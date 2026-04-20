@@ -8,7 +8,6 @@ import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { sanitizeForLog } from "@/lib/sanitize";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
@@ -768,7 +767,8 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get("x-signature-ed25519") ?? "";
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
   const body = await req.text();
-  console.log(`[interactions] POST sig=${sanitizeForLog(signature.substring(0, 16))}… ts=${sanitizeForLog(timestamp)} bodyLen=${body.length}`);
+  const safeTs = String(parseInt(timestamp, 10) || 0);
+  console.log(`[interactions] POST sig=${signature.replace(/[^0-9a-f]/gi, "").substring(0, 16)}… ts=${safeTs} bodyLen=${body.length}`);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
@@ -776,7 +776,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!verifySignature(publicKey, signature, timestamp, body)) {
-    console.log(`[interactions] Signature verification FAILED pkLen=${publicKey.length} sigLen=${signature.length} bodyStart=${sanitizeForLog(body.substring(0, 30))}`);
+    console.log(`[interactions] Signature verification FAILED pkLen=${publicKey.length} sigLen=${signature.length} bodyLen=${body.length}`);
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 
@@ -786,7 +786,8 @@ export async function POST(req: NextRequest) {
     console.log(`[interactions] Stale timestamp rejected: age=${requestAge.toFixed(1)}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
-  console.log(`[interactions] Signature OK, type=${sanitizeForLog(JSON.parse(body).type)} bodyStart=${sanitizeForLog(body.substring(0, 30))}`);
+  const interactionType = Number(JSON.parse(body).type);
+  console.log(`[interactions] Signature OK, type=${interactionType} bodyLen=${body.length}`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const interaction: any = JSON.parse(body);

@@ -7,7 +7,6 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
-import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -69,15 +68,16 @@ export async function POST(req: NextRequest) {
   }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
+    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
     console.warn(
-      `[webhook/radarr] 200 skipped event=${sanitizeForLog(payload.eventType)} tmdbId=${payload.movie?.tmdbId ?? "none"}`,
+      `[webhook/radarr] 200 skipped event=${loggedEvent} tmdbId=${payload.movie?.tmdbId ?? "none"}`,
     );
     return NextResponse.json({ ok: true, skipped: true });
   }
 
   const { tmdbId, title } = payload.movie;
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    console.warn(`[webhook/radarr] 400 invalid tmdbId=${sanitizeForLog(tmdbId)}`);
+    console.warn("[webhook/radarr] 400 invalid tmdbId");
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
