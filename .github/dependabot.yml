@@ -1,0 +1,41 @@
+version: 2
+updates:
+  # npm dependencies (Next.js, Prisma, NextAuth, Tailwind, etc.)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "npm"
+    groups:
+      # Bundle dev-only bumps into a single PR
+      dev-dependencies:
+        dependency-type: "development"
+      # Bundle tiny patches to keep noise down
+      patch-updates:
+        update-types:
+          - "patch"
+
+  # GitHub Actions used in workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  # Docker base image bumps (node:22-alpine, postgres:17-alpine)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+      - "docker"
