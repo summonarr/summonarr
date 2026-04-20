@@ -95,7 +95,7 @@ export const proxy = auth(function proxyHandler(
   const cspValue = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    `style-src 'self' 'nonce-${nonce}'`,
+    `style-src 'self' 'unsafe-inline'`,
     "img-src 'self' data: https://image.tmdb.org https://plex.tv https://assets.plex.tv https://secure.gravatar.com https://i0.wp.com",
     "font-src 'self'",
     `connect-src 'self' https://plex.tv${(() => { try { return process.env.OIDC_ISSUER ? ` ${new URL(process.env.OIDC_ISSUER).origin}` : ""; } catch { return ""; } })()}`,
