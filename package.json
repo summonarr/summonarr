@@ -41,18 +41,18 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^22",
-    "@types/nodemailer": "^7.0.11",
+    "@types/node": "^25",
+    "@types/nodemailer": "^8.0.0",
     "@types/pg": "^8.11.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/swagger-ui-react": "^5.18.0",
     "@types/web-push": "^3.6.4",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.3",
-    "shadcn": "^4.2.0",
+    "eslint": "^10",
+    "eslint-config-next": "16.2.4",
+    "shadcn": "^4.3.1",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5"
+    "typescript": "^6"
   }
 }
