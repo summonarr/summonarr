@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
 import {
   ArrowLeft, Film, Tv2, User, Monitor, Zap,
-  HardDrive, Globe, Clock, CheckCircle2, Circle,
+  Globe, Clock, CheckCircle2, Circle,
 } from "lucide-react";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 

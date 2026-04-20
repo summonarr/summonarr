@@ -8,7 +8,7 @@ import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { maintenanceGuard } from "@/lib/maintenance";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
@@ -768,7 +768,7 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get("x-signature-ed25519") ?? "";
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
   const body = await req.text();
-  console.log(`[interactions] POST sig=${signature.substring(0, 16)}… ts=${timestamp} bodyLen=${body.length}`);
+  console.log(`[interactions] POST sig=${sanitizeForLog(signature.substring(0, 16))}… ts=${sanitizeForLog(timestamp)} bodyLen=${body.length}`);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
@@ -776,7 +776,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!verifySignature(publicKey, signature, timestamp, body)) {
-    console.log(`[interactions] Signature verification FAILED pkLen=${publicKey.length} sigLen=${signature.length} bodyStart=${body.substring(0, 30)}`);
+    console.log(`[interactions] Signature verification FAILED pkLen=${publicKey.length} sigLen=${signature.length} bodyStart=${sanitizeForLog(body.substring(0, 30))}`);
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 
@@ -786,7 +786,7 @@ export async function POST(req: NextRequest) {
     console.log(`[interactions] Stale timestamp rejected: age=${requestAge.toFixed(1)}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
-  console.log(`[interactions] Signature OK, type=${JSON.parse(body).type} bodyStart=${body.substring(0, 30)}`);
+  console.log(`[interactions] Signature OK, type=${sanitizeForLog(JSON.parse(body).type)} bodyStart=${sanitizeForLog(body.substring(0, 30))}`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const interaction: any = JSON.parse(body);

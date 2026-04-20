@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { X, User, Film, Tv2, Star, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check } from "lucide-react";
+import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";

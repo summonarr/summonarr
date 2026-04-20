@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
   const enriched = await attachArrPending([stub]);
   const arrPendingResult = enriched[0]?.arrPending ?? false;
 
-  let liveCheck: { result: boolean; error?: string } = { result: false };
+  let liveCheck: { result: boolean; error?: string };
   try {
     const result = type === "movie"
       ? await isMovieWantedInRadarr(tmdbId)

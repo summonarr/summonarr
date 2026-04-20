@@ -7,6 +7,7 @@ import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 type FixMatchBody = {
   server:         "plex" | "jellyfin";
@@ -30,7 +31,7 @@ async function fixPlexMatch(
   mediaType: "MOVIE" | "TV",
   preselectedGuid?: string,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
-  const tag = `[fix-match/plex ratingKey=${ratingKey} target=tmdb://${correctTmdbId}]`;
+  const tag = `[fix-match/plex ratingKey=${sanitizeForLog(ratingKey)} target=tmdb://${sanitizeForLog(correctTmdbId)}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, tokenRow] = await Promise.all([
@@ -128,7 +129,7 @@ async function fixPlexMatch(
       return results[0] ?? null;
     };
 
-    if (imdbId && !canonicalGuid) {
+    if (imdbId) {
       const hit = await plexMatchSearch("imdb-guid", { manual: "1", includeGuids: "1", guid: `imdb://${imdbId}` });
       if (hit) { canonicalGuid = hit.guid; if (hit.name) matchName = hit.name; if (hit.year) matchYear = String(hit.year); }
     }
@@ -368,7 +369,7 @@ async function fixJellyfinMatch(
   mediaType: "MOVIE" | "TV",
   filePath: string | null,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
-  const tag = `[fix-match/jellyfin itemId=${itemId} target=tmdb:${correctTmdbId}]`;
+  const tag = `[fix-match/jellyfin itemId=${sanitizeForLog(itemId)} target=tmdb:${sanitizeForLog(correctTmdbId)}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, keyRow] = await Promise.all([
@@ -609,7 +610,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[fix-match] ${server} error:`, msg);
+    console.error(`[fix-match] ${sanitizeForLog(server)} error:`, sanitizeForLog(msg));
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

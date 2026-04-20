@@ -76,12 +76,21 @@ export async function GET(request: NextRequest) {
     ];
   }
 
-  const SORTABLE_FIELDS = new Set(["startedAt", "title", "playDuration", "duration", "source", "platform"]);
-  const sortBy = params.get("sortBy");
   const sortDir = params.get("sortDir") === "asc" ? "asc" : "desc";
-  const orderBy: Record<string, string> = SORTABLE_FIELDS.has(sortBy ?? "")
-    ? { [sortBy!]: sortDir }
-    : { startedAt: "desc" };
+  const sortByRaw = params.get("sortBy");
+  type SortField = "startedAt" | "title" | "playDuration" | "duration" | "source" | "platform";
+  const safeSortBy: SortField = ((): SortField => {
+    switch (sortByRaw) {
+      case "startedAt": return "startedAt";
+      case "title": return "title";
+      case "playDuration": return "playDuration";
+      case "duration": return "duration";
+      case "source": return "source";
+      case "platform": return "platform";
+      default: return "startedAt";
+    }
+  })();
+  const orderBy: Record<string, string> = { [safeSortBy]: sortDir };
 
   const [items, total] = await Promise.all([
     prisma.playHistory.findMany({

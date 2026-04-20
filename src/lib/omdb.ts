@@ -3,11 +3,11 @@ import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { tmdbAuth } from "./tmdb-auth";
+import { sanitizeForLog } from "./sanitize";
 
 const OMDB_BASE = "https://www.omdbapi.com";
 const OMDB_FETCH_TIMEOUT_MS = 10_000;
 
-const OMDB_TTL_FALLBACK = 14 * 24 * 60 * 60;
 const OMDB_NEGATIVE_TTL = 24 * 60 * 60;
 
 // Sentinel stored in the cache to distinguish "item not in OMDB" from "never fetched" so we don't
@@ -162,7 +162,7 @@ export async function fetchAndCacheOmdbForTmdb(
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
-    console.error(`[omdb] Error fetching for ${mediaType}:${tmdbId}: ${msg}`);
+    console.error(`[omdb] Error fetching for ${mediaType}:${tmdbId}: ${sanitizeForLog(msg)}`);
     return { found: false, keyConfigured: true };
   }
 }

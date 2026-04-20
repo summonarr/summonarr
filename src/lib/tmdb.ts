@@ -99,10 +99,15 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>, reval
     for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   }
 
+  const tmdbUrl = url.toString();
+  if (new URL(tmdbUrl).hostname !== "api.themoviedb.org") {
+    throw new Error(`TMDB URL validation failed: unexpected host`);
+  }
+
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetch(url.toString(), {
+      const res = await fetch(tmdbUrl, {
         headers: auth.headers,
         next: { revalidate },
       });

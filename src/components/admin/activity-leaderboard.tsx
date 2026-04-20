@@ -35,7 +35,6 @@ export function ActivityLeaderboard({ byHours, byPlays, days }: ActivityLeaderbo
   if (data.length === 0) return null;
 
   const maxValue = tab === "hours" ? (byHours[0]?.hours ?? 1) : (byPlays[0]?.count ?? 1);
-  const label = tab === "hours" ? "h" : "plays";
 
   return (
     <Card className="bg-zinc-900 border-zinc-800 p-5">
