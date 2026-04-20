@@ -768,7 +768,7 @@ export async function POST(req: NextRequest) {
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
   const body = await req.text();
   const safeTs = String(parseInt(timestamp, 10) || 0);
-  console.log(`[interactions] POST sig=${signature.replace(/[^0-9a-f]/gi, "").substring(0, 16)}… ts=${safeTs} bodyLen=${body.length}`);
+  console.log(`[interactions] POST sigLen=${signature.length} ts=${safeTs} bodyLen=${body.length}`);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
