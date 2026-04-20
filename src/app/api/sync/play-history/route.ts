@@ -1,0 +1,420 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { auth, isTokenExpired } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import {
+  isPlayHistoryEnabled,
+  isSourceEnabled,
+  resolveMediaServerUser,
+  recordCompletedSession,
+  cleanupStaleSessions,
+  purgeOldHistory,
+  resolveShowTmdbId,
+} from "@/lib/play-history";
+import { getPlexSessions, extractTmdbIdFromGuids, type PlexSessionData } from "@/lib/plex";
+import { getJellyfinSessions, type JellyfinSessionData } from "@/lib/jellyfin";
+import { emitSSE } from "@/lib/sse-emitter";
+import { posterUrl } from "@/lib/tmdb-types";
+
+function safeCompareStrings(a: string, b: string): boolean {
+  const ha = createHash("sha256").update(a).digest();
+  const hb = createHash("sha256").update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+async function isAuthorized(request: NextRequest): Promise<boolean> {
+  const session = await auth();
+  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) return true;
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) {
+    const authHeader = request.headers.get("authorization") ?? "";
+    if (authHeader.startsWith("Bearer ") && safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
+  }
+  return false;
+}
+
+async function syncPlexSessions(): Promise<{ started: number; updated: number; ended: number }> {
+  const [serverUrlRow, tokenRow] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
+    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+  ]);
+
+  if (!serverUrlRow?.value || !tokenRow?.value) return { started: 0, updated: 0, ended: 0 };
+
+  const serverUrl = serverUrlRow.value.replace(/\/$/, "");
+  const sessions = await getPlexSessions(serverUrl, tokenRow.value);
+  const now = new Date();
+  let started = 0;
+  let updated = 0;
+
+  const seenSessionKeys = new Set<string>();
+
+  for (const s of sessions) {
+    if (!s.sessionKey || !s.accountId) continue;
+    seenSessionKeys.add(s.sessionKey);
+
+    const msUserId = await resolveMediaServerUser({
+      source: "plex",
+      sourceUserId: s.accountId,
+      username: s.accountName,
+      thumbUrl: s.accountThumb || null,
+    });
+
+    const sessionId = `plex:${s.sessionKey}`;
+    let tmdbId: number | null = null;
+    let mediaType: string | null = s.type === "episode" ? "TV" : s.type === "movie" ? "MOVIE" : null;
+
+    if (s.type === "episode") {
+      // For episodes, resolve the TMDB ID from the show (grandparent), not the episode item itself
+      tmdbId = await resolveShowTmdbId("plex", s.grandparentRatingKey);
+    } else {
+      tmdbId = extractTmdbIdFromGuids(s.Guid);
+      if (tmdbId == null && s.ratingKey) {
+        const lib = await prisma.plexLibraryItem.findFirst({
+          where: { plexRatingKey: s.ratingKey },
+          select: { tmdbId: true, mediaType: true },
+        });
+        if (lib) {
+          tmdbId = lib.tmdbId;
+          mediaType = mediaType ?? lib.mediaType;
+        }
+      }
+    }
+
+    const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
+
+    let posterPath: string | null = null;
+    if (tmdbId && mediaType) {
+      const core = await prisma.tmdbMediaCore.findUnique({
+        where: { tmdbId_mediaType: { tmdbId, mediaType: mediaType as "MOVIE" | "TV" } },
+        select: { posterPath: true },
+      }).catch(() => null);
+      posterPath = core?.posterPath ?? null;
+    }
+
+    const result = await prisma.activeSession.upsert({
+      where: { id: sessionId },
+      update: {
+        lastSeenAt: now,
+        state: s.state,
+        progressPercent,
+        progressMs: BigInt(s.viewOffset),
+        playMethod: s.playMethod,
+        resolution: s.resolution,
+        ...(tmdbId != null ? { tmdbId, mediaType } : {}),
+        ...(posterPath ? { posterPath } : {}),
+      },
+      create: {
+        id: sessionId,
+        source: "plex",
+        sessionKey: s.sessionKey,
+        startedAt: now,
+        lastSeenAt: now,
+        state: s.state,
+        mediaServerUserId: msUserId,
+        serverUsername: s.accountName,
+        tmdbId,
+        mediaType,
+
+        title: s.type === "episode" ? (s.grandparentTitle ?? s.title) : s.title,
+        year: s.year ?? null,
+        seasonNumber: s.parentIndex ?? null,
+        episodeNumber: s.index ?? null,
+        episodeTitle: s.type === "episode" ? (s.title.split(" — ")[1] ?? null) : null,
+        sourceItemId: s.ratingKey,
+        posterPath,
+        progressPercent,
+        progressMs: BigInt(s.viewOffset),
+        durationMs: BigInt(s.duration),
+        platform: s.platform ?? null,
+        player: s.player ?? null,
+        device: s.device ?? null,
+        ipAddress: s.address ?? null,
+        playMethod: s.playMethod ?? null,
+        videoCodec: s.videoCodec ?? null,
+        audioCodec: s.audioCodec ?? null,
+        resolution: s.resolution ?? null,
+        bitrate: s.bitrate ?? null,
+        videoDecision: s.videoDecision ?? null,
+        audioDecision: s.audioDecision ?? null,
+        container: s.container ?? null,
+      },
+    });
+    if (result.startedAt.getTime() === now.getTime()) started++;
+    else updated++;
+  }
+
+  const activePlexSessions = await prisma.activeSession.findMany({
+    where: { source: "plex" },
+  });
+
+  let ended = 0;
+  for (const session of activePlexSessions) {
+    if (!seenSessionKeys.has(session.sessionKey)) {
+      try {
+        await recordCompletedSession(session);
+        ended++;
+      } catch {
+
+      }
+    }
+  }
+
+  return { started, updated, ended };
+}
+
+async function syncJellyfinSessions(): Promise<{ started: number; updated: number; ended: number }> {
+  const [urlRow, keyRow] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
+    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+  ]);
+
+  if (!urlRow?.value || !keyRow?.value) return { started: 0, updated: 0, ended: 0 };
+
+  const baseUrl = urlRow.value.replace(/\/$/, "");
+  const sessions = await getJellyfinSessions(baseUrl, keyRow.value);
+  const now = new Date();
+  let started = 0;
+  let updated = 0;
+
+  const seenSessionKeys = new Set<string>();
+
+  for (const s of sessions) {
+    if (!s.playSessionId || !s.userId) continue;
+    seenSessionKeys.add(s.playSessionId);
+
+    const msUserId = await resolveMediaServerUser({
+      source: "jellyfin",
+      sourceUserId: s.userId,
+      username: s.userName,
+    });
+
+    const sessionId = `jellyfin:${s.playSessionId}`;
+    let tmdbId: number | null = null;
+    let mediaType: string | null = s.itemType === "Episode" ? "TV" : s.itemType === "Movie" ? "MOVIE" : null;
+
+    if (s.itemType === "Episode") {
+      // For episodes, resolve TMDB ID from the series, not the episode item
+      tmdbId = await resolveShowTmdbId("jellyfin", s.seriesId);
+    } else {
+      const tmdbRaw = s.providerIds?.Tmdb ?? s.providerIds?.tmdb;
+      const parsed = tmdbRaw ? parseInt(tmdbRaw, 10) : NaN;
+      tmdbId = Number.isFinite(parsed) ? parsed : null;
+      if (tmdbId == null && s.itemId) {
+        const lib = await prisma.jellyfinLibraryItem.findFirst({
+          where: { jellyfinItemId: s.itemId },
+          select: { tmdbId: true, mediaType: true },
+        });
+        if (lib) {
+          tmdbId = lib.tmdbId;
+          mediaType = mediaType ?? lib.mediaType;
+        }
+      }
+    }
+
+    const positionMs = Math.floor(s.positionTicks / 10_000);
+    const durationMs = Math.floor(s.durationTicks / 10_000);
+    const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
+
+    let jfPosterPath: string | null = null;
+    const resolvedTmdbId = tmdbId && !isNaN(tmdbId) ? tmdbId : null;
+    if (resolvedTmdbId && mediaType) {
+      const core = await prisma.tmdbMediaCore.findUnique({
+        where: { tmdbId_mediaType: { tmdbId: resolvedTmdbId, mediaType: mediaType as "MOVIE" | "TV" } },
+        select: { posterPath: true },
+      }).catch(() => null);
+      jfPosterPath = core?.posterPath ?? null;
+    }
+
+    const result = await prisma.activeSession.upsert({
+      where: { id: sessionId },
+      update: {
+        lastSeenAt: now,
+        state: s.state,
+        progressPercent,
+        progressMs: BigInt(positionMs),
+        playMethod: s.playMethod,
+        resolution: s.resolution ?? null,
+        ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
+        ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
+      },
+      create: {
+        id: sessionId,
+        source: "jellyfin",
+        sessionKey: s.playSessionId,
+        startedAt: now,
+        lastSeenAt: now,
+        state: s.state,
+        mediaServerUserId: msUserId,
+        serverUsername: s.userName,
+        tmdbId: resolvedTmdbId,
+        mediaType,
+
+        title: s.itemType === "Episode" ? (s.seriesName ?? s.title) : s.title,
+        year: s.year != null ? String(s.year) : null,
+        seasonNumber: s.seasonNumber ?? null,
+        episodeNumber: s.episodeNumber ?? null,
+        episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ")[1] ?? null) : null,
+        sourceItemId: s.itemId,
+        posterPath: jfPosterPath,
+        progressPercent,
+        progressMs: BigInt(positionMs),
+        durationMs: BigInt(durationMs),
+        platform: s.client ?? null,
+        player: s.client ?? null,
+        device: s.deviceName ?? null,
+        ipAddress: s.remoteEndPoint ?? null,
+        playMethod: s.playMethod ?? null,
+        videoCodec: s.videoCodec ?? null,
+        audioCodec: s.audioCodec ?? null,
+        resolution: s.resolution ?? null,
+        bitrate: s.bitrate ?? null,
+        container: s.container ?? null,
+      },
+    });
+    if (result.startedAt.getTime() === now.getTime()) started++;
+    else updated++;
+  }
+
+  const activeJfSessions = await prisma.activeSession.findMany({
+    where: { source: "jellyfin" },
+  });
+
+  let ended = 0;
+  for (const session of activeJfSessions) {
+    if (!seenSessionKeys.has(session.sessionKey)) {
+      try {
+        await recordCompletedSession(session);
+        ended++;
+      } catch (err) {
+        console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
+      }
+    }
+  }
+
+  return { started, updated, ended };
+}
+
+export async function POST(request: NextRequest) {
+  if (!(await isAuthorized(request))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  if (!checkRateLimit(`sync-ph:${getClientIp(request.headers)}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
+  if (!(await isPlayHistoryEnabled())) {
+    return NextResponse.json({ message: "Play history tracking is disabled" });
+  }
+
+  const results: Record<string, unknown> = {};
+
+  try {
+    const [plexEnabled, jellyfinEnabled] = await Promise.all([
+      isSourceEnabled("plex"),
+      isSourceEnabled("jellyfin"),
+    ]);
+
+    const syncPromises: Promise<void>[] = [];
+
+    if (plexEnabled) {
+      syncPromises.push(
+        syncPlexSessions()
+          .then((r) => { results.plex = r; })
+          .catch((err) => {
+            results.plex = { error: err instanceof Error ? err.message : String(err) };
+          })
+      );
+    }
+
+    if (jellyfinEnabled) {
+      syncPromises.push(
+        syncJellyfinSessions()
+          .then((r) => { results.jellyfin = r; })
+          .catch((err) => {
+            results.jellyfin = { error: err instanceof Error ? err.message : String(err) };
+          })
+      );
+    }
+
+    await Promise.all(syncPromises);
+
+    const allSessions = await prisma.activeSession.findMany({ orderBy: { startedAt: "desc" } });
+
+    const sessionPosterMap: Record<number, string | null> = {};
+    const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
+    if (tmdbIds.length > 0) {
+      const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
+      const cacheRows = await prisma.tmdbCache.findMany({
+        where: { key: { in: cacheKeys } },
+        select: { key: true, data: true },
+      });
+      for (const row of cacheRows) {
+        try {
+          const parsed = JSON.parse(row.data) as { posterPath?: string | null };
+          if (parsed.posterPath) {
+            const id = parseInt(row.key.split(":")[1], 10);
+            if (id && !sessionPosterMap[id]) sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
+          }
+        } catch { }
+      }
+    }
+
+    emitSSE({
+      type: "activity:sessions",
+      sessions: allSessions.map((s) => ({
+        id: s.id,
+        source: s.source,
+        state: s.state,
+        serverUsername: s.serverUsername,
+        title: s.title,
+        tmdbId: s.tmdbId,
+        mediaType: s.mediaType,
+        year: s.year,
+        seasonNumber: s.seasonNumber,
+        episodeNumber: s.episodeNumber,
+        episodeTitle: s.episodeTitle,
+        progressPercent: s.progressPercent,
+        progressMs: Number(s.progressMs),
+        durationMs: Number(s.durationMs),
+        platform: s.platform,
+        player: s.player,
+        device: s.device,
+        ipAddress: s.ipAddress,
+        startedAt: s.startedAt.toISOString(),
+        playMethod: s.playMethod,
+        videoCodec: s.videoCodec,
+        audioCodec: s.audioCodec,
+        resolution: s.resolution,
+        bitrate: s.bitrate,
+        videoDecision: s.videoDecision,
+        audioDecision: s.audioDecision,
+        container: s.container,
+        posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
+      })),
+    });
+
+    await cleanupStaleSessions(30);
+
+    const now = Date.now();
+
+    // Atomic CAS: only the first caller within a 1-hour window performs the retention purge
+    const retentionClaimed = await prisma.$executeRaw`
+      INSERT INTO "Setting" (key, value, "updatedAt")
+      VALUES ('lastRetentionCheckAt', ${String(now)}, NOW())
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, "updatedAt" = NOW()
+      WHERE CAST("Setting".value AS BIGINT) + ${3600_000}::bigint <= ${now}::bigint
+    `;
+    if (retentionClaimed > 0) {
+      const purged = await purgeOldHistory();
+      if (purged > 0) results.purged = purged;
+    }
+  } catch (err) {
+    return NextResponse.json({ error: "Sync failed" }, { status: 500 });
+  }
+
+  return NextResponse.json(results);
+}

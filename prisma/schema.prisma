@@ -1,0 +1,742 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Auth ───────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid(2))
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  role          Role      @default(USER)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  discordId     String?   @unique
+  autoApprove   Boolean   @default(false)
+  quotaExempt   Boolean   @default(false)
+  // For local/OIDC users: which media server's availability badges to show ("plex" | "jellyfin" | null)
+  // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
+  mediaServer   String?
+
+  // Canonical X-Plex-Client-Identifier for this user — pinned after first successful Plex sign-in.
+  // Handed back to any browser this user later signs in from so subsequent sign-ins reuse the
+  // same clientId, avoiding the "Another device is attempting to sign in" warning on Plex's
+  // OAuth approval page (Plex only warns on clientIds not yet registered to the user's account).
+  plexClientId  String?
+
+  // Discord notification preferences (opt-in by default)
+  notifyOnApproved  Boolean @default(true)
+  notifyOnAvailable Boolean @default(true)
+  notifyOnDeclined  Boolean @default(true)
+
+  // Email notification preferences (opt-out by default for users)
+  emailOnApproved  Boolean @default(false)
+  emailOnAvailable Boolean @default(false)
+  emailOnDeclined  Boolean @default(false)
+
+  // Admin/issue-admin notification preferences
+  notifyOnIssue Boolean @default(true)
+
+  // Push notification preferences (opt-in by default)
+  pushOnApproved  Boolean @default(true)
+  pushOnAvailable Boolean @default(true)
+  pushOnDeclined  Boolean @default(true)
+
+  accounts          Account[]
+  sessions          Session[]
+  requests          MediaRequest[]
+  issues            Issue[]
+  issueMessages     IssueMessage[]
+  issueGrabs        IssueGrab[]
+  pushSubscriptions PushSubscription[]
+  deletionVotes     DeletionVote[]
+  discordLinkToken  DiscordLinkToken?
+  discordMergeCode  DiscordMergeCode?
+  mediaServerUsers  MediaServerUser[]
+  authSessions      AuthSession[]
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid(2))
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  label     String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                String  @id @default(cuid(2))
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid(2))
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// One record per active JWT auth session. Created at sign-in, deleted on sign-out or revocation.
+// Enables per-device session listing, forced logout, and cross-replica revocation via DB.
+model AuthSession {
+  id          String   @id @default(cuid(2))
+  sessionId   String   @unique // mirrors JWT token.sessionId
+  userId      String
+  deviceType  String // "mobile" | "tablet" | "desktop"
+  deviceLabel String? // e.g. "Chrome on Windows"
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  expiresAt   DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─── Discord Linking ──────────────────────────────────────────────────────────
+
+model DiscordLinkToken {
+  token     String   @id
+  userId    String   @unique
+  discordId String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model DiscordMergeCode {
+  userId    String   @unique
+  discordId String
+  code      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── Requests ───────────────────────────────────────────────────────────────
+
+model MediaRequest {
+  id          String        @id @default(cuid(2))
+  mediaType   MediaType
+  tmdbId      Int
+  title       String
+  posterPath  String?
+  releaseYear String?
+  status      RequestStatus @default(PENDING)
+  note        String?   @db.VarChar(500)
+  adminNote           String?   @db.VarChar(500)
+  permanentlyDeclined Boolean   @default(false)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
+
+  availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
+  pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
+  notifiedAvailable Boolean   @default(false) // set when the "ready to watch" notification is sent; never reset on status revert
+
+  requestedBy String
+  user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
+
+  @@unique([tmdbId, mediaType, requestedBy])
+  @@index([requestedBy])
+  @@index([status])
+  @@index([tvdbId])
+  @@index([status, availableAt])
+  @@index([notifiedAvailable])
+}
+
+// ─── Plex Library Cache ───────────────────────────────────────────────────────
+
+model PlexLibraryItem {
+  tmdbId        Int
+  mediaType     MediaType
+  filePath      String?
+  plexRatingKey String? // Plex internal ratingKey — needed to call fix-match API
+  title         String?
+  year          String?
+  overview      String?
+  contentRating String? // e.g. "PG-13", "R", "TV-MA" — from Plex contentRating field
+  addedAt       DateTime? // when the item was added to the Plex library
+
+  @@id([tmdbId, mediaType])
+}
+
+// ─── Jellyfin Library Cache ───────────────────────────────────────────────────
+
+model JellyfinLibraryItem {
+  tmdbId          Int
+  mediaType       MediaType
+  filePath        String?
+  jellyfinItemId  String? // Jellyfin internal item UUID — needed to call fix-match API
+  title           String?
+  year            String?
+  overview        String?
+  contentRating   String? // e.g. "PG", "R", "TV-14" — from OfficialRating field
+  communityRating Float? // Jellyfin community rating (0–10)
+  addedAt         DateTime? // when the item was added to Jellyfin (DateCreated)
+
+  @@id([tmdbId, mediaType])
+}
+
+// ─── TV Episode Cache ─────────────────────────────────────────────────────────
+// Populated during sync; stores season+episode granularity for TV shows.
+// source = "plex" | "jellyfin"
+
+model TVEpisodeCache {
+  source        String
+  tmdbId        Int
+  seasonNumber  Int
+  episodeNumber Int
+
+  // Episode metadata — populated as a side-effect of season expand fetches
+  episodeName String?
+  airDate     String?
+  stillPath   String?
+  runtime     Int?
+  overview    String?
+
+  @@id([source, tmdbId, seasonNumber, episodeNumber])
+  @@index([source, tmdbId])
+}
+
+// ─── Radarr Wanted Cache ──────────────────────────────────────────────────────
+// Movies in Radarr that have no file yet (monitored/unmonitored, not downloaded).
+// Populated by /api/sync/radarr; cleared per-movie by the Radarr webhook on Download.
+
+model RadarrWantedItem {
+  tmdbId Int @id
+}
+
+// ─── Radarr Available Cache ───────────────────────────────────────────────────
+// Movies in Radarr that have a file (hasFile=true).
+// Populated atomically with RadarrWantedItem by /api/sync/radarr.
+// Enables DB-only availability checks — avoids per-movie ?tmdbId= API calls.
+
+model RadarrAvailableItem {
+  tmdbId Int @id
+}
+
+// ─── Sonarr Wanted Cache ──────────────────────────────────────────────────────
+// TV shows in Sonarr that have zero downloaded episode files.
+// Populated by /api/sync/sonarr; cleared per-series by the Sonarr webhook on Download.
+
+model SonarrWantedItem {
+  tmdbId Int @id
+}
+
+// ─── Sonarr Available Cache ───────────────────────────────────────────────────
+// TV shows in Sonarr that have at least one downloaded episode file (episodeFileCount > 0).
+// Populated atomically with SonarrWantedItem by /api/sync/sonarr.
+// Enables DB-only availability checks — avoids per-series ?tmdbId= API calls.
+
+model SonarrAvailableItem {
+  tmdbId Int @id
+}
+
+// ─── Upcoming Cache ───────────────────────────────────────────────────────────
+// Populated by /api/sync/upcoming; full replacement each sync.
+// Stores TMDB upcoming movies (/movie/upcoming) and on-the-air TV (/tv/on_the_air).
+
+model UpcomingCacheItem {
+  tmdbId       Int
+  mediaType    MediaType
+  title        String
+  overview     String
+  posterPath   String?
+  backdropPath String?
+  releaseDate  String?
+  releaseYear  String
+  voteAverage  Float
+  cachedAt     DateTime  @default(now())
+
+  @@id([tmdbId, mediaType])
+}
+
+// ─── TMDB Cache ───────────────────────────────────────────────────────────────
+// Generic key-value store for TMDB API responses.
+// key examples: "movie:123:details", "tv:456:credits", "person:789", "genres:movie"
+// data is JSON-serialised. expiresAt is checked before returning cached data.
+
+model TmdbCache {
+  key       String   @id
+  data      String // JSON
+  cachedAt  DateTime @default(now())
+  expiresAt DateTime
+}
+
+// ─── TMDB Media Core ──────────────────────────────────────────────────────────
+// Normalized store for core media metadata (title, poster, year, rating,
+// certification) used by every grid page. Populated as a fire-and-forget
+// side-effect of detail fetches, prewarm, and trending/popular/discover calls.
+// Enables grid pages to avoid TmdbCache JSON blob parsing on every load.
+
+model TmdbMediaCore {
+  tmdbId        Int
+  mediaType     MediaType
+  title         String
+  posterPath    String?
+  releaseYear   String?
+  voteAverage   Float     @default(0)
+  certification String?
+  lastSyncedAt  DateTime  @default(now())
+  expiresAt     DateTime
+
+  @@id([tmdbId, mediaType])
+  @@index([expiresAt])
+  @@index([mediaType, voteAverage])
+}
+
+// ─── Discord Search Cache ────────────────────────────────────────────────────
+// Stores Discord /request search results (keyed by q:{type}:{query}) and
+// pending selection state (keyed by p:{interactionId}:{discordUserId}).
+// Survives server restarts; expired rows are cleaned up by a daily cron job.
+
+model DiscordSearchCache {
+  queryKey  String   @id
+  data      String // JSON
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// Caches a SHA-256 hash of each Plex authToken → verified email so subsequent
+// sign-ins can skip the /api/v2/user call (which fires Plex "new device" alerts
+// from the server's IP). Cache hits are revalidated via /api/v2/ping, which
+// returns no user data and doesn't trigger device alerts.
+model PlexTokenCache {
+  tokenHash  String   @id
+  email      String
+  verifiedAt DateTime @default(now())
+  lastUsedAt DateTime @default(now()) @updatedAt
+
+  @@index([email])
+}
+
+// ─── Issues ──────────────────────────────────────────────────────────────────
+
+model Issue {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reportedBy String
+  user       User   @relation(fields: [reportedBy], references: [id], onDelete: Cascade)
+
+  mediaType  MediaType
+  tmdbId     Int
+  tvdbId     Int?
+  title      String
+  posterPath String?
+
+  issueType     IssueType
+  scope         IssueScope @default(FULL)
+  seasonNumber  Int?
+  episodeNumber Int?
+  note          String?
+
+  status     IssueStatus @default(OPEN)
+  resolution String?
+
+  messages IssueMessage[]
+  grabs    IssueGrab[]
+
+  @@index([reportedBy])
+  @@index([status])
+}
+
+model IssueMessage {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  issueId String
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  authorId String
+  author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  body      String   @db.VarChar(10000)
+  fromAdmin Boolean @default(false)
+
+  @@index([issueId])
+  @@index([authorId])
+}
+
+// ─── Issue Grabs ─────────────────────────────────────────────────────────────
+// Tracks each release grab an admin triggers for an issue so that we can
+// send them a push notification when the download completes via webhook.
+
+model IssueGrab {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  issueId String
+  issue   Issue  @relation(fields: [issueId], references: [id], onDelete: Cascade)
+
+  triggeredById String
+  triggeredBy   User   @relation(fields: [triggeredById], references: [id], onDelete: Cascade)
+
+  tmdbId        Int
+  tvdbId        Int?
+  mediaType     MediaType
+  title         String
+  scope         IssueScope
+  seasonNumber  Int?
+  episodeNumber Int?
+
+  notifiedAt DateTime? // set when the completion push is sent; prevents duplicate notifications
+
+  @@index([issueId])
+  @@index([triggeredById])
+}
+
+// ─── Deletion Votes ──────────────────────────────────────────────────────
+// Users nominate library items for removal. The first vote creates the nomination;
+// subsequent votes from other users increase the count. Admin can review
+// top-voted items and decide whether to delete.
+
+model DeletionVote {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  tmdbId     Int
+  mediaType  MediaType
+  title      String
+  posterPath String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  reason String? @db.VarChar(200)
+
+  @@unique([tmdbId, mediaType, userId]) // one vote per user per item
+  @@index([tmdbId, mediaType])
+}
+
+// ─── Audit Log ───────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id        String      @id @default(cuid(2))
+  createdAt DateTime    @default(now())
+  userId    String?
+  userName  String
+  action    AuditAction
+  target    String
+  details   String?
+  ipAddress String?
+  userAgent String?
+  provider  String?
+  sessionId String?
+
+  @@index([createdAt(sort: Desc)])
+  @@index([action])
+  @@index([userId])
+  @@index([userName])
+  @@index([target])
+}
+
+enum AuditAction {
+  REQUEST_APPROVE
+  REQUEST_DECLINE
+  REQUEST_DELETE
+  USER_ROLE_CHANGE
+  USER_DELETE
+  SETTINGS_CHANGE
+  LIBRARY_SYNC
+  ISSUE_STATUS_CHANGE
+  MAINTENANCE_TOGGLE
+  BACKUP_EXPORT
+  BACKUP_IMPORT
+  AUTH_LOGIN
+  AUTH_LOGIN_FAILED
+  AUTH_LOGOUT
+  SESSION_REVOKE
+  CACHE_WARM
+  RATINGS_CACHE_CLEAR
+  ISSUE_DELETE
+}
+
+// ─── Play History ────────────────────────────────────────────────────────────
+// Tracks playback sessions from Plex and Jellyfin — Tautulli-style analytics.
+
+model MediaServerUser {
+  id           String   @id @default(cuid(2))
+  source       String // "plex" | "jellyfin"
+  sourceUserId String // Plex accountID or Jellyfin userId UUID
+  username     String
+  email        String?
+  thumbUrl     String?
+  userId       String? // FK to User — nullable for unlinked server users
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  playHistory    PlayHistory[]
+  activeSessions ActiveSession[]
+
+  @@unique([source, sourceUserId])
+  @@index([userId])
+  @@index([source])
+}
+
+model PlayHistory {
+  id     String @id @default(cuid(2))
+  source String // "plex" | "jellyfin"
+
+  // Session timing
+  startedAt      DateTime
+  stoppedAt      DateTime
+  duration       Int // Total duration of media in seconds
+  playDuration   Int // Actual time spent playing in seconds
+  pausedDuration Int      @default(0)
+  watched        Boolean  @default(false) // True if playDuration >= threshold
+  completed      Boolean  @default(false) // True if playback position reached >= 95% of duration
+
+  // User
+  mediaServerUserId String
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Cascade)
+
+  // Media identification
+  tmdbId        Int?
+  mediaType     MediaType?
+  title         String
+  year          String?
+  posterPath    String?
+  seasonNumber  Int?
+  episodeNumber Int?
+  episodeTitle  String?
+
+  // Source-specific keys (for deduplication)
+  sourceSessionId String?
+  sourceItemId    String?
+
+  // Playback metadata
+  platform  String?
+  player    String?
+  device    String?
+  ipAddress String?
+
+  // Transcode info
+  playMethod    String? // "DirectPlay" | "DirectStream" | "Transcode"
+  videoCodec    String?
+  audioCodec    String?
+  resolution    String?
+  bitrate       Int? // kbps
+  videoDecision String?
+  audioDecision String?
+  container     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([mediaServerUserId, startedAt(sort: Desc)])
+  @@index([tmdbId, mediaType])
+  @@index([startedAt(sort: Desc)])
+  @@index([source])
+  @@index([source, sourceSessionId])
+  @@index([source, sourceItemId, mediaServerUserId, startedAt])
+  @@index([watched])
+  @@unique([source, sourceSessionId])
+}
+
+model ActiveSession {
+  id     String @id // source:sessionKey composite
+  source String // "plex" | "jellyfin"
+
+  sessionKey String
+  startedAt  DateTime
+  lastSeenAt DateTime
+  state      String // "playing" | "paused" | "buffering"
+
+  // User
+  mediaServerUserId String
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Cascade)
+  serverUsername    String
+
+  // Media
+  tmdbId        Int?
+  mediaType     String?
+  title         String
+  year          String?
+  seasonNumber  Int?
+  episodeNumber Int?
+  episodeTitle  String?
+  sourceItemId  String?
+
+  posterPath String? // populated from TmdbMediaCore on session create
+
+  // Progress
+  progressPercent Float  @default(0)
+  progressMs      BigInt @default(0)
+  durationMs      BigInt @default(0)
+
+  // Playback metadata
+  platform      String?
+  player        String?
+  device        String?
+  ipAddress     String?
+  playMethod    String?
+  videoCodec    String?
+  audioCodec    String?
+  resolution    String?
+  bitrate       Int?
+  videoDecision String?
+  audioDecision String?
+  container     String?
+
+  @@unique([source, sessionKey])
+  @@index([source])
+}
+
+// ─── TRaSH Guides ────────────────────────────────────────────────────────────
+
+// Upstream custom formats, quality profiles, naming, and quality-size specs
+// pulled from the TRaSH-Guides repo (Recyclarr was dropped in c0fe663 — TRaSH
+// now publishes quality profile JSON directly).
+// Keyed by the upstream trash_id so we can match against Radarr/Sonarr CFs that
+// have been imported via the TRaSH convention.
+model TrashSpec {
+  id           String        @id @default(cuid(2))
+  trashId      String
+  service      TrashService
+  kind         TrashSpecKind
+  name         String
+  description  String?
+  payload      Json
+  upstreamPath String
+  upstreamSha  String?
+  fetchedAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  application  TrashApplication?
+
+  @@unique([service, kind, trashId])
+  @@index([service, kind])
+}
+
+// One row per spec the admin has chosen to push to Radarr/Sonarr. `enabled=false`
+// is the unmanage escape hatch — the sync job ignores it. `remoteId` tracks the
+// id Radarr/Sonarr assigned on first apply so we can PUT (overwrite) on subsequent
+// syncs without depending on name lookups.
+model TrashApplication {
+  id          String     @id @default(cuid(2))
+  trashSpecId String     @unique
+  trashSpec   TrashSpec  @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
+  enabled     Boolean    @default(true)
+  remoteId    Int?
+  appliedAt   DateTime?
+  lastError   String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+// ─── Enums ───────────────────────────────────────────────────────────────────
+
+enum TrashService {
+  RADARR
+  SONARR
+}
+
+enum TrashSpecKind {
+  CUSTOM_FORMAT
+  QUALITY_PROFILE
+  NAMING
+  QUALITY_SIZE
+}
+
+enum Role {
+  USER
+  ISSUE_ADMIN
+  ADMIN
+}
+
+enum MediaType {
+  MOVIE
+  TV
+}
+
+enum RequestStatus {
+  PENDING
+  APPROVED
+  DECLINED
+  AVAILABLE
+}
+
+enum IssueType {
+  BAD_VIDEO
+  WRONG_AUDIO
+  MISSING_SUBTITLES
+  WRONG_MATCH
+  OTHER
+}
+
+enum IssueScope {
+  FULL
+  SEASON
+  EPISODE
+}
+
+enum IssueStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+model WebhookReplay {
+  digest    String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}

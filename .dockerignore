@@ -1,0 +1,32 @@
+# ── Secrets (never bake into an image) ────────────────────────────────────────
+.env
+.env.*
+
+# ── Dependencies (rebuilt inside Docker) ──────────────────────────────────────
+node_modules
+
+# ── Build output ──────────────────────────────────────────────────────────────
+.next
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git
+.gitignore
+
+# ── Editor / tooling ──────────────────────────────────────────────────────────
+.vscode
+.claude
+.DS_Store
+
+# ── Docker files (no need to nest these inside the image) ─────────────────────
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# ── Docs and examples ─────────────────────────────────────────────────────────
+*.md
+.env.example
+
+# ── Generated / build artifacts ───────────────────────────────────────────────
+*.tsbuildinfo
+next-env.d.ts
+src/generated
