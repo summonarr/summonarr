@@ -1,6 +1,7 @@
 import "server-only";
 import { prisma } from "./prisma";
 import { getCache, setCache, TTL } from "./tmdb-cache";
+import { safeFetch } from "./safe-fetch";
 
 // In-process request coalescing: concurrent callers for the same detail page share one upstream fetch
 // rather than hammering TMDB and writing the same cache row N times.
@@ -100,14 +101,11 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>, reval
   }
 
   const tmdbUrl = url.toString();
-  if (new URL(tmdbUrl).hostname !== "api.themoviedb.org") {
-    throw new Error(`TMDB URL validation failed: unexpected host`);
-  }
 
   let lastErr: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const res = await fetch(tmdbUrl, {
+      const res = await safeFetch(tmdbUrl, {
         headers: auth.headers,
         next: { revalidate },
       });
@@ -120,8 +118,10 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>, reval
       return data as T;
     } catch (err) {
       // UND_ERR_SOCKET is a transient undici connection reset; retry twice before surfacing the error
-      const cause = (err as { cause?: { code?: string } })?.cause;
-      if (cause?.code === "UND_ERR_SOCKET" && attempt < 2) {
+      const isSocketError =
+        (err as { cause?: { code?: string } })?.cause?.code === "UND_ERR_SOCKET" ||
+        (err instanceof Error && err.message.includes("UND_ERR_SOCKET"));
+      if (isSocketError && attempt < 2) {
         lastErr = err;
         continue;
       }

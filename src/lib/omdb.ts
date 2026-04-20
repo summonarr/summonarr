@@ -161,7 +161,7 @@ export async function fetchAndCacheOmdbForTmdb(
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
-    console.error(`[omdb] Error fetching for ${mediaType}:${tmdbId}: ${msg.replace(/[\r\n]/g, " ")}`);
+    console.error(`[omdb] Error fetching for ${mediaType}:${tmdbId}: ${encodeURIComponent(msg)}`);
     return { found: false, keyConfigured: true };
   }
 }

@@ -614,7 +614,8 @@ export async function POST(request: NextRequest) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const serverLabel = server === "plex" ? "plex" : "jellyfin";
-    console.error(`[fix-match] ${serverLabel} error:`, msg);
+    const errClass = err instanceof Error ? err.constructor.name : "Error";
+    console.error(`[fix-match] ${serverLabel} error (${errClass})`);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
