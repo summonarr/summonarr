@@ -22,3 +22,7 @@ export function sanitizeOptional(input: string | undefined | null): string | nul
   const cleaned = sanitizeText(input);
   return cleaned || null;
 }
+
+export function sanitizeForLog(value: unknown): string {
+  return String(value).replace(/[\r\n]/g, " ");
+}

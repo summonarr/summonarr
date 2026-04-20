@@ -213,11 +213,6 @@ export default async function ActivityPage({
       ),
     ]);
 
-  const transcodeCount =
-    stats.transcodeRatio.find((r: { method: string; count: number }) => r.method === "Transcode")?.count ?? 0;
-  const totalTranscodeBase = stats.transcodeRatio.reduce((s: number, r: { count: number }) => s + r.count, 0);
-  const transcodePct = totalTranscodeBase > 0 ? Math.round((transcodeCount / totalTranscodeBase) * 100) : 0;
-
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
 
@@ -398,13 +393,6 @@ export default async function ActivityPage({
     userSource: p.mediaServerUser.source,
     userThumb: p.mediaServerUser.thumbUrl,
   }));
-
-  const playsTodayNum = Number(playsToday[0]?.count ?? 0);
-  const watchTimeTodayNum = Math.round(Number(watchTimeToday[0]?.hours ?? 0) * 10) / 10;
-  const activeUsersTodayNum = Number(activeUsersToday[0]?.count ?? 0);
-  const playsYesterdayNum = Number(playsYesterday[0]?.count ?? 0);
-  const watchTimeYesterdayNum = Math.round(Number(watchTimeYesterday[0]?.hours ?? 0) * 10) / 10;
-  const activeUsersYesterdayNum = Number(activeUsersYesterday[0]?.count ?? 0);
 
   const prevPlaysNum = Number(prevPlays[0]?.count ?? 0);
   const prevWatchTimeNum = Math.round(Number(prevWatchTime[0]?.hours ?? 0) * 10) / 10;

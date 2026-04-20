@@ -696,10 +696,8 @@ function StarterPackRow({
     status = { icon: <XCircle className="w-3.5 h-3.5" />, label: "error", tone: "text-red-400" };
   } else if (application?.appliedAt) {
     status = { icon: <CheckCircle className="w-3.5 h-3.5" />, label: "applied", tone: "text-green-400" };
-  } else if (spec) {
-    status = { icon: <CircleDashed className="w-3.5 h-3.5" />, label: "ready", tone: "text-zinc-300" };
   } else {
-    status = { icon: <CircleDashed className="w-3.5 h-3.5" />, label: "—", tone: "text-zinc-500" };
+    status = { icon: <CircleDashed className="w-3.5 h-3.5" />, label: "ready", tone: "text-zinc-300" };
   }
 
   const interactive = !!spec;

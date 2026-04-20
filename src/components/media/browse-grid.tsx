@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, useTransition } from "react";
-import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import type { TmdbMedia, Genre, WatchProvider } from "@/lib/tmdb-types";
 import { MediaCard } from "./media-card";
 import { FilterBar } from "./filter-bar";
@@ -35,10 +35,7 @@ export function BrowseGrid({
   showPlex,
   showJellyfin,
 }: BrowseGridProps) {
-  const router = useRouter();
-  const pathname = usePathname();
   const searchParams = useSearchParams();
-  const [isPending, startTransition] = useTransition();
 
   const [items, setItems] = useState<TmdbMedia[]>(initialItems);
   const [totalPages, setTotalPages] = useState(initialTotalPages);

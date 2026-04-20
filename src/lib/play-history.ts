@@ -1,5 +1,4 @@
 import { prisma } from "./prisma";
-import { Prisma } from "@/generated/prisma";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 const settingsCache = new Map<string, { value: string | null; expiresAt: number }>();
