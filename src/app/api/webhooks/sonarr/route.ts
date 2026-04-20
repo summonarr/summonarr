@@ -7,7 +7,6 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
-import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -70,7 +69,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
-    console.warn(`[webhook/sonarr] 200 skipped event=${sanitizeForLog(payload.eventType)}`);
+    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
+    console.warn(`[webhook/sonarr] 200 skipped event=${loggedEvent}`);
     return NextResponse.json({ ok: true, skipped: true });
   }
 

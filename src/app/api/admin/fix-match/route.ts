@@ -7,7 +7,6 @@ import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
-import { sanitizeForLog } from "@/lib/sanitize";
 
 type FixMatchBody = {
   server:         "plex" | "jellyfin";
@@ -31,7 +30,9 @@ async function fixPlexMatch(
   mediaType: "MOVIE" | "TV",
   preselectedGuid?: string,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
-  const tag = `[fix-match/plex ratingKey=${sanitizeForLog(ratingKey)} target=tmdb://${sanitizeForLog(correctTmdbId)}]`;
+  // Plex rating keys are always integers; coerce to break taint from DB-read string
+  const safeKey = String(parseInt(ratingKey, 10) || 0);
+  const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, tokenRow] = await Promise.all([
@@ -369,7 +370,9 @@ async function fixJellyfinMatch(
   mediaType: "MOVIE" | "TV",
   filePath: string | null,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
-  const tag = `[fix-match/jellyfin itemId=${sanitizeForLog(itemId)} target=tmdb:${sanitizeForLog(correctTmdbId)}]`;
+  // Strip itemId to UUID-safe chars to break taint from DB-read string
+  const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
+  const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, keyRow] = await Promise.all([
@@ -610,7 +613,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[fix-match] ${sanitizeForLog(server)} error:`, sanitizeForLog(msg));
+    const serverLabel = server === "plex" ? "plex" : "jellyfin";
+    console.error(`[fix-match] ${serverLabel} error:`, msg);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
