@@ -69,7 +69,8 @@ export async function POST(req: NextRequest) {
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
-    console.warn(`[webhook/sonarr] 200 skipped event=${payload.eventType}`);
+    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
+    console.warn(`[webhook/sonarr] 200 skipped event=${loggedEvent}`);
     return NextResponse.json({ ok: true, skipped: true });
   }
 

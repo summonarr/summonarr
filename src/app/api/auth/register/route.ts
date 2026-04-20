@@ -44,7 +44,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
   }
 
-  if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+  if (typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
+    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+  }
+  const emailParts = email.split("@");
+  if (emailParts.length !== 2 || !emailParts[0] || !emailParts[1]) {
+    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+  }
+  const domainDot = emailParts[1].lastIndexOf(".");
+  if (domainDot < 1 || domainDot === emailParts[1].length - 1) {
     return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
   }
 

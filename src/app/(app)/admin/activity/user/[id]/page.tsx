@@ -55,7 +55,6 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
   const deviceMax = Math.max(...stats.deviceList.map((d) => d.count), 1);
 
   const directPlays = stats.transcodeRatio.find((r) => r.method === "DirectPlay")?.count ?? 0;
-  const transcodes = stats.transcodeRatio.find((r) => r.method === "Transcode")?.count ?? 0;
   const totalWithMethod = stats.transcodeRatio.reduce((s, r) => s + r.count, 0);
   const directPct = totalWithMethod > 0 ? Math.round((directPlays / totalWithMethod) * 100) : null;
 
@@ -242,9 +241,6 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
               </thead>
               <tbody>
                 {stats.recentPlays.map((p) => {
-                  const href = p.tmdbId && p.mediaType
-                    ? (p.mediaType === "TV" ? `/tv/${p.tmdbId}` : `/movie/${p.tmdbId}`)
-                    : null;
                   const qualityParts: string[] = [];
                   if (p.playMethod) qualityParts.push(p.playMethod === "DirectPlay" ? "Direct" : p.playMethod);
                   if (p.resolution) qualityParts.push(p.resolution);

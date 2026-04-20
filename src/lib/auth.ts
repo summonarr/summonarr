@@ -9,7 +9,7 @@ import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, isMobileUa } from "@/lib/ua-fingerprint";
+import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 import { consumePendingFingerprint } from "@/lib/oidc-fingerprint-bootstrap";
 import { encryptToken, decryptToken } from "@/lib/token-crypto";
 import type { Adapter, AdapterAccount } from "next-auth/adapters";

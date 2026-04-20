@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";

@@ -30,7 +30,9 @@ async function fixPlexMatch(
   mediaType: "MOVIE" | "TV",
   preselectedGuid?: string,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
-  const tag = `[fix-match/plex ratingKey=${ratingKey} target=tmdb://${correctTmdbId}]`;
+  // Plex rating keys are always integers; coerce to break taint from DB-read string
+  const safeKey = String(parseInt(ratingKey, 10) || 0);
+  const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, tokenRow] = await Promise.all([
@@ -128,7 +130,7 @@ async function fixPlexMatch(
       return results[0] ?? null;
     };
 
-    if (imdbId && !canonicalGuid) {
+    if (imdbId) {
       const hit = await plexMatchSearch("imdb-guid", { manual: "1", includeGuids: "1", guid: `imdb://${imdbId}` });
       if (hit) { canonicalGuid = hit.guid; if (hit.name) matchName = hit.name; if (hit.year) matchYear = String(hit.year); }
     }
@@ -368,7 +370,9 @@ async function fixJellyfinMatch(
   mediaType: "MOVIE" | "TV",
   filePath: string | null,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
-  const tag = `[fix-match/jellyfin itemId=${itemId} target=tmdb:${correctTmdbId}]`;
+  // Strip itemId to UUID-safe chars to break taint from DB-read string
+  const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
+  const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
   console.log(`${tag} starting`);
 
   const [urlRow, keyRow] = await Promise.all([
@@ -609,7 +613,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[fix-match] ${server} error:`, msg);
+    const serverLabel = server === "plex" ? "plex" : "jellyfin";
+    const errClass = err instanceof Error ? err.constructor.name : "Error";
+    console.error(`[fix-match] ${serverLabel} error (${errClass})`);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

@@ -108,7 +108,7 @@ export async function fetchAndCacheMdblistForTmdb(
           tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
           return { found: false, keyConfigured: true, quotaExhausted: true };
         }
-        console.log(`[mdblist] API error for ${mediaType}:${tmdbId}: ${errMsg}`);
+        console.log(`[mdblist] API error for ${mediaType}:${tmdbId}: ${encodeURIComponent(errMsg)}`);
         await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
         return { found: false, keyConfigured: true };
       }
@@ -121,7 +121,7 @@ export async function fetchAndCacheMdblistForTmdb(
   } catch (err) {
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
-    console.error(`[mdblist] Error fetching for ${mediaType}:${tmdbId}: ${reason}`);
+    console.error(`[mdblist] Error fetching for ${mediaType}:${tmdbId}: ${encodeURIComponent(reason)}`);
     return { found: false, keyConfigured: true };
   }
 }

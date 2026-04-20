@@ -68,15 +68,17 @@ export async function POST(req: NextRequest) {
   }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
+    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
+    const loggedTmdbId = Number.isInteger(payload.movie?.tmdbId) ? payload.movie!.tmdbId : 0;
     console.warn(
-      `[webhook/radarr] 200 skipped event=${payload.eventType} tmdbId=${payload.movie?.tmdbId ?? "none"}`,
+      `[webhook/radarr] 200 skipped event=${loggedEvent} tmdbId=${loggedTmdbId}`,
     );
     return NextResponse.json({ ok: true, skipped: true });
   }
 
   const { tmdbId, title } = payload.movie;
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    console.warn(`[webhook/radarr] 400 invalid tmdbId=${tmdbId}`);
+    console.warn("[webhook/radarr] 400 invalid tmdbId");
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
