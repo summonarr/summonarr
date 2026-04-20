@@ -1,5 +1,5 @@
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:22-alpine3.21 AS deps
+FROM node:25-alpine3.21 AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -8,7 +8,7 @@ COPY package*.json ./
 RUN npm ci --legacy-peer-deps
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:22-alpine3.21 AS builder
+FROM node:25-alpine3.21 AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -27,7 +27,7 @@ RUN npm run build
 # Install ONLY prisma + dotenv using exact versions from the lockfile.
 # npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:22-alpine3.21 AS migrate-deps
+FROM node:25-alpine3.21 AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -49,7 +49,7 @@ RUN node -e " \
 " && npm install --legacy-peer-deps && npm install pg
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:22-alpine3.21 AS runner
+FROM node:25-alpine3.21 AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).
