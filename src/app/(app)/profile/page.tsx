@@ -20,6 +20,7 @@ export default async function ProfilePage() {
       where: { id: session.user.id },
       select: {
         name: true, email: true, discordId: true, role: true, mediaServer: true,
+        notificationEmail: true,
         notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true,
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
@@ -116,6 +117,8 @@ export default async function ProfilePage() {
             <NotificationPrefs
               discordLinked={!!user?.discordId}
               isAdminRole={user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"}
+              isJellyfin={session.user.provider === "jellyfin" || session.user.provider === "jellyfin-quickconnect"}
+              notificationEmail={user?.notificationEmail ?? null}
               notifyOnApproved={user?.notifyOnApproved ?? true}
               notifyOnAvailable={user?.notifyOnAvailable ?? true}
               notifyOnDeclined={user?.notifyOnDeclined ?? true}

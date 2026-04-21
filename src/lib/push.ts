@@ -1,8 +1,9 @@
 import webpush from "web-push";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
+import { isFeatureEnabled } from "@/lib/features";
 
-async function getVapidKeys(): Promise<{ publicKey: string; privateKey: string; contact: string } | null> {
+async function getVapidKeysRaw(): Promise<{ publicKey: string; privateKey: string; contact: string } | null> {
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["vapidPublicKey", "vapidPrivateKey", "smtpFrom", "smtpUser"] } },
   });
@@ -12,9 +13,15 @@ async function getVapidKeys(): Promise<{ publicKey: string; privateKey: string; 
   return { publicKey: cfg.vapidPublicKey, privateKey: cfg.vapidPrivateKey, contact };
 }
 
+// Send-path variant — returns null when the push integration feature flag is disabled so all notification helpers short-circuit through their existing `if (!keys) return` guards. Key bootstrapping (getOrCreateVapidPublicKey) uses getVapidKeysRaw directly so keys can still be inspected/generated even when sends are disabled.
+async function getVapidKeys(): Promise<{ publicKey: string; privateKey: string; contact: string } | null> {
+  if (!(await isFeatureEnabled("feature.integration.push"))) return null;
+  return getVapidKeysRaw();
+}
+
 export async function getOrCreateVapidPublicKey(): Promise<string> {
   // VAPID keys must never change after subscriptions are stored — changing them invalidates all existing push subscriptions
-  const existing = await getVapidKeys();
+  const existing = await getVapidKeysRaw();
   if (existing) return existing.publicKey;
 
   const generated = webpush.generateVAPIDKeys();
@@ -40,7 +47,7 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
     ]);
   });
 
-  const keys = await getVapidKeys();
+  const keys = await getVapidKeysRaw();
   return keys?.publicKey ?? generated.publicKey;
 }
 

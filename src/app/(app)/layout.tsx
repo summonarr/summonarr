@@ -9,6 +9,7 @@ import { MaintenancePage } from "@/components/layout/maintenance-page";
 import { MaintenanceBanner } from "@/components/layout/maintenance-banner";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
+import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -27,10 +28,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let maintenanceEnabled = false;
   let maintenanceMessage = "";
   let isAdmin = false;
+  let featureFlags: FeatureFlags | undefined;
   try {
-    const [rows, session] = await Promise.all([
+    const [rows, session, flags] = await Promise.all([
       prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage"] } } }),
       auth(),
+      getFeatureFlags(),
     ]);
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
@@ -40,6 +43,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     maintenanceEnabled  = cfg.maintenanceEnabled === "true";
     maintenanceMessage  = cfg.maintenanceMessage  ?? "";
     isAdmin             = session?.user?.role === "ADMIN";
+    featureFlags        = flags;
     if (discordInviteUrl && session?.user?.id) {
       const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } });
       userDiscordId = user?.discordId ?? null;
@@ -56,7 +60,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   return (
     <div className="flex h-screen overflow-hidden">
       <NavigationProgress />
-      <Sidebar siteTitle={siteTitle} />
+      <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />
         {maintenanceEnabled && isAdmin && <MaintenanceBanner message={maintenanceMessage} />}
@@ -81,7 +85,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           </a>
         </div>
       </div>
-      <MobileNav />
+      <MobileNav featureFlags={featureFlags} />
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
   );

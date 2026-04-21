@@ -3,6 +3,7 @@ import { prisma } from "./prisma";
 import { notifyUserRequestApproved, notifyUserRequestAvailable, notifyUserRequestDeclined, notifyUsersRequestsAvailable } from "./discord-notify";
 import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUsersRequestsAvailablePush } from "./push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
+import { resolveUserNotificationEmail } from "./notification-email";
 
 interface RequestInfo {
   requestedBy: string;
@@ -99,24 +100,33 @@ export function notifyRequestStatusChange(
   if (status === "APPROVED") {
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, emailOnApproved: true } })
-      .then((u) => { if (u?.email && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: u.email, title, mediaType }); })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
+      .then((u) => {
+        const to = u && resolveUserNotificationEmail(u);
+        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType });
+      })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
 
   if (status === "AVAILABLE") {
     notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, emailOnAvailable: true } })
-      .then((u) => { if (u?.email && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: u.email, title, mediaType }); })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
+      .then((u) => {
+        const to = u && resolveUserNotificationEmail(u);
+        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType });
+      })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
 
   if (status === "DECLINED") {
     notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, emailOnDeclined: true } })
-      .then((u) => { if (u?.email && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: u.email, title, mediaType, adminNote: request.adminNote }); })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })
+      .then((u) => {
+        const to = u && resolveUserNotificationEmail(u);
+        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote });
+      })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
 }

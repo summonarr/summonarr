@@ -8,6 +8,7 @@ import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
@@ -36,6 +37,7 @@ export default async function UpcomingPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
+  await requireFeature("feature.page.upcoming");
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);

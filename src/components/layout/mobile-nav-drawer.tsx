@@ -6,7 +6,8 @@ import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
 import { LogOut, Bell } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { userNavItems, getVisibleAdminItems } from "@/lib/nav-items";
+import { userNavItems, getVisibleAdminItems, filterNavByFeatures } from "@/lib/nav-items";
+import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import {
   Drawer,
@@ -20,16 +21,17 @@ import {
 interface MobileNavDrawerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  featureFlags?: FeatureFlags;
 }
 
-export function MobileNavDrawer({ open, onOpenChange }: MobileNavDrawerProps) {
+export function MobileNavDrawer({ open, onOpenChange, featureFlags }: MobileNavDrawerProps) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = session?.user?.role;
-  const adminItems = getVisibleAdminItems(role);
+  const adminItems = filterNavByFeatures(getVisibleAdminItems(role), featureFlags);
 
-  const browseItems = userNavItems.filter((i) => i.section === "browse");
-  const personalItems = userNavItems.filter((i) => i.section === "personal");
+  const browseItems   = filterNavByFeatures(userNavItems.filter((i) => i.section === "browse"),   featureFlags);
+  const personalItems = filterNavByFeatures(userNavItems.filter((i) => i.section === "personal"), featureFlags);
 
   useEffect(() => {
     onOpenChange(false);

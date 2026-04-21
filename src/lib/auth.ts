@@ -331,8 +331,25 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
   },
   events: {
-    async signIn({ user, account }) {
+    async signIn({ user, account, profile }) {
       const u = user as { _auditIp?: string; _auditUa?: string; id?: string; name?: string | null; email?: string | null; role?: string };
+
+      // OIDC: keep notificationEmail in lock-step with the OIDC provider's current email claim.
+      // Prefer the fresh `profile.email` over `user.email` — the adapter-returned user is
+      // the stored DB row and can lag behind OIDC email changes.
+      if (account?.provider === "oidc" && u.id) {
+        const oidcEmail = typeof profile?.email === "string"
+          ? normalizeEmail(profile.email)
+          : u.email
+            ? normalizeEmail(u.email)
+            : null;
+        if (oidcEmail) {
+          await prisma.user.update({
+            where: { id: u.id },
+            data: { notificationEmail: oidcEmail },
+          }).catch((err) => console.error("[auth] notificationEmail sync (oidc) failed:", err instanceof Error ? err.message : err));
+        }
+      }
 
       if (account?.provider && account.provider !== "credentials" && u.id) {
         const promoted = await prisma.$transaction(async (tx) => {
@@ -514,12 +531,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
                 image: plexThumb,
               });
 
-              if (browserClientId) {
-                await prisma.user.update({
-                  where: { id: plexDbUser.id },
-                  data: { plexClientId: browserClientId },
-                }).catch(() => {});
-              }
+              // notificationEmail is kept in lock-step with the Plex-verified email on every
+              // sign-in so notifications always go to the user's current Plex address.
+              await prisma.user.update({
+                where: { id: plexDbUser.id },
+                data: {
+                  notificationEmail: verifiedEmail,
+                  ...(browserClientId ? { plexClientId: browserClientId } : {}),
+                },
+              }).catch(() => {});
               const device = buildDeviceMeta(headers);
               plexResult = { ...plexDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
             }

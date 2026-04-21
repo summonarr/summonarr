@@ -8,6 +8,7 @@ import Image from "next/image";
 import { VoteActions } from "@/components/votes/vote-actions";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
+import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 
 const PAGE_SIZE = 40;
@@ -18,6 +19,7 @@ export default async function VotesPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
+  await requireFeature("feature.page.votes");
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 

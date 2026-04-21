@@ -4,10 +4,12 @@ import { redirect } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { getArrDiskSpace } from "@/lib/arr-stats";
 import { StatsCharts } from "@/components/admin/stats-charts";
+import { requireFeature } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
 export default async function StatsPage() {
+  await requireFeature("feature.admin.stats");
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 

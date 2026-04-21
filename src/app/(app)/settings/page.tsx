@@ -13,6 +13,8 @@ import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button
 import { MasterDbFillButton } from "@/components/admin/master-db-fill-button";
 import { SettingsTabNav, type TabId } from "@/components/settings/settings-tab-nav";
 import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-table";
+import { FeaturesForm } from "@/components/settings/features-form";
+import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
@@ -56,7 +58,7 @@ const ALL_KEYS = [
   "omdbApiKey", "mdblistApiKey", "traktClientId",
 ] as const;
 
-const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "system"];
+const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
 
 export default async function SettingsPage({
   searchParams,
@@ -563,6 +565,21 @@ export default async function SettingsPage({
               </div>
             </Card>
           </>
+        )}
+
+        {tab === "features" && (
+          <FeaturesForm
+            initialFlags={await getFeatureFlags()}
+            groups={(() => {
+              const g = groupFeaturesByCategory();
+              return [
+                { category: "pages" as const,        title: "User pages",         description: "Hide or show user-facing nav sections and their pages.", features: g.pages },
+                { category: "behaviors" as const,    title: "Behaviors",          description: "Turn on or off specific features of the app.", features: g.behaviors },
+                { category: "integrations" as const, title: "Integrations",       description: "Toggle external integrations on or off without clearing their config.", features: g.integrations },
+                { category: "admin" as const,        title: "Admin pages",        description: "Hide or show admin-only pages and their nav entries.", features: g.admin },
+              ];
+            })()}
+          />
         )}
 
         {tab === "system" && metrics && (

@@ -12,6 +12,7 @@ import Image from "next/image";
 import { Film, Tv2, MessageSquare } from "lucide-react";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
+import { requireFeature } from "@/lib/features";
 
 const STATUS_STYLES: Record<string, string> = {
   OPEN: "bg-red-500/10 text-red-400 border-red-500/20",
@@ -76,6 +77,7 @@ export default async function AdminIssuesPage({
 }: {
   searchParams: Promise<{ filter?: string; selected?: string }>;
 }) {
+  await requireFeature("feature.page.issues");
   const session = await auth();
   if (!session || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) redirect("/");
 

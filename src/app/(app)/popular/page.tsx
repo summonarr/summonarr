@@ -10,6 +10,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
+import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Suspense } from "react";
@@ -39,6 +40,7 @@ export default async function PopularOnServerPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
+  await requireFeature("feature.page.popular");
   const [sp, session] = await Promise.all([searchParams, auth()]);
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);

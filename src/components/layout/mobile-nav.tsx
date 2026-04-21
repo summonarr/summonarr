@@ -6,20 +6,24 @@ import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
 import { MoreHorizontal, ShieldCheck, AlertTriangle } from "lucide-react";
-import { userNavItems } from "@/lib/nav-items";
+import { userNavItems, filterNavByFeatures } from "@/lib/nav-items";
+import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
-
-const bottomBarItems = userNavItems.filter((i) => i.mobileBottomBar);
 
 const adminItem = { href: "/admin", label: "Admin", icon: ShieldCheck, exact: true };
 const issueAdminItem = { href: "/admin/issues", label: "Issues", icon: AlertTriangle, exact: false };
 
-export function MobileNav() {
+export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = session?.user?.role;
   const [drawerOpen, setDrawerOpen] = useState(false);
   const handleOpenChange = useCallback((open: boolean) => setDrawerOpen(open), []);
+
+  const bottomBarItems = filterNavByFeatures(
+    userNavItems.filter((i) => i.mobileBottomBar),
+    featureFlags,
+  );
 
   const roleItem =
     role === "ADMIN" ? adminItem : role === "ISSUE_ADMIN" ? issueAdminItem : null;
@@ -88,7 +92,7 @@ export function MobileNav() {
         </button>
       </nav>
 
-      <MobileNavDrawer open={drawerOpen} onOpenChange={handleOpenChange} />
+      <MobileNavDrawer open={drawerOpen} onOpenChange={handleOpenChange} featureFlags={featureFlags} />
     </>
   );
 }

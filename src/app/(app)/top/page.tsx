@@ -12,6 +12,7 @@ import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
+import { requireFeature } from "@/lib/features";
 
 const PER_PAGE = 36;
 
@@ -136,6 +137,7 @@ export default async function TopRatedPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
+  await requireFeature("feature.page.top");
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const hideAvailable = sp.hideAvailable === "1";
   const mediaType     = sp.mediaType || undefined;

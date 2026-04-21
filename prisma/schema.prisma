@@ -26,6 +26,14 @@ model User {
   // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
   mediaServer   String?
 
+  // Delivery address for outgoing email notifications. Separate from `email`
+  // (which is the login identity and may be a synthetic jellyfin-<id>@jellyfin.local
+  // placeholder for Jellyfin users). For Plex/OIDC/credentials users this is
+  // auto-synced to the source email on every sign-in. For Jellyfin users it is
+  // null until the user sets it manually on the profile page and is never
+  // auto-populated from the Jellyfin server.
+  notificationEmail String?
+
   // Canonical X-Plex-Client-Identifier for this user — pinned after first successful Plex sign-in.
   // Handed back to any browser this user later signs in from so subsequent sign-ins reuse the
   // same clientId, avoiding the "Another device is attempting to sign in" warning on Plex's

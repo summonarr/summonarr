@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { AuditLogView } from "@/components/admin/audit-log-table";
+import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 
 export const dynamic = "force-dynamic";
@@ -21,6 +22,7 @@ export default async function AuditLogPage({
 }: {
   searchParams: Promise<{ action?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string }>;
 }) {
+  await requireFeature("feature.admin.auditLog");
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 

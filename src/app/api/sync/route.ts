@@ -15,6 +15,7 @@ import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDown
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { isFeatureEnabled } from "@/lib/features";
 
 const CONCURRENCY_LIMIT = 5;
 
@@ -189,9 +190,17 @@ export async function POST(request: NextRequest) {
   let jfMovieIds   = new Map<number, JellyfinLibraryItemData>();
   let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
 
+  const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    isFeatureEnabled("feature.integration.radarr"),
+    isFeatureEnabled("feature.integration.sonarr"),
+  ]);
+
   // Plex and Jellyfin library writes run concurrently; errors in one don't abort the other
   const syncResults = await Promise.allSettled([
     (async () => {
+      if (!plexEnabled) return;
       if (!plexUrlRow?.value || !plexTokenRow?.value) return;
       try {
         const serverUrl = plexUrlRow.value.replace(/\/$/, "");
@@ -225,6 +234,7 @@ export async function POST(request: NextRequest) {
       }
     })(),
     (async () => {
+      if (!jellyfinEnabled) return;
       if (!jfUrlRow?.value || !jfKeyRow?.value) return;
       try {
         const baseUrl = jfUrlRow.value.replace(/\/$/, "");
@@ -381,47 +391,51 @@ export async function POST(request: NextRequest) {
   }
 
   let radarrWanted = 0;
-  try {
-    const radarrResult = await getRadarrWantedTmdbIds();
-    if (radarrResult === null) {
-      console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
-    } else {
-      const wantedRows    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-      const availableRows = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId }));
-      // Advisory lock 1001,1 coordinates with the Radarr webhook handler to prevent partial reads
-      await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-        await tx.radarrWantedItem.deleteMany();
-        if (wantedRows.length > 0) await tx.radarrWantedItem.createMany({ data: wantedRows });
-        await tx.radarrAvailableItem.deleteMany();
-        if (availableRows.length > 0) await tx.radarrAvailableItem.createMany({ data: availableRows });
-      }, { timeout: BATCH_TX_TIMEOUT });
-      radarrWanted = wantedRows.length;
+  if (radarrEnabled) {
+    try {
+      const radarrResult = await getRadarrWantedTmdbIds();
+      if (radarrResult === null) {
+        console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
+      } else {
+        const wantedRows    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId }));
+        const availableRows = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId }));
+        // Advisory lock 1001,1 coordinates with the Radarr webhook handler to prevent partial reads
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
+          await tx.radarrWantedItem.deleteMany();
+          if (wantedRows.length > 0) await tx.radarrWantedItem.createMany({ data: wantedRows });
+          await tx.radarrAvailableItem.deleteMany();
+          if (availableRows.length > 0) await tx.radarrAvailableItem.createMany({ data: availableRows });
+        }, { timeout: BATCH_TX_TIMEOUT });
+        radarrWanted = wantedRows.length;
+      }
+    } catch (err) {
+      console.error("[sync] Radarr wanted sync failed:", err);
     }
-  } catch (err) {
-    console.error("[sync] Radarr wanted sync failed:", err);
   }
 
   let sonarrWanted = 0;
-  try {
-    const sonarrResult = await getSonarrWantedTmdbIds();
-    if (sonarrResult === null) {
-      console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
-    } else {
-      const wantedRows    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-      const availableRows = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId }));
-      // Advisory lock 1001,2 coordinates with the Sonarr webhook handler to prevent partial reads
-      await prisma.$transaction(async (tx) => {
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-        await tx.sonarrWantedItem.deleteMany();
-        if (wantedRows.length > 0) await tx.sonarrWantedItem.createMany({ data: wantedRows });
-        await tx.sonarrAvailableItem.deleteMany();
-        if (availableRows.length > 0) await tx.sonarrAvailableItem.createMany({ data: availableRows });
-      }, { timeout: BATCH_TX_TIMEOUT });
-      sonarrWanted = wantedRows.length;
+  if (sonarrEnabled) {
+    try {
+      const sonarrResult = await getSonarrWantedTmdbIds();
+      if (sonarrResult === null) {
+        console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
+      } else {
+        const wantedRows    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId }));
+        const availableRows = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId }));
+        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler to prevent partial reads
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+          await tx.sonarrWantedItem.deleteMany();
+          if (wantedRows.length > 0) await tx.sonarrWantedItem.createMany({ data: wantedRows });
+          await tx.sonarrAvailableItem.deleteMany();
+          if (availableRows.length > 0) await tx.sonarrAvailableItem.createMany({ data: availableRows });
+        }, { timeout: BATCH_TX_TIMEOUT });
+        sonarrWanted = wantedRows.length;
+      }
+    } catch (err) {
+      console.error("[sync] Sonarr wanted sync failed:", err);
     }
-  } catch (err) {
-    console.error("[sync] Sonarr wanted sync failed:", err);
   }
 
   try {

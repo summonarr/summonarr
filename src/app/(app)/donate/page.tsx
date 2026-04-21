@@ -2,10 +2,12 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { ExternalLink, Heart } from "lucide-react";
+import { requireFeature } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
 export default async function DonatePage() {
+  await requireFeature("feature.page.donate");
   const session = await auth();
   if (!session) redirect("/login");
 
