@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** early development (v0.1). Single-container Docker deploy is the supported install path. Expect rough edges.
+> **Status:** v0.9.0 beta — feature-complete for the initial release. Single-container Docker deploy is the supported install path. **Beta testers wanted** — see [below](#beta-testing).
 
 ---
 
@@ -28,8 +28,9 @@ Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, 
 18. [Local (non-Docker) development](#local-non-docker-development)
 19. [Project structure](#project-structure)
 20. [Security](#security)
-21. [Contributing & issues](#contributing)
-22. [License](#license)
+21. [Beta testing](#beta-testing)
+22. [Contributing & issues](#contributing)
+23. [License](#license)
 
 ---
 
@@ -552,6 +553,22 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - All `/api/sync*` and `/api/cron*` endpoints gate on `CRON_SECRET` (or an admin session).
 - The container runs as non-root (`nextjs:nodejs`, UID 1001), with `npm`/`npx` removed from the runtime image.
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
+
+## Beta testing
+
+Summonarr v0.9.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help, here is how:
+
+1. **Deploy** using the [Quick start](#quick-start-docker-compose) guide above.
+2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
+3. **Report what breaks** — open a GitHub issue with the details listed in [Contributing & issues](#contributing) below.
+
+Particularly useful feedback:
+- Anything that breaks with large Plex or Jellyfin libraries (thousands of items).
+- Edge cases in the Radarr/Sonarr approval pipeline (stuck requests, missing badges).
+- Auth flows: Plex OAuth, Jellyfin QuickConnect, and OIDC providers other than Authentik.
+- Mobile layout issues or Web Push notification failures.
+
+There is no mailing list or Discord. GitHub Issues is the only channel.
 
 ## Contributing
 
