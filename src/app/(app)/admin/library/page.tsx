@@ -214,6 +214,7 @@ export default async function LibraryDiffPage({
   const jellyfinMovieStripPrefix = prefixCfg.jellyfinMoviePathStripPrefix ?? "";
   const jellyfinTvStripPrefix    = prefixCfg.jellyfinTvPathStripPrefix    ?? "";
 
+  // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const threshold = new Date(Date.now() + LIBRARY_REFRESH_THRESHOLD);
   const [freshMovieCount, freshTvCount] = await Promise.all([
     prisma.tmdbCache.count({

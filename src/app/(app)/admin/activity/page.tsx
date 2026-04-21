@@ -58,6 +58,7 @@ export default async function ActivityPage({
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
   const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
 
+  // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const extraFilters: { template: string; value: unknown }[] = [];
@@ -267,7 +268,7 @@ export default async function ActivityPage({
       (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.sourceItemId}`]),
     );
     if (stillNeedTitle.length > 0) {
-      const titles = [...new Set(stillNeedTitle.map((s: typeof stillNeedTitle[0]) => (s as any).title))] as string[];
+      const titles = [...new Set(stillNeedTitle.map((s: typeof stillNeedTitle[0]) => s.title))];
       const titleMatches = await prisma.playHistory.findMany({
         where: { title: { in: titles }, tmdbId: { not: null } },
         distinct: ["title"],
@@ -309,7 +310,7 @@ export default async function ActivityPage({
   }
 
   const posterMap: Record<number, string | null> = {};
-  const sessionTmdbIds = [...new Set(effectiveSessions.map((s: typeof effectiveSessions[0]) => s.effectiveTmdbId).filter((id: any): id is number => id != null))];
+  const sessionTmdbIds = [...new Set(effectiveSessions.map((s: typeof effectiveSessions[0]) => s.effectiveTmdbId).filter((id): id is number => id != null))];
   if (sessionTmdbIds.length > 0) {
     const cacheKeys = sessionTmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
     const cacheRows = await prisma.tmdbCache.findMany({

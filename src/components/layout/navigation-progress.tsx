@@ -38,7 +38,7 @@ export function NavigationProgress() {
     return () => {
       window.history.pushState = original;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (pathname === prevPathname.current) return;
@@ -49,15 +49,15 @@ export function NavigationProgress() {
       intervalRef.current = null;
     }
 
-    setWidth(100);
-
-    timeoutRef.current = setTimeout(() => {
+    const completeId = setTimeout(() => setWidth(100), 0);
+    const hideId = setTimeout(() => {
       setVisible(false);
       setWidth(0);
     }, 300);
 
     return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      clearTimeout(completeId);
+      clearTimeout(hideId);
     };
   }, [pathname]);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { AlertTriangle, Loader2, X, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
@@ -48,6 +48,16 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
   const [manualSeason, setManualSeason] = useState("");
   const [manualEpisode, setManualEpisode] = useState("");
 
+  // Reset season/episode selections when scope changes (setState-during-render avoids useEffect cascade)
+  const [prevScope, setPrevScope] = useState(scope);
+  if (scope !== prevScope) {
+    setPrevScope(scope);
+    setSelectedSeason(tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null);
+    setSelectedEpisode(null);
+    setManualSeason("");
+    setManualEpisode("");
+  }
+
   const isTV = mediaType === "TV";
   const useManualInputs = isTV && (availabilityFailed || (dialogState === "open" && tvSeasons.length === 0));
 
@@ -89,13 +99,6 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
     if (dialogState === "submitting") return;
     setDialogState("idle");
   }
-
-  useEffect(() => {
-    setSelectedSeason(tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null);
-    setSelectedEpisode(null);
-    setManualSeason("");
-    setManualEpisode("");
-  }, [scope, tvSeasons]);
 
   function handleSeasonChange(seasonNum: number) {
     setSelectedSeason(seasonNum);

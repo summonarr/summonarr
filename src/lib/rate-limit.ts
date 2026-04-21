@@ -46,6 +46,7 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
 }
 
 import { isIP } from "node:net";
+import { createHash } from "node:crypto";
 
 function isValidIp(addr: string): boolean {
   return isIP(addr) !== 0;
@@ -61,7 +62,6 @@ export function getClientIp(headers: Headers): string {
 
   // Fall back to a UA fingerprint so unauthenticated clients without a forwarded IP still share a bucket
   const ua = headers.get("user-agent") ?? "";
-  const { createHash } = require("node:crypto") as typeof import("node:crypto");
   return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
 }
 

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { Wrench } from "lucide-react";
 
 export function MaintenancePage({ message }: { message?: string }) {
@@ -11,12 +12,12 @@ export function MaintenancePage({ message }: { message?: string }) {
         <p className="text-zinc-400 mb-6">
           {message || "We're performing some maintenance. Please check back shortly."}
         </p>
-        <a
+        <Link
           href="/"
           className="inline-block px-4 py-2 text-sm font-medium rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
         >
           Try Again
-        </a>
+        </Link>
       </div>
     </div>
   );

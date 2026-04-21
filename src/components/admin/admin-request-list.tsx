@@ -271,7 +271,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
 
               {r.note && (
                 <p className="mt-1 text-xs text-zinc-400 bg-zinc-800 rounded px-2 py-1 border-l-2 border-indigo-500/50">
-                  "{r.note}"
+                  &ldquo;{r.note}&rdquo;
                 </p>
               )}
               {r.adminNote && (

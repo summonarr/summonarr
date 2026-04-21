@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -12,13 +12,10 @@ interface MotdModalProps {
 const SESSION_KEY = "motd_dismissed";
 
 export function MotdModal({ title, body }: MotdModalProps) {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (!body) return;
-    if (sessionStorage.getItem(SESSION_KEY)) return;
-    setVisible(true);
-  }, [body]);
+  // Lazy initializer reads sessionStorage once on mount (client-only); SSR returns false safely
+  const [visible, setVisible] = useState(
+    () => !!body && typeof window !== "undefined" && !sessionStorage.getItem(SESSION_KEY)
+  );
 
   function dismiss() {
     sessionStorage.setItem(SESSION_KEY, "1");

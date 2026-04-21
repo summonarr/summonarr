@@ -39,7 +39,7 @@ export default async function UpcomingPage({
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  let raw: TmdbMedia[] = [];
+  const raw: TmdbMedia[] = [];
   try {
     const today = new Date().toISOString().slice(0, 10);
 

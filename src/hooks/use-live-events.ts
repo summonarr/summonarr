@@ -77,7 +77,8 @@ function teardownEventSource() {
 export function useLiveEvents(onEvent: (event: LiveEvent) => void) {
   // Ref keeps the callback stable so the effect doesn't re-run when the parent re-renders
   const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  // Update ref after each render so the subscriber always calls the latest onEvent
+  useEffect(() => { onEventRef.current = onEvent; });
 
   useEffect(() => {
     const sub: Subscriber = (event) => onEventRef.current(event);
