@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: summonarr
       POSTGRES_USER: summonarr
     env_file:
-      - .env.local
+      - .env
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -17,10 +17,7 @@ services:
       retries: 5
 
   summonarr:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: summonarr:local
+    image: ghcr.io/summonarr/summonarr:latest
     container_name: summonarr
     restart: unless-stopped
     ports:
@@ -43,7 +40,7 @@ services:
       PLAY_HISTORY_SYNC_INTERVAL: "${PLAY_HISTORY_SYNC_INTERVAL:-5}"
       TRASH_SYNC_INTERVAL: "${TRASH_SYNC_INTERVAL:-86400}"
     env_file:
-      - .env.local
+      - .env
     depends_on:
       postgres:
         condition: service_healthy
