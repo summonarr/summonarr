@@ -1,9 +1,11 @@
 import nodemailer from "nodemailer";
 import { prisma } from "@/lib/prisma";
+import { isFeatureEnabled } from "@/lib/features";
 
 const SMTP_KEYS = ["smtpHost", "smtpPort", "smtpUser", "smtpPassword", "smtpFrom"] as const;
 
 async function getSmtpConfig(): Promise<Record<string, string>> {
+  if (!(await isFeatureEnabled("feature.integration.email"))) return {};
   const rows = await prisma.setting.findMany({ where: { key: { in: [...SMTP_KEYS] } } });
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }

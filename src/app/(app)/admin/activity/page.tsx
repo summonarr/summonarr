@@ -13,6 +13,7 @@ import { ActivityLeaderboard } from "@/components/admin/activity-leaderboard";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { posterUrl } from "@/lib/tmdb-types";
+import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
@@ -49,8 +50,13 @@ export default async function ActivityPage({
 }: {
   searchParams: Promise<{ days?: string; source?: string; mediaType?: string; tab?: string }>;
 }) {
+  await requireFeature("feature.admin.activity");
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
+
+  const featureFlags = await getFeatureFlags();
+  const showActiveSessions   = featureFlags["feature.behavior.activeSessions"] !== false;
+  const showActivityCalendar = featureFlags["feature.behavior.activityCalendar"] !== false;
 
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab } = await searchParams;
   const isHistoryTab = tab === "history";
@@ -410,7 +416,9 @@ export default async function ActivityPage({
 
       <ActivityFilterBar />
 
-      <ActivityNowPlaying key={`np-${source ?? ""}-${mediaType ?? ""}`} initialSessions={serializedSessions} source={source} mediaType={mediaType} />
+      {showActiveSessions && (
+        <ActivityNowPlaying key={`np-${source ?? ""}-${mediaType ?? ""}`} initialSessions={serializedSessions} source={source} mediaType={mediaType} />
+      )}
 
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-8">
         <Card className="bg-zinc-900 border-zinc-800 p-4">
@@ -516,7 +524,7 @@ export default async function ActivityPage({
         )}
       </div>
 
-      {calendarData.length > 0 && (
+      {showActivityCalendar && calendarData.length > 0 && (
         <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
           <h2 className="font-semibold text-white mb-4 text-sm">365-Day Activity</h2>
           <ActivityCalendar data={calendarData} />

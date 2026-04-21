@@ -9,6 +9,7 @@ import Link from "next/link";
 import { Film, Tv2, MessageSquare } from "lucide-react";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
+import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +54,7 @@ export default async function IssuesPage({
 }: {
   searchParams: Promise<{ page?: string; selected?: string; status?: string; type?: string; q?: string }>;
 }) {
+  await requireFeature("feature.page.issues");
   const session = await auth();
   if (!session) return null;
 

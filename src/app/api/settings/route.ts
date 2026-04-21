@@ -94,6 +94,26 @@ const SETTINGS_SCHEMA = [
   ["trashSyncNaming",                 false],
   ["trashSyncQualitySizes",           false],
   ["trashGithubToken",                true ],
+  // Feature toggles — see src/lib/features.ts for the registry. All stored as "true"|"false".
+  ["feature.page.top",                false],
+  ["feature.page.popular",            false],
+  ["feature.page.upcoming",           false],
+  ["feature.page.issues",             false],
+  ["feature.page.votes",              false],
+  ["feature.page.donate",             false],
+  ["feature.behavior.activeSessions", false],
+  ["feature.behavior.activityCalendar", false],
+  ["feature.integration.plex",        false],
+  ["feature.integration.jellyfin",    false],
+  ["feature.integration.radarr",      false],
+  ["feature.integration.sonarr",      false],
+  ["feature.integration.discord",     false],
+  ["feature.integration.email",       false],
+  ["feature.integration.push",        false],
+  ["feature.admin.stats",             false],
+  ["feature.admin.activity",          false],
+  ["feature.admin.auditLog",          false],
+  ["feature.admin.backup",            false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];

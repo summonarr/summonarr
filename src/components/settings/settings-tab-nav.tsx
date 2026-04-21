@@ -7,6 +7,7 @@ const TABS = [
   { id: "media",         label: "Media" },
   { id: "notifications", label: "Notifications" },
   { id: "integrations",  label: "Integrations" },
+  { id: "features",      label: "Features" },
   { id: "system",        label: "System" },
 ] as const;
 

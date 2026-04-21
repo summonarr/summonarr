@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { isFeatureEnabled } from "@/lib/features";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
@@ -28,6 +29,7 @@ interface Embed {
 }
 
 async function getConfig(): Promise<{ botToken: string; channelId: string | null } | null> {
+  if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["discordBotToken", "discordNotifyChannelId"] } },
   });
@@ -41,6 +43,7 @@ async function getConfig(): Promise<{ botToken: string; channelId: string | null
 
 export async function assignDiscordRolesOnLink(discordUserId: string, userEmail: string, userRole: "ADMIN" | "ISSUE_ADMIN" | "USER" = "USER"): Promise<void> {
   try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
     const rows = await prisma.setting.findMany({
       where: { key: { in: ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] } },
     });
@@ -85,6 +88,7 @@ export async function notifyAdminsNewRequestDiscord(data: {
   posterPath: string | null;
 }): Promise<void> {
   try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
     const rows = await prisma.setting.findMany({
       where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
     });

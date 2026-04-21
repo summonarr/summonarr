@@ -33,6 +33,46 @@ export interface NavItem {
   section: "browse" | "personal" | "admin";
 }
 
+// Map of nav item href → feature flag that controls its visibility. Items not
+// listed here are always visible. See src/lib/features.ts for the registry and
+// defaults. Kept here (rather than on each NavItem) because NavItem is used by
+// both server and client components and we want the nav definition to stay a
+// plain data module with no cross-file coupling beyond href strings.
+export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
+  "/top":                "feature.page.top",
+  "/popular":            "feature.page.popular",
+  "/upcoming":           "feature.page.upcoming",
+  "/issues":             "feature.page.issues",
+  "/votes":              "feature.page.votes",
+  "/donate":             "feature.page.donate",
+  "/admin/issues":       "feature.page.issues",
+  "/admin/stats":        "feature.admin.stats",
+  "/admin/activity":     "feature.admin.activity",
+  "/admin/audit-log":    "feature.admin.auditLog",
+  "/admin/backup":       "feature.admin.backup",
+  "/admin/trash-guides": "trashGuidesEnabled",
+};
+
+/**
+ * Filter nav items by an admin-controlled feature flag map. Pass `undefined`
+ * or an empty map to show everything (fail-open, so nav never disappears
+ * entirely if the flag query fails).
+ */
+export function filterNavByFeatures<T extends { href: string }>(
+  items: readonly T[],
+  flags?: Record<string, boolean>,
+): T[] {
+  if (!flags) return [...items];
+  return items.filter((item) => {
+    const key = NAV_ITEM_FEATURE_KEY[item.href];
+    if (!key) return true;
+    // Missing key in the flag map means "no row stored yet" → fall back to
+    // showing the item. getFeatureFlags() always fills in registered keys
+    // with their defaults, so this only matters for unregistered keys.
+    return flags[key] !== false;
+  });
+}
+
 export const userNavItems: NavItem[] = [
   { href: "/", label: "Discover", icon: LayoutDashboard, exact: true, mobileBottomBar: true, section: "browse" },
   { href: "/movies", label: "Movies", icon: Film, mobileBottomBar: true, section: "browse" },

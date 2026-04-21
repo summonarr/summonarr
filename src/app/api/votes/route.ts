@@ -9,6 +9,7 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
+import { isFeatureEnabled } from "@/lib/features";
 
 const PAGE_SIZE = 40;
 
@@ -74,6 +75,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  if (!(await isFeatureEnabled("feature.page.votes"))) {
+    return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
+  }
 
   const maint = await maintenanceGuard(session.user.role);
   if (maint) return maint;

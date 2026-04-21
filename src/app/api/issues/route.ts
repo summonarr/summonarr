@@ -8,6 +8,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
+import { isFeatureEnabled } from "@/lib/features";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
@@ -44,6 +45,10 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  if (!(await isFeatureEnabled("feature.page.issues"))) {
+    return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
+  }
 
   const maint = await maintenanceGuard(session.user.role);
   if (maint) return maint;

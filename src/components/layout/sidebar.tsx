@@ -5,14 +5,16 @@ import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
 import { Film } from "lucide-react";
-import { userNavItems, getVisibleAdminItems } from "@/lib/nav-items";
+import { userNavItems, getVisibleAdminItems, filterNavByFeatures } from "@/lib/nav-items";
+import type { FeatureFlags } from "@/lib/features";
 
-export function Sidebar({ siteTitle }: { siteTitle?: string }) {
+export function Sidebar({ siteTitle, featureFlags }: { siteTitle?: string; featureFlags?: FeatureFlags }) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = session?.user?.role;
 
-  const visibleAdminItems = getVisibleAdminItems(role);
+  const visibleUserItems  = filterNavByFeatures(userNavItems, featureFlags);
+  const visibleAdminItems = filterNavByFeatures(getVisibleAdminItems(role), featureFlags);
 
   return (
     <aside className="hidden md:flex flex-col w-56 shrink-0 bg-zinc-900 border-r border-zinc-800 h-screen sticky top-0">
@@ -26,7 +28,7 @@ export function Sidebar({ siteTitle }: { siteTitle?: string }) {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-        {userNavItems.map(({ href, label, icon: Icon }) => (
+        {visibleUserItems.map(({ href, label, icon: Icon }) => (
           <Link
             key={href}
             href={href}
