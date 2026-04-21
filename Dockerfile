@@ -7,6 +7,30 @@ RUN apk upgrade --no-cache
 COPY package*.json ./
 RUN npm ci --legacy-peer-deps
 
+# ── Stage 1b: prisma-gen (runs on native builder platform) ───────────────────
+# Running `prisma generate` under QEMU (when cross-building for a non-native
+# target like linux/arm64 on an amd64 runner) crashes Prisma's schema-engine
+# binary. The generated client is platform-independent JavaScript — we use
+# @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
+# it is safe and much faster to generate on $BUILDPLATFORM and copy the
+# output into the target-arch builder stage.
+FROM --platform=$BUILDPLATFORM node:25-alpine3.21 AS prisma-gen
+WORKDIR /app
+
+RUN apk upgrade --no-cache
+
+COPY package*.json ./
+# --ignore-scripts skips any target-arch postinstall hooks; we only need the
+# prisma CLI and its deps to run `prisma generate` on the build host.
+RUN npm ci --legacy-peer-deps --ignore-scripts
+
+COPY prisma ./prisma
+COPY prisma.config.ts ./prisma.config.ts
+# prisma.config.ts asserts DATABASE_URL is defined. `prisma generate` does not
+# connect, but the assertion still fires — provide a dummy to satisfy it.
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
+RUN npx prisma generate
+
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
 FROM node:25-alpine3.21 AS builder
 WORKDIR /app
@@ -16,8 +40,8 @@ RUN apk upgrade --no-cache
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Generate Prisma client (outputs to src/generated/prisma — not node_modules)
-RUN npx prisma generate
+# Pull the prisma client generated on $BUILDPLATFORM into the target-arch tree.
+COPY --from=prisma-gen /app/src/generated/prisma ./src/generated/prisma
 
 # Build Next.js (standalone output)
 ENV NEXT_TELEMETRY_DISABLED=1
