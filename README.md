@@ -57,6 +57,8 @@ The compose stack runs two containers:
 | `summonarr`| `ghcr.io/summonarr/summonarr:latest`    | Next.js app **plus** an internal cron loop that drives sync jobs (no sidecar needed).   | `3001 → 3000`           |
 | `postgres` | `postgres:17-alpine`                    | Primary database. Persisted to the `postgres-data` named volume.                        | not exposed to host     |
 
+> Two compose setups are provided. Use [`docker-container/`](./docker-container/) to deploy the pre-built image from GHCR (recommended for most users). Use the root [`docker-compose.yml`](./docker-compose.yml) if you are building from source.
+
 Everything Summonarr needs at runtime — schema sync (`prisma db push`), library sync, TMDB refresh, play-history polling, cache warmers, audit-PII scrubbing — runs inside the `summonarr` container. You do **not** need a separate `sync-cron` container; that was an earlier design that has since been folded into `docker-entrypoint.sh`.
 
 ```
@@ -80,14 +82,16 @@ Everything Summonarr needs at runtime — schema sync (`prisma db push`), librar
 
 ## Quick start (Docker Compose)
 
+The [`docker-container/`](./docker-container/) folder contains a self-contained deployment setup that pulls the pre-built image from GHCR — no build step required.
+
 ```bash
 # 1. Clone
 git clone https://github.com/summonarr/summonarr.git
-cd summonarr
+cd summonarr/docker-container
 
-# 2. Configure. IMPORTANT: compose reads `.env.local`, NOT `.env`.
-cp .env.example .env.local
-${EDITOR:-vi} .env.local   # fill in the required vars (see below)
+# 2. Configure
+cp .env.example .env
+${EDITOR:-vi} .env   # fill in the required vars (see below)
 
 # 3. Launch
 docker compose up -d
@@ -98,7 +102,7 @@ docker compose logs -f summonarr
 
 Open <http://localhost:3001>. The **first user to register is auto-promoted to `ADMIN`** — create your account before exposing the app publicly.
 
-Minimum variables you must set in `.env.local` before the first `docker compose up`:
+Minimum variables you must set in `.env` before the first `docker compose up`:
 
 ```dotenv
 TMDB_API_KEY=...
@@ -113,7 +117,7 @@ Everything else (`TOKEN_ENCRYPTION_KEY`, `BACKUP_DB_PASSWORD`, `OIDC_*`, `JELLYF
 
 ## Environment variables
 
-The canonical, commented list lives in [`.env.example`](./.env.example). Summary table follows.
+The canonical, commented list lives in [`docker-container/.env.example`](./docker-container/.env.example) (for the pre-built image deploy) and [`.env.example`](./.env.example) (for local development). Summary table follows.
 
 ### Required
 
@@ -148,7 +152,7 @@ Plex OAuth is configured inside the app (**Admin → Settings → Plex**), not t
 
 ### Schedule tuning (optional)
 
-All intervals are in seconds and already have sensible defaults. Override via `.env.local` if you want the compose stack to pass them through:
+All intervals are in seconds and already have sensible defaults. Override via `.env` (or `.env.local` for the root dev compose) if you want the compose stack to pass them through:
 
 | Variable                    | Default  | What it schedules                                                           |
 | --------------------------- | -------- | ---------------------------------------------------------------------------- |
@@ -238,7 +242,7 @@ server {
 }
 ```
 
-Set `AUTH_URL=https://requests.example.com` and `TRUST_PROXY=true` in `.env.local`.
+Set `AUTH_URL=https://requests.example.com` and `TRUST_PROXY=true` in your `.env` (or `.env.local` if building from source).
 
 ### Caddy
 
@@ -272,7 +276,7 @@ Remove the `ports:` mapping on the `summonarr` service when using Traefik on the
 
 Running Summonarr at `https://example.com/request` instead of a dedicated hostname:
 
-1. Set `BASE_PATH=/request` in `.env.local`.
+1. Set `BASE_PATH=/request` in your `.env` (or `.env.local` if building from source).
 2. Set `AUTH_URL=https://example.com/request`.
 3. Configure the proxy to forward requests under `/request/` **without stripping the prefix** — Summonarr's router expects to see the full path. Example for Nginx:
 
@@ -288,7 +292,7 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
    }
    ```
 
-4. `docker compose up -d --force-recreate summonarr` so the new `BASE_PATH` is picked up.
+4. `docker compose up -d --force-recreate summonarr` so the new `BASE_PATH` is picked up (run this from the same folder as your `docker-compose.yml`).
 
 ## Internal cron schedule
 
@@ -377,7 +381,7 @@ All service wiring is done in the running app (**Admin → Settings**) and persi
 ### OIDC / SSO
 
 1. Register a new application with your IdP. Callback URL: `${AUTH_URL}/api/auth/callback/oidc`.
-2. Copy the issuer, client ID, and client secret into `.env.local`:
+2. Copy the issuer, client ID, and client secret into your `.env` (or `.env.local` if building from source):
 
    ```dotenv
    OIDC_ISSUER=https://auth.example.com
@@ -385,7 +389,7 @@ All service wiring is done in the running app (**Admin → Settings**) and persi
    OIDC_CLIENT_SECRET=...
    OIDC_DISPLAY_NAME=Authentik
    ```
-3. `docker compose up -d --force-recreate summonarr`. The "Sign in with SSO" button appears automatically.
+3. `docker compose up -d --force-recreate summonarr` (from your compose folder). The "Sign in with SSO" button appears automatically.
 
 ## Backups & restore
 
@@ -418,12 +422,23 @@ docker compose exec -T postgres psql -U summonarr -d summonarr < summonarr.sql
 
 ## Upgrading
 
+**Pre-built image (`docker-container/`):**
+
+```bash
+cd /path/to/summonarr/docker-container
+docker compose pull
+docker compose up -d
+docker compose logs -f summonarr   # watch prisma db push apply any schema changes
+```
+
+**Building from source (root compose):**
+
 ```bash
 cd /path/to/summonarr
 git pull
-docker compose pull              # if tracking ghcr.io/summonarr/summonarr:latest
-docker compose up -d              # recreate containers with the new image
-docker compose logs -f summonarr # watch prisma db push apply any schema changes
+docker compose build
+docker compose up -d
+docker compose logs -f summonarr
 ```
 
 Schema changes are applied on every container start via `prisma db push` (no migrations directory, no manual step). Destructive schema changes (dropped columns, narrowed types) will **fail fast at boot** instead of silently clobbering data — apply those by hand with explicit intent when they come up.
@@ -445,7 +460,7 @@ docker compose exec summonarr sh
 # Open a psql session
 docker compose exec postgres psql -U summonarr -d summonarr
 
-# Force-recreate after editing .env.local (docker compose does NOT auto-reload env files)
+# Force-recreate after editing .env / .env.local (docker compose does NOT auto-reload env files)
 docker compose up -d --force-recreate summonarr
 
 # Full teardown, keep the data volume
@@ -455,34 +470,31 @@ docker compose down
 docker compose down -v
 
 # Manually trigger a full sync from the host
+# (adjust .env to .env.local if using the root dev compose)
 curl -X POST \
-  -H "Authorization: Bearer $(grep ^CRON_SECRET .env.local | cut -d= -f2)" \
+  -H "Authorization: Bearer $(grep ^CRON_SECRET .env | cut -d= -f2)" \
   -H "Content-Type: application/json" \
   -d '{"full": true}' \
   http://localhost:3001/api/sync
 ```
 
-Editing `.env.local` does not hot-reload inside a running container. Run `docker compose up -d --force-recreate summonarr` for env changes to take effect.
+Editing `.env` (or `.env.local`) does not hot-reload inside a running container. Run `docker compose up -d --force-recreate summonarr` for env changes to take effect.
 
 ## Building the image yourself
 
-The shipped `docker-compose.yml` pulls from `ghcr.io/summonarr/summonarr:latest`. To build locally instead:
-
-```yaml
-services:
-  summonarr:
-    # image: ghcr.io/summonarr/summonarr:latest
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # …rest unchanged
-```
-
-Then:
+The root [`docker-compose.yml`](./docker-compose.yml) is already configured to build from source using the local `Dockerfile`. Run it from the repo root:
 
 ```bash
-docker compose build summonarr
-docker compose up -d summonarr
+git clone https://github.com/summonarr/summonarr.git
+cd summonarr
+
+# IMPORTANT: root compose reads `.env.local`, NOT `.env`
+cp .env.example .env.local
+${EDITOR:-vi} .env.local
+
+docker compose build
+docker compose up -d
+docker compose logs -f summonarr
 ```
 
 The Dockerfile is a four-stage build (deps → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
@@ -536,9 +548,12 @@ src/generated/prisma generated Prisma client (never edit by hand)
 prisma/              schema.prisma (schema-first, no migrations folder)
 public/              static assets
 scripts/             build-time helpers (audit-deps, smoke-test-security, …)
-Dockerfile           multi-stage standalone Next build, non-root user
-docker-compose.yml   app + Postgres 17, reads `.env.local`
-docker-entrypoint.sh schema sync, dedupe, cron loops, play-history poll
+Dockerfile              multi-stage standalone Next build, non-root user
+docker-compose.yml      app + Postgres 17, builds from source, reads `.env.local`
+docker-container/       ready-to-deploy setup pulling the GHCR image, reads `.env`
+  docker-compose.yml    pulls ghcr.io/summonarr/summonarr:latest
+  .env.example          annotated env template (includes DATABASE_URL)
+docker-entrypoint.sh    schema sync, dedupe, cron loops, play-history poll
 ```
 
 See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md) for the architecture brief and Next 16 / contribution conventions.
