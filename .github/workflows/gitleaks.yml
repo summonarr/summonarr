@@ -6,11 +6,20 @@ name: Gitleaks
 # table (not in git, but a belt-and-suspenders net for mistaken .env
 # commits).
 #
-# The `gitleaks/gitleaks-action` wrapper requires a paid GITLEAKS_LICENSE
-# for organization-owned repos (summonarr/summonarr qualifies). The CLI
-# itself is MIT-licensed and has no such restriction, so we install the
-# binary directly. This also sidesteps the June 2026 Node 20 deprecation
-# — no JS-runtime action is involved.
+# Uses gitleaks/gitleaks-action@v2 (the wrapper). GITLEAKS_LICENSE
+# must be set as a repo or org secret — required for org-owned repos
+# like summonarr/summonarr. Grab one at https://gitleaks.io.
+#
+# Wrapper perks vs. raw CLI:
+#   - Auto-posts finding summaries as PR comments.
+#   - Uses diff-only scanning on pull_request events (faster).
+#   - Writes results.sarif on findings for Security-tab upload below.
+#
+# Known risk: gitleaks-action@v2 runs on Node 20, which GitHub is
+# retiring on GitHub Actions runners (forced to Node 24 on
+# 2026-06-02, removed 2026-09-16). If upstream hasn't shipped a
+# Node-24 build by then, revert this file to the raw-CLI install
+# approach — see commit a6f4994.
 
 on:
   push:
@@ -35,47 +44,30 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # Action posts finding summaries as PR comments.
+      pull-requests: write
+      # Upload SARIF to the GitHub Security tab.
       security-events: write
-    env:
-      # Bump version + sha256 together when upgrading. No Dependabot
-      # ecosystem tracks raw GitHub release downloads.
-      # Latest release list: https://github.com/gitleaks/gitleaks/releases
-      GITLEAKS_VERSION: '8.30.1'
-      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           # Full history so scheduled scans catch secrets in older
-          # commits. PR runs only diff against the base ref anyway.
+          # commits; the action auto-diffs on pull_request events.
           fetch-depth: 0
 
-      - name: Install gitleaks
-        run: |
-          set -euo pipefail
-          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o gitleaks.tar.gz "$url"
-          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
-          tar -xzf gitleaks.tar.gz gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
-          gitleaks version
-
       - name: Run gitleaks
-        run: |
-          set -euo pipefail
-          # --redact hides matched secrets from stdout so they don't
-          # leak into workflow logs; SARIF is written to disk separately.
-          # `|| true` keeps the job non-blocking on findings — the Security
-          # tab is the source of truth. Drop `|| true` to gate merges.
-          gitleaks git \
-            --redact \
-            --report-format sarif \
-            --report-path gitleaks.sarif \
-            || true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
       - name: Upload SARIF
-        if: always() && hashFiles('gitleaks.sarif') != ''
+        # Runs even when the scan step fails on findings. The action
+        # only emits results.sarif when something was flagged, so skip
+        # the upload if the file isn't there.
+        if: always() && hashFiles('results.sarif') != ''
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: gitleaks.sarif
+          sarif_file: results.sarif
           category: gitleaks
