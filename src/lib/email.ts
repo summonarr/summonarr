@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
+import { resolveUserNotificationEmail } from "@/lib/notification-email";
 
 const SMTP_KEYS = ["smtpHost", "smtpPort", "smtpUser", "smtpPassword", "smtpFrom"] as const;
 
@@ -30,9 +31,11 @@ function safeHeader(str: string): string {
 async function getAdminEmails(): Promise<string[]> {
   const admins = await prisma.user.findMany({
     where: { role: "ADMIN" },
-    select: { email: true },
+    select: { email: true, notificationEmail: true },
   });
-  return admins.map((a) => a.email).filter((e): e is string => Boolean(e));
+  return admins
+    .map((a) => resolveUserNotificationEmail(a))
+    .filter((e): e is string => Boolean(e));
 }
 
 export async function notifyAdminsNewRequest(data: {
