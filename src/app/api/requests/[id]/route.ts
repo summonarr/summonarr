@@ -192,7 +192,7 @@ export async function PATCH(
       arrError = arrErrorMessage(err);
     }
 
-    notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType });
+    notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
 
     scheduleDelayed(90_000, async () => {
       try {
@@ -254,11 +254,11 @@ export async function PATCH(
     void prisma.deletionVote.deleteMany({
       where: { tmdbId: updated.tmdbId, mediaType: updated.mediaType },
     }).catch(() => {});
-    notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType });
+    notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
   }
 
   if (status === "DECLINED" && existing.status !== "DECLINED") {
-    notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote });
+    notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
   }
 
   return NextResponse.json(updated);

@@ -294,7 +294,7 @@ export async function POST(req: NextRequest) {
   const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
   after(async () => {
     await Promise.allSettled([
-      notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null }),
+      notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear }),
       notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy }),
       notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
     ]);

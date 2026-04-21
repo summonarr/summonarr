@@ -51,6 +51,9 @@ const SETTINGS_SCHEMA = [
   ["smtpUser",                      false],
   ["smtpPassword",                  true ],
   ["smtpFrom",                      false],
+  ["emailBackend",                  false],
+  ["resendApiKey",                  true ],
+  ["resendFrom",                    false],
   ["discordBotToken",               true ],
   ["discordClientId",               false],
   ["discordGuildId",                false],
@@ -359,14 +362,14 @@ export async function PATCH(req: NextRequest) {
     })();
   }
 
-  if (updated.smtpHost || updated.smtpPassword) {
+  if (updated.smtpHost || updated.smtpPassword || updated.resendApiKey || updated.emailBackend) {
     const adminEmail = session.user.email;
     if (adminEmail) {
       try {
         await sendTestEmail(adminEmail);
         testResults.smtpTested = true;
-      } catch {
-        testResults.smtpError = "SMTP connection failed. Check your SMTP settings.";
+      } catch (err) {
+        testResults.smtpError = err instanceof Error ? err.message : "Email test failed. Check your email settings.";
         testFailed = true;
       }
     }

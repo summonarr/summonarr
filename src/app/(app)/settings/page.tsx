@@ -6,7 +6,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { Card } from "@/components/ui/card";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, SmtpForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, RatingsCacheClearButton, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, RatingsCacheClearButton, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -48,6 +48,7 @@ const ALL_KEYS = [
   "maintenanceEnabled", "maintenanceMessage",
   "sessionDefaultDuration", "sessionMobileDuration", "sessionMaxDuration",
   "smtpHost", "smtpPort", "smtpUser", "smtpPassword", "smtpFrom", "enableUserEmails",
+  "emailBackend", "resendApiKey", "resendFrom",
   "discordBotToken", "discordClientId", "discordGuildId", "discordPublicKey", "discordAutoApproveRoles", "discordRequireLinkedAccount", "discordRequireLinkedAccountSite", "discordAdminRequestChannelId", "discordWelcomeChannelId", "discordNotifyChannelId", "discordInviteUrl",
   "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId",
   "deletionVoteThreshold",
@@ -470,18 +471,21 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold text-white text-lg">Email</h2>
-                  <StatusBadge connected={!!cfg.smtpHost} />
+                  <StatusBadge connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />
                 </div>
                 <p className="text-sm text-zinc-500">
                   Send admins an email when a new request or issue is submitted. Saving will send a test email to your account.
                 </p>
               </div>
-              <SmtpForm
+              <EmailForm
+                initialBackend={cfg.emailBackend === "resend" ? "resend" : "smtp"}
                 initialHost={cfg.smtpHost ?? ""}
                 initialPort={cfg.smtpPort ?? ""}
                 initialUser={cfg.smtpUser ?? ""}
                 initialPassword={cfg.smtpPassword ? "••••••••" : ""}
                 initialFrom={cfg.smtpFrom ?? ""}
+                initialResendApiKey={cfg.resendApiKey ? "••••••••" : ""}
+                initialResendFrom={cfg.resendFrom ?? ""}
               />
               <EnableUserEmailsToggle initialEnabled={cfg.enableUserEmails === "true"} />
             </Card>

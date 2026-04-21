@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
   const reportedBy = session.user.name ?? session.user.email ?? session.user.id;
   after(async () => {
     await Promise.allSettled([
-      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null }),
+      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id }),
       notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy }),
     ]);
   });

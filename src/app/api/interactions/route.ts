@@ -659,7 +659,7 @@ async function handleComponent(interaction: any): Promise<void> {
         } else {
           const pendingRequest = await prisma.mediaRequest.create({ data: baseData });
           const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
-          void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null });
+          void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null });
           void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy });
           void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
           note = "An admin will review your request.";
