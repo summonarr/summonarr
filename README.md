@@ -28,7 +28,7 @@ Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, 
 18. [Local (non-Docker) development](#local-non-docker-development)
 19. [Project structure](#project-structure)
 20. [Security](#security)
-21. [Contributing](#contributing)
+21. [Contributing & issues](#contributing)
 22. [License](#license)
 
 ---
@@ -555,16 +555,15 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue to discuss substantial changes first.
+**Bug reports and feature requests are welcome.** If you open an issue, please include:
 
-Before opening a PR:
+- A clear description of the problem or requested feature.
+- Steps to reproduce (for bugs): what you did, what you expected, what actually happened.
+- Relevant environment details: Docker image tag, host OS, which external services (Plex, Jellyfin, Radarr, Sonarr) are involved.
+- Log output from `docker compose logs summonarr` covering the failure window.
+- For request-pipeline issues: the output of `/api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv` (admin only).
 
-```bash
-npm run lint
-npx tsc --noEmit
-```
-
-Commit style is Conventional Commits with scopes (`feat(sync): …`, `fix(arr): …`, `perf(play-history): …`). See [`CLAUDE.md`](./CLAUDE.md) for the full guardrails.
+Issues opened without sufficient detail to reproduce or understand the problem may be closed without action.
 
 ## License
 
