@@ -1,14 +1,16 @@
 name: Gitleaks
 
-# Scans for accidentally committed secrets. The env surface worth
-# guarding: NEXTAUTH_SECRET, CRON_SECRET, TOKEN_ENCRYPTION_KEY,
-# TMDB_READ_TOKEN, BACKUP_DB_PASSWORD, plus Plex/Jellyfin/ARR tokens
-# held in the Setting table (not in git, but worth a belt-and-suspenders
-# net for mistaken .env commits).
+# Scans for accidentally committed secrets. Env surface worth guarding:
+# NEXTAUTH_SECRET, CRON_SECRET, TOKEN_ENCRYPTION_KEY, TMDB_READ_TOKEN,
+# BACKUP_DB_PASSWORD, plus Plex/Jellyfin/ARR tokens held in the Setting
+# table (not in git, but a belt-and-suspenders net for mistaken .env
+# commits).
 #
-# gitleaks-action v2 is free for public repos. For private or internal
-# repos, set a GITLEAKS_LICENSE repo/org secret — the action will fail
-# early without one.
+# The `gitleaks/gitleaks-action` wrapper requires a paid GITLEAKS_LICENSE
+# for organization-owned repos (summonarr/summonarr qualifies). The CLI
+# itself is MIT-licensed and has no such restriction, so we install the
+# binary directly. This also sidesteps the June 2026 Node 20 deprecation
+# — no JS-runtime action is involved.
 
 on:
   push:
@@ -31,18 +33,49 @@ jobs:
     name: Gitleaks
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # Bump version + sha256 together when upgrading. No Dependabot
+      # ecosystem tracks raw GitHub release downloads.
+      # Latest release list: https://github.com/gitleaks/gitleaks/releases
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_SHA256: '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          # Full history so scheduled scans catch secrets in older commits,
-          # not just the tip. PR scans only diff against the base ref, so
-          # this is cheap there too.
+          # Full history so scheduled scans catch secrets in older
+          # commits. PR runs only diff against the base ref anyway.
           fetch-depth: 0
 
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Uncomment if this repo is ever flipped to private:
-          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Run gitleaks
+        run: |
+          set -euo pipefail
+          # --redact hides matched secrets from stdout so they don't
+          # leak into workflow logs; SARIF is written to disk separately.
+          # `|| true` keeps the job non-blocking on findings — the Security
+          # tab is the source of truth. Drop `|| true` to gate merges.
+          gitleaks git \
+            --redact \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            || true
+
+      - name: Upload SARIF
+        if: always() && hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
