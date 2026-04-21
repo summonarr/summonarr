@@ -9,6 +9,7 @@ import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
 import { encryptToken } from "@/lib/token-crypto";
+import { FEATURE_KEYS } from "@/lib/features";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -125,6 +126,13 @@ const SENSITIVE_KEYS = new Set<string>(
 // Per-key write cooldown prevents rapid settings toggling (e.g. maintenanceEnabled spam)
 const KEY_COOLDOWN_MS = 10_000;
 const lastKeyWriteAt = new Map<string, number>();
+// Feature-flag keys are exempt from the cooldown. The Features admin tab is a
+// rapid-toggle UI by design — a 10s cooldown makes the second click of an
+// accidental double-click look "stuck" (PATCH returns 429 → client rolls back
+// the optimistic flip). Spam protection for this tab is handled client-side
+// via trailing-edge coalescing in features-form.tsx plus the general
+// admin-settings rate limit (10 PATCHes / minute).
+const COOLDOWN_EXEMPT = new Set<string>(FEATURE_KEYS);
 setInterval(() => {
   const cutoff = Date.now() - KEY_COOLDOWN_MS;
   for (const [key, ts] of lastKeyWriteAt) {
@@ -168,6 +176,7 @@ export async function PATCH(req: NextRequest) {
 
   const now = Date.now();
   for (const key of Object.keys(body)) {
+    if (COOLDOWN_EXEMPT.has(key)) continue;
     const last = lastKeyWriteAt.get(key);
     if (last !== undefined && now - last < KEY_COOLDOWN_MS) {
       const retryAfterMs = KEY_COOLDOWN_MS - (now - last);
@@ -243,6 +252,7 @@ export async function PATCH(req: NextRequest) {
 
   const writeTs = Date.now();
   for (const [key] of entries) {
+    if (COOLDOWN_EXEMPT.has(key)) continue;
     lastKeyWriteAt.set(key, writeTs);
   }
 
