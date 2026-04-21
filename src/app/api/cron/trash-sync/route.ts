@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
+import { recordCronRun } from "@/lib/cron-run";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { runTrashSync } from "@/lib/trash";
 
@@ -45,18 +46,27 @@ export async function POST(request: NextRequest) {
       const result = await runTrashSync();
       const durationMs = Date.now() - startTime;
 
+      const appliedFailures = result.applied.filter((r) => !r.ok).length;
+      const details = {
+        refreshed: result.refreshed,
+        applied: { count: result.applied.length, failures: appliedFailures },
+        errors: result.errors,
+      };
+
       await logAudit({
         userId: authCtx.userId,
         userName: authCtx.userName,
         action: "SETTINGS_CHANGE",
         target: "trash-sync",
-        details: {
-          refreshed: result.refreshed,
-          applied: { count: result.applied.length, failures: result.applied.filter((r) => !r.ok).length },
-          errors: result.errors,
-          durationMs,
-          trigger: authCtx.trigger,
-        },
+        details: { ...details, durationMs, trigger: authCtx.trigger },
+      });
+
+      await recordCronRun({
+        target: "trash-sync",
+        status: result.errors.length > 0 || appliedFailures > 0 ? "error" : "ok",
+        durationMs,
+        trigger: authCtx.trigger,
+        details,
       });
 
       return NextResponse.json({

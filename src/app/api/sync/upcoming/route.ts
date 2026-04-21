@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUpcomingMovies, getUpcomingTV } from "@/lib/tmdb";
 import { isCronAuthorized, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { recordCronRun, resolveCronTrigger } from "@/lib/cron-run";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 
@@ -60,14 +61,24 @@ export async function POST(request: NextRequest) {
 
       const durationMs = Date.now() - startTime;
       const errors = [movies, tv].filter((r) => r.status === "rejected").length;
+      const details = { movies: movieItems.length, tv: tvItems.length, total: rows.length, errors, durationMs };
+      const trigger = await resolveCronTrigger();
 
       await logAudit({
         userId: "system",
         userName: "cron",
         action: "LIBRARY_SYNC",
         target: "upcoming-cache",
-        details: { movies: movieItems.length, tv: tvItems.length, total: rows.length, errors, durationMs },
+        details,
       }).catch(() => {});
+
+      await recordCronRun({
+        target: "upcoming-cache",
+        status: errors > 0 ? "error" : "ok",
+        durationMs,
+        trigger,
+        details,
+      });
 
       return NextResponse.json({
         movies: movieItems.length,

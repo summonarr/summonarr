@@ -15,6 +15,7 @@ import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDown
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { recordCronRun } from "@/lib/cron-run";
 import { isFeatureEnabled } from "@/lib/features";
 
 const CONCURRENCY_LIMIT = 5;
@@ -32,6 +33,8 @@ export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
     prisma.mediaRequest.findMany({
@@ -447,23 +450,29 @@ export async function POST(request: NextRequest) {
   }
 
   const session = await auth();
+  const trigger = session?.user ? "admin" : "cron";
+  const details = { marked, reverted, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted };
+
   if (session?.user) {
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.id,
       action: "LIBRARY_SYNC",
       target: "sync:full",
-      details: { marked, reverted, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted },
+      details,
     });
   }
 
+  await recordCronRun({
+    target: "sync:full",
+    status: "ok",
+    durationMs: Date.now() - startTime,
+    trigger,
+    details,
+  });
+
   return NextResponse.json({
     checked: { approved: approved.length, available: available.length },
-    marked,
-    reverted,
-    plexMarked,
-    jellyfinMarked,
-    radarrWanted,
-    sonarrWanted,
+    ...details,
   });
 }

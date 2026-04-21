@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron-auth";
+import { recordCronRun, resolveCronTrigger } from "@/lib/cron-run";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
@@ -64,6 +65,15 @@ export async function POST(request: NextRequest) {
 
       const { warmed, skipped } = await warmBatch(all);
       const durationMs = Date.now() - startTime;
+      const trigger = await resolveCronTrigger();
+
+      await recordCronRun({
+        target: "ratings-sync",
+        status: "ok",
+        durationMs,
+        trigger,
+        details: { total: all.length, warmed, skipped },
+      });
 
       return NextResponse.json({ total: all.length, warmed, skipped, durationMs });
     },

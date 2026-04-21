@@ -517,6 +517,19 @@ enum AuditAction {
   ISSUE_DELETE
 }
 
+// Per-job heartbeat for the scheduled-jobs admin panel. One row per target,
+// upserted on every run — cron or manual. Distinct from AuditLog, which
+// skips cron-triggered runs to avoid flooding the audit trail.
+model CronRun {
+  target     String   @id
+  lastRunAt  DateTime
+  durationMs Int?
+  status     String
+  trigger    String
+  details    String?
+  updatedAt  DateTime @updatedAt
+}
+
 // ─── Play History ────────────────────────────────────────────────────────────
 // Tracks playback sessions from Plex and Jellyfin — Tautulli-style analytics.
 

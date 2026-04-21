@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron-auth";
+import { recordCronRun, resolveCronTrigger } from "@/lib/cron-run";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -12,6 +13,7 @@ export async function POST(request: NextRequest) {
   return withAdvisoryLock(
     2001,
     async () => {
+      const startTime = Date.now();
       const now = new Date();
       const [authSessionResult, discordLinkTokenResult, discordMergeCodeResult, discordSearchCacheResult] =
         await Promise.allSettled([
@@ -33,6 +35,14 @@ export async function POST(request: NextRequest) {
         userName: "cron",
         action: "SETTINGS_CHANGE",
         target: "auth-sessions:purge-expired",
+        details: deleted,
+      });
+
+      await recordCronRun({
+        target: "auth-sessions:purge-expired",
+        status: "ok",
+        durationMs: Date.now() - startTime,
+        trigger: await resolveCronTrigger(),
         details: deleted,
       });
 

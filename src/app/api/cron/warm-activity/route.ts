@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
+import { recordCronRun } from "@/lib/cron-run";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 
 function safeCompareStrings(a: string, b: string): boolean {
@@ -52,6 +53,14 @@ export async function POST(request: NextRequest) {
           details: { warmed, durationMs, trigger: authCtx.trigger },
         });
       }
+
+      await recordCronRun({
+        target: "activity",
+        status: "ok",
+        durationMs,
+        trigger: authCtx.trigger,
+        details: { warmed },
+      });
 
       return NextResponse.json({
         ok: true,

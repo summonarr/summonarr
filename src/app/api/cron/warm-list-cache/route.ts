@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
+import { recordCronRun } from "@/lib/cron-run";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import {
   getTrending, getPopularMovies, getPopularTV,
@@ -136,6 +137,14 @@ export async function POST(request: NextRequest) {
         details: { ...counts, totalItems, errors: errorCount, durationMs, trigger: authCtx.trigger },
       });
     }
+
+    await recordCronRun({
+      target: "list-cache",
+      status: errorCount > 0 ? "error" : "ok",
+      durationMs,
+      trigger: authCtx.trigger,
+      details: { ...counts, totalItems, errors: errorCount },
+    });
 
       return NextResponse.json({
         ok: true,

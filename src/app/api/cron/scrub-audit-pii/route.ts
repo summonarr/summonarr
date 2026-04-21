@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron-auth";
+import { recordCronRun, resolveCronTrigger } from "@/lib/cron-run";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -12,6 +13,7 @@ export async function POST(request: NextRequest) {
   return withAdvisoryLock(
     2002,
     async () => {
+      const startTime = Date.now();
       const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
       const result = await prisma.auditLog.updateMany({
@@ -27,6 +29,14 @@ export async function POST(request: NextRequest) {
         userName: "cron",
         action: "SETTINGS_CHANGE",
         target: "audit-log:pii-scrub",
+        details: { scrubbed: result.count, cutoff: cutoff.toISOString() },
+      });
+
+      await recordCronRun({
+        target: "audit-log:pii-scrub",
+        status: "ok",
+        durationMs: Date.now() - startTime,
+        trigger: await resolveCronTrigger(),
         details: { scrubbed: result.count, cutoff: cutoff.toISOString() },
       });
 

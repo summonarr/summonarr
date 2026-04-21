@@ -174,11 +174,9 @@ export default async function SettingsPage({
       "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
       "trash-sync",
     ];
-    const lastRuns = await prisma.auditLog.findMany({
+    const lastRuns = await prisma.cronRun.findMany({
       where: { target: { in: cronTargets } },
-      orderBy: { createdAt: "desc" },
-      distinct: ["target"],
-      select: { target: true, createdAt: true, details: true },
+      select: { target: true, lastRunAt: true, durationMs: true, status: true },
     });
     const lastRunMap = new Map(lastRuns.map((r) => [r.target, r]));
 
@@ -199,16 +197,15 @@ export default async function SettingsPage({
     };
   }
 
-  function buildCronJobs(lastRunMap: Map<string, { createdAt: Date; details: string | null }>): CronJobInfo[] {
+  function buildCronJobs(lastRunMap: Map<string, { lastRunAt: Date; durationMs: number | null; status: string }>): CronJobInfo[] {
     function lastRunInfo(target: string): { lastRun: string | null; lastDuration: number | null; lastStatus: "ok" | "error" | null } {
       const row = lastRunMap.get(target);
       if (!row) return { lastRun: null, lastDuration: null, lastStatus: null };
-      let durationMs: number | null = null;
-      try {
-        const d = row.details ? JSON.parse(row.details) : null;
-        if (d?.durationMs != null) durationMs = d.durationMs;
-      } catch { }
-      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus: "ok" };
+      return {
+        lastRun: row.lastRunAt.toISOString(),
+        lastDuration: row.durationMs,
+        lastStatus: row.status === "error" ? "error" : "ok",
+      };
     }
 
     return [
