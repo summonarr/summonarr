@@ -1,0 +1,149 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly.
+title: "[bug]: "
+labels:
+  - "bug"
+  - "triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. A few notes before you start:
+
+        - Please search [open and closed issues](https://github.com/summonarr/summonarr/issues?q=is%3Aissue) first — duplicates get closed.
+        - For questions or setup help, use [Discussions](https://github.com/summonarr/summonarr/discussions) instead.
+        - **Do not report security vulnerabilities here.** See [SECURITY.md](https://github.com/summonarr/summonarr/blob/main/SECURITY.md) for private disclosure.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing the bug.
+      placeholder: "Approved movie requests stay in 'Pending' forever even after Radarr grabs them."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include exact error messages if any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, starting from a clean state where possible.
+      placeholder: |
+        1. Sign in as a non-admin user
+        2. Search for "Dune: Part Two"
+        3. Click Request
+        4. As admin, approve the request
+        5. Observe status in /requests after next sync tick
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Summonarr version / commit
+      description: Git commit SHA, Docker tag, or release version.
+      placeholder: "v0.4.2 / ghcr.io/summonarr/summonarr:latest@sha256:... / commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - Docker Compose (recommended)
+        - Docker (standalone)
+        - Bare metal / npm start
+        - Other (describe in context)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: services
+    attributes:
+      label: Affected / connected services
+      description: Which integrations are relevant to this bug?
+      options:
+        - label: Plex
+        - label: Jellyfin
+        - label: Radarr
+        - label: Sonarr
+        - label: TMDB
+        - label: Discord
+        - label: Push notifications
+        - label: None / unrelated to integrations
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: Sign-in method used when the bug occurred
+      options:
+        - Local credentials
+        - Plex OAuth
+        - Jellyfin (standard)
+        - Jellyfin QuickConnect
+        - OIDC
+        - Not applicable / not signed in
+    validations:
+      required: true
+
+  - type: input
+    id: browser
+    attributes:
+      label: Browser + OS (for UI bugs)
+      description: Skip if the bug is server-side only.
+      placeholder: "Firefox 128 on macOS 15.2 / Chrome 139 on Android 15"
+
+  - type: textarea
+    id: debug_endpoint
+    attributes:
+      label: Debug endpoint output (for Radarr/Sonarr availability bugs)
+      description: |
+        If this is about availability badges, stuck requests, or fulfillment, please include the response from:
+
+        `GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv`
+
+        (requires an admin session). Redact any secrets or personal info before pasting.
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: |
+        Server logs from around the time the bug occurred. Silent success is the convention in this codebase, so `[scope] …` error/warn lines are what you're looking for. Redact tokens, cookies, and IPs as needed.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Reverse proxy, unusual network setup, library size, anything else that might matter.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am running a supported version (current release or `main`).
+          required: true
+        - label: I have redacted secrets, tokens, and personal data from any pasted logs or JSON.
+          required: true

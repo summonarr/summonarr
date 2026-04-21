@@ -1,0 +1,73 @@
+name: Feature request
+description: Suggest a new capability or improvement.
+title: "[feat]: "
+labels:
+  - "enhancement"
+  - "triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. A few notes:
+
+        - Please [search existing issues](https://github.com/summonarr/summonarr/issues?q=is%3Aissue) and [Discussions](https://github.com/summonarr/summonarr/discussions) first — your idea may already be tracked.
+        - Feature requests that describe a **problem** get prioritized over ones that prescribe a specific solution. Both are welcome, but lead with the "why."
+        - Requests that duplicate something Overseerr / Jellyseerr already does well may be declined — Summonarr isn't trying to reach feature parity.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and why is it hard or impossible today?
+      placeholder: "As a Plex admin with a shared library, I can't tell which user requested a title that was later auto-deleted, which makes it hard to …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like Summonarr to do? UI sketches, API shape, or config keys are all fine.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you've tried or thought about, and why they fall short.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Area of the app
+      description: Roughly where does this live? Check all that apply.
+      options:
+        - label: Browse / request UI (TMDB, discover, upcoming)
+        - label: Requests / approvals / voting
+        - label: Issues (broken playback reports)
+        - label: Plex integration
+        - label: Jellyfin integration
+        - label: Radarr / Sonarr integration
+        - label: Play history / activity calendar / active sessions
+        - label: Admin dashboard (users, library, audit log, backup, stats)
+        - label: Auth (local / Plex / Jellyfin / OIDC)
+        - label: Notifications (push / Discord)
+        - label: Deployment / Docker / cron
+        - label: Other
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, links to how other tools solve this, library size, user count — anything that helps reviewers judge impact.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues and Discussions; this is not already tracked.
+          required: true
+        - label: This is a feature request, not a bug or a support question.
+          required: true
