@@ -1,0 +1,48 @@
+name: Gitleaks
+
+# Scans for accidentally committed secrets. The env surface worth
+# guarding: NEXTAUTH_SECRET, CRON_SECRET, TOKEN_ENCRYPTION_KEY,
+# TMDB_READ_TOKEN, BACKUP_DB_PASSWORD, plus Plex/Jellyfin/ARR tokens
+# held in the Setting table (not in git, but worth a belt-and-suspenders
+# net for mistaken .env commits).
+#
+# gitleaks-action v2 is free for public repos. For private or internal
+# repos, set a GITLEAKS_LICENSE repo/org secret — the action will fail
+# early without one.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '15 15 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # Full history so scheduled scans catch secrets in older commits,
+          # not just the tip. PR scans only diff against the base ref, so
+          # this is cheap there too.
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Uncomment if this repo is ever flipped to private:
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

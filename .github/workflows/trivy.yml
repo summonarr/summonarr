@@ -1,0 +1,105 @@
+name: Trivy
+
+# Two scans:
+#   - filesystem (PR + push + weekly): fast, runs against the checked-out
+#     source. Catches npm CVEs via package-lock.json plus Dockerfile /
+#     compose misconfigurations and any accidentally committed secrets.
+#   - image (weekly + manual): pulls the latest published GHCR image
+#     and scans the final runtime surface, including Alpine OS packages
+#     that aren't visible from source alone.
+#
+# Findings upload as SARIF to the GitHub Security tab. `exit-code: 0`
+# keeps the job non-blocking — treat the Security tab as the source of
+# truth, not PR status.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Monday 15:27 UTC, offset from CodeQL (15:39) and Gitleaks (15:15)
+    # so the Security tab doesn't get three simultaneous uploads.
+    - cron: '27 15 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  filesystem:
+    name: Filesystem + config scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'
+          # Generated Prisma client is regenerated on every build
+          # (CLAUDE.md guardrail 12). Skip it to avoid upstream noise.
+          skip-dirs: 'node_modules,.next,src/generated'
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+
+  image:
+    name: Image scan (GHCR latest)
+    # Skipped on PRs — the image won't have been rebuilt yet. Runs on
+    # schedule and manual dispatch against whatever `latest` resolves to.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: '0'
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
