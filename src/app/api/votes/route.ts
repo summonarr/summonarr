@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Cannot vote to delete your own request" }, { status: 403 });
   }
 
-  let thresholdNotifyData: { title: string; mediaType: string; voteCount: number } | null = null;
+  let thresholdNotifyData: { title: string; mediaType: string; voteCount: number; posterPath: string | null; tmdbId: number } | null = null;
 
   let vote: Awaited<ReturnType<typeof prisma.deletionVote.create>>;
   try {
@@ -165,7 +165,7 @@ export async function POST(req: NextRequest) {
           const claimKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
           try {
             await tx.setting.create({ data: { key: claimKey, value: "1" } });
-            thresholdNotifyData = { title: verified.title, mediaType, voteCount };
+            thresholdNotifyData = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
           } catch { }
         }
       }

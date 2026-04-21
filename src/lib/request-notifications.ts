@@ -10,6 +10,8 @@ interface RequestInfo {
   title: string;
   mediaType: string;
   adminNote?: string | null;
+  posterPath?: string | null;
+  tmdbId?: number;
 }
 
 export interface PendingAvailableRequest {
@@ -95,7 +97,7 @@ export function notifyRequestStatusChange(
   status: "APPROVED" | "AVAILABLE" | "DECLINED",
   request: RequestInfo,
 ): void {
-  const { requestedBy, title, mediaType } = request;
+  const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
   if (status === "APPROVED") {
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
@@ -103,7 +105,7 @@ export function notifyRequestStatusChange(
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType });
+        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
@@ -114,7 +116,7 @@ export function notifyRequestStatusChange(
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType });
+        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType, posterPath, tmdbId });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
@@ -125,7 +127,7 @@ export function notifyRequestStatusChange(
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote });
+        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote, posterPath });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
