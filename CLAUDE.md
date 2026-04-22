@@ -103,7 +103,7 @@ Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `ne
     const session = await requireAuth({ role: "ADMIN" });
     if (session instanceof NextResponse) return session;
     ```
-    Options: omit `role` for any-authenticated-user (401 on failure); `role: "ADMIN"` / `role: "ISSUE_ADMIN"` (returns 403 on any failure); add `split: true` to return 401 for missing/expired session and 403 only for wrong role. This does not apply to cron/sync routes (use `isCronAuthorized`) or routes that return plain-text/binary responses (SSE, thumbnails) — those stay inline.
+    Semantics: 401 for missing/expired session, 403 only for wrong role. Options: omit `role` for any-authenticated-user; `role: "ADMIN"` requires ADMIN; `role: "ISSUE_ADMIN"` accepts ADMIN or ISSUE_ADMIN. Does not apply to cron/sync routes (use `isCronAuthorized`) or routes that return plain-text/binary responses (SSE, thumbnails) — those stay inline.
 
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 

@@ -19,7 +19,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN", split: true });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
@@ -100,7 +100,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN", split: true });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;

@@ -19,7 +19,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth({ role: "ADMIN", split: true });
+  const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`admin-req:${session.user.id}`, 60, 60 * 1000)) {
@@ -267,7 +267,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await requireAuth({ role: "ADMIN", split: true });
+  const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;

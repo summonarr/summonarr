@@ -13,7 +13,7 @@ const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
 export async function PATCH(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN", split: true });
+  const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {

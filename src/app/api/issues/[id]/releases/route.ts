@@ -13,7 +13,7 @@ import {
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN", split: true });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
