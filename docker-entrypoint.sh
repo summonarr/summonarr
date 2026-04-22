@@ -17,9 +17,15 @@ node --input-type=module <<'DEDUP_EOF'
 const { DATABASE_URL } = process.env;
 // Remove duplicate PlayHistory rows with the same (source, sourceSessionId),
 // keeping the highest id (latest write). Idempotent — safe to run every start.
+// Skips cleanly on a fresh DB where the table hasn't been created yet.
 const { default: { Client } } = await import('pg');
 const client = new Client({ connectionString: DATABASE_URL });
 await client.connect();
+const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
+if (exists.rows[0].t === null) {
+  await client.end();
+  process.exit(0);
+}
 const res = await client.query(`
   DELETE FROM "PlayHistory"
   WHERE id IN (
