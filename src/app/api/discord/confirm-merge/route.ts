@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
@@ -7,8 +7,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { timingSafeEqual } from "crypto";
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });

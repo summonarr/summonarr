@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { getPersonDetails } from "@/lib/tmdb";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -12,8 +12,8 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`person:${session.user.id}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });

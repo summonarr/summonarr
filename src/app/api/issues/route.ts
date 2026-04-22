@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewIssue } from "@/lib/email";
@@ -14,8 +14,8 @@ const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRO
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const where =
     (session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN") ? {} : { reportedBy: session.user.id };
@@ -43,8 +43,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!(await isFeatureEnabled("feature.page.issues"))) {
     return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });

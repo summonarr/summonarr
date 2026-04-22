@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
@@ -501,11 +501,9 @@ async function fixJellyfinMatch(
 }
 
 export async function POST(request: NextRequest) {
-  const session = await auth();
   // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
-  if (!session || isTokenExpired(session) || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   let body: FixMatchBody;
   try {

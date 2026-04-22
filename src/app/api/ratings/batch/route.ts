@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -9,8 +9,8 @@ const MAX_BATCH = 200;
 type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`ratings-batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });

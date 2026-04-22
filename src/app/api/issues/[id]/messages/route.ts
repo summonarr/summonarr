@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { notifyUserIssueMessage, notifyAdminsIssueMessage } from "@/lib/discord-notify";
 import { notifyUserIssueMessagePush, notifyAdminsIssueMessagePush } from "@/lib/push";
@@ -11,8 +11,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, { params }: RouteContext) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
@@ -34,8 +34,8 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
 }
 
 export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const maint = await maintenanceGuard(session.user.role);
   if (maint) return maint;

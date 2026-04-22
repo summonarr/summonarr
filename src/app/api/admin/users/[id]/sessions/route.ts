@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired, revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
+import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAuditOrFail } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
@@ -10,10 +11,8 @@ export async function GET(
   _req: NextRequest,
   { params }: RouteParams
 ) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
 
@@ -42,10 +41,8 @@ export async function DELETE(
   req: NextRequest,
   { params }: RouteParams
 ) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
 

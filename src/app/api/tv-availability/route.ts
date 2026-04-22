@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 export interface TVSeasonInfo {
@@ -13,8 +13,8 @@ export interface TVAvailabilityResponse {
 }
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const raw = req.nextUrl.searchParams.get("tmdbId");
   if (!raw) return NextResponse.json({ error: "tmdbId is required" }, { status: 400 });

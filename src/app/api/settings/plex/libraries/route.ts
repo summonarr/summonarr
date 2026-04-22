@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexLibrarySections } from "@/lib/plex";
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const [serverUrlRow, tokenRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),

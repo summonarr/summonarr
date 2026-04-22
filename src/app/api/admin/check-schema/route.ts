@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { requireAuth } from "@/lib/api-auth";
 import { isCronAuthorized } from "@/lib/cron-auth";
-import { auth, isTokenExpired } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 const EXPECTED: Record<string, string[]> = {
@@ -17,10 +17,8 @@ const EXPECTED: Record<string, string[]> = {
 
 export async function GET(request: NextRequest) {
   // Requires both an admin session AND a cron bearer token to prevent accidental exposure
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }

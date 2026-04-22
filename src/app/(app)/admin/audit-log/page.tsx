@@ -20,16 +20,17 @@ const VALID_ACTIONS: AuditAction[] = [
 export default async function AuditLogPage({
   searchParams,
 }: {
-  searchParams: Promise<{ action?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string }>;
+  searchParams: Promise<{ action?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string; hideCron?: string }>;
 }) {
   await requireFeature("feature.admin.auditLog");
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const { action: actionParam, dateFrom, dateTo, user, target } = await searchParams;
+  const { action: actionParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;
   const action = VALID_ACTIONS.includes(actionParam as AuditAction)
     ? (actionParam as AuditAction)
     : undefined;
+  const hideCron = hideCronParam === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
   if (action) where.action = action;
@@ -44,6 +45,7 @@ export default async function AuditLogPage({
   }
   if (user) where.userName = { contains: user, mode: "insensitive" };
   if (target) where.target = { contains: target, mode: "insensitive" };
+  if (hideCron) where.userId = { not: "system" };
 
   const logs = await prisma.auditLog.findMany({
     where,
@@ -83,6 +85,7 @@ export default async function AuditLogPage({
         currentDateTo={dateTo ?? ""}
         currentUser={user ?? ""}
         currentTarget={target ?? ""}
+        currentHideCron={hideCron}
       />
     </div>
   );

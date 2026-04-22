@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import {
   getReleasesForMovie,
@@ -13,9 +13,8 @@ import {
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(_req: NextRequest, { params }: RouteContext) {
-  const session = await auth();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (isTokenExpired(session) || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
@@ -53,8 +52,8 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
 }
 
 export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
   const issueRecord = await prisma.issue.findUnique({ where: { id }, select: { reportedBy: true } });

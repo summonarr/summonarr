@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 
@@ -28,10 +28,8 @@ function escapeCSV(value: string): string {
 }
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
@@ -40,6 +38,7 @@ export async function GET(req: NextRequest) {
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
   const target = url.searchParams.get("target");
+  const hideCron = url.searchParams.get("hideCron") === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
   if (action && VALID_ACTIONS.includes(action)) where.action = action;
@@ -54,6 +53,7 @@ export async function GET(req: NextRequest) {
   }
   if (user) where.userName = { contains: user, mode: "insensitive" };
   if (target) where.target = { contains: target, mode: "insensitive" };
+  if (hideCron) where.userId = { not: "system" };
 
   const date = new Date().toISOString().slice(0, 10);
 

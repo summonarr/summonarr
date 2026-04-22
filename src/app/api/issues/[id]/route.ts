@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import {
   searchMovieInRadarr,
@@ -19,9 +19,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (isTokenExpired(session) || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
 
@@ -101,9 +100,8 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (isTokenExpired(session) || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });

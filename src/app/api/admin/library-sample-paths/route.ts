@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 const SAMPLE_COUNT = 6;
@@ -50,10 +50,8 @@ function pickTvShowSamples(paths: string[], mountPoint: string): string[] {
 }
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const [plexMovieRows, plexTvRows, jellyfinMovieRows, jellyfinTvRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),

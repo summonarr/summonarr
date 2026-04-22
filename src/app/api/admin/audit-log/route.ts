@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
@@ -14,10 +14,8 @@ const VALID_ACTIONS: AuditAction[] = [
 ];
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const url = req.nextUrl;
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));
@@ -27,6 +25,7 @@ export async function GET(req: NextRequest) {
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
   const target = url.searchParams.get("target");
+  const hideCron = url.searchParams.get("hideCron") === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
 
@@ -53,6 +52,10 @@ export async function GET(req: NextRequest) {
     where.target = { contains: target, mode: "insensitive" };
   }
 
+  if (hideCron) {
+    where.userId = { not: "system" };
+  }
+
   const logs = await prisma.auditLog.findMany({
     where,
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -68,10 +71,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function DELETE(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   // Only null out fields that still hold PII; rows without IP/UA are already clean
   const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);

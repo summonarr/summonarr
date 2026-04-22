@@ -218,14 +218,19 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
 
     setQcCode(code);
 
+    // Server holds each request up to ~25s; this wall-clock budget bounds the total wait
+    const deadline = Date.now() + 2 * 60 * 1000;
     let authenticated = false;
-    for (let i = 0; i < 60; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
+    while (Date.now() < deadline) {
       try {
-        const poll = await fetch(`/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}`);
+        const poll = await fetch(
+          `/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1`
+        );
         if (poll.ok) {
           const data: { authenticated: boolean } = await poll.json();
           if (data.authenticated) { authenticated = true; break; }
+        } else if (poll.status === 410) {
+          break;
         }
       } catch {
 

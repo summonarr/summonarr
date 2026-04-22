@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { searchMulti } from "@/lib/tmdb";
 import { prisma } from "@/lib/prisma";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const maint = await maintenanceGuard(session.user.role);
   if (maint) return maint;

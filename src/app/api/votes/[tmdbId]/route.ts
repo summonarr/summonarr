@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ tmdbId: string }> },
 ) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
@@ -33,10 +33,8 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ tmdbId: string }> },
 ) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);

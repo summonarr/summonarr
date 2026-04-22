@@ -1,14 +1,12 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
 import { logAudit } from "@/lib/audit";
 
 export async function POST() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const users = await prisma.user.findMany({
     where: { discordId: { not: null } },

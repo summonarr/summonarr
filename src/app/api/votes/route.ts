@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -14,8 +14,8 @@ import { isFeatureEnabled } from "@/lib/features";
 const PAGE_SIZE = 40;
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const page = Math.min(Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1), 10_000);
 
@@ -73,8 +73,8 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!(await isFeatureEnabled("feature.page.votes"))) {
     return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });

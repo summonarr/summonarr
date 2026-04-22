@@ -4,11 +4,18 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 const JELLYFIN_URL = process.env.JELLYFIN_URL;
 
+// Long-poll can hold the connection up to ~25s, so bump the route timeout above the default
+export const maxDuration = 30;
+
 // In-memory per-secret poll limiter; caps attempts per QuickConnect session without a DB round-trip
 interface PollEntry { count: number; expiresAt: number; }
 const pollCounts = new Map<string, PollEntry>();
 const MAX_POLLS = 60;
 const QC_TTL = 15 * 60 * 1000;
+
+// Server-side long-poll bounds: total wait per request and per-iteration sleep
+const LONG_POLL_MAX_MS = 25_000;
+const LONG_POLL_TICK_MS = 2_000;
 
 setInterval(() => {
   const now = Date.now();
@@ -41,6 +48,7 @@ export async function GET(req: NextRequest) {
   if (!secret) {
     return NextResponse.json({ error: "Missing secret" }, { status: 400 });
   }
+  const wait = searchParams.get("wait") === "1";
 
   if (!checkRateLimit(`qc-poll:${getClientIp(req.headers)}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
@@ -53,19 +61,44 @@ export async function GET(req: NextRequest) {
   const countKey = secret.slice(0, 32);
   const existing = pollCounts.get(countKey);
   const now = Date.now();
-  if (existing && existing.expiresAt < now) pollCounts.delete(existing as unknown as string);
+  if (existing && existing.expiresAt < now) pollCounts.delete(countKey);
   const attempts = (existing && existing.expiresAt >= now ? existing.count : 0) + 1;
   if (attempts > MAX_POLLS) {
     pollCounts.delete(countKey);
     return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
   }
   pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
+
   try {
-    const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
-    if (authenticated) {
-      pollCounts.delete(countKey);
+    if (!wait) {
+      const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
+      if (authenticated) pollCounts.delete(countKey);
+      return NextResponse.json({ authenticated });
     }
-    return NextResponse.json({ authenticated });
+
+    // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
+    // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
+    const deadline = Date.now() + LONG_POLL_MAX_MS;
+    while (Date.now() < deadline) {
+      if (req.signal.aborted) {
+        return NextResponse.json({ authenticated: false }, { status: 499 });
+      }
+      const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
+      if (authenticated) {
+        pollCounts.delete(countKey);
+        return NextResponse.json({ authenticated: true });
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, Math.min(LONG_POLL_TICK_MS, remaining));
+        req.signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new Error("aborted"));
+        }, { once: true });
+      }).catch(() => { /* aborted — handled by the next loop-top check */ });
+    }
+    return NextResponse.json({ authenticated: false });
   } catch (err) {
     console.error("[jellyfin quickconnect] poll error:", err);
     return NextResponse.json({ error: "Failed to poll QuickConnect" }, { status: 502 });

@@ -98,6 +98,13 @@ Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `ne
 
 6. **Route all cron/sync handlers through `isCronAuthorized`.** Do not re-implement `CRON_SECRET` checks inline.
 
+6a. **User-session API routes must use `requireAuth` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
+    ```ts
+    const session = await requireAuth({ role: "ADMIN" });
+    if (session instanceof NextResponse) return session;
+    ```
+    Semantics: 401 for missing/expired session, 403 only for wrong role. Options: omit `role` for any-authenticated-user; `role: "ADMIN"` requires ADMIN; `role: "ISSUE_ADMIN"` accepts ADMIN or ISSUE_ADMIN. Does not apply to cron/sync routes (use `isCronAuthorized`) or routes that return plain-text/binary responses (SSE, thumbnails) — those stay inline.
+
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 
 8. **No tests, no typecheck script.** Do not fabricate either. If you need verification, run `npm run lint` and `npx tsc --noEmit` explicitly and say what you ran.

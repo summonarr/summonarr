@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { prewarmLibraryCache } from "@/lib/tmdb-prewarm";
 import { logAudit } from "@/lib/audit";
@@ -8,10 +8,8 @@ const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastLibraryWarmAt";
 
 export async function POST() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const now = Date.now();
 
