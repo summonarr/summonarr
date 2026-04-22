@@ -25,7 +25,7 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 
 - **Docker** 20.10+ with the **Compose v2** plugin (`docker compose …`, not `docker-compose …`)
 - A machine with outbound HTTPS so Summonarr can reach TMDB, Plex, Jellyfin, Radarr, Sonarr, MDBList/OMDB (optional), and your OIDC provider (optional)
-- A **TMDB API key** (free — [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api))
+- A **TMDB credential** (free — [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)). Use a **v4 Read Access Token** (`TMDB_READ_TOKEN`, preferred) or a **v3 API key** (`TMDB_API_KEY`, legacy).
 - Optional upstream services you want to wire up: Plex, Jellyfin, Radarr, Sonarr, SMTP, an OIDC IdP (Authelia/Authentik/Keycloak/Auth0/Okta/…)
 
 ## Quick start
@@ -51,8 +51,8 @@ Open <http://localhost:3001>. **The first user to register is auto-promoted to `
 Minimum variables you must set in `.env` before the first `docker compose up`:
 
 ```dotenv
-TMDB_API_KEY=...
-NEXTAUTH_SECRET=...          # openssl rand -base64 32
+TMDB_READ_TOKEN=...          # v4 bearer token (preferred); or TMDB_API_KEY for v3
+NEXTAUTH_SECRET=...          # openssl rand -base64 32  (must be ≥ 32 chars)
 AUTH_URL=http://localhost:3001
 CRON_SECRET=...              # openssl rand -base64 32  (must be ≥ 32 chars)
 POSTGRES_PASSWORD=...        # openssl rand -base64 32
@@ -67,32 +67,33 @@ The canonical, commented list lives in [`.env.example`](./.env.example). Summary
 
 ### Required
 
-| Variable            | Purpose                                                                                                                                    |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TMDB_API_KEY`      | Free key from [themoviedb.org](https://www.themoviedb.org/settings/api). Without it, browse/search/posters don't work.                     |
-| `NEXTAUTH_SECRET`   | Signs JWT session tokens. `openssl rand -base64 32`.                                                                                       |
-| `AUTH_URL`          | Public URL of the app (e.g. `https://requests.example.com`). Pins NextAuth's base URL and blocks Host-header injection behind a proxy.     |
-| `CRON_SECRET`       | Bearer token for `/api/sync*` and `/api/cron*`. Must be **≥ 32 chars**. The internal cron loop reads this from the container environment.  |
-| `POSTGRES_PASSWORD` | Password for the bundled Postgres. The entrypoint derives `DATABASE_URL` from this automatically.                                          |
-| `TRUST_PROXY`       | `true` when behind a trusted reverse proxy — enables per-IP rate limiting based on `X-Forwarded-For`. `false` if exposed directly.         |
+| Variable            | Constraints                                           | Purpose                                                                                                                                                                                  |
+| ------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TMDB_READ_TOKEN`   | v4 bearer token                                       | Preferred TMDB credential. Sent as a header, so the key never leaks into upstream access logs. Set this **or** `TMDB_API_KEY`.                                                           |
+| `TMDB_API_KEY`      | v3 API key                                            | Legacy fallback. Sent as a query-string parameter and triggers a one-time deprecation warning at boot. Use `TMDB_READ_TOKEN` instead where possible.                                     |
+| `NEXTAUTH_SECRET`   | **≥ 32 chars**                                        | Signs JWT session tokens. App refuses to boot in production if missing/short. `openssl rand -base64 32`.                                                                                 |
+| `AUTH_URL`          | Absolute URL incl. scheme                             | Public URL of the app (e.g. `https://requests.example.com`). Pins NextAuth's base URL and blocks Host-header injection behind a proxy. App refuses to boot in production if unset.       |
+| `CRON_SECRET`       | **≥ 32 chars**                                        | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment. App refuses to boot in production if missing/short.                   |
+| `POSTGRES_PASSWORD` | any; `openssl rand -base64 32` recommended            | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
+| `TRUST_PROXY`       | exactly `"true"` or unset                             | `true` when behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else disables per-IP rate limiting. App refuses to boot in production unless `true`. |
 
 ### Strongly recommended in production
 
-| Variable               | Purpose                                                                                                                                                                     |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TOKEN_ENCRYPTION_KEY` | 32 bytes / 64 hex chars. Enables AES-256-GCM encryption at rest for Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts.     |
-| `BACKUP_DB_PASSWORD`   | ≥ 12 chars. **Required** to enable the Backup & Restore admin page — export and import return `503` without it. Losing it makes every prior encrypted backup unrecoverable. |
-| `AUTH_TRUSTED_ORIGIN`  | Comma-separated extra origins allowed to make authenticated API calls (staging URL, internal hostname, LAN IP, …).                                                          |
+| Variable               | Constraints                         | Purpose                                                                                                                                                                                  |
+| ---------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes) | Enables AES-256-GCM encryption at rest for Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts. App refuses to boot in production if set to any other length. |
+| `BACKUP_DB_PASSWORD`   | **≥ 12 chars**                      | **Required** to enable the Backup & Restore admin page — export and import return `503` without it. Losing it makes every prior encrypted backup unrecoverable.                          |
+| `AUTH_TRUSTED_ORIGIN`  | Comma-separated URLs                | Extra origins allowed to make authenticated API calls (staging URL, internal hostname, LAN IP, …).                                                                                       |
 
 ### Sign-in / identity (optional)
 
-| Variable             | Purpose                                                                                                             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `JELLYFIN_URL`       | Base URL of your Jellyfin server. Enables both standard and QuickConnect Jellyfin sign-in.                          |
-| `OIDC_ISSUER`        | Any OIDC provider that exposes `.well-known/openid-configuration` (Authelia, Authentik, Keycloak, Auth0, Okta, …).  |
-| `OIDC_CLIENT_ID`     | Client ID registered with the IdP.                                                                                  |
-| `OIDC_CLIENT_SECRET` | Client secret from the IdP.                                                                                         |
-| `OIDC_DISPLAY_NAME`  | Optional label shown on the login button (defaults to `SSO`).                                                       |
+| Variable             | Constraints                                           | Purpose                                                                                                             |
+| -------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `JELLYFIN_URL`       | Absolute URL                                          | Base URL of your Jellyfin server. Enables both standard and QuickConnect Jellyfin sign-in.                          |
+| `OIDC_ISSUER`        | Absolute URL; must serve `.well-known/openid-configuration` | Any OIDC provider (Authelia, Authentik, Keycloak, Auth0, Okta, …). Must be set together with the client id/secret.  |
+| `OIDC_CLIENT_ID`     | provider-defined                                      | Client ID registered with the IdP.                                                                                  |
+| `OIDC_CLIENT_SECRET` | provider-defined                                      | Client secret from the IdP.                                                                                         |
+| `OIDC_DISPLAY_NAME`  | free-form; default `SSO`                              | Optional label shown on the login button.                                                                           |
 
 Plex OAuth is configured inside the app (**Admin → Settings → Plex**), not through environment variables.
 
@@ -110,16 +111,21 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `WARM_MDBLIST_INTERVAL`      | `86400` | MDBList cache warmer.                                            |
 | `WARM_OMDB_INTERVAL`         | `86400` | OMDB cache warmer.                                               |
 | `PLAY_HISTORY_SYNC_INTERVAL` | `5`     | Active-session poll (fast loop, decoupled from the 60s main tick). |
+| `PURGE_SESSIONS_INTERVAL`    | `86400` | Expired auth-session purge.                                      |
 | `SCRUB_AUDIT_PII_INTERVAL`   | `86400` | Audit-log PII scrubber.                                          |
 | `TRASH_SYNC_INTERVAL`        | `86400` | TRaSH-Guides quality profile refresh.                            |
 
 ### Advanced / rarely needed
 
-| Variable                   | Purpose                                                                                                                                                         |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_PATH`                | Serve under a subpath, e.g. `/request`. Must start with `/` and not end with one.                                                                               |
-| `SUMMONARR_VERSION`        | Pin the image tag. Defaults to `latest`. Example: `SUMMONARR_VERSION=v0.9.0`.                                                                                   |
-| `/run/secrets/cron_secret` | If mounted (Docker/Swarm secret), the entrypoint reads `CRON_SECRET` from the file so it doesn't appear in `docker inspect`. Takes precedence over the env var. |
+| Variable                       | Constraints                    | Purpose                                                                                                                                                         |
+| ------------------------------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
+| `SUMMONARR_VERSION`            | image tag; default `latest`    | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.9.0`.                                                                                                    |
+| `DATABASE_URL`                 | postgres:// URI                | Normally overridden automatically by the entrypoint from `POSTGRES_PASSWORD`. Set manually only when pointing at an external Postgres.                           |
+| `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`         | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
+| `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`         | Max jobs waiting to be picked up (included in pending).                                                                                                         |
+| `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`           | Concurrent workers draining the queue.                                                                                                                          |
+| `/run/secrets/cron_secret`     | file mount                     | If mounted (Docker/Swarm secret), the entrypoint reads `CRON_SECRET` from the file so it doesn't appear in `docker inspect`. Takes precedence over the env var. |
 
 ## Generating secrets
 
