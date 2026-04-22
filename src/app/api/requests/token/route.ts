@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { generateRequestToken } from "@/lib/request-token";
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const tmdbId = parseInt(req.nextUrl.searchParams.get("tmdbId") ?? "", 10);
   const mediaType = req.nextUrl.searchParams.get("mediaType");

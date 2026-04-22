@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
@@ -150,10 +150,8 @@ function buildSqlStream(
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {

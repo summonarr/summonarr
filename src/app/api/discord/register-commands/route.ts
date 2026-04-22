@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -50,10 +50,8 @@ const SLASH_COMMANDS = [
 ];
 
 export async function POST() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["discordBotToken", "discordClientId", "discordGuildId"] } },

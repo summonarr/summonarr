@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { randomInt } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -8,8 +8,8 @@ const DISCORD_API = "https://discord.com/api/v10";
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export async function POST(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`discord-merge-init:${session.user.id}`, 3, 15 * 60 * 1000)) {
     return NextResponse.json(

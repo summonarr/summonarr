@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired, invalidateSessionDurationsCache } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
+import { invalidateSessionDurationsCache } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { testRadarrConnection, testSonarrConnection } from "@/lib/arr";
 import { pingPlexToken } from "@/lib/plex";
@@ -144,10 +145,8 @@ setInterval(() => {
 }, 60_000).unref();
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...ALLOWED_KEYS] } },
@@ -161,10 +160,8 @@ export async function GET() {
 }
 
 export async function PATCH(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`admin-settings:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });

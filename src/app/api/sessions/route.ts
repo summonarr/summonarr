@@ -1,14 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired, revokeSessionById } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
+import { revokeSessionById } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const sessions = await prisma.authSession.findMany({
     where: { userId: session.user.id },
@@ -36,10 +35,8 @@ export async function GET() {
 }
 
 export async function DELETE(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   let body: { sessionId?: string };
   try {

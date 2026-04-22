@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired, normalizeEmail } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
+import { normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
@@ -7,8 +8,8 @@ import { prisma } from "@/lib/prisma";
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function PATCH(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   let body: {
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;

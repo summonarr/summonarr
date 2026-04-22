@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import type { Prisma } from "@/generated/prisma";
@@ -23,10 +23,8 @@ function escapeCSV(value: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await auth();
-  if (!session || session.user.role !== "ADMIN" || isTokenExpired(session)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`ph-export:${session.user.id}:${getClientIp(request.headers)}`, 5, 3_600_000)) {
     return NextResponse.json({ error: "Too many export requests — try again later" }, { status: 429 });

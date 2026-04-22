@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 
 const spec = {
   openapi: "3.0.3",
@@ -1301,10 +1301,8 @@ const spec = {
 };
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
   if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 
@@ -28,10 +28,8 @@ function escapeCSV(value: string): string {
 }
 
 export async function GET(req: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
+  const session = await requireAuth({ role: "ADMIN" });
+  if (session instanceof NextResponse) return session;
 
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
