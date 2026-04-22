@@ -40,6 +40,7 @@ export async function GET(req: NextRequest) {
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
   const target = url.searchParams.get("target");
+  const hideCron = url.searchParams.get("hideCron") === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
   if (action && VALID_ACTIONS.includes(action)) where.action = action;
@@ -54,6 +55,7 @@ export async function GET(req: NextRequest) {
   }
   if (user) where.userName = { contains: user, mode: "insensitive" };
   if (target) where.target = { contains: target, mode: "insensitive" };
+  if (hideCron) where.userId = { not: "system" };
 
   const date = new Date().toISOString().slice(0, 10);
 

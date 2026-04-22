@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
   const target = url.searchParams.get("target");
+  const hideCron = url.searchParams.get("hideCron") === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
 
@@ -51,6 +52,10 @@ export async function GET(req: NextRequest) {
 
   if (target) {
     where.target = { contains: target, mode: "insensitive" };
+  }
+
+  if (hideCron) {
+    where.userId = { not: "system" };
   }
 
   const logs = await prisma.auditLog.findMany({

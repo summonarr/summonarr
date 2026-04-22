@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield } from "lucide-react";
+import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "lucide-react";
 
 interface AuditRow {
   id: string;
@@ -118,6 +118,7 @@ function AuditLogFilters({
   currentDateTo,
   currentUser,
   currentTarget,
+  currentHideCron,
   viewMode,
   onViewModeChange,
 }: {
@@ -126,6 +127,7 @@ function AuditLogFilters({
   currentDateTo: string;
   currentUser: string;
   currentTarget: string;
+  currentHideCron: boolean;
   viewMode: "table" | "timeline";
   onViewModeChange: (mode: "table" | "timeline") => void;
 }) {
@@ -135,7 +137,7 @@ function AuditLogFilters({
   const userTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const targetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const hasFilters = currentAction || currentDateFrom || currentDateTo || currentUser || currentTarget;
+  const hasFilters = currentAction || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron;
 
   useEffect(() => {
     clearTimeout(userTimer.current);
@@ -179,6 +181,18 @@ function AuditLogFilters({
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => navigate({ hideCron: currentHideCron ? "" : "1" })}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+              currentHideCron
+                ? "bg-indigo-600 text-white"
+                : "bg-zinc-800 text-zinc-400 hover:text-white"
+            }`}
+            title={currentHideCron ? "Showing only real users — click to include cron jobs" : "Hide system cron job entries"}
+          >
+            <Bot size={14} /> {currentHideCron ? "Cron hidden" : "Hide cron"}
+          </button>
+
           <div className="flex rounded-md border border-zinc-700 overflow-hidden">
             <button
               onClick={() => onViewModeChange("table")}
@@ -202,6 +216,7 @@ function AuditLogFilters({
             currentDateTo={currentDateTo}
             currentUser={currentUser}
             currentTarget={currentTarget}
+            currentHideCron={currentHideCron}
           />
         </div>
       </div>
@@ -242,7 +257,7 @@ function AuditLogFilters({
             onClick={() => {
               setUserInput("");
               setTargetInput("");
-              navigate({ action: "", dateFrom: "", dateTo: "", user: "", target: "" });
+              navigate({ action: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" });
             }}
             className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
           >
@@ -260,12 +275,14 @@ function ExportButton({
   currentDateTo,
   currentUser,
   currentTarget,
+  currentHideCron,
 }: {
   currentAction: string;
   currentDateFrom: string;
   currentDateTo: string;
   currentUser: string;
   currentTarget: string;
+  currentHideCron: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -277,6 +294,7 @@ function ExportButton({
     if (currentDateTo) params.set("dateTo", currentDateTo);
     if (currentUser) params.set("user", currentUser);
     if (currentTarget) params.set("target", currentTarget);
+    if (currentHideCron) params.set("hideCron", "1");
     window.open(`/api/admin/audit-log/export?${params.toString()}`, "_blank");
     setOpen(false);
   }
@@ -578,6 +596,7 @@ export function AuditLogView({
   currentDateTo,
   currentUser,
   currentTarget,
+  currentHideCron,
 }: {
   initialLogs: AuditRow[];
   initialNextCursor: string | null;
@@ -587,6 +606,7 @@ export function AuditLogView({
   currentDateTo: string;
   currentUser: string;
   currentTarget: string;
+  currentHideCron: boolean;
 }) {
   const [logs, setLogs] = useState(initialLogs);
   const [nextCursor, setNextCursor] = useState(initialNextCursor);
@@ -621,6 +641,7 @@ export function AuditLogView({
       if (currentDateTo) params.set("dateTo", currentDateTo);
       if (currentUser) params.set("user", currentUser);
       if (currentTarget) params.set("target", currentTarget);
+      if (currentHideCron) params.set("hideCron", "1");
 
       const res = await fetch(`/api/admin/audit-log?${params.toString()}`);
       if (!res.ok) return;
@@ -641,6 +662,7 @@ export function AuditLogView({
         currentDateTo={currentDateTo}
         currentUser={currentUser}
         currentTarget={currentTarget}
+        currentHideCron={currentHideCron}
         viewMode={viewMode}
         onViewModeChange={handleViewModeChange}
       />
