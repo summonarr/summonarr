@@ -10,7 +10,6 @@ import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJell
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
-import { consumePendingFingerprint } from "@/lib/oidc-fingerprint-bootstrap";
 import { encryptToken, decryptToken } from "@/lib/token-crypto";
 import type { Adapter, AdapterAccount } from "next-auth/adapters";
 
@@ -193,6 +192,148 @@ function encryptingAdapter(base: Adapter): Adapter {
   };
 }
 
+type JwtToken = Record<string, unknown>;
+
+async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
+  if (!token.sessionId) {
+    // Credentials provider supplies _sessionId via DeviceMeta; OIDC/OAuth do not
+    token.sessionId = crypto.randomUUID();
+  }
+
+  const rememberMe = (user as { rememberMe?: string }).rememberMe === "true";
+  const isMobile   = token.isMobile as boolean | undefined;
+  const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
+
+  let ttl: number;
+  if (rememberMe) {
+    ttl = maxDuration;
+  } else if (isMobile) {
+    ttl = mobileDuration;
+  } else {
+    ttl = desktopDuration;
+  }
+  token.expiresAt = Math.floor(Date.now() / 1000) + ttl;
+
+  const userId = user.id as string | undefined;
+  if (!token.mediaServer && userId) {
+    const dbUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { mediaServer: true },
+    });
+    token.mediaServer = dbUser?.mediaServer ?? null;
+  }
+
+  if (userId) {
+    const sessionId   = token.sessionId as string;
+    const deviceLabel = (token.deviceLabel as string | undefined) ?? null;
+    const deviceType  = isMobile ? "mobile" : "desktop";
+    const ipAddress   = (user as { _auditIp?: string })._auditIp ?? null;
+    await prisma.authSession.upsert({
+      where: { sessionId },
+      update: { lastSeenAt: new Date(), expiresAt: new Date((token.expiresAt as number) * 1000) },
+      create: {
+        sessionId,
+        userId,
+        deviceType,
+        deviceLabel,
+        ipAddress,
+        expiresAt:   new Date((token.expiresAt as number) * 1000),
+      },
+    });
+  }
+
+  return token;
+}
+
+async function rotateSessionIdOnRoleChange(oldSessionId: string): Promise<string | null> {
+  // Rotate sessionId when role changes so the old token cannot be replayed after a role change
+  const newSessionId = crypto.randomUUID();
+  forceRevokeSessions.add(oldSessionId);
+  const rotated = await prisma.authSession.update({
+    where: { sessionId: oldSessionId },
+    data:  { sessionId: newSessionId },
+  }).catch(() => null);
+  return rotated ? newSessionId : null;
+}
+
+async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (token.expiresAt && nowSec > (token.expiresAt as number)) {
+    return null;
+  }
+
+  const userId = token.id as string | undefined;
+  if (!userId) return null;
+
+  const sessionId = token.sessionId as string | undefined;
+  if (!sessionId) return null;
+
+  if (forceRevokeSessions.has(sessionId)) {
+    forceRevokeSessions.delete(sessionId);
+    return null;
+  }
+
+  const now         = Math.floor(Date.now() / 1000);
+  const lastChecked = token.dbCheckedAt as number | undefined;
+  const forceCheck  = forceRevalidateUserIds.has(userId);
+  if (forceCheck) forceRevalidateUserIds.delete(userId);
+  // Admins/issue-admins recheck DB every 10 s so role demotions propagate quickly
+  const checkInterval = (token.role === "ADMIN" || token.role === "ISSUE_ADMIN") ? 10 : 60;
+
+  if (!forceCheck && lastChecked && now - lastChecked <= checkInterval) {
+    return token;
+  }
+
+  const [dbUser, authSessionRow] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, mediaServer: true },
+    }),
+    prisma.authSession.findUnique({ where: { sessionId } }),
+  ]);
+
+  if (!dbUser) return null;
+  if (!authSessionRow) return null;
+
+  void prisma.authSession.update({
+    where: { sessionId },
+    data: { lastSeenAt: new Date() },
+  }).catch(() => {});
+
+  if (!token.uaFingerprint) {
+    // OIDC sign-ins skip authorize(), so the fingerprint is derived from the current request's UA on first refresh
+    try {
+      const { headers: getHeaders } = await import("next/headers");
+      const h = await getHeaders();
+      const ua = h.get("user-agent") ?? "";
+      if (ua) token.uaFingerprint = serializeFingerprint(extractUaFingerprint(ua));
+    } catch {
+      // jwt() invoked outside request context — fingerprint stays unset, populated on next request
+    }
+  }
+
+  if (dbUser.role !== token.role) {
+    const newSessionId = await rotateSessionIdOnRoleChange(sessionId);
+    if (!newSessionId) return null;
+    token.sessionId = newSessionId;
+  }
+
+  token.role = dbUser.role;
+
+  const provider = token.provider as string | null;
+  if (provider !== "plex" && provider !== "jellyfin" && provider !== "jellyfin-quickconnect") {
+    token.mediaServer = dbUser.mediaServer ?? null;
+  }
+  token.dbCheckedAt = now;
+
+  // Non-admins get their token silently shortened to 1 h on each DB check to cap stale JWT lifetime
+  if (token.role !== "ADMIN" && (token.expiresAt as number) > now + 3600) {
+    token.expiresAt = now + 3600;
+  }
+
+  return token;
+}
+
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   trustHost: !!(process.env.AUTH_URL || process.env.NEXTAUTH_URL || process.env.AUTH_TRUST_HOST === "true"),
@@ -202,132 +343,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async jwt(params) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const token = await (authConfig.callbacks as any).jwt(params);
-
-      if (params.user) {
-
-        if (!token.sessionId) {
-          // Credentials provider supplies _sessionId via DeviceMeta; OIDC/OAuth do not
-          token.sessionId = crypto.randomUUID();
-
-        }
-
-        const rememberMe = (params.user as { rememberMe?: string }).rememberMe === "true";
-        const isMobile   = token.isMobile as boolean | undefined;
-        const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
-
-        let ttl: number;
-        if (rememberMe) {
-          ttl = maxDuration;
-        } else if (isMobile) {
-          ttl = mobileDuration;
-        } else {
-          ttl = desktopDuration;
-        }
-        token.expiresAt = Math.floor(Date.now() / 1000) + ttl;
-
-        if (!token.mediaServer && params.user.id) {
-          const dbUser = await prisma.user.findUnique({
-            where: { id: params.user.id as string },
-            select: { mediaServer: true },
-          });
-          token.mediaServer = dbUser?.mediaServer ?? null;
-        }
-
-        const sessionId = token.sessionId as string;
-        if (params.user.id) {
-          const deviceLabel = (token.deviceLabel as string | undefined) ?? null;
-          const deviceType  = isMobile ? "mobile" : "desktop";
-          const ipAddress   = (params.user as { _auditIp?: string })._auditIp ?? null;
-          await prisma.authSession.upsert({
-            where: { sessionId },
-            update: { lastSeenAt: new Date(), expiresAt: new Date(token.expiresAt * 1000) },
-            create: {
-              sessionId,
-              userId:      params.user.id as string,
-              deviceType,
-              deviceLabel,
-              ipAddress,
-              expiresAt:   new Date(token.expiresAt * 1000),
-            },
-          });
-        }
-
-        return token;
-      }
-
-      const nowSec = Math.floor(Date.now() / 1000);
-      if (token.expiresAt && nowSec > (token.expiresAt as number)) {
-        return null;
-      }
-
-      const userId = token.id as string | undefined;
-      if (!userId) return null;
-
-      const sessionId = token.sessionId as string | undefined;
-      if (!sessionId) return null;
-
-      if (forceRevokeSessions.has(sessionId)) {
-        forceRevokeSessions.delete(sessionId);
-        return null;
-      }
-
-      const now           = Math.floor(Date.now() / 1000);
-      const lastChecked   = token.dbCheckedAt as number | undefined;
-      const forceCheck    = forceRevalidateUserIds.has(userId);
-      if (forceCheck) forceRevalidateUserIds.delete(userId);
-      // Admins/issue-admins recheck DB every 10 s so role demotions propagate quickly
-      const checkInterval = (token.role === "ADMIN" || token.role === "ISSUE_ADMIN") ? 10 : 60;
-
-      if (forceCheck || !lastChecked || now - lastChecked > checkInterval) {
-
-        const [dbUser, authSessionRow] = await Promise.all([
-          prisma.user.findUnique({
-            where: { id: userId },
-            select: { role: true, mediaServer: true },
-          }),
-          prisma.authSession.findUnique({ where: { sessionId } }),
-        ]);
-
-        if (!dbUser) return null;
-        if (!authSessionRow) return null;
-
-        void prisma.authSession.update({
-          where: { sessionId },
-          data: { lastSeenAt: new Date() },
-        }).catch(() => {});
-
-        if (!token.uaFingerprint) {
-          const bootstrapFp = consumePendingFingerprint(sessionId);
-          if (bootstrapFp) token.uaFingerprint = bootstrapFp;
-        }
-
-        if (dbUser.role !== token.role) {
-          // Rotate sessionId when role changes so the old token cannot be replayed after a role change
-          const newSessionId = crypto.randomUUID();
-          forceRevokeSessions.add(sessionId);
-          const rotated = await prisma.authSession.update({
-            where: { sessionId },
-            data: { sessionId: newSessionId },
-          }).catch(() => null);
-          if (!rotated) return null;
-          token.sessionId = newSessionId;
-        }
-
-        token.role = dbUser.role;
-
-        const provider = token.provider as string | null;
-        if (provider !== "plex" && provider !== "jellyfin" && provider !== "jellyfin-quickconnect") {
-          token.mediaServer = dbUser.mediaServer ?? null;
-        }
-        token.dbCheckedAt = now;
-
-        // Non-admins get their token silently shortened to 1 h on each DB check to cap stale JWT lifetime
-        if (token.role !== "ADMIN" && (token.expiresAt as number) > now + 3600) {
-          token.expiresAt = now + 3600;
-        }
-      }
-
-      return token;
+      if (params.user) return initializeTokenOnSignIn(token, params.user as Record<string, unknown>);
+      return refreshToken(token);
     },
   },
   events: {

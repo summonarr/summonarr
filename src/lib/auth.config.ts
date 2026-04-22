@@ -1,7 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { extractUaFingerprint, serializeFingerprint } from "@/lib/ua-fingerprint";
-import { setPendingFingerprint } from "@/lib/oidc-fingerprint-bootstrap";
 
 export const authConfig: NextAuthConfig = {
 
@@ -53,15 +52,9 @@ export const authConfig: NextAuthConfig = {
         }
 
         const storedFp = (auth as unknown as Record<string, unknown>).uaFingerprint as string | undefined;
-        const sessionId = (auth as unknown as Record<string, unknown>).sessionId as string | undefined;
         const currentFp = serializeFingerprint(
           extractUaFingerprint(request.headers.get("user-agent") ?? "")
         );
-
-        if (!storedFp && sessionId) {
-          // OIDC sign-ins never pass through authorize(), so the fingerprint is bootstrapped here on first request
-          setPendingFingerprint(sessionId, currentFp);
-        }
 
         if (storedFp) {
           if (currentFp !== storedFp) {
