@@ -13,6 +13,7 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
+import { PageHeader } from "@/components/ui/design";
 
 const PER_PAGE = 36;
 
@@ -199,15 +200,16 @@ export default async function TopRatedPage({
 
   const sourceCount = [rawTmdbMovies.length || rawTmdbTV.length, rawTraktMovies.length || rawTraktTV.length, rawMdbMovies.length || rawMdbTV.length].filter(Boolean).length;
 
+  const subtitleBits = [
+    `Sorted by ${SORT_LABELS[sortBy]}`,
+    sourceCount > 1 ? `${sourceCount} sources` : null,
+    `${allMovies.length + allTV.length} titles`,
+  ].filter(Boolean) as string[];
+
   return (
-    <div>
+    <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">Top Rated</h1>
-      <p className="text-zinc-400 text-sm mb-4">
-        Sorted by {SORT_LABELS[sortBy]}
-        {sourceCount > 1 && ` · ${sourceCount} sources`}
-        {` · ${allMovies.length + allTV.length} titles`}
-      </p>
+      <PageHeader title="Top Rated" subtitle={subtitleBits.join(" · ")} />
 
       <Suspense>
         <TopFilterBar
@@ -222,23 +224,34 @@ export default async function TopRatedPage({
       </Suspense>
 
       {showMovies && (
-        <section className="mb-10">
-          <h2 className="text-lg font-semibold text-white mb-4">
-            Movies
-            {allMovies.length > 0 && (
-              <span className="ml-2 text-sm font-normal text-zinc-400">
-                {movieOffset + 1}–{Math.min(movieOffset + movies.length, allMovies.length)} of {allMovies.length}
-              </span>
-            )}
-          </h2>
+        <section style={{ marginBottom: 40 }}>
+          <SectionHeader
+            title="Movies"
+            range={
+              allMovies.length > 0
+                ? `${movieOffset + 1}–${Math.min(movieOffset + movies.length, allMovies.length)} of ${allMovies.length}`
+                : undefined
+            }
+          />
           {movies.length === 0 ? (
-            <p className="text-zinc-500 text-sm">
-              {page > 1 ? "No more results on this page." : "No movies match these filters."}
+            <p
+              className="ds-mono"
+              style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+            >
+              {page > 1
+                ? "No more results on this page."
+                : "No movies match these filters."}
             </p>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+            <div className="ds-media-grid">
               {movies.map((media) => (
-                <MediaCard key={`movie-${media.id}`} media={media} showPlex={showPlex} showJellyfin={showJellyfin} size="md" />
+                <MediaCard
+                  key={`movie-${media.id}`}
+                  media={media}
+                  showPlex={showPlex}
+                  showJellyfin={showJellyfin}
+                  size="md"
+                />
               ))}
             </div>
           )}
@@ -246,23 +259,34 @@ export default async function TopRatedPage({
       )}
 
       {showTV && (
-        <section className="mb-10">
-          <h2 className="text-lg font-semibold text-white mb-4">
-            TV Shows
-            {allTV.length > 0 && (
-              <span className="ml-2 text-sm font-normal text-zinc-400">
-                {tvOffset + 1}–{Math.min(tvOffset + tv.length, allTV.length)} of {allTV.length}
-              </span>
-            )}
-          </h2>
+        <section style={{ marginBottom: 40 }}>
+          <SectionHeader
+            title="TV Shows"
+            range={
+              allTV.length > 0
+                ? `${tvOffset + 1}–${Math.min(tvOffset + tv.length, allTV.length)} of ${allTV.length}`
+                : undefined
+            }
+          />
           {tv.length === 0 ? (
-            <p className="text-zinc-500 text-sm">
-              {page > 1 ? "No more results on this page." : "No TV shows match these filters."}
+            <p
+              className="ds-mono"
+              style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+            >
+              {page > 1
+                ? "No more results on this page."
+                : "No TV shows match these filters."}
             </p>
           ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+            <div className="ds-media-grid">
               {tv.map((media) => (
-                <MediaCard key={`tv-${media.id}`} media={media} showPlex={showPlex} showJellyfin={showJellyfin} size="md" />
+                <MediaCard
+                  key={`tv-${media.id}`}
+                  media={media}
+                  showPlex={showPlex}
+                  showJellyfin={showJellyfin}
+                  size="md"
+                />
               ))}
             </div>
           )}
@@ -272,6 +296,35 @@ export default async function TopRatedPage({
       <Suspense>
         <PaginationBar currentPage={page} totalPages={totalPages} />
       </Suspense>
+    </div>
+  );
+}
+
+function SectionHeader({ title, range }: { title: string; range?: string }) {
+  return (
+    <div className="flex items-end mb-3">
+      <h2
+        className="section-title m-0 font-semibold"
+        style={{
+          fontSize: 15,
+          letterSpacing: "-0.01em",
+          color: "var(--ds-fg)",
+        }}
+      >
+        {title}
+      </h2>
+      {range && (
+        <span
+          className="ds-mono ml-auto uppercase"
+          style={{
+            fontSize: 10.5,
+            color: "var(--ds-fg-subtle)",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {range}
+        </span>
+      )}
     </div>
   );
 }

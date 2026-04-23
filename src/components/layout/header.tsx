@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
-import { Search, Film, Tv2, Loader2 } from "lucide-react";
-import { Input } from "@/components/ui/input";
+import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
+import { Search, Film, Tv2, Loader2, ChevronRight } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,13 +14,27 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { signOut, useSession } from "next-auth/react";
 import { PushNotifications } from "@/components/layout/push-notifications";
+import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 
 type MediaFilter = "all" | "movie" | "tv";
 
-function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin: boolean }) {
+export function SearchBar({
+  showPlex,
+  showJellyfin,
+  variant = "inline",
+  autoFocus,
+  onAfterSelect,
+}: {
+  showPlex: boolean;
+  showJellyfin: boolean;
+  variant?: "inline" | "full";
+  autoFocus?: boolean;
+  onAfterSelect?: () => void;
+}) {
   const router = useRouter();
+  const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MediaFilter>("all");
   const [results, setResults] = useState<TmdbMedia[]>([]);
@@ -32,7 +46,10 @@ function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
         setOpen(false);
       }
     }
@@ -41,9 +58,35 @@ function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin
   }, []);
 
   useEffect(() => {
+    if (!autoFocus) return;
+    const id = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [autoFocus]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.key === "k" || e.key === "K") && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        inputRef.current?.focus();
+        setOpen(true);
+      }
+      if (e.key === "Escape") {
+        setOpen(false);
+        inputRef.current?.blur();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     abortRef.current?.abort();
-    if (!query.trim()) { setResults([]); setOpen(false); return; }
+    if (!query.trim()) {
+      setResults([]);
+      setOpen(false);
+      return;
+    }
 
     debounceRef.current = setTimeout(async () => {
       abortRef.current?.abort();
@@ -63,12 +106,16 @@ function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin
       }
     }, 350);
 
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); abortRef.current?.abort(); };
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      abortRef.current?.abort();
+    };
   }, [query, filter]);
 
   function handleSelect(media: TmdbMedia) {
     setOpen(false);
     setQuery("");
+    onAfterSelect?.();
     router.push(`/${media.mediaType}/${media.id}`);
   }
 
@@ -78,72 +125,206 @@ function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin
     { value: "tv", label: "TV" },
   ];
 
+  const fieldHeight = variant === "full" ? 36 : 32;
+
   return (
-    <div ref={containerRef} className="relative flex-1 max-w-md md:max-w-lg lg:max-w-xl xl:max-w-2xl">
-      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
-      {loading && (
-        <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 animate-spin" />
-      )}
-      <Input
-        placeholder="Search movies & TV..."
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onFocus={() => results.length > 0 && setOpen(true)}
-        className="pl-9 pr-9 bg-zinc-900 border-zinc-700 text-sm"
-      />
-      {open && (
-        <div className="absolute top-full mt-2 left-0 right-0 z-50 rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl overflow-hidden">
-          <div className="flex gap-1 px-3 pt-2 pb-1.5 border-b border-zinc-800">
-            {filterLabels.map(({ value, label }) => (
-              <button
-                key={value}
-                onMouseDown={(e) => { e.preventDefault(); setFilter(value); }}
-                className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium transition-colors ${
-                  filter === value
-                    ? "bg-indigo-600 text-white"
-                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
-                }`}
-              >
-                {value === "movie" && <Film className="w-3 h-3" />}
-                {value === "tv" && <Tv2 className="w-3 h-3" />}
-                {label}
-              </button>
-            ))}
+    <div
+      ref={containerRef}
+      className={variant === "full" ? "relative flex-1 min-w-0" : "relative flex-1 min-w-0 max-w-[520px]"}
+    >
+      <div
+        className="flex items-center"
+        style={{
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          height: fieldHeight,
+          padding: "0 8px 0 10px",
+          transition:
+            "border-color 120ms var(--ds-ease), background 120ms var(--ds-ease)",
+        }}
+      >
+        <Search
+          className="shrink-0"
+          style={{
+            width: 14,
+            height: 14,
+            color: "var(--ds-fg-subtle)",
+            marginRight: 8,
+          }}
+        />
+        <input
+          ref={inputRef}
+          placeholder="Search movies, TV, requests…"
+          value={query}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none"
+          style={{
+            fontSize: variant === "full" ? 14 : 13,
+            color: "var(--ds-fg)",
+          }}
+        />
+        {loading ? (
+          <Loader2
+            style={{
+              width: 14,
+              height: 14,
+              color: "var(--ds-fg-subtle)",
+            }}
+            className="animate-spin"
+          />
+        ) : variant === "inline" ? (
+          <kbd className="ds-kbd">⌘K</kbd>
+        ) : null}
+      </div>
+
+      {open && (query.trim() || results.length > 0) && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            right: 0,
+            zIndex: 50,
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+            boxShadow: "var(--ds-shadow-lg)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            className="flex gap-1 px-3 pt-2 pb-1.5"
+            style={{ borderBottom: "1px solid var(--ds-border)" }}
+          >
+            {filterLabels.map(({ value, label }) => {
+              const isActive = filter === value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setFilter(value);
+                  }}
+                  className="inline-flex items-center gap-1 font-medium transition-colors"
+                  style={{
+                    padding: "2px 10px",
+                    borderRadius: 4,
+                    fontSize: 11,
+                    background: isActive ? "var(--ds-accent-soft)" : "transparent",
+                    color: isActive ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+                  }}
+                >
+                  {value === "movie" && <Film style={{ width: 12, height: 12 }} />}
+                  {value === "tv" && <Tv2 style={{ width: 12, height: 12 }} />}
+                  {label}
+                </button>
+              );
+            })}
           </div>
-          {results.length > 0 ? results.map((media) => {
-            const poster = posterUrl(media.posterPath, "w342");
-            return (
-              <button
-                key={`${media.mediaType}-${media.id}`}
-                onClick={() => handleSelect(media)}
-                className="flex items-center gap-3 w-full px-3 py-2.5 hover:bg-zinc-800 transition-colors text-left"
-              >
-                <div className="relative w-9 h-14 rounded shrink-0 bg-zinc-700 overflow-hidden">
-                  {poster ? (
-                    <Image src={poster} alt={media.title} fill className="object-cover" sizes="36px" />
-                  ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                      {media.mediaType === "movie" ? <Film className="w-4 h-4" /> : <Tv2 className="w-4 h-4" />}
-                    </div>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-white truncate">{media.title}</p>
-                  <p className="text-xs text-zinc-400">
-                    {media.releaseYear && `${media.releaseYear} · `}
-                    {media.mediaType === "movie" ? "Movie" : "TV Show"}
-                    {showPlex && media.plexAvailable && (
-                      <span className="ml-1.5 text-[#e5a00d] font-medium">· On Plex</span>
+          {query.trim() && results.length === 0 && !loading ? (
+            <div
+              className="text-center"
+              style={{
+                padding: "14px 12px",
+                fontSize: 13,
+                color: "var(--ds-fg-subtle)",
+              }}
+            >
+              No matches
+            </div>
+          ) : (
+            results.map((media) => {
+              const poster = posterUrl(media.posterPath, "w342");
+              return (
+                <button
+                  key={`${media.mediaType}-${media.id}`}
+                  onClick={() => handleSelect(media)}
+                  className="flex items-center gap-2.5 w-full text-left transition-colors"
+                  style={{
+                    padding: "8px 12px",
+                    color: "var(--ds-fg)",
+                    background: "transparent",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--ds-bg-3)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "transparent";
+                  }}
+                >
+                  <div
+                    className="relative shrink-0 overflow-hidden"
+                    style={{
+                      width: 28,
+                      height: 40,
+                      borderRadius: 3,
+                      background: "var(--ds-bg-3)",
+                    }}
+                  >
+                    {poster ? (
+                      <Image
+                        src={poster}
+                        alt={media.title}
+                        fill
+                        className="object-cover"
+                        sizes="28px"
+                      />
+                    ) : (
+                      <div
+                        className="absolute inset-0 flex items-center justify-center"
+                        style={{ color: "var(--ds-fg-subtle)" }}
+                      >
+                        {media.mediaType === "movie" ? (
+                          <Film style={{ width: 14, height: 14 }} />
+                        ) : (
+                          <Tv2 style={{ width: 14, height: 14 }} />
+                        )}
+                      </div>
                     )}
-                    {showJellyfin && media.jellyfinAvailable && (
-                      <span className="ml-1.5 text-[#00a4dc] font-medium">· On Jellyfin</span>
-                    )}
-                  </p>
-                </div>
-              </button>
-            );
-          }) : (
-            <p className="px-3 py-4 text-sm text-zinc-500 text-center">No results</p>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className="font-medium truncate"
+                      style={{ fontSize: 13, color: "var(--ds-fg)" }}
+                    >
+                      {media.title}
+                    </p>
+                    <p
+                      className="ds-mono truncate"
+                      style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                    >
+                      {media.releaseYear && `${media.releaseYear} · `}
+                      {media.mediaType === "movie" ? "MOVIE" : "TV"}
+                      {showPlex && media.plexAvailable && (
+                        <span style={{ color: "var(--ds-plex)", marginLeft: 6 }}>
+                          · plex
+                        </span>
+                      )}
+                      {showJellyfin && media.jellyfinAvailable && (
+                        <span
+                          style={{ color: "var(--ds-jellyfin)", marginLeft: 6 }}
+                        >
+                          · jellyfin
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <ChevronRight
+                    style={{
+                      width: 14,
+                      height: 14,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  />
+                </button>
+              );
+            })
           )}
         </div>
       )}
@@ -152,36 +333,122 @@ function SearchBar({ showPlex, showJellyfin }: { showPlex: boolean; showJellyfin
 }
 
 export function Header() {
+  const pathname = usePathname();
   const router = useRouter();
   const { data: session } = useSession();
   const role = session?.user?.role;
   const provider = session?.user?.provider;
-  const showPlex = role === "ADMIN" || role === "ISSUE_ADMIN" || provider === "plex";
-  const showJellyfin = role === "ADMIN" || role === "ISSUE_ADMIN" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
+  const showPlex =
+    role === "ADMIN" || role === "ISSUE_ADMIN" || provider === "plex";
+  const showJellyfin =
+    role === "ADMIN" ||
+    role === "ISSUE_ADMIN" ||
+    provider === "jellyfin" ||
+    provider === "jellyfin-quickconnect";
   const initials = session?.user?.name
     ?.split(" ")
     .map((n) => n[0])
     .join("")
     .toUpperCase();
 
-  return (
-    <header className="sticky top-0 z-30 flex items-center gap-4 px-6 py-3 bg-zinc-950/80 backdrop-blur border-b border-zinc-800">
-      <SearchBar showPlex={showPlex} showJellyfin={showJellyfin} />
+  const crumbs = breadcrumbFor(pathname);
 
-      <div className="flex items-center gap-2 ml-auto">
+  return (
+    <header
+      className="hidden lg:flex items-center sticky top-0 z-30"
+      style={{
+        gap: 14,
+        padding: "10px 18px",
+        height: 52,
+        borderBottom: "1px solid var(--ds-border)",
+        background: "color-mix(in oklab, var(--ds-bg) 85%, transparent)",
+        backdropFilter: "blur(10px)",
+      }}
+    >
+      {/* Breadcrumb */}
+      <div className="flex items-center min-w-0" style={{ gap: 6 }}>
+        {crumbs.map((c, i) => {
+          const last = i === crumbs.length - 1;
+          const content = (
+            <span
+              className="font-medium"
+              style={{
+                fontSize: 13,
+                fontWeight: last ? 500 : 400,
+                color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+              }}
+            >
+              {c.label}
+            </span>
+          );
+          return (
+            // biome-ignore lint/suspicious/noArrayIndexKey: crumbs are positional
+            <span key={i} className="flex items-center" style={{ gap: 6 }}>
+              {i > 0 && (
+                <ChevronRight
+                  style={{
+                    width: 12,
+                    height: 12,
+                    color: "var(--ds-fg-subtle)",
+                  }}
+                />
+              )}
+              {c.href && !last ? (
+                <Link
+                  href={c.href}
+                  className="hover:text-[var(--ds-fg)] transition-colors"
+                >
+                  {content}
+                </Link>
+              ) : (
+                content
+              )}
+            </span>
+          );
+        })}
+      </div>
+
+      {/* Search */}
+      <div className="flex-1 min-w-0 flex justify-center">
+        <SearchBar showPlex={showPlex} showJellyfin={showJellyfin} />
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-1.5">
         {session && <PushNotifications />}
 
         <DropdownMenu>
-          <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
-            <Avatar className="h-9 w-9 cursor-pointer">
+          <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
+            <Avatar
+              className="cursor-pointer"
+              style={{
+                width: 28,
+                height: 28,
+                border: "1px solid var(--ds-border)",
+              }}
+            >
               <AvatarImage src={session?.user?.image ?? ""} />
-              <AvatarFallback className="bg-indigo-700 text-white text-xs">
+              <AvatarFallback
+                className="font-semibold"
+                style={{
+                  fontSize: 11,
+                  background: "var(--ds-bg-3)",
+                  color: "var(--ds-fg)",
+                }}
+              >
                 {initials ?? "?"}
               </AvatarFallback>
             </Avatar>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48">
-            <div className="px-1.5 py-1.5 text-sm font-medium text-zinc-200">
+            <div
+              style={{
+                padding: "6px 8px",
+                fontSize: 13,
+                fontWeight: 500,
+                color: "var(--ds-fg)",
+              }}
+            >
               {session?.user?.name ?? session?.user?.email}
             </div>
             <DropdownMenuSeparator />

@@ -10,6 +10,7 @@ import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
+import { PageHeader } from "@/components/ui/design";
 
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
   const rows = await prisma.upcomingCacheItem.findMany({
@@ -73,23 +74,35 @@ export default async function UpcomingPage({
   }
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">Upcoming</h1>
-      <p className="text-zinc-400 text-sm mb-4">Movies releasing soon &amp; TV shows currently airing</p>
-
-      <Suspense>
-        <HideAvailableToggle active={hideAvailable} />
-      </Suspense>
+      <PageHeader
+        title="Upcoming"
+        subtitle="Movies releasing soon & TV shows currently airing"
+        right={
+          <Suspense>
+            <HideAvailableToggle active={hideAvailable} />
+          </Suspense>
+        }
+      />
 
       {items.length === 0 ? (
-        <div className="text-zinc-500 text-sm">
+        <div
+          className="ds-mono"
+          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+        >
           No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local to see upcoming content.
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+        <div className="ds-media-grid">
           {items.map((media) => (
-            <MediaCard key={`${media.mediaType}-${media.id}`} media={media} showPlex={showPlex} showJellyfin={showJellyfin} size="md" />
+            <MediaCard
+              key={`${media.mediaType}-${media.id}`}
+              media={media}
+              showPlex={showPlex}
+              showJellyfin={showJellyfin}
+              size="md"
+            />
           ))}
         </div>
       )}

@@ -1,10 +1,10 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { Card } from "@/components/ui/card";
 import { getArrDiskSpace } from "@/lib/arr-stats";
 import { StatsCharts } from "@/components/admin/stats-charts";
 import { requireFeature } from "@/lib/features";
+import { PageHeader, StatCard } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -100,114 +100,235 @@ export default async function StatsPage() {
   ];
 
   return (
-    <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-1">Statistics</h1>
-        <p className="text-zinc-400 text-sm">Server and request analytics</p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Statistics"
+        subtitle="Server and request analytics"
+      />
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3 mb-8">
+      <div
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6"
+        style={{ gap: 10, marginBottom: 24 }}
+      >
         {statCards.map((s) => (
-          <Card key={s.label} className="bg-zinc-900 border-zinc-800 p-4">
-            <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{s.label}</p>
-            <p className="text-2xl font-bold text-white tabular-nums">{s.value.toLocaleString()}</p>
-          </Card>
+          <StatCard
+            key={s.label}
+            label={s.label}
+            value={s.value.toLocaleString()}
+            mono
+          />
         ))}
       </div>
 
       {avgHours !== null && avgHours !== undefined && (
-        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Average Fulfillment Time</p>
-          <p className="text-2xl font-bold text-white">
+        <StatsSection>
+          <p
+            className="ds-mono uppercase"
+            style={{
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+              letterSpacing: "0.08em",
+              margin: "0 0 6px",
+            }}
+          >
+            Average Fulfillment Time
+          </p>
+          <p
+            className="font-semibold"
+            style={{
+              fontSize: 22,
+              color: "var(--ds-fg)",
+              letterSpacing: "-0.02em",
+              margin: 0,
+            }}
+          >
             {avgHours < 1
               ? `${Math.round(avgHours * 60)} minutes`
               : avgHours < 24
                 ? `${avgHours.toFixed(1)} hours`
                 : `${(avgHours / 24).toFixed(1)} days`}
           </p>
-          <p className="text-xs text-zinc-500 mt-1">From request creation to available</p>
-        </Card>
+          <p
+            className="ds-mono"
+            style={{
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+              marginTop: 6,
+            }}
+          >
+            From request creation to available
+          </p>
+        </StatsSection>
       )}
 
       {monthData.length > 0 && (
-        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-          <h2 className="font-semibold text-white mb-4">Requests Over Time</h2>
+        <StatsSection title="Requests Over Time">
           <StatsCharts data={monthData} />
-        </Card>
+        </StatsSection>
       )}
 
       {topRequesters.length > 0 && (
-        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-          <h2 className="font-semibold text-white mb-4">Top Requesters</h2>
-          <div className="space-y-2">
+        <StatsSection title="Top Requesters">
+          <div className="flex flex-col" style={{ gap: 6 }}>
             {topRequesters.map((u, i) => (
-              <div key={u.email} className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-3">
-                  <span className="text-zinc-600 w-5 text-right">{i + 1}.</span>
-                  <span className="text-white">{u.name ?? u.email}</span>
+              <div
+                key={u.email}
+                className="flex items-center justify-between"
+                style={{ fontSize: 13 }}
+              >
+                <div className="flex items-center" style={{ gap: 12 }}>
+                  <span
+                    className="ds-mono text-right"
+                    style={{
+                      width: 20,
+                      color: "var(--ds-fg-disabled)",
+                      fontSize: 11,
+                    }}
+                  >
+                    {i + 1}.
+                  </span>
+                  <span style={{ color: "var(--ds-fg)" }}>
+                    {u.name ?? u.email}
+                  </span>
                 </div>
-                <span className="text-zinc-400 tabular-nums">{Number(u.count)} requests</span>
+                <span
+                  className="ds-mono"
+                  style={{
+                    color: "var(--ds-fg-muted)",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {Number(u.count)} requests
+                </span>
               </div>
             ))}
           </div>
-        </Card>
+        </StatsSection>
       )}
 
       {(diskSpace.radarr || diskSpace.sonarr) && (
-        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-          <h2 className="font-semibold text-white mb-4">Disk Space</h2>
-          <div className="space-y-4">
+        <StatsSection title="Disk Space">
+          <div className="flex flex-col" style={{ gap: 16 }}>
             {diskSpace.radarr && (
-              <div>
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">Radarr</h3>
-                {diskSpace.radarr.map((d) => {
-                  const usedPct = d.totalSpace > 0 ? ((d.totalSpace - d.freeSpace) / d.totalSpace) * 100 : 0;
-                  return (
-                    <div key={d.path} className="mb-2">
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-zinc-300 truncate max-w-[60%]">{d.label || d.path}</span>
-                        <span className="text-zinc-400">
-                          {formatBytes(d.totalSpace - d.freeSpace)} / {formatBytes(d.totalSpace)}
-                        </span>
-                      </div>
-                      <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${usedPct > 90 ? "bg-red-500" : usedPct > 75 ? "bg-yellow-500" : "bg-indigo-500"}`}
-                          style={{ width: `${usedPct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <DiskGroup label="Radarr" items={diskSpace.radarr} formatBytes={formatBytes} />
             )}
             {diskSpace.sonarr && (
-              <div>
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">Sonarr</h3>
-                {diskSpace.sonarr.map((d) => {
-                  const usedPct = d.totalSpace > 0 ? ((d.totalSpace - d.freeSpace) / d.totalSpace) * 100 : 0;
-                  return (
-                    <div key={d.path} className="mb-2">
-                      <div className="flex justify-between text-sm mb-1">
-                        <span className="text-zinc-300 truncate max-w-[60%]">{d.label || d.path}</span>
-                        <span className="text-zinc-400">
-                          {formatBytes(d.totalSpace - d.freeSpace)} / {formatBytes(d.totalSpace)}
-                        </span>
-                      </div>
-                      <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${usedPct > 90 ? "bg-red-500" : usedPct > 75 ? "bg-yellow-500" : "bg-indigo-500"}`}
-                          style={{ width: `${usedPct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <DiskGroup label="Sonarr" items={diskSpace.sonarr} formatBytes={formatBytes} />
             )}
           </div>
-        </Card>
+        </StatsSection>
       )}
+    </div>
+  );
+}
+
+function StatsSection({
+  title,
+  children,
+}: {
+  title?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      style={{
+        padding: 20,
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 10,
+        marginBottom: 24,
+      }}
+    >
+      {title && (
+        <h2
+          className="font-semibold"
+          style={{
+            fontSize: 15,
+            letterSpacing: "-0.01em",
+            color: "var(--ds-fg)",
+            margin: "0 0 14px",
+          }}
+        >
+          {title}
+        </h2>
+      )}
+      {children}
+    </section>
+  );
+}
+
+function DiskGroup({
+  label,
+  items,
+  formatBytes,
+}: {
+  label: string;
+  items: { path: string; label?: string; totalSpace: number; freeSpace: number }[];
+  formatBytes: (n: number) => string;
+}) {
+  return (
+    <div>
+      <h3
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+          letterSpacing: "0.08em",
+          margin: "0 0 8px",
+        }}
+      >
+        {label}
+      </h3>
+      {items.map((d) => {
+        const usedPct =
+          d.totalSpace > 0
+            ? ((d.totalSpace - d.freeSpace) / d.totalSpace) * 100
+            : 0;
+        const bar =
+          usedPct > 90
+            ? "var(--ds-danger)"
+            : usedPct > 75
+              ? "var(--ds-warning)"
+              : "var(--ds-accent)";
+        return (
+          <div key={d.path} style={{ marginBottom: 10 }}>
+            <div
+              className="flex justify-between"
+              style={{ fontSize: 12, marginBottom: 4 }}
+            >
+              <span
+                className="truncate"
+                style={{ color: "var(--ds-fg)", maxWidth: "60%" }}
+              >
+                {d.label || d.path}
+              </span>
+              <span
+                className="ds-mono"
+                style={{ color: "var(--ds-fg-muted)" }}
+              >
+                {formatBytes(d.totalSpace - d.freeSpace)} / {formatBytes(d.totalSpace)}
+              </span>
+            </div>
+            <div
+              className="overflow-hidden"
+              style={{
+                height: 6,
+                background: "var(--ds-bg-3)",
+                borderRadius: 999,
+              }}
+            >
+              <div
+                className="h-full transition-all"
+                style={{
+                  width: `${usedPct}%`,
+                  background: bar,
+                  borderRadius: 999,
+                }}
+              />
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

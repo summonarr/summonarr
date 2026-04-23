@@ -2,8 +2,8 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Card } from "@/components/ui/card";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar } from "@/lib/play-history";
+import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import { ActivityCharts } from "@/components/admin/activity-charts";
 import { ActivityRecentPlays } from "@/components/admin/activity-recent-plays";
@@ -24,9 +24,14 @@ function Sparkline({ data }: { data: number[] }) {
     <div className="flex items-end gap-px h-6 mt-1">
       {data.map((v, i) => (
         <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: positional bars
           key={i}
-          className="flex-1 bg-indigo-600/40 rounded-sm"
-          style={{ height: `${(v / max) * 100}%`, minHeight: v > 0 ? "2px" : 0 }}
+          className="flex-1 rounded-sm"
+          style={{
+            height: `${(v / max) * 100}%`,
+            minHeight: v > 0 ? "2px" : 0,
+            background: "color-mix(in oklab, var(--ds-accent) 45%, transparent)",
+          }}
         />
       ))}
     </div>
@@ -35,15 +40,54 @@ function Sparkline({ data }: { data: number[] }) {
 
 function TrendBadge({ current, previous }: { current: number; previous: number }) {
   if (previous === 0 && current === 0) return null;
-  if (previous === 0) return <span className="text-xs text-green-400 ml-1">new</span>;
+  if (previous === 0)
+    return (
+      <span
+        className="ds-mono"
+        style={{ fontSize: 11, color: "var(--ds-success)", marginLeft: 4 }}
+      >
+        new
+      </span>
+    );
   const pct = Math.round(((current - previous) / previous) * 100);
   if (pct === 0) return null;
   return (
-    <span className={`text-xs ml-1 ${pct > 0 ? "text-green-400" : "text-red-400"}`}>
-      {pct > 0 ? "↑" : "↓"}{Math.abs(pct)}%
+    <span
+      className="ds-mono"
+      style={{
+        fontSize: 11,
+        marginLeft: 4,
+        color: pct > 0 ? "var(--ds-success)" : "var(--ds-danger)",
+      }}
+    >
+      {pct > 0 ? "↑" : "↓"}
+      {Math.abs(pct)}%
     </span>
   );
 }
+
+const activityCardStyle: React.CSSProperties = {
+  padding: 14,
+  background: "var(--ds-bg-2)",
+  border: "1px solid var(--ds-border)",
+  borderRadius: 8,
+};
+const activityCardLabel =
+  "ds-mono uppercase";
+const activityCardLabelStyle: React.CSSProperties = {
+  fontSize: 10.5,
+  color: "var(--ds-fg-subtle)",
+  letterSpacing: "0.08em",
+  margin: "0 0 4px",
+};
+const activityCardValueStyle: React.CSSProperties = {
+  fontSize: 22,
+  fontWeight: 600,
+  letterSpacing: "-0.02em",
+  color: "var(--ds-fg)",
+  fontVariantNumeric: "tabular-nums",
+  margin: 0,
+};
 
 export default async function ActivityPage({
   searchParams,
@@ -84,11 +128,11 @@ export default async function ActivityPage({
 
   if (isHistoryTab) {
     return (
-      <div>
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold mb-1">Activity</h1>
-          <p className="text-zinc-400 text-sm">Play history and server activity monitoring</p>
-        </div>
+      <div className="ds-page-enter">
+        <PageHeader
+          title="Activity"
+          subtitle="Play history and server activity monitoring"
+        />
         <ActivityFilterBar />
         <ActivityHistoryTable
           key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}`}
@@ -405,34 +449,48 @@ export default async function ActivityPage({
   const prevWatchTimeNum = Math.round(Number(prevWatchTime[0]?.hours ?? 0) * 10) / 10;
 
   return (
-    <div>
-      <div className="mb-6 flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-bold mb-1">Activity</h1>
-          <p className="text-zinc-400 text-sm">Play history and server activity monitoring</p>
-        </div>
-        <ActivityWarmButton />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Activity"
+        subtitle="Play history and server activity monitoring"
+        right={<ActivityWarmButton />}
+      />
 
       <ActivityFilterBar />
 
       {showActiveSessions && (
-        <ActivityNowPlaying key={`np-${source ?? ""}-${mediaType ?? ""}`} initialSessions={serializedSessions} source={source} mediaType={mediaType} />
+        <ActivityNowPlaying
+          key={`np-${source ?? ""}-${mediaType ?? ""}`}
+          initialSessions={serializedSessions}
+          source={source}
+          mediaType={mediaType}
+        />
       )}
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-8">
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{days}-Day Plays</p>
+      <div
+        className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6"
+        style={{ gap: 10, marginBottom: 24 }}
+      >
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            {days}-Day Plays
+          </p>
           <div className="flex items-baseline gap-1">
-            <p className="text-2xl font-bold text-white tabular-nums">{stats.totalPlays}</p>
+            <p style={activityCardValueStyle}>{stats.totalPlays}</p>
             <TrendBadge current={stats.totalPlays} previous={prevPlaysNum} />
           </div>
-          <Sparkline data={stats.playsByDay.map((d: typeof stats.playsByDay[0]) => d.count)} />
-        </Card>
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{days}-Day Watch Time</p>
+          <Sparkline
+            data={stats.playsByDay.map(
+              (d: (typeof stats.playsByDay)[0]) => d.count,
+            )}
+          />
+        </div>
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            {days}-Day Watch Time
+          </p>
           <div className="flex items-baseline gap-1">
-            <p className="text-2xl font-bold text-white tabular-nums">
+            <p style={activityCardValueStyle}>
               {Math.round(Number(totalWatchTimeNd[0]?.hours ?? 0))}h
             </p>
             <TrendBadge
@@ -440,98 +498,227 @@ export default async function ActivityPage({
               previous={Math.round(prevWatchTimeNum)}
             />
           </div>
-          <Sparkline data={stats.watchTimeByDay.map((d: typeof stats.watchTimeByDay[0]) => d.hours)} />
-        </Card>
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Active Users</p>
-          <div className="flex items-baseline gap-1">
-            <p className="text-2xl font-bold text-white tabular-nums">
-              {Number(uniqueUsersNd[0]?.count ?? 0)}
-            </p>
-          </div>
-        </Card>
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Completion Rate</p>
-          <p className="text-2xl font-bold text-white tabular-nums">{stats.completionRate}%</p>
-        </Card>
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Busiest Day</p>
-          <p className="text-lg font-bold text-white tabular-nums">
+          <Sparkline
+            data={stats.watchTimeByDay.map(
+              (d: (typeof stats.watchTimeByDay)[0]) => d.hours,
+            )}
+          />
+        </div>
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            Active Users
+          </p>
+          <p style={activityCardValueStyle}>
+            {Number(uniqueUsersNd[0]?.count ?? 0)}
+          </p>
+        </div>
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            Completion Rate
+          </p>
+          <p style={activityCardValueStyle}>{stats.completionRate}%</p>
+        </div>
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            Busiest Day
+          </p>
+          <p
+            style={{
+              ...activityCardValueStyle,
+              fontSize: 16,
+            }}
+          >
             {mostActiveDay[0]?.day
               ? `${new Date(mostActiveDay[0].day + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} (${Number(mostActiveDay[0].count)})`
               : "—"}
           </p>
-        </Card>
-        <Card className="bg-zinc-900 border-zinc-800 p-4">
-          <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Avg Bandwidth ({days}d)</p>
-          <p className="text-2xl font-bold text-white tabular-nums">
+        </div>
+        <div style={activityCardStyle}>
+          <p className={activityCardLabel} style={activityCardLabelStyle}>
+            Avg Bandwidth ({days}d)
+          </p>
+          <p style={activityCardValueStyle}>
             {stats.avgBitrateMbps > 0 ? `${stats.avgBitrateMbps} Mbps` : "—"}
           </p>
-          <p className="text-xs text-zinc-500 mt-1">
+          <p
+            className="ds-mono"
+            style={{
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+              marginTop: 4,
+            }}
+          >
             {stats.totalBandwidthGB >= 1000
               ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB total`
               : `${stats.totalBandwidthGB} GB total`}
           </p>
-        </Card>
+        </div>
       </div>
 
       <ActivityCharts stats={stats} days={days} />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-8">
+      <div
+        className="grid grid-cols-1 lg:grid-cols-2"
+        style={{ gap: 14, marginBottom: 24 }}
+      >
         <ActivityLeaderboard
-          byHours={watchTimeLeaderboard.map((u) => ({ ...u, hours: u.hours ?? 0 }))}
+          byHours={watchTimeLeaderboard.map((u) => ({
+            ...u,
+            hours: u.hours ?? 0,
+          }))}
           byPlays={stats.topUsers}
           days={days}
         />
         {mostRewatched.length > 0 && (
-          <Card className="bg-zinc-900 border-zinc-800 p-5">
-            <h3 className="font-semibold text-white mb-3 text-sm">Most Rewatched</h3>
-            <div className="space-y-2">
-              {mostRewatched.map((m: typeof mostRewatched[0], i: number) => {
+          <section
+            style={{
+              padding: 20,
+              background: "var(--ds-bg-2)",
+              border: "1px solid var(--ds-border)",
+              borderRadius: 10,
+            }}
+          >
+            <h3
+              className="font-semibold"
+              style={{
+                fontSize: 14,
+                letterSpacing: "-0.01em",
+                color: "var(--ds-fg)",
+                margin: "0 0 12px",
+              }}
+            >
+              Most Rewatched
+            </h3>
+            <div className="flex flex-col" style={{ gap: 8 }}>
+              {mostRewatched.map((m: (typeof mostRewatched)[0], i: number) => {
                 const maxPlays = mostRewatched[0]?.plays ?? 1;
-                const href = m.mediaType === "TV" ? `/tv/${m.tmdbId}` : `/movie/${m.tmdbId}`;
+                const href =
+                  m.mediaType === "TV"
+                    ? `/tv/${m.tmdbId}`
+                    : `/movie/${m.tmdbId}`;
                 const activityHref = `/admin/activity/media/${m.tmdbId}`;
                 return (
-                  <div key={`${m.tmdbId}-${i}`} className="flex items-center gap-3">
-                    <span className="text-zinc-600 w-5 text-right text-xs">{i + 1}.</span>
+                  <div
+                    key={`${m.tmdbId}-${i}`}
+                    className="flex items-center"
+                    style={{ gap: 12 }}
+                  >
+                    <span
+                      className="ds-mono text-right"
+                      style={{
+                        width: 20,
+                        fontSize: 11,
+                        color: "var(--ds-fg-disabled)",
+                      }}
+                    >
+                      {i + 1}.
+                    </span>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between text-sm mb-0.5">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Link href={href} className="text-white hover:text-indigo-400 transition-colors truncate">
+                      <div
+                        className="flex items-center justify-between"
+                        style={{ fontSize: 13, marginBottom: 2 }}
+                      >
+                        <div
+                          className="flex items-center min-w-0"
+                          style={{ gap: 8 }}
+                        >
+                          <Link
+                            href={href}
+                            className="truncate transition-colors"
+                            style={{ color: "var(--ds-fg)" }}
+                          >
                             {m.title}
                           </Link>
-                          <Link href={activityHref} className="text-[10px] text-zinc-600 hover:text-indigo-400 transition-colors shrink-0">
+                          <Link
+                            href={activityHref}
+                            className="ds-mono shrink-0 transition-colors"
+                            style={{
+                              fontSize: 10,
+                              color: "var(--ds-fg-subtle)",
+                            }}
+                          >
                             activity
                           </Link>
                         </div>
-                        <span className="text-zinc-400 tabular-nums shrink-0 ml-2 text-xs">
+                        <span
+                          className="ds-mono shrink-0"
+                          style={{
+                            fontSize: 11,
+                            marginLeft: 8,
+                            color: "var(--ds-fg-muted)",
+                            fontVariantNumeric: "tabular-nums",
+                          }}
+                        >
                           {m.plays} plays · {m.viewers} viewers
                         </span>
                       </div>
-                      <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div
+                        className="overflow-hidden"
+                        style={{
+                          height: 5,
+                          background: "var(--ds-bg-3)",
+                          borderRadius: 999,
+                        }}
+                      >
                         <div
-                          className="h-full bg-indigo-600 rounded-full"
-                          style={{ width: `${maxPlays > 0 ? (m.plays / maxPlays) * 100 : 0}%` }}
+                          className="h-full"
+                          style={{
+                            width: `${maxPlays > 0 ? (m.plays / maxPlays) * 100 : 0}%`,
+                            background: "var(--ds-accent)",
+                            borderRadius: 999,
+                          }}
                         />
                       </div>
-                      <span className="text-[10px] text-zinc-600">{m.mediaType}</span>
+                      <span
+                        className="ds-mono"
+                        style={{
+                          fontSize: 10,
+                          color: "var(--ds-fg-disabled)",
+                        }}
+                      >
+                        {m.mediaType}
+                      </span>
                     </div>
                   </div>
                 );
               })}
             </div>
-          </Card>
+          </section>
         )}
       </div>
 
       {showActivityCalendar && calendarData.length > 0 && (
-        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-          <h2 className="font-semibold text-white mb-4 text-sm">365-Day Activity</h2>
+        <section
+          style={{
+            padding: 20,
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 10,
+            marginBottom: 24,
+          }}
+        >
+          <h2
+            className="font-semibold"
+            style={{
+              fontSize: 14,
+              letterSpacing: "-0.01em",
+              color: "var(--ds-fg)",
+              margin: "0 0 14px",
+            }}
+          >
+            365-Day Activity
+          </h2>
           <ActivityCalendar data={calendarData} />
-        </Card>
+        </section>
       )}
 
-      <ActivityRecentPlays key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`} plays={serializedRecentPlays} source={source} mediaType={mediaType} days={days} />
+      <ActivityRecentPlays
+        key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`}
+        plays={serializedRecentPlays}
+        source={source}
+        mediaType={mediaType}
+        days={days}
+      />
     </div>
   );
 }

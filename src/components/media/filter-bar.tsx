@@ -217,22 +217,40 @@ export function FilterBar({
         </StyledSelect>
 
         <button
+          type="button"
           onClick={() => push({ hideAvailable: activeHideAvailable ? undefined : "1" })}
-          className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
-            activeHideAvailable
-              ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
-              : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-500"
-          }`}
+          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+          style={{
+            padding: "5px 12px",
+            borderRadius: 6,
+            fontSize: 12,
+            background: activeHideAvailable
+              ? "var(--ds-accent-soft)"
+              : "var(--ds-bg-2)",
+            color: activeHideAvailable
+              ? "var(--ds-accent)"
+              : "var(--ds-fg-muted)",
+            border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
+          }}
         >
           Hide Available
         </button>
 
         {hasFilters && (
           <button
+            type="button"
             onClick={() => router.push(pathname)}
-            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-white transition-colors px-2 py-1.5 rounded-lg border border-zinc-700 hover:border-zinc-500"
+            className="ds-tap inline-flex items-center gap-1 transition-colors"
+            style={{
+              padding: "5px 10px",
+              borderRadius: 6,
+              fontSize: 11,
+              background: "var(--ds-bg-2)",
+              color: "var(--ds-fg-muted)",
+              border: "1px solid var(--ds-border)",
+            }}
           >
-            <X className="w-3 h-3" />
+            <X style={{ width: 12, height: 12 }} />
             Clear filters
           </button>
         )}
@@ -275,10 +293,21 @@ export function FilterBar({
 
 function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
-    <span className="flex items-center gap-1 text-xs bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 rounded-full px-2.5 py-0.5">
+    <span className="ds-chip ds-chip-accent">
       {label}
-      <button onClick={onRemove} className="hover:text-white transition-colors ml-0.5">
-        <X className="w-3 h-3" />
+      <button
+        type="button"
+        onClick={onRemove}
+        className="inline-flex items-center transition-colors ml-0.5"
+        style={{
+          background: "transparent",
+          border: 0,
+          padding: 0,
+          cursor: "pointer",
+          color: "inherit",
+        }}
+      >
+        <X style={{ width: 10, height: 10 }} />
       </button>
     </span>
   );

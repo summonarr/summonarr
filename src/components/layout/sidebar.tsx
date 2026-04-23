@@ -4,88 +4,219 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { cn } from "@/lib/utils";
-import { Film } from "lucide-react";
-import { userNavItems, getVisibleAdminItems, filterNavByFeatures } from "@/lib/nav-items";
+import {
+  userNavItems,
+  getVisibleAdminItems,
+  filterNavByFeatures,
+  type NavItem,
+} from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 
-export function Sidebar({ siteTitle, featureFlags }: { siteTitle?: string; featureFlags?: FeatureFlags }) {
+export function Sidebar({
+  siteTitle,
+  featureFlags,
+}: {
+  siteTitle?: string;
+  featureFlags?: FeatureFlags;
+}) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = session?.user?.role;
 
-  const visibleUserItems  = filterNavByFeatures(userNavItems, featureFlags);
-  const visibleAdminItems = filterNavByFeatures(getVisibleAdminItems(role), featureFlags);
+  const visibleUserItems = filterNavByFeatures(userNavItems, featureFlags);
+  const visibleAdminItems = filterNavByFeatures(
+    getVisibleAdminItems(role),
+    featureFlags,
+  );
+
+  const browseItems = visibleUserItems.filter((i) => i.section === "browse");
+  const personalItems = visibleUserItems.filter(
+    (i) => i.section === "personal",
+  );
+
+  const isActive = (item: NavItem) =>
+    item.exact ? pathname === item.href : pathname.startsWith(item.href);
 
   return (
-    <aside className="hidden md:flex flex-col w-56 shrink-0 bg-zinc-900 border-r border-zinc-800 h-screen sticky top-0">
-      <div className="flex items-center gap-2 px-5 py-5 border-b border-zinc-800">
-        <div className="w-8 h-8 rounded-md bg-indigo-600 flex items-center justify-center">
-          <Film className="w-4 h-4 text-white" />
+    <aside
+      className="hidden lg:flex h-screen sticky top-0 flex-col flex-shrink-0"
+      style={{
+        width: 232,
+        background: "var(--ds-bg-1)",
+        borderRight: "1px solid var(--ds-border)",
+      }}
+    >
+      {/* Brand */}
+      <div
+        className="flex items-center gap-2.5"
+        style={{
+          padding: "16px 16px 14px",
+          borderBottom: "1px solid var(--ds-border)",
+        }}
+      >
+        <div
+          className="ds-mono font-bold"
+          style={{
+            width: 26,
+            height: 26,
+            borderRadius: 6,
+            background: "var(--ds-accent)",
+            color: "var(--ds-accent-fg)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 13,
+            boxShadow:
+              "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
+          }}
+        >
+          S
         </div>
-        <span className="font-bold text-white text-lg tracking-tight">
+        <span
+          className="font-semibold truncate"
+          style={{
+            letterSpacing: "-0.01em",
+            fontSize: 14,
+            color: "var(--ds-fg)",
+          }}
+        >
           {siteTitle || "Summonarr"}
         </span>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
-        {visibleUserItems.map(({ href, label, icon: Icon }) => (
-          <Link
-            key={href}
-            href={href}
-            className={cn(
-              "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
-              pathname === href
-                ? "bg-indigo-600 text-white"
-                : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-            )}
-          >
-            <Icon className="w-4 h-4 shrink-0" />
-            {label}
-          </Link>
-        ))}
+      {/* Nav */}
+      <nav
+        className="flex-1 overflow-y-auto"
+        style={{ padding: "10px 8px" }}
+      >
+        <NavSection label="Browse">
+          {browseItems.map((item) => (
+            <NavLink key={item.href} item={item} active={isActive(item)} />
+          ))}
+        </NavSection>
+
+        {personalItems.length > 0 && (
+          <NavSection label="You">
+            {personalItems.map((item) => (
+              <NavLink key={item.href} item={item} active={isActive(item)} />
+            ))}
+          </NavSection>
+        )}
 
         {visibleAdminItems.length > 0 && (
-          <>
-            <div className="pt-4 pb-1">
-              <p className="px-3 text-xs font-semibold text-zinc-600 uppercase tracking-wider">
-                Admin
-              </p>
-            </div>
-            {visibleAdminItems.map(({ href, label, icon: Icon, exact }) => (
-              <Link
-                key={href}
-                href={href}
-                className={cn(
-                  "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors",
-                  (exact ? pathname === href : pathname.startsWith(href))
-                    ? "bg-indigo-600 text-white"
-                    : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-                )}
-              >
-                <Icon className="w-4 h-4 shrink-0" />
-                {label}
-              </Link>
+          <NavSection label="Admin">
+            {visibleAdminItems.map((item) => (
+              <NavLink key={item.href} item={item} active={isActive(item)} />
             ))}
-          </>
+          </NavSection>
         )}
       </nav>
-      <div className="px-4 py-3 border-t border-zinc-800 shrink-0">
+
+      {/* Footer — TMDB attribution */}
+      <div
+        style={{
+          padding: "10px 14px 12px",
+          borderTop: "1px solid var(--ds-border)",
+        }}
+      >
         <a
           href="https://www.themoviedb.org"
           target="_blank"
           rel="noopener noreferrer"
           title="This product uses the TMDB API but is not endorsed or certified by TMDB."
-          className="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity"
+          className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
         >
-          {}
-          <img
-            src="/tmdb-logo.svg"
-            alt="TMDB"
-            className="h-4 w-auto"
-          />
-          <span className="text-[11px] text-zinc-500 leading-tight">Data provided by TMDB</span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/tmdb-logo.svg" alt="TMDB" className="h-3 w-auto" />
+          <span
+            className="ds-mono"
+            style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+          >
+            Data via TMDB
+          </span>
         </a>
       </div>
     </aside>
+  );
+}
+
+function NavSection({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div
+        className="ds-mono uppercase"
+        style={{
+          padding: "4px 10px 6px",
+          fontSize: 10,
+          color: "var(--ds-fg-subtle)",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </div>
+      <div className="flex flex-col" style={{ gap: 1 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function NavLink({ item, active }: { item: NavItem; active: boolean }) {
+  const Icon = item.icon;
+  return (
+    <Link
+      href={item.href}
+      className={cn(
+        "flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
+        !active && "hover:text-[var(--ds-fg)]",
+      )}
+      style={{
+        padding: "6px 10px",
+        borderRadius: 6,
+        background: active ? "var(--ds-accent-soft)" : "transparent",
+        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        fontSize: 13,
+      }}
+      onMouseEnter={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "var(--ds-bg-3)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "transparent";
+        }
+      }}
+    >
+      {active && (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 6,
+            bottom: 6,
+            width: 2,
+            background: "var(--ds-accent)",
+            borderRadius: 2,
+          }}
+        />
+      )}
+      <Icon
+        className="shrink-0"
+        style={{
+          width: 16,
+          height: 16,
+          color: active ? "var(--ds-accent)" : "inherit",
+        }}
+      />
+      <span>{item.label}</span>
+    </Link>
   );
 }

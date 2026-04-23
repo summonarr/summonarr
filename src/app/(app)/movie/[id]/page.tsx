@@ -1,5 +1,4 @@
 import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, backdropUrl, posterUrl } from "@/lib/tmdb";
-import { Badge } from "@/components/ui/badge";
 import { RequestButton } from "@/components/media/request-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -15,6 +14,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
+import { Chip } from "@/components/ui/design";
 
 export default async function MovieDetailPage({
   params,
@@ -66,94 +66,145 @@ export default async function MovieDetailPage({
   const poster = posterUrl(media.posterPath, "w500");
 
   return (
-    <div className="-m-6 lg:-m-8 xl:-m-10">
-      <div className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]">
+    <div className="ds-page-enter ds-detail-bleed">
+      <div
+        className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]"
+        style={{ background: "var(--ds-bg-inset)" }}
+      >
         {backdrop && (
           <Image src={backdrop} alt="" fill className="object-cover object-top" sizes="100vw" priority />
         )}
-        <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/50 to-transparent" />
+        <div
+          className="absolute inset-0"
+          style={{
+            background:
+              "linear-gradient(to top, var(--ds-bg) 0%, color-mix(in oklab, var(--ds-bg) 55%, transparent) 55%, transparent 100%)",
+          }}
+        />
       </div>
 
-      <div className="px-6 pb-8 -mt-32 relative flex gap-6">
-        {poster && (
-          <div className="relative w-36 h-52 shrink-0 rounded-lg overflow-hidden shadow-2xl hidden sm:block">
-            <Image src={poster} alt={media.title} fill className="object-cover" sizes="144px" />
-          </div>
-        )}
-
-        <div className="flex flex-col justify-end gap-3 pt-28 sm:pt-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <Badge className="bg-indigo-600 text-white border-0">Movie</Badge>
-            {media.releaseYear && (
-              <span className="text-zinc-400 text-sm">{media.releaseYear}</span>
-            )}
-            {media.certification && (
-              <Badge className="bg-zinc-700 text-zinc-200 border border-zinc-500 text-xs">
-                {media.certification}
-              </Badge>
-            )}
-          </div>
-
-          <h1 className="text-3xl font-bold text-white">{media.title}</h1>
-
-          <RatingsBar
-            imdbRating={media.imdbRating}
-            imdbId={media.imdbId}
-            imdbVotes={media.imdbVotes}
-            rottenTomatoes={media.rottenTomatoes}
-            rtAudienceScore={media.rtAudienceScore}
-            metacritic={media.metacritic}
-            traktRating={media.traktRating}
-            letterboxdRating={media.letterboxdRating}
-            mdblistScore={media.mdblistScore}
-            malRating={media.malRating}
-            rogerEbertRating={media.rogerEbertRating}
-            voteAverage={media.voteAverage}
-          />
-
-          {media.overview && (
-            <p className="text-zinc-300 text-sm max-w-2xl leading-relaxed">{media.overview}</p>
+      <div className="ds-detail-body">
+        <div className="ds-detail-hero">
+          {poster && (
+            <div
+              className="ds-detail-poster relative shrink-0 overflow-hidden hidden sm:block"
+              style={{
+                width: 160,
+                aspectRatio: "2 / 3",
+                borderRadius: 8,
+                boxShadow: "var(--ds-shadow-lg)",
+                border: "1px solid var(--ds-border)",
+                background: "var(--ds-bg-3)",
+              }}
+            >
+              <Image src={poster} alt={media.title} fill className="object-cover" sizes="160px" />
+            </div>
           )}
 
-          <div className="mt-2 flex items-center gap-3 flex-wrap">
-            <RequestButton
-              tmdbId={media.id}
-              mediaType="MOVIE"
-              title={media.title}
-              posterPath={media.posterPath}
-              releaseYear={media.releaseYear ?? undefined}
-              plexAvailable={plexAvailable}
-              jellyfinAvailable={jellyfinAvailable}
-              arrPending={arrPending}
-              requested={requested}
-              showPlex={showPlex}
-              showJellyfin={showJellyfin}
-              requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
+          <div className="flex flex-col justify-end" style={{ gap: 10 }}>
+            <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
+              <Chip tone="accent">MOVIE</Chip>
+              {media.releaseYear && (
+                <span
+                  className="ds-mono"
+                  style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}
+                >
+                  {media.releaseYear}
+                </span>
+              )}
+              {media.certification && (
+                <Chip>{media.certification}</Chip>
+              )}
+            </div>
+
+            <h1
+              className="font-bold"
+              style={{
+                fontSize: 28,
+                letterSpacing: "-0.02em",
+                color: "var(--ds-fg)",
+                margin: 0,
+                lineHeight: 1.1,
+              }}
+            >
+              {media.title}
+            </h1>
+
+            <RatingsBar
+              imdbRating={media.imdbRating}
+              imdbId={media.imdbId}
+              imdbVotes={media.imdbVotes}
+              rottenTomatoes={media.rottenTomatoes}
+              rtAudienceScore={media.rtAudienceScore}
+              metacritic={media.metacritic}
+              traktRating={media.traktRating}
+              letterboxdRating={media.letterboxdRating}
+              mdblistScore={media.mdblistScore}
+              malRating={media.malRating}
+              rogerEbertRating={media.rogerEbertRating}
+              voteAverage={media.voteAverage}
             />
-            {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
-              <ReportIssueButton
+
+            {media.overview && (
+              <p
+                className="max-w-2xl leading-relaxed"
+                style={{ fontSize: 13, color: "var(--ds-fg-muted)" }}
+              >
+                {media.overview}
+              </p>
+            )}
+
+            <div
+              className="flex items-center flex-wrap"
+              style={{ gap: 10, marginTop: 6 }}
+            >
+              <RequestButton
                 tmdbId={media.id}
                 mediaType="MOVIE"
                 title={media.title}
                 posterPath={media.posterPath}
+                releaseYear={media.releaseYear ?? undefined}
+                plexAvailable={plexAvailable}
+                jellyfinAvailable={jellyfinAvailable}
+                arrPending={arrPending}
+                requested={requested}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
               />
-            )}
-            {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
-              <VoteDeleteButton
-                tmdbId={media.id}
-                mediaType="MOVIE"
-                requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
-                alreadyVoted={!!userDeletionVote}
-              />
-            )}
-            {(media.trailerKey || media.trailerUrl) && (
-              <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-            )}
-            {media.releasedDigital && (
-              <span className="text-zinc-500 text-xs">
-                Digital {new Date(media.releasedDigital).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
-              </span>
-            )}
+              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
+                <ReportIssueButton
+                  tmdbId={media.id}
+                  mediaType="MOVIE"
+                  title={media.title}
+                  posterPath={media.posterPath}
+                />
+              )}
+              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
+                <VoteDeleteButton
+                  tmdbId={media.id}
+                  mediaType="MOVIE"
+                  requestToken={generateRequestToken(media.id, "MOVIE", session.user.id)}
+                  alreadyVoted={!!userDeletionVote}
+                />
+              )}
+              {(media.trailerKey || media.trailerUrl) && (
+                <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
+              )}
+              {media.releasedDigital && (
+                <span
+                  className="ds-mono"
+                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+                >
+                  Digital{" "}
+                  {new Date(media.releasedDigital).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  })}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>

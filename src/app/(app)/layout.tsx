@@ -58,34 +58,25 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div
+      className="flex h-screen overflow-hidden"
+      style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
+    >
       <NavigationProgress />
       <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
-      <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Header />
-        {maintenanceEnabled && isAdmin && <MaintenanceBanner message={maintenanceMessage} />}
-        {discordInviteUrl && !userDiscordId && <DiscordJoinModal inviteUrl={discordInviteUrl} />}
-        <main className="flex-1 overflow-y-auto p-6 lg:p-8 xl:p-10 pb-20 pb-safe-bottom-20 md:pb-6 lg:pb-8 xl:pb-10">{children}</main>
-        {}
-        <div className="md:hidden flex justify-center pb-20 pb-safe-bottom-20 pt-1 border-t border-zinc-800 bg-zinc-950">
-          <a
-            href="https://www.themoviedb.org"
-            target="_blank"
-            rel="noopener noreferrer"
-            title="This product uses the TMDB API but is not endorsed or certified by TMDB."
-            className="flex items-center gap-2 opacity-40 hover:opacity-70 transition-opacity py-2"
-          >
-            {}
-            <img
-              src="/tmdb-logo.svg"
-              alt="TMDB"
-              className="h-4 w-auto"
-            />
-            <span className="text-[11px] text-zinc-500">Data provided by TMDB</span>
-          </a>
-        </div>
+        <MobileNav featureFlags={featureFlags} />
+        {maintenanceEnabled && isAdmin && (
+          <MaintenanceBanner message={maintenanceMessage} />
+        )}
+        {discordInviteUrl && !userDiscordId && (
+          <DiscordJoinModal inviteUrl={discordInviteUrl} />
+        )}
+        <main className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-24 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
+          {children}
+        </main>
       </div>
-      <MobileNav featureFlags={featureFlags} />
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
   );

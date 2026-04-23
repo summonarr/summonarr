@@ -99,9 +99,19 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   if (seasons.length === 0) return null;
 
   return (
-    <div className="px-6 pb-10">
-      <h2 className="text-lg font-semibold text-white mb-4">Seasons</h2>
-      <div className="space-y-2">
+    <section style={{ padding: "0 16px 32px" }}>
+      <h2
+        className="section-title font-semibold"
+        style={{
+          fontSize: 15,
+          letterSpacing: "-0.01em",
+          color: "var(--ds-fg)",
+          margin: "0 0 12px",
+        }}
+      >
+        Seasons
+      </h2>
+      <div className="flex flex-col" style={{ gap: 8 }}>
         {seasons.map((season) => {
           const s = state[season.seasonNumber];
           const ownedCount = s?.owned.size ?? 0;
@@ -111,85 +121,173 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
               : ownedCount >= season.episodeCount
               ? "Complete"
               : `${ownedCount} / ${season.episodeCount}`;
+          const fullyOwned = ownedCount >= season.episodeCount;
 
           return (
             <div
               key={season.seasonNumber}
-              className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden"
+              className="overflow-hidden"
+              style={{
+                background: "var(--ds-bg-2)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 8,
+              }}
             >
               <button
                 type="button"
                 onClick={() => toggleSeason(season.seasonNumber)}
-                className="w-full flex items-center gap-4 p-3 text-left hover:bg-zinc-800/50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                className="w-full flex items-center text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
                 aria-expanded={s?.expanded ?? false}
                 aria-controls={`season-${season.seasonNumber}-panel`}
+                style={{
+                  gap: 14,
+                  padding: 12,
+                  background: "transparent",
+                  border: 0,
+                  color: "var(--ds-fg)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--ds-bg-3)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                }}
               >
-                <div className="relative w-12 h-18 shrink-0 rounded overflow-hidden bg-zinc-800">
+                <div
+                  className="relative shrink-0 overflow-hidden"
+                  style={{
+                    width: 44,
+                    aspectRatio: "2 / 3",
+                    borderRadius: 4,
+                    background: "var(--ds-bg-3)",
+                  }}
+                >
                   {season.posterPath ? (
                     <Image
                       src={posterUrl(season.posterPath, "w342") ?? ""}
                       alt={season.name}
                       fill
-                      sizes="48px"
+                      sizes="44px"
                       className="object-cover"
                     />
                   ) : (
-                    <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                      <Tv2 className="w-5 h-5" />
+                    <div
+                      className="absolute inset-0 flex items-center justify-center"
+                      style={{ color: "var(--ds-fg-subtle)" }}
+                    >
+                      <Tv2 style={{ width: 16, height: 16 }} />
                     </div>
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <h3 className="font-semibold text-white truncate">{season.name}</h3>
-                    <span className="text-xs text-zinc-500">
-                      {season.episodeCount} {season.episodeCount === 1 ? "episode" : "episodes"}
+                  <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
+                    <h3
+                      className="font-semibold truncate"
+                      style={{
+                        fontSize: 14,
+                        color: "var(--ds-fg)",
+                        margin: 0,
+                      }}
+                    >
+                      {season.name}
+                    </h3>
+                    <span
+                      className="ds-mono"
+                      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+                    >
+                      {season.episodeCount}{" "}
+                      {season.episodeCount === 1 ? "ep" : "eps"}
                     </span>
                     {season.airDate && (
-                      <span className="flex items-center gap-1 text-xs text-zinc-500">
-                        <Calendar className="w-3 h-3" />
+                      <span
+                        className="ds-mono flex items-center"
+                        style={{
+                          gap: 4,
+                          fontSize: 10.5,
+                          color: "var(--ds-fg-subtle)",
+                        }}
+                      >
+                        <Calendar style={{ width: 10, height: 10 }} />
                         {new Date(season.airDate).getFullYear()}
                       </span>
                     )}
                   </div>
                   {ownershipLabel && (
-                    <div
+                    <span
                       className={cn(
-                        "inline-flex items-center gap-1 mt-1 text-[11px] font-semibold px-2 py-0.5 rounded-full",
-                        ownedCount >= season.episodeCount
-                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
-                          : "bg-indigo-500/10 text-indigo-300 border border-indigo-500/30",
+                        "ds-chip inline-flex items-center",
+                        fullyOwned ? "ds-chip-approved" : "ds-chip-accent",
                       )}
+                      style={{ marginTop: 6 }}
                     >
-                      <CheckCircle className="w-3 h-3" />
+                      <CheckCircle style={{ width: 10, height: 10 }} />
                       {ownershipLabel} owned
-                    </div>
+                    </span>
                   )}
                 </div>
                 <ChevronDown
                   className={cn(
-                    "w-5 h-5 text-zinc-500 shrink-0 transition-transform",
+                    "shrink-0 transition-transform",
                     s?.expanded && "rotate-180",
                   )}
+                  style={{
+                    width: 18,
+                    height: 18,
+                    color: "var(--ds-fg-subtle)",
+                  }}
                 />
               </button>
 
               {s?.expanded && (
-                <div id={`season-${season.seasonNumber}-panel`} className="border-t border-zinc-800 p-3">
+                <div
+                  id={`season-${season.seasonNumber}-panel`}
+                  style={{
+                    borderTop: "1px solid var(--ds-border)",
+                    padding: 12,
+                  }}
+                >
                   {s.loadState === "loading" && (
-                    <div className="flex items-center gap-2 text-sm text-zinc-400 py-4 justify-center">
-                      <Loader2 className="w-4 h-4 animate-spin" />
+                    <div
+                      className="ds-mono flex items-center justify-center"
+                      style={{
+                        gap: 8,
+                        fontSize: 12,
+                        color: "var(--ds-fg-subtle)",
+                        padding: "16px 0",
+                      }}
+                    >
+                      <Loader2
+                        className="animate-spin"
+                        style={{
+                          width: 14,
+                          height: 14,
+                          color: "var(--ds-accent)",
+                        }}
+                      />
                       Loading episodes…
                     </div>
                   )}
 
                   {s.loadState === "error" && (
-                    <div className="text-sm text-red-400 py-4 text-center">
+                    <div
+                      className="text-center ds-mono"
+                      style={{
+                        fontSize: 12,
+                        color: "var(--ds-danger)",
+                        padding: "16px 0",
+                      }}
+                    >
                       Failed to load episodes.{" "}
                       <button
                         type="button"
                         onClick={() => toggleSeason(season.seasonNumber)}
-                        className="underline hover:text-red-300"
+                        className="underline transition-colors"
+                        style={{
+                          background: "transparent",
+                          border: 0,
+                          color: "inherit",
+                          cursor: "pointer",
+                        }}
                       >
                         Retry
                       </button>
@@ -197,7 +295,16 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                   )}
 
                   {s.loadState === "ready" && s.episodes.length === 0 && (
-                    <p className="text-sm text-zinc-500 py-4 text-center">No episodes found.</p>
+                    <p
+                      className="ds-mono text-center"
+                      style={{
+                        fontSize: 12,
+                        color: "var(--ds-fg-subtle)",
+                        padding: "16px 0",
+                      }}
+                    >
+                      No episodes found.
+                    </p>
                   )}
 
                   {s.loadState === "ready" && s.episodes.length > 0 && (
@@ -210,37 +317,25 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         return (
                           <div
                             key={ep.episodeNumber}
-                            className={cn(
-                              "group relative flex gap-3 rounded-lg p-2 transition-colors",
-                              owned
-                                ? "bg-emerald-500/5 border border-emerald-500/20"
-                                : "bg-zinc-900 border border-zinc-800",
-                            )}
+                            className="group relative flex transition-colors"
+                            style={{
+                              gap: 12,
+                              padding: 8,
+                              borderRadius: 8,
+                              background: owned
+                                ? "color-mix(in oklab, var(--ds-success) 6%, transparent)"
+                                : "var(--ds-bg-1)",
+                              border: `1px solid ${owned ? "color-mix(in oklab, var(--ds-success) 25%, transparent)" : "var(--ds-border)"}`,
+                            }}
                           >
-                            {}
-                            <div className="pointer-events-none absolute bottom-full left-0 z-50 mb-2 w-72 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                              <div className="rounded-lg border border-zinc-700 bg-zinc-900 p-3 shadow-2xl">
-                                <div className="mb-2 flex items-start justify-between gap-2">
-                                  <p className="text-sm font-semibold leading-snug text-white">{ep.name}</p>
-                                  {owned ? (
-                                    <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-                                  ) : (
-                                    <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-600" />
-                                  )}
-                                </div>
-                                <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-zinc-400">
-                                  <span className="font-medium text-zinc-300">E{ep.episodeNumber}</span>
-                                  {aired && <><span className="text-zinc-600">·</span><span>{aired}</span></>}
-                                  {runtime && <><span className="text-zinc-600">·</span><span>{runtime}</span></>}
-                                  {owned && <><span className="text-zinc-600">·</span><span className="text-emerald-400">In library</span></>}
-                                </div>
-                                {ep.overview && (
-                                  <p className="text-xs leading-relaxed text-zinc-300">{ep.overview}</p>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="relative w-28 aspect-video rounded overflow-hidden bg-zinc-800 shrink-0">
+                            <div
+                              className="relative aspect-video shrink-0 overflow-hidden"
+                              style={{
+                                width: 112,
+                                borderRadius: 4,
+                                background: "var(--ds-bg-3)",
+                              }}
+                            >
                               {still ? (
                                 <Image
                                   src={still}
@@ -250,38 +345,83 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                   className="object-cover"
                                 />
                               ) : (
-                                <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                                  <Tv2 className="w-5 h-5" />
+                                <div
+                                  className="absolute inset-0 flex items-center justify-center"
+                                  style={{ color: "var(--ds-fg-subtle)" }}
+                                >
+                                  <Tv2 style={{ width: 16, height: 16 }} />
                                 </div>
                               )}
-                              <div className="absolute top-1 left-1 bg-black/70 rounded px-1.5 py-0.5 text-[10px] font-bold text-white">
+                              <div
+                                className="ds-mono absolute"
+                                style={{
+                                  top: 4,
+                                  left: 4,
+                                  padding: "1px 6px",
+                                  borderRadius: 3,
+                                  fontSize: 9.5,
+                                  fontWeight: 700,
+                                  color: "#fff",
+                                  background: "color-mix(in oklab, black 70%, transparent)",
+                                }}
+                              >
                                 E{ep.episodeNumber}
                               </div>
                             </div>
                             <div className="flex-1 min-w-0">
-                              <div className="flex items-start gap-2">
-                                <p className="text-sm font-semibold text-white line-clamp-2 flex-1">
+                              <div className="flex items-start" style={{ gap: 8 }}>
+                                <p
+                                  className="font-semibold line-clamp-2 flex-1"
+                                  style={{ fontSize: 13, color: "var(--ds-fg)" }}
+                                >
                                   {ep.name}
                                 </p>
                                 {owned ? (
                                   <CheckCircle
-                                    className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5"
+                                    style={{
+                                      width: 14,
+                                      height: 14,
+                                      color: "var(--ds-success)",
+                                      marginTop: 2,
+                                    }}
                                     aria-label="In library"
                                   />
                                 ) : (
                                   <Circle
-                                    className="w-4 h-4 text-zinc-600 shrink-0 mt-0.5"
+                                    style={{
+                                      width: 14,
+                                      height: 14,
+                                      color: "var(--ds-fg-disabled)",
+                                      marginTop: 2,
+                                    }}
                                     aria-label="Not in library"
                                   />
                                 )}
                               </div>
-                              <div className="flex items-center gap-2 text-[11px] text-zinc-500 mt-0.5">
+                              <div
+                                className="ds-mono flex items-center"
+                                style={{
+                                  gap: 6,
+                                  fontSize: 10.5,
+                                  color: "var(--ds-fg-subtle)",
+                                  marginTop: 2,
+                                }}
+                              >
                                 {aired && <span>{aired}</span>}
-                                {aired && runtime && <span className="text-zinc-700">·</span>}
+                                {aired && runtime && <span>·</span>}
                                 {runtime && <span>{runtime}</span>}
                               </div>
                               {ep.overview && (
-                                <p className="text-xs text-zinc-400 mt-1 line-clamp-2">{ep.overview}</p>
+                                <p
+                                  className="line-clamp-2"
+                                  style={{
+                                    fontSize: 11.5,
+                                    color: "var(--ds-fg-muted)",
+                                    marginTop: 4,
+                                  }}
+                                >
+                                  {ep.overview}
+                                </p>
                               )}
                             </div>
                           </div>
@@ -295,6 +435,6 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
           );
         })}
       </div>
-    </div>
+    </section>
   );
 }

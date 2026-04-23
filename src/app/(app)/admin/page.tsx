@@ -3,10 +3,10 @@ import { prisma } from "@/lib/prisma";
 import { type RequestStatus } from "@/generated/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
-import { Card } from "@/components/ui/card";
 import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type RequestRow } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
+import { PageHeader, StatCard } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -97,21 +97,16 @@ export default async function AdminPage({
   }));
 
   return (
-    <div>
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold mb-1">Admin</h1>
-          <p className="text-zinc-400 text-sm">Manage all requests</p>
-        </div>
-        <SyncButton />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Requested"
+        subtitle="Approve, decline, or manage every incoming request"
+        right={<SyncButton />}
+      />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-4 mb-8">
+      <div className="ds-stat-row" style={{ marginBottom: 24 }}>
         {stats.map((s) => (
-          <Card key={s.label} className="bg-zinc-900 border-zinc-800 p-5">
-            <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{s.label}</p>
-            <p className="text-3xl font-bold text-white">{s.value}</p>
-          </Card>
+          <StatCard key={s.label} label={s.label} value={s.value} mono />
         ))}
       </div>
 
@@ -123,11 +118,21 @@ export default async function AdminPage({
       />
 
       {total === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800">
-          <div className="p-8 text-center text-zinc-500 text-sm">
-            {statusFilter ? `No ${statusFilter.toLowerCase()} requests.` : "No requests yet."}
-          </div>
-        </Card>
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
+          {statusFilter
+            ? `No ${statusFilter.toLowerCase()} requests.`
+            : "No requests yet."}
+        </div>
       ) : (
         <AdminRequestList
           requests={rows}

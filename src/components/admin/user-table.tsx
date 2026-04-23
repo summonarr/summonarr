@@ -566,53 +566,133 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
         return (
           <div
             key={u.id}
-            className="flex items-center gap-3 rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-3 hover:border-zinc-700 transition-colors"
+            className="flex items-center transition-colors"
+            style={{
+              gap: 12,
+              padding: "12px 16px",
+              background: "var(--ds-bg-2)",
+              border: "1px solid var(--ds-border)",
+              borderRadius: 10,
+            }}
           >
-            <div className={`w-9 h-9 rounded-full ${avatarColors[u.source]} flex items-center justify-center text-sm font-bold text-white shrink-0`}>
+            <div
+              className={`${avatarColors[u.source]} flex items-center justify-center font-bold text-white shrink-0`}
+              style={{
+                width: 34,
+                height: 34,
+                borderRadius: 999,
+                fontSize: 13,
+              }}
+            >
               {initial}
             </div>
 
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5 flex-wrap">
-                <span className="font-medium text-white text-sm truncate">{displayName}</span>
+              <div className="flex items-center flex-wrap" style={{ gap: 6 }}>
+                <span
+                  className="font-medium truncate"
+                  style={{ fontSize: 13, color: "var(--ds-fg)" }}
+                >
+                  {displayName}
+                </span>
                 {u.name && (
-                  <span className="text-xs text-zinc-600 truncate hidden sm:block">{u.email}</span>
+                  <span
+                    className="ds-mono truncate hidden sm:block"
+                    style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+                  >
+                    {u.email}
+                  </span>
                 )}
-                {isSelf && <span className="text-[10px] text-indigo-400 font-medium">(you)</span>}
+                {isSelf && (
+                  <span
+                    className="font-medium"
+                    style={{ fontSize: 10, color: "var(--ds-accent)" }}
+                  >
+                    (you)
+                  </span>
+                )}
               </div>
-              <p className="text-xs text-zinc-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
-                <span>Joined {new Date(u.createdAt).toLocaleDateString()}</span>
-                <span className="text-zinc-700">·</span>
-                <span>{u._count.requests} request{u._count.requests !== 1 ? "s" : ""}</span>
+              <p
+                className="ds-mono flex items-center flex-wrap"
+                style={{
+                  marginTop: 3,
+                  gap: 6,
+                  fontSize: 10.5,
+                  color: "var(--ds-fg-subtle)",
+                }}
+              >
+                <span>
+                  Joined {new Date(u.createdAt).toLocaleDateString()}
+                </span>
+                <span>·</span>
+                <span>
+                  {u._count.requests} request
+                  {u._count.requests !== 1 ? "s" : ""}
+                </span>
                 {u.discordId && (
-                  <><span className="text-zinc-700">·</span><span className="text-indigo-400">Discord linked</span></>
+                  <>
+                    <span>·</span>
+                    <span style={{ color: "var(--ds-accent)" }}>
+                      Discord linked
+                    </span>
+                  </>
                 )}
                 {u.autoApprove && (
-                  <><span className="text-zinc-700">·</span><span className="text-green-500">Auto-approve</span></>
+                  <>
+                    <span>·</span>
+                    <span style={{ color: "var(--ds-success)" }}>
+                      Auto-approve
+                    </span>
+                  </>
                 )}
                 {u.quotaExempt && (
-                  <><span className="text-zinc-700">·</span><span className="text-sky-400">No quota</span></>
+                  <>
+                    <span>·</span>
+                    <span style={{ color: "var(--ds-info)" }}>No quota</span>
+                  </>
                 )}
                 {u.mediaServer === "plex" && u.source === "local" && (
-                  <><span className="text-zinc-700">·</span><span className="text-yellow-500">Plex access</span></>
+                  <>
+                    <span>·</span>
+                    <span style={{ color: "var(--ds-plex)" }}>Plex access</span>
+                  </>
                 )}
                 {u.mediaServer === "jellyfin" && u.source === "local" && (
-                  <><span className="text-zinc-700">·</span><span className="text-purple-400">Jellyfin access</span></>
+                  <>
+                    <span>·</span>
+                    <span style={{ color: "var(--ds-jellyfin)" }}>
+                      Jellyfin access
+                    </span>
+                  </>
                 )}
               </p>
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0">
-              <Badge className={`border text-[10px] px-1.5 h-5 ${sourceStyles[u.source]}`}>
+            <div
+              className="flex items-center shrink-0"
+              style={{ gap: 6 }}
+            >
+              <Badge
+                className={`border text-[10px] px-1.5 h-5 ${sourceStyles[u.source]}`}
+              >
                 {u.source}
               </Badge>
-              <Badge className={`border text-[10px] px-1.5 h-5 ${roleStyles[u.role]}`}>
+              <Badge
+                className={`border text-[10px] px-1.5 h-5 ${roleStyles[u.role]}`}
+              >
                 {roleLabel[u.role]}
               </Badge>
             </div>
 
             {isBusy ? (
-              <Loader2 className="w-4 h-4 animate-spin text-zinc-500 shrink-0" />
+              <Loader2
+                className="animate-spin shrink-0"
+                style={{
+                  width: 16,
+                  height: 16,
+                  color: "var(--ds-fg-subtle)",
+                }}
+              />
             ) : isSelf ? (
               <div className="w-7 shrink-0" />
             ) : (

@@ -23,17 +23,21 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
   }
 
   return (
-    <div className="mb-8">
-      <button
-        onClick={toggle}
-        className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
-          active
-            ? "bg-indigo-600/20 border-indigo-500/50 text-indigo-300"
-            : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-500"
-        }`}
-      >
-        Hide Available
-      </button>
-    </div>
+    <button
+      type="button"
+      onClick={toggle}
+      className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+      style={{
+        padding: "5px 12px",
+        borderRadius: 6,
+        fontSize: 12,
+        background: active ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
+        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        border: `1px solid ${active ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      Hide Available
+    </button>
   );
 }

@@ -36,7 +36,15 @@ export function FilterPills({
   );
 
   return (
-    <div className="flex gap-1.5 flex-wrap">
+    <div
+      className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+      style={{
+        padding: 2,
+        background: "var(--ds-bg-1)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
       {options.map((opt) => {
         const isActive = active === opt.value;
         return (
@@ -44,15 +52,33 @@ export function FilterPills({
             key={opt.value || "_all"}
             type="button"
             onClick={() => onSelect(opt.value)}
-            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-colors border ${
-              isActive
-                ? "bg-indigo-600 text-white border-indigo-500"
-                : "bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white hover:border-zinc-600"
-            }`}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
+            style={{
+              padding: "5px 12px",
+              borderRadius: 6,
+              border: 0,
+              fontSize: 12,
+              background: isActive ? "var(--ds-bg-3)" : "transparent",
+              color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+              cursor: "pointer",
+            }}
           >
             {opt.label}
             {opt.count !== undefined && (
-              <span className={`ml-1.5 text-[10px] ${isActive ? "text-indigo-200" : "text-zinc-600"}`}>
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 10,
+                  padding: "0 5px",
+                  borderRadius: 3,
+                  background: isActive
+                    ? "var(--ds-accent-soft)"
+                    : "var(--ds-bg-3)",
+                  color: isActive
+                    ? "var(--ds-accent)"
+                    : "var(--ds-fg-subtle)",
+                }}
+              >
                 {opt.count}
               </span>
             )}
@@ -116,24 +142,56 @@ export function SearchBox({
 
   return (
     <div className="relative w-full sm:max-w-xs">
-      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500 pointer-events-none" />
-      <input
-        type="text"
-        value={value}
-        onChange={handleChange}
-        placeholder={placeholder}
-        className="w-full h-9 rounded-lg bg-zinc-900 border border-zinc-800 pl-9 pr-8 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-600"
-      />
-      {value && (
-        <button
-          type="button"
-          onClick={handleClear}
-          className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-zinc-500 hover:text-white hover:bg-zinc-800 transition-colors"
-          aria-label="Clear search"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-      )}
+      <div
+        className="flex items-center"
+        style={{
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          height: 32,
+          padding: "0 8px 0 10px",
+        }}
+      >
+        <Search
+          className="shrink-0"
+          style={{ width: 14, height: 14, color: "var(--ds-fg-subtle)", marginRight: 8 }}
+        />
+        <input
+          type="text"
+          value={value}
+          onChange={handleChange}
+          placeholder={placeholder}
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none"
+          style={{ fontSize: 13, color: "var(--ds-fg)" }}
+        />
+        {value && (
+          <button
+            type="button"
+            onClick={handleClear}
+            aria-label="Clear search"
+            className="inline-flex items-center justify-center transition-colors"
+            style={{
+              width: 20,
+              height: 20,
+              borderRadius: 4,
+              background: "transparent",
+              color: "var(--ds-fg-subtle)",
+              border: 0,
+              marginLeft: 4,
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--ds-bg-3)";
+              e.currentTarget.style.color = "var(--ds-fg)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--ds-fg-subtle)";
+            }}
+          >
+            <X style={{ width: 12, height: 12 }} />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

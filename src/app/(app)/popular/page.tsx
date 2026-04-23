@@ -14,6 +14,7 @@ import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Suspense } from "react";
+import { PageHeader } from "@/components/ui/design";
 
 type EnrichedMedia = TmdbMedia & {
   plays: number;
@@ -147,51 +148,85 @@ export default async function PopularOnServerPage({
   }
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">Popular on Server</h1>
-      <p className="text-zinc-400 text-sm mb-5">{activeSort.description}</p>
+      <PageHeader title="Popular on Server" subtitle={activeSort.description} />
 
-      <div className="flex flex-col sm:flex-row gap-3 mb-6">
-        <div className="flex gap-2">
-          {SORT_OPTIONS.map(({ value, label }) => (
-            <Link
-              key={value}
-              href={buildHref({ sort: value === "trending" ? undefined : value })}
-              className={cn(
-                "px-3 py-1.5 rounded-full text-sm font-medium transition-colors",
-                sort === value
-                  ? "bg-indigo-600 text-white"
-                  : "bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700",
-              )}
-            >
-              {label}
-            </Link>
-          ))}
+      <div className="flex flex-col sm:flex-row gap-3 mb-6 flex-wrap">
+        <div
+          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+          style={{
+            padding: 2,
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+            gap: 0,
+          }}
+        >
+          {SORT_OPTIONS.map(({ value, label }) => {
+            const isActive = sort === value;
+            return (
+              <Link
+                key={value}
+                href={buildHref({ sort: value === "trending" ? undefined : value })}
+                className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+                style={{
+                  padding: "5px 12px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: isActive ? "var(--ds-bg-3)" : "transparent",
+                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              >
+                {label}
+              </Link>
+            );
+          })}
         </div>
 
-        <div className="hidden sm:block w-px bg-zinc-700 mx-1" />
+        <div
+          className="hidden sm:block self-stretch"
+          style={{ width: 1, background: "var(--ds-border)", marginInline: 4 }}
+        />
 
-        <div className="flex gap-2">
-          {TYPE_OPTIONS.map(({ label, value }) => (
-            <Link
-              key={label}
-              href={buildHref({ mediaType: value })}
-              className={cn(
-                "px-3 py-1.5 rounded-full text-sm font-medium transition-colors",
-                mediaTypeFilter === value
-                  ? "bg-zinc-600 text-white"
-                  : "bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700",
-              )}
-            >
-              {label}
-            </Link>
-          ))}
+        <div
+          className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+          style={{
+            padding: 2,
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+          }}
+        >
+          {TYPE_OPTIONS.map(({ label, value }) => {
+            const isActive = mediaTypeFilter === value;
+            return (
+              <Link
+                key={label}
+                href={buildHref({ mediaType: value })}
+                className={cn(
+                  "inline-flex items-center whitespace-nowrap font-medium transition-colors",
+                )}
+                style={{
+                  padding: "5px 12px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: isActive ? "var(--ds-bg-3)" : "transparent",
+                  color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              >
+                {label}
+              </Link>
+            );
+          })}
         </div>
       </div>
 
       {!hasAny ? (
-        <div className="text-zinc-500 text-sm">
+        <div
+          className="ds-mono"
+          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+        >
           {sort === "trending"
             ? "No plays in the last 30 days — try switching to Most Played for all-time data."
             : page > 1
@@ -199,28 +234,36 @@ export default async function PopularOnServerPage({
               : "No play history yet — data will appear once media is played on your servers."}
         </div>
       ) : (
-        <div className="space-y-10">
+        <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
           {showMovies && movies.length > 0 && (
             <section>
-              <h2 className="text-lg font-semibold text-white mb-4">
-                Movies
-                <span className="ml-2 text-sm font-normal text-zinc-400">
-                  {rankOffset + 1}–{rankOffset + movies.length} of {totalMovies} titles
-                </span>
-              </h2>
-              <MediaGrid items={movies} showPlex={showPlex} showJellyfin={showJellyfin} sort={sort} rankOffset={rankOffset} />
+              <PopularSectionHeader
+                title="Movies"
+                range={`${rankOffset + 1}–${rankOffset + movies.length} of ${totalMovies} titles`}
+              />
+              <MediaGrid
+                items={movies}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                sort={sort}
+                rankOffset={rankOffset}
+              />
             </section>
           )}
 
           {showTV && tv.length > 0 && (
             <section>
-              <h2 className="text-lg font-semibold text-white mb-4">
-                TV Shows
-                <span className="ml-2 text-sm font-normal text-zinc-400">
-                  {rankOffset + 1}–{rankOffset + tv.length} of {totalTv} titles
-                </span>
-              </h2>
-              <MediaGrid items={tv} showPlex={showPlex} showJellyfin={showJellyfin} sort={sort} rankOffset={rankOffset} />
+              <PopularSectionHeader
+                title="TV Shows"
+                range={`${rankOffset + 1}–${rankOffset + tv.length} of ${totalTv} titles`}
+              />
+              <MediaGrid
+                items={tv}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                sort={sort}
+                rankOffset={rankOffset}
+              />
             </section>
           )}
         </div>
@@ -229,6 +272,35 @@ export default async function PopularOnServerPage({
       <Suspense>
         <PaginationBar currentPage={page} totalPages={totalPages} />
       </Suspense>
+    </div>
+  );
+}
+
+function PopularSectionHeader({
+  title,
+  range,
+}: {
+  title: string;
+  range: string;
+}) {
+  return (
+    <div className="flex items-end mb-3">
+      <h2
+        className="section-title m-0 font-semibold"
+        style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)" }}
+      >
+        {title}
+      </h2>
+      <span
+        className="ds-mono ml-auto uppercase"
+        style={{
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+          letterSpacing: "0.06em",
+        }}
+      >
+        {range}
+      </span>
     </div>
   );
 }
@@ -247,11 +319,24 @@ function MediaGrid({
   rankOffset: number;
 }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+    <div className="ds-media-grid">
       {items.map((media, i) => (
         <div key={`${media.mediaType}-${media.id}`} className="relative">
-          <div className="absolute top-2 left-2 z-10 bg-black/70 rounded-full w-6 h-6 flex items-center justify-center">
-            <span className="text-xs font-bold text-white">{rankOffset + i + 1}</span>
+          <div
+            className="ds-mono absolute z-10 flex items-center justify-center font-bold"
+            style={{
+              top: 6,
+              left: 6,
+              width: 22,
+              height: 22,
+              borderRadius: 999,
+              background: "color-mix(in oklab, var(--ds-bg-inset) 85%, transparent)",
+              border: "1px solid var(--ds-border)",
+              color: "var(--ds-fg)",
+              fontSize: 10.5,
+            }}
+          >
+            {rankOffset + i + 1}
           </div>
           <MediaCard
             media={media}
@@ -259,46 +344,51 @@ function MediaGrid({
             showJellyfin={showJellyfin}
             size="md"
           />
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-1.5 px-1">
+          <div
+            className="ds-mono flex flex-wrap items-center"
+            style={{
+              marginTop: 6,
+              paddingInline: 2,
+              gap: "0 8px",
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+            }}
+          >
             <span
-              className={cn(
-                "text-[11px] whitespace-nowrap",
-                sort === "plays" || sort === "trending" ? "text-indigo-400 font-medium" : "text-zinc-500",
-              )}
+              style={{
+                whiteSpace: "nowrap",
+                color:
+                  sort === "plays" || sort === "trending"
+                    ? "var(--ds-accent)"
+                    : "var(--ds-fg-subtle)",
+                fontWeight: sort === "plays" || sort === "trending" ? 500 : 400,
+              }}
             >
               {media.plays} {media.plays === 1 ? "play" : "plays"}
               {sort === "trending" ? " (30d)" : ""}
             </span>
             {sort === "trending" && (
-              <>
-                <span className="text-zinc-700">&middot;</span>
-                <span className="text-[11px] whitespace-nowrap text-zinc-500">
-                  {media.allTimePlays} all-time
-                </span>
-              </>
+              <span style={{ whiteSpace: "nowrap" }}>
+                · {media.allTimePlays} all-time
+              </span>
             )}
-            <span className="text-zinc-700">&middot;</span>
             <span
-              className={cn(
-                "text-[11px] whitespace-nowrap",
-                sort === "viewers" ? "text-indigo-400 font-medium" : "text-zinc-500",
-              )}
+              style={{
+                whiteSpace: "nowrap",
+                color:
+                  sort === "viewers" ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                fontWeight: sort === "viewers" ? 500 : 400,
+              }}
             >
-              {media.viewers} {media.viewers === 1 ? "viewer" : "viewers"}
+              · {media.viewers} {media.viewers === 1 ? "viewer" : "viewers"}
             </span>
             {media.mediaType === "tv" && media.episodes > 0 && (
-              <>
-                <span className="text-zinc-700">&middot;</span>
-                <span className="text-[11px] text-zinc-500 whitespace-nowrap">
-                  {media.episodes} {media.episodes === 1 ? "ep" : "eps"}
-                </span>
-              </>
+              <span style={{ whiteSpace: "nowrap" }}>
+                · {media.episodes} {media.episodes === 1 ? "ep" : "eps"}
+              </span>
             )}
             {media.totalHours > 0 && (
-              <>
-                <span className="text-zinc-700">&middot;</span>
-                <span className="text-[11px] text-zinc-500 whitespace-nowrap">{media.totalHours}h</span>
-              </>
+              <span style={{ whiteSpace: "nowrap" }}>· {media.totalHours}h</span>
             )}
           </div>
         </div>

@@ -2,8 +2,18 @@
 
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { Film, Tv2, Star, PlayCircle, MonitorPlay, Clock, CheckCircle, Loader2, Plus, Check, X } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import {
+  Film,
+  Tv2,
+  PlayCircle,
+  MonitorPlay,
+  Clock,
+  CheckCircle,
+  Loader2,
+  Plus,
+  Check,
+  X,
+} from "lucide-react";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";
@@ -25,7 +35,15 @@ interface MediaCardProps {
 
 type RequestState = "idle" | "confirm" | "loading" | "requested" | "error";
 
-function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true, showJellyfin = true, requestToken }: MediaCardProps) {
+function MediaCardImpl({
+  media,
+  onClick,
+  className,
+  size = "sm",
+  showPlex = true,
+  showJellyfin = true,
+  requestToken,
+}: MediaCardProps) {
   const router = useRouter();
   const poster = posterUrl(media.posterPath, "w342");
   const [reqState, setReqState] = useState<RequestState>("idle");
@@ -37,20 +55,26 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
     requestRatings(media.id, media.mediaType, media.releaseDate ?? null).then((data) => {
       if (!cancelled && data) setLiveRatings(data);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [media.id, media.mediaType, media.releaseDate, media.imdbRating, media.rottenTomatoes]);
 
   const isAvailable = !!(
     (showPlex && media.plexAvailable) ||
     (showJellyfin && media.jellyfinAvailable)
   );
+  const isRequested =
+    !!(media.requestedByMe || media.arrPending) || reqState === "requested";
 
-  const isRequested = !!(media.requestedByMe || media.arrPending) || reqState === "requested";
-
-  const detailPath = media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
+  const detailPath =
+    media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
 
   function handleCardClick() {
-    if (onClick) { onClick(media); return; }
+    if (onClick) {
+      onClick(media);
+      return;
+    }
     router.push(detailPath);
   }
 
@@ -62,7 +86,9 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
       const mt = media.mediaType === "movie" ? "MOVIE" : "TV";
       let token = requestToken;
       if (!token) {
-        const tokenRes = await fetch(`/api/requests/token?tmdbId=${media.id}&mediaType=${mt}`);
+        const tokenRes = await fetch(
+          `/api/requests/token?tmdbId=${media.id}&mediaType=${mt}`,
+        );
         if (tokenRes.ok) token = (await tokenRes.json()).token;
       }
       const res = await fetch("/api/requests", {
@@ -78,8 +104,10 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
 
   function handleBubbleClick(e: React.MouseEvent) {
     e.stopPropagation();
-    if (onClick) { onClick(media); return; }
-
+    if (onClick) {
+      onClick(media);
+      return;
+    }
     if (isAvailable || media.arrPending || isRequested) {
       router.push(detailPath);
     } else if (reqState === "idle" || reqState === "error") {
@@ -98,7 +126,7 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
     if (isAvailable) return <span>View</span>;
     if (media.arrPending) return <span>View</span>;
     if (isRequested) return <span>View</span>;
-    if (reqState === "loading") return <Loader2 className="w-4 h-4 animate-spin" />;
+    if (reqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
     if (reqState === "error") return <span>Retry</span>;
     return (
       <span className="flex items-center gap-1">
@@ -112,11 +140,22 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
     <button
       onClick={handleCardClick}
       className={cn(
-        "group relative flex flex-col w-full rounded-lg overflow-hidden bg-zinc-800 text-left transition-transform hover:scale-[1.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
-        className
+        "group relative flex flex-col w-full overflow-hidden text-left",
+        "ds-card-lift focus-visible:outline-none",
+        "focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]",
+        className,
       )}
+      style={{
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+        color: "var(--ds-fg)",
+      }}
     >
-      <div className="relative aspect-[2/3] w-full bg-zinc-700">
+      <div
+        className="relative aspect-[2/3] w-full"
+        style={{ background: "var(--ds-bg-3)" }}
+      >
         {poster ? (
           <Image
             src={poster}
@@ -126,30 +165,69 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
             className="object-cover"
           />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-            {media.mediaType === "movie" ? <Film className="w-10 h-10" /> : <Tv2 className="w-10 h-10" />}
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ color: "var(--ds-fg-subtle)" }}
+          >
+            {media.mediaType === "movie" ? (
+              <Film className="w-10 h-10" />
+            ) : (
+              <Tv2 className="w-10 h-10" />
+            )}
           </div>
         )}
 
-        {}
-        <div className={cn(
-          "absolute inset-0 bg-black/60 transition-opacity flex items-center justify-center pointer-events-none",
-          reqState === "confirm" ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-        )}>
+        {/* Hover / confirm overlay */}
+        <div
+          className={cn(
+            "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
+            reqState === "confirm"
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100",
+          )}
+          style={{
+            background:
+              "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)",
+            padding: 10,
+          }}
+        >
           {reqState === "confirm" ? (
-            <div className="pointer-events-auto flex flex-col items-center gap-2 px-3">
-              <span className="text-white text-xs font-semibold text-center leading-tight">Request this?</span>
+            <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
+              <span
+                className="text-center leading-tight font-semibold"
+                style={{ fontSize: 11, color: "#fff" }}
+              >
+                Request this?
+              </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleBubbleClick}
-                  className="text-white text-xs font-semibold px-2.5 py-1 rounded-full bg-indigo-600/90 hover:bg-indigo-500 flex items-center gap-1 transition-colors"
+                  type="button"
+                  className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
+                  style={{
+                    padding: "4px 10px",
+                    borderRadius: 999,
+                    background: "var(--ds-accent)",
+                    color: "var(--ds-accent-fg)",
+                    fontSize: 11,
+                    border: 0,
+                  }}
                 >
                   <Check className="w-3 h-3" />
                   Confirm
                 </button>
                 <button
                   onClick={cancelConfirm}
-                  className="text-white text-xs font-semibold px-2.5 py-1 rounded-full border border-white/30 bg-white/10 hover:bg-white/20 flex items-center gap-1 transition-colors"
+                  type="button"
+                  className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
+                  style={{
+                    padding: "4px 10px",
+                    borderRadius: 999,
+                    background: "rgba(255,255,255,0.12)",
+                    color: "#fff",
+                    fontSize: 11,
+                    border: "1px solid rgba(255,255,255,0.28)",
+                  }}
                 >
                   <X className="w-3 h-3" />
                   Cancel
@@ -159,100 +237,160 @@ function MediaCardImpl({ media, onClick, className, size = "sm", showPlex = true
           ) : (
             <button
               onClick={handleBubbleClick}
-              className="pointer-events-auto text-white text-sm font-semibold px-3 py-1.5 rounded-full border border-white/30 bg-white/10 hover:bg-white/20 flex items-center gap-1.5 transition-colors"
+              type="button"
+              className="ds-tap pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
+              style={{
+                padding: "5px 12px",
+                borderRadius: 999,
+                background:
+                  isAvailable || isRequested
+                    ? "rgba(255,255,255,0.14)"
+                    : "var(--ds-accent)",
+                color:
+                  isAvailable || isRequested
+                    ? "#fff"
+                    : "var(--ds-accent-fg)",
+                border:
+                  isAvailable || isRequested
+                    ? "1px solid rgba(255,255,255,0.28)"
+                    : "0",
+                fontSize: 12,
+              }}
             >
               {bubbleContent()}
             </button>
           )}
         </div>
 
-        <div className="absolute top-2 left-2 flex flex-col gap-1">
+        {/* Top-left: availability chips */}
+        <div className="absolute top-1.5 left-1.5 flex flex-col gap-1">
           {showPlex && media.plexAvailable && (
-            <div className="flex items-center gap-1 bg-[#e5a00d]/90 rounded-full px-2 py-0.5 text-xs text-black font-semibold">
-              <PlayCircle className="w-3 h-3" />
-              On Plex
-            </div>
+            <span
+              className="ds-chip ds-chip-plex"
+              style={{ paddingLeft: 5, paddingRight: 6 }}
+            >
+              <PlayCircle style={{ width: 9, height: 9 }} />
+              Plex
+            </span>
           )}
           {showJellyfin && media.jellyfinAvailable && (
-            <div className="flex items-center gap-1 bg-[#00a4dc]/90 rounded-full px-2 py-0.5 text-xs text-white font-semibold">
-              <MonitorPlay className="w-3 h-3" />
-              On Jellyfin
-            </div>
+            <span
+              className="ds-chip ds-chip-jellyfin"
+              style={{ paddingLeft: 5, paddingRight: 6 }}
+            >
+              <MonitorPlay style={{ width: 9, height: 9 }} />
+              Jellyfin
+            </span>
           )}
           {!isAvailable && media.arrPending && (
-            <div className="flex items-center gap-1 bg-orange-500/90 rounded-full px-2 py-0.5 text-xs text-white font-semibold">
-              <Clock className="w-3 h-3" />
-              Approved in Queue
-            </div>
+            <span
+              className="ds-chip ds-chip-pending"
+              style={{ paddingLeft: 5, paddingRight: 6 }}
+            >
+              <Clock style={{ width: 9, height: 9 }} />
+              Queued
+            </span>
           )}
         </div>
 
+        {/* Bottom-left: requested indicator */}
         {!isAvailable && (media.requested || reqState === "requested") && (
-          <div className="absolute bottom-2 left-2 flex items-center gap-1 bg-indigo-600/90 rounded-full px-2 py-0.5 text-xs text-white font-semibold">
-            <CheckCircle className="w-3 h-3" />
+          <span
+            className="ds-chip ds-chip-accent absolute bottom-1.5 left-1.5"
+            style={{ paddingLeft: 5, paddingRight: 6 }}
+          >
+            <CheckCircle style={{ width: 9, height: 9 }} />
             Requested
-          </div>
+          </span>
         )}
 
+        {/* Top-right: score chip (IMDb-style) */}
         {media.voteAverage > 0 && (
-          <div className="absolute top-2 right-2 flex items-center gap-1 bg-black/70 rounded-full px-2 py-0.5 text-xs text-yellow-400 font-medium">
-            <Star className="w-3 h-3 fill-yellow-400" />
-            {media.voteAverage.toFixed(1)}
+          <div
+            className="ds-mono absolute top-1.5 right-1.5 inline-flex items-center gap-1"
+            style={{
+              fontSize: 10.5,
+              fontWeight: 600,
+              padding: "2px 6px",
+              borderRadius: 4,
+              background:
+                "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
+              backdropFilter: "blur(6px)",
+              border: "1px solid var(--ds-border)",
+              color: "var(--ds-fg)",
+            }}
+          >
+            <span
+              className="ds-mono"
+              style={{
+                fontSize: 7.5,
+                fontWeight: 800,
+                letterSpacing: "-0.02em",
+                background: "#f5c518",
+                color: "#000",
+                padding: "1px 2.5px",
+                borderRadius: 2,
+                lineHeight: 1,
+              }}
+            >
+              IMDb
+            </span>
+            {media.imdbRating
+              ? Number.parseFloat(media.imdbRating).toFixed(1)
+              : media.voteAverage.toFixed(1)}
           </div>
         )}
       </div>
 
-      <div className={cn("flex flex-col gap-1.5 shrink-0", size === "md" ? "p-3 pb-4" : "p-2.5")}>
-        <p className={cn("font-medium text-white leading-tight line-clamp-2", size === "md" ? "text-base h-10" : "text-sm h-8")}>{media.title}</p>
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {media.releaseYear && (
-            <span className={cn("text-zinc-400", size === "md" ? "text-sm" : "text-xs")}>{media.releaseYear}</span>
+      {/* Card body */}
+      <div
+        className={cn(
+          "flex flex-col gap-1.5 shrink-0",
+          size === "md" ? "p-3 pb-4" : "p-2.5",
+        )}
+      >
+        <p
+          className={cn(
+            "font-medium line-clamp-2",
+            size === "md" ? "text-[15px] h-10" : "text-[13px] h-8",
           )}
-          <Badge variant="secondary" className={cn("px-1.5 py-0 bg-zinc-700 text-zinc-300 border-0", size === "md" ? "text-xs h-5" : "text-[10px] h-4")}>
-            {media.mediaType === "movie" ? "Movie" : "TV"}
-          </Badge>
+          style={{ color: "var(--ds-fg)", lineHeight: 1.3 }}
+        >
+          {media.title}
+        </p>
+        <div
+          className="ds-mono flex items-center gap-1.5 flex-wrap"
+          style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+        >
+          {media.releaseYear && <span>{media.releaseYear}</span>}
+          {media.releaseYear && <span>·</span>}
+          <span>{media.mediaType === "movie" ? "MOVIE" : "TV"}</span>
           {media.certification && (
-            <Badge variant="secondary" className={cn("px-1.5 py-0 bg-zinc-600 text-zinc-200 border border-zinc-500", size === "md" ? "text-xs h-5" : "text-[10px] h-4")}>
-              {media.certification}
-            </Badge>
+            <>
+              <span>·</span>
+              <span>{media.certification}</span>
+            </>
           )}
         </div>
-        {size === "md" ? (
-          <div className="flex flex-col gap-1 mt-0.5">
-            <RatingsBar
-              imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
-              imdbId={liveRatings?.imdbId ?? media.imdbId}
-              rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
-              rtAudienceScore={liveRatings?.rtAudienceScore ?? media.rtAudienceScore}
-              metacritic={liveRatings?.metacritic ?? media.metacritic}
-              traktRating={liveRatings?.traktRating ?? media.traktRating}
-              letterboxdRating={liveRatings?.letterboxdRating ?? media.letterboxdRating}
-              mdblistScore={liveRatings?.mdblistScore ?? media.mdblistScore}
-              malRating={liveRatings?.malRating ?? media.malRating}
-              rogerEbertRating={liveRatings?.rogerEbertRating ?? media.rogerEbertRating}
-              voteAverage={media.voteAverage}
-              size="sm"
-            />
-          </div>
-        ) : (
-          <div className="min-h-[34px] flex items-start">
-            <RatingsBar
-              imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
-              imdbId={liveRatings?.imdbId ?? media.imdbId}
-              rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
-              rtAudienceScore={liveRatings?.rtAudienceScore ?? media.rtAudienceScore}
-              metacritic={liveRatings?.metacritic ?? media.metacritic}
-              traktRating={liveRatings?.traktRating ?? media.traktRating}
-              letterboxdRating={liveRatings?.letterboxdRating ?? media.letterboxdRating}
-              mdblistScore={liveRatings?.mdblistScore ?? media.mdblistScore}
-              malRating={liveRatings?.malRating ?? media.malRating}
-              rogerEbertRating={liveRatings?.rogerEbertRating ?? media.rogerEbertRating}
-              voteAverage={media.voteAverage}
-              size="sm"
-              compact
-            />
-          </div>
-        )}
+        <div
+          className={size === "md" ? "flex flex-col gap-1 mt-0.5" : "min-h-[34px] flex items-start"}
+        >
+          <RatingsBar
+            imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
+            imdbId={liveRatings?.imdbId ?? media.imdbId}
+            rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
+            rtAudienceScore={liveRatings?.rtAudienceScore ?? media.rtAudienceScore}
+            metacritic={liveRatings?.metacritic ?? media.metacritic}
+            traktRating={liveRatings?.traktRating ?? media.traktRating}
+            letterboxdRating={liveRatings?.letterboxdRating ?? media.letterboxdRating}
+            mdblistScore={liveRatings?.mdblistScore ?? media.mdblistScore}
+            malRating={liveRatings?.malRating ?? media.malRating}
+            rogerEbertRating={liveRatings?.rogerEbertRating ?? media.rogerEbertRating}
+            voteAverage={media.voteAverage}
+            size="sm"
+            compact={size !== "md"}
+          />
+        </div>
       </div>
     </button>
   );

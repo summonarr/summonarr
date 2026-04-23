@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -70,11 +71,11 @@ export default async function AuditLogPage({
   }));
 
   return (
-    <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-1">Audit Log</h1>
-        <p className="text-zinc-400 text-sm">Track admin actions and system changes</p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Audit Log"
+        subtitle="Track admin actions and system changes"
+      />
 
       <AuditLogView
         initialLogs={rows}
