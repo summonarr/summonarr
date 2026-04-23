@@ -214,6 +214,65 @@
   --ds-shadow-lg: 0 16px 40px rgba(15,23,42,.10), 0 2px 8px rgba(15,23,42,.06);
 }
 
+/* ────────────────────────────────────────────────────────────────────
+   LEGACY TAILWIND COLOR REMAP
+   Child components built before the design-system migration use literal
+   Tailwind classes like `bg-indigo-600`, `text-zinc-400`, `border-zinc-800`.
+   Tailwind v4 compiles those utilities to `var(--color-indigo-600)` etc.,
+   so overriding those CSS custom properties under [data-theme="dark"]
+   retargets every legacy usage at once without touching component files.
+
+   Keep this section short — only the shades that legacy code actually uses.
+   ──────────────────────────────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  /* Accent (was indigo): align every indigo shade to the DS accent.
+     All `bg-indigo-*`, `text-indigo-*`, `border-indigo-*`, `ring-indigo-*`
+     and opacity variants (`bg-indigo-600/10`, etc.) resolve to the
+     accent token, so role-preview / theme tweaks propagate automatically. */
+  --color-indigo-300:  color-mix(in oklab, var(--ds-accent) 80%, var(--ds-fg));
+  --color-indigo-400:  var(--ds-accent);
+  --color-indigo-500:  var(--ds-accent);
+  --color-indigo-600:  var(--ds-accent);
+  --color-indigo-700:  var(--ds-accent-hover);
+  --color-indigo-800:  var(--ds-accent-hover);
+
+  /* Surfaces (legacy used zinc for dark surfaces; remap to DS surface stack).
+     The ds-bg stack is tuned to match zinc-950→zinc-700 closely, so this
+     is mostly a small oklch nudge + the project's purple-tinted neutrals. */
+  --color-zinc-950:  var(--ds-bg);
+  --color-zinc-900:  var(--ds-bg-1);
+  --color-zinc-800:  var(--ds-bg-2);
+  --color-zinc-700:  var(--ds-bg-3);
+  --color-zinc-600:  oklch(0.36 0.006 275);
+
+  /* Text / muted foregrounds (legacy zinc-300..500 map to DS fg scale). */
+  --color-zinc-100:  var(--ds-fg);
+  --color-zinc-200:  var(--ds-fg);
+  --color-zinc-300:  var(--ds-fg-muted);
+  --color-zinc-400:  var(--ds-fg-muted);
+  --color-zinc-500:  var(--ds-fg-subtle);
+
+  /* Functional colors — keep action buttons / chips / status badges on
+     the same palette the Chip primitive uses. */
+  --color-red-400:     var(--ds-danger);
+  --color-red-500:     var(--ds-danger);
+  --color-red-600:     var(--ds-danger);
+  --color-amber-400:   var(--ds-warning);
+  --color-amber-500:   var(--ds-warning);
+  --color-yellow-400:  var(--ds-warning);
+  --color-yellow-500:  var(--ds-warning);
+  --color-orange-400:  var(--ds-warning);
+  --color-orange-500:  var(--ds-warning);
+  --color-green-400:   var(--ds-success);
+  --color-green-500:   var(--ds-success);
+  --color-green-600:   var(--ds-success);
+  --color-emerald-400: var(--ds-success);
+  --color-emerald-500: var(--ds-success);
+  --color-sky-400:     var(--ds-info);
+  --color-sky-500:     var(--ds-info);
+}
+
 /* Accent variants — pick via [data-accent="..."] on <html>. */
 [data-accent="indigo"]  { --ds-accent: oklch(0.58 0.21 275); --ds-accent-hover: oklch(0.64 0.21 275); --ds-accent-soft: oklch(0.58 0.21 275 / 0.14); --ds-accent-ring: oklch(0.58 0.21 275 / 0.35); }
 [data-accent="amber"]   { --ds-accent: oklch(0.78 0.16 75);  --ds-accent-hover: oklch(0.82 0.16 75);  --ds-accent-soft: oklch(0.78 0.16 75  / 0.14); --ds-accent-ring: oklch(0.78 0.16 75  / 0.35); --ds-accent-fg: oklch(0.18 0 0); }
