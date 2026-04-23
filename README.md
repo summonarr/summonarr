@@ -91,7 +91,8 @@ npm install
 cp .env.example .env
 # Set DATABASE_URL directly when running Postgres yourself, e.g.:
 #   DATABASE_URL=postgresql://summonarr:password@localhost:5432/summonarr
-# Then fill in NEXTAUTH_SECRET, AUTH_URL, CRON_SECRET, TMDB_API_KEY, TRUST_PROXY.
+# Then fill in NEXTAUTH_SECRET (≥32 chars), AUTH_URL, CRON_SECRET (≥32 chars),
+# TMDB_READ_TOKEN (or legacy TMDB_API_KEY), TRUST_PROXY.
 
 npx prisma db push    # apply schema (no migrations folder)
 npx prisma generate   # regenerate client (outputs to src/generated/prisma)
