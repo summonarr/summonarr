@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
+import Link from "next/link";
 import { SetupForm } from "./setup-form";
 
 // First-run wizard; inaccessible once any user exists so the admin account can't be hijacked
@@ -11,6 +12,13 @@ export default async function SetupPage() {
 
   const siteTitleRow = await prisma.setting.findUnique({ where: { key: "siteTitle" } });
   const siteTitle = siteTitleRow?.value || "Summonarr";
+
+  const jellyfinEnabled = !!process.env.JELLYFIN_URL;
+  const oidcEnabled = !!(
+    process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET
+  );
+  const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
+  const hasExternalProvider = jellyfinEnabled || oidcEnabled;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
@@ -34,6 +42,25 @@ export default async function SetupPage() {
             </span>
           </div>
           <SetupForm />
+
+          {hasExternalProvider && (
+            <>
+              <div className="flex items-center gap-3 my-6">
+                <div className="flex-1 h-px bg-zinc-800" />
+                <span className="text-xs uppercase tracking-wider text-zinc-500">or</span>
+                <div className="flex-1 h-px bg-zinc-800" />
+              </div>
+              <p className="text-center text-xs text-zinc-500 mb-3">
+                Sign in with your existing account — the first user becomes administrator automatically.
+              </p>
+              <Link
+                href="/login"
+                className="block text-center w-full rounded-md border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm font-medium py-2.5 transition-colors"
+              >
+                Sign in with {jellyfinEnabled && oidcEnabled ? "Jellyfin or " + oidcName : jellyfinEnabled ? "Jellyfin" : oidcName}
+              </Link>
+            </>
+          )}
         </div>
       </div>
     </div>

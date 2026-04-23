@@ -9,9 +9,10 @@ export const dynamic = "force-dynamic";
 export default async function LoginPage() {
 
   const count = await prisma.user.count();
-  // When no users exist and no external provider is configured, redirect to the first-run setup wizard
-  const hasExternalProvider = !!process.env.OIDC_ISSUER || !!process.env.JELLYFIN_URL;
-  if (count === 0 && !hasExternalProvider) redirect("/setup");
+  // Fresh install: always send to /setup. /setup offers external-provider sign-in links when
+  // JELLYFIN_URL/OIDC_ISSUER are set, so external-first deployments aren't trapped here
+  // with no account to sign in against.
+  if (count === 0) redirect("/setup");
 
   const [plexRow, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
