@@ -303,12 +303,12 @@
   border: 1px solid var(--ds-border);
   letter-spacing: 0.02em;
 }
-.ds-chip-plex     { background: color-mix(in oklab, var(--ds-plex)     15%, transparent); color: var(--ds-plex);     border-color: color-mix(in oklab, var(--ds-plex)     25%, transparent); }
-.ds-chip-jellyfin { background: color-mix(in oklab, var(--ds-jellyfin) 15%, transparent); color: var(--ds-jellyfin); border-color: color-mix(in oklab, var(--ds-jellyfin) 25%, transparent); }
-.ds-chip-pending  { background: color-mix(in oklab, var(--ds-warning)  15%, transparent); color: var(--ds-warning);  border-color: color-mix(in oklab, var(--ds-warning)  25%, transparent); }
-.ds-chip-approved { background: color-mix(in oklab, var(--ds-success)  15%, transparent); color: var(--ds-success);  border-color: color-mix(in oklab, var(--ds-success)  25%, transparent); }
-.ds-chip-declined { background: color-mix(in oklab, var(--ds-danger)   15%, transparent); color: var(--ds-danger);   border-color: color-mix(in oklab, var(--ds-danger)   25%, transparent); }
-.ds-chip-accent   { background: var(--ds-accent-soft); color: var(--ds-accent); border-color: var(--ds-accent-ring); }
+.ds-chip-plex     { background: var(--ds-plex);     color: #000; border-color: transparent; font-weight: 600; }
+.ds-chip-jellyfin { background: var(--ds-jellyfin); color: #fff; border-color: transparent; font-weight: 600; }
+.ds-chip-pending  { background: var(--ds-warning);  color: #000; border-color: transparent; font-weight: 600; }
+.ds-chip-approved { background: var(--ds-success);  color: #000; border-color: transparent; font-weight: 600; }
+.ds-chip-declined { background: var(--ds-danger);   color: #fff; border-color: transparent; font-weight: 600; }
+.ds-chip-accent   { background: var(--ds-accent);   color: var(--ds-accent-fg); border-color: transparent; font-weight: 600; }
 
 .ds-kbd {
   display: inline-flex; align-items: center;
