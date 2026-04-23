@@ -9,19 +9,21 @@ export const dynamic = "force-dynamic";
 export default async function LoginPage() {
 
   const count = await prisma.user.count();
-  // Fresh install: always send to /setup. /setup offers external-provider sign-in links when
-  // JELLYFIN_URL/OIDC_ISSUER are set, so external-first deployments aren't trapped here
-  // with no account to sign in against.
+  // Fresh install: empty user table always lands on /setup. No exceptions for external providers —
+  // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
   if (count === 0) redirect("/setup");
 
-  const [plexRow, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+  const [plexRow, jellyfinKeyRow, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
     prisma.setting.findUnique({ where: { key: "siteTitle" } }),
     prisma.setting.findUnique({ where: { key: "siteUrl" } }),
     prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
   ]);
   const plexEnabled = !!plexRow?.value;
-  const jellyfinEnabled = !!process.env.JELLYFIN_URL;
+  // Mirror Plex: the env var is necessary but not sufficient — the Jellyfin tab appears only
+  // after an admin has completed the Jellyfin wiring in Admin → Settings (API key stored).
+  const jellyfinEnabled = !!process.env.JELLYFIN_URL && !!jellyfinKeyRow?.value;
   const oidcEnabled = !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET);
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
   const localLoginDisabled = disableLocalRow?.value === "true";
