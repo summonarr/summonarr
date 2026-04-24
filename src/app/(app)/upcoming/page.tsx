@@ -55,13 +55,15 @@ export default async function UpcomingPage({
     const movies = all.filter((m) => m.mediaType === "movie");
     const tv = all.filter((m) => m.mediaType === "tv");
 
+    // Movies use release_date (future). TV uses first_air_date (often past for currently-airing shows)
+    // and comes from /tv/on_the_air which is already scoped to currently airing — no future filter needed
     const futureMovies = movies.filter((m) => m.releaseDate && m.releaseDate >= today);
-    const futureTV = tv.filter((m) => m.releaseDate && m.releaseDate >= today);
+    const currentTV = tv;
 
-    const maxLen = Math.max(futureMovies.length, futureTV.length);
+    const maxLen = Math.max(futureMovies.length, currentTV.length);
     for (let i = 0; i < maxLen; i++) {
       if (i < futureMovies.length) raw.push(futureMovies[i]);
-      if (i < futureTV.length) raw.push(futureTV[i]);
+      if (i < currentTV.length) raw.push(currentTV[i]);
     }
   } catch {
 

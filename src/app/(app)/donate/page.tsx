@@ -135,21 +135,11 @@ export default async function DonatePage() {
                 href={m.href(m.value)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="group flex items-center justify-between transition-colors"
+                className="group flex items-center justify-between transition-colors bg-[var(--ds-bg-2)] border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] hover:border-[var(--ds-border-strong)]"
                 style={{
                   padding: 18,
-                  background: "var(--ds-bg-2)",
-                  border: "1px solid var(--ds-border)",
                   borderRadius: 10,
                   color: "var(--ds-fg)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--ds-bg-3)";
-                  e.currentTarget.style.borderColor = "var(--ds-border-strong)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--ds-bg-2)";
-                  e.currentTarget.style.borderColor = "var(--ds-border)";
                 }}
               >
                 <div>

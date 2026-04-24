@@ -245,14 +245,8 @@ export default async function IssuesPage({
                     <Link
                       href={issueHref(issue.id)}
                       scroll={false}
-                      className="flex items-start transition-colors"
+                      className="flex items-start transition-colors hover:bg-[var(--ds-bg-3)]"
                       style={{ gap: 14, padding: 14 }}
-                      onMouseEnter={(e) => {
-                        e.currentTarget.style.background = "var(--ds-bg-3)";
-                      }}
-                      onMouseLeave={(e) => {
-                        e.currentTarget.style.background = "transparent";
-                      }}
                     >
                       <div
                         className="relative shrink-0 overflow-hidden"
