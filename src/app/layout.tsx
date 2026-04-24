@@ -1,11 +1,16 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Playfair_Display } from "next/font/google";
+import { Geist, Geist_Mono, Playfair_Display } from "next/font/google";
 import "./globals.css";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/lib/auth";
 
 const geist = Geist({
   variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
   subsets: ["latin"],
 });
 
@@ -38,7 +43,12 @@ export default async function RootLayout({
 }>) {
   const session = await auth();
   return (
-    <html lang="en" className={`${geist.variable} ${playfair.variable} h-full antialiased dark`}>
+    <html
+      lang="en"
+      className={`${geist.variable} ${geistMono.variable} ${playfair.variable} h-full antialiased dark`}
+      data-theme="dark"
+      data-accent="indigo"
+    >
       <body className="min-h-full bg-zinc-950 text-zinc-100">
         <SessionProvider session={session}>{children}</SessionProvider>
       </body>

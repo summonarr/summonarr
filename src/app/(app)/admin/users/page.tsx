@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { UserTable } from "@/components/admin/user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -44,16 +45,12 @@ export default async function UsersPage() {
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
 
   return (
-    <div>
-      <div className="flex items-start justify-between mb-8">
-        <div>
-          <h1 className="text-2xl font-bold mb-1">Users</h1>
-          <p className="text-zinc-400 text-sm">
-            {users.length} registered user{users.length !== 1 ? "s" : ""}
-          </p>
-        </div>
-        <SyncRolesButton />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Users"
+        subtitle={`${users.length} registered user${users.length !== 1 ? "s" : ""}`}
+        right={<SyncRolesButton />}
+      />
 
       <div>
         <UserTable

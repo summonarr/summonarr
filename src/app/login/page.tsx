@@ -32,32 +32,78 @@ export default async function LoginPage() {
   const maintenance = await getMaintenanceStatus();
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
-      <div className="w-full max-w-sm bg-zinc-900 border border-zinc-800 rounded-xl p-8">
+    <div
+      className="min-h-screen flex items-center justify-center px-4"
+      style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
+    >
+      <div
+        className="w-full max-w-sm"
+        style={{
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: "var(--ds-r-xl)",
+          padding: 28,
+          boxShadow: "var(--ds-shadow-md)",
+        }}
+      >
         {maintenance.enabled && (
-          <div className="flex items-start gap-2.5 bg-yellow-900/20 border border-yellow-800/30 rounded-lg p-3 mb-6">
-            <Wrench className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />
-            <p className="text-sm text-yellow-300">
+          <div
+            className="flex items-start gap-2.5 mb-5"
+            style={{
+              background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+              border: "1px solid color-mix(in oklab, var(--ds-warning) 28%, transparent)",
+              borderRadius: "var(--ds-r-md)",
+              padding: "10px 12px",
+            }}
+          >
+            <Wrench style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-warning)", flexShrink: 0 }} />
+            <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
               {maintenance.message || "We're performing some maintenance. Please check back shortly."}
             </p>
           </div>
         )}
-        <div className="flex flex-col items-center mb-8">
-          <p className="text-3xl text-white mb-4 tracking-wide" style={{ fontFamily: "var(--font-playfair)" }}>Summonarr</p>
-          <div className="w-12 h-12 rounded-xl bg-indigo-600 flex items-center justify-center mb-3">
-            <Film className="w-6 h-6 text-white" />
-          </div>
-          <h1 className="text-xl font-bold text-white">{siteTitle}</h1>
-          <p className="text-zinc-400 text-sm mt-1">Sign in to your account</p>
-        </div>
 
-        {count === 0 && (
-          <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
-            <span className="text-indigo-400 text-xs font-medium">
-              First sign-in automatically becomes administrator
-            </span>
+        <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
+          <p
+            className="m-0"
+            style={{
+              fontFamily: "var(--font-playfair)",
+              fontSize: 28,
+              color: "var(--ds-fg)",
+              letterSpacing: "0.02em",
+              marginBottom: 14,
+            }}
+          >
+            Summonarr
+          </p>
+          <div
+            className="flex items-center justify-center"
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 10,
+              background: "var(--ds-accent)",
+              color: "var(--ds-accent-fg)",
+              boxShadow:
+                "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
+              marginBottom: 12,
+            }}
+          >
+            <Film style={{ width: 22, height: 22 }} />
           </div>
-        )}
+          <h1
+            className="m-0 font-semibold"
+            style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
+          >
+            {siteTitle}
+          </h1>
+          <p
+            className="ds-mono m-0"
+            style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginTop: 4 }}
+          >
+            Sign in to your account
+          </p>
+        </div>
 
         <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
       </div>

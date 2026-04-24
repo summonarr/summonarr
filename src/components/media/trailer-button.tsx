@@ -1,7 +1,6 @@
 "use client";
 
 import { Play } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 interface TrailerButtonProps {
   trailerKey?: string | null;
@@ -9,21 +8,28 @@ interface TrailerButtonProps {
 }
 
 export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
-  const href = trailerKey ? `https://www.youtube.com/watch?v=${trailerKey}` : trailerUrl;
+  const href = trailerKey
+    ? `https://www.youtube.com/watch?v=${trailerKey}`
+    : trailerUrl;
   if (!href) return null;
   return (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
+      className="ds-tap inline-flex items-center gap-2 font-medium transition-colors"
+      style={{
+        padding: "6px 12px",
+        height: 32,
+        borderRadius: 6,
+        background: "var(--ds-bg-2)",
+        color: "var(--ds-fg)",
+        border: "1px solid var(--ds-border)",
+        fontSize: 13,
+      }}
     >
-      <Button
-        variant="outline"
-        className="gap-2 border-zinc-600 text-zinc-300 hover:text-white hover:border-zinc-400"
-      >
-        <Play className="w-4 h-4" />
-        Watch Trailer
-      </Button>
+      <Play style={{ width: 14, height: 14 }} />
+      Watch Trailer
     </a>
   );
 }

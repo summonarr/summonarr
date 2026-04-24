@@ -9,6 +9,7 @@ import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
+import { PageHeader } from "@/components/ui/design";
 
 function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): TmdbMedia[] {
   const colon = ratingFilter.indexOf(":");
@@ -96,9 +97,9 @@ export default async function TVPage({
   }
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">TV Shows</h1>
+      <PageHeader title="TV Shows" />
       <BrowseGrid
         mediaType="tv"
         initialItems={items}

@@ -15,20 +15,35 @@ export type TabId = typeof TABS[number]["id"];
 
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
   return (
-    <nav className="flex gap-0.5 border-b border-zinc-800">
-      {TABS.map(({ id, label }) => (
-        <Link
-          key={id}
-          href={`/settings?tab=${id}`}
-          className={`px-4 py-2.5 text-sm font-medium rounded-t-md transition-colors border-b-2 -mb-px ${
-            activeTab === id
-              ? "border-indigo-500 text-white bg-zinc-900/50"
-              : "border-transparent text-zinc-500 hover:text-zinc-300"
-          }`}
-        >
-          {label}
-        </Link>
-      ))}
+    <nav
+      className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+      style={{
+        padding: 2,
+        background: "var(--ds-bg-1)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+        width: "fit-content",
+      }}
+    >
+      {TABS.map(({ id, label }) => {
+        const active = activeTab === id;
+        return (
+          <Link
+            key={id}
+            href={`/settings?tab=${id}`}
+            className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+            style={{
+              padding: "5px 14px",
+              borderRadius: 6,
+              fontSize: 12,
+              background: active ? "var(--ds-bg-3)" : "transparent",
+              color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+            }}
+          >
+            {label}
+          </Link>
+        );
+      })}
     </nav>
   );
 }

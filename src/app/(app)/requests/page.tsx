@@ -1,11 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { Badge } from "@/components/ui/badge";
 import { Film, Tv2 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import type { Prisma } from "@/generated/prisma";
@@ -13,14 +11,16 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { Chip, PageHeader } from "@/components/ui/design";
+import type { ChipTone } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
-const STATUS_STYLES: Record<string, string> = {
-  PENDING:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  APPROVED:  "bg-green-500/10 text-green-400 border-green-500/20",
-  DECLINED:  "bg-red-500/10 text-red-400 border-red-500/20",
-  AVAILABLE: "bg-indigo-500/10 text-indigo-400 border-indigo-500/20",
+const STATUS_TONE: Record<string, ChipTone> = {
+  PENDING: "pending",
+  APPROVED: "approved",
+  DECLINED: "declined",
+  AVAILABLE: "accent",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -124,16 +124,18 @@ export default async function RequestsPage({
 
   const hasFilters = status !== null || sort !== "newest" || q !== "";
 
-  return (
-    <div>
-      <LiveRefresh on={["request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">My Requests</h1>
-      <p className="text-zinc-400 text-sm mb-6">
-        {total} request{total !== 1 ? "s" : ""}
-        {hasFilters && totalAllStatuses !== total ? ` (of ${totalAllStatuses} total)` : ""}
-      </p>
+  const subtitle =
+    `${total} request${total !== 1 ? "s" : ""}` +
+    (hasFilters && totalAllStatuses !== total
+      ? ` (of ${totalAllStatuses} total)`
+      : "");
 
-      <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
+  return (
+    <div className="ds-page-enter">
+      <LiveRefresh on={["request:updated", "request:deleted"]} />
+      <PageHeader title="My Requests" subtitle={subtitle} />
+
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
         <FilterPills
           param="status"
           active={status ?? ""}
@@ -166,14 +168,24 @@ export default async function RequestsPage({
       </div>
 
       {total === 0 ? (
-        <div className="rounded-lg bg-zinc-900 border border-zinc-800 p-10 text-center text-zinc-500 text-sm">
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
           {hasFilters
             ? "No requests match these filters."
             : "No requests yet. Find something on Discover, Movies, or TV and hit Request."}
         </div>
       ) : (
         <>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col" style={{ gap: 8 }}>
             {requests.map((r) => {
               const poster = posterUrl(r.posterPath, "w342");
               const availability = availabilityByKey.get(
@@ -182,92 +194,167 @@ export default async function RequestsPage({
               return (
                 <div
                   key={r.id}
-                  className="flex items-start gap-4 rounded-lg bg-zinc-900 border border-zinc-800 p-4"
+                  className="flex items-start"
+                  style={{
+                    gap: 14,
+                    padding: 14,
+                    background: "var(--ds-bg-2)",
+                    border: "1px solid var(--ds-border)",
+                    borderRadius: 8,
+                  }}
                 >
                   <Link
-                    href={r.mediaType === "MOVIE" ? `/movie/${r.tmdbId}` : `/tv/${r.tmdbId}`}
-                    className="flex items-start gap-4 flex-1 min-w-0 group"
+                    href={
+                      r.mediaType === "MOVIE"
+                        ? `/movie/${r.tmdbId}`
+                        : `/tv/${r.tmdbId}`
+                    }
+                    className="flex items-start flex-1 min-w-0 group"
+                    style={{ gap: 14 }}
                   >
-                  <div className="relative w-12 h-16 shrink-0 rounded bg-zinc-700 overflow-hidden">
-                    {poster ? (
-                      <Image src={poster} alt={r.title} fill className="object-cover" sizes="48px" />
-                    ) : (
-                      <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                        {r.mediaType === "MOVIE" ? <Film className="w-5 h-5" /> : <Tv2 className="w-5 h-5" />}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-white truncate group-hover:text-indigo-400 transition-colors">{r.title}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-xs text-zinc-400">
-                        {r.mediaType === "MOVIE" ? "Movie" : "TV Show"}
-                        {r.releaseYear ? ` · ${r.releaseYear}` : ""}
-                      </span>
-                      <span className="text-zinc-600 text-xs">·</span>
-                      <span className="text-xs text-zinc-500">
-                        {new Date(r.createdAt).toLocaleDateString()}
-                      </span>
+                    <div
+                      className="relative shrink-0 overflow-hidden"
+                      style={{
+                        width: 44,
+                        aspectRatio: "2 / 3",
+                        borderRadius: 4,
+                        background: "var(--ds-bg-3)",
+                      }}
+                    >
+                      {poster ? (
+                        <Image
+                          src={poster}
+                          alt={r.title}
+                          fill
+                          className="object-cover"
+                          sizes="44px"
+                        />
+                      ) : (
+                        <div
+                          className="absolute inset-0 flex items-center justify-center"
+                          style={{ color: "var(--ds-fg-subtle)" }}
+                        >
+                          {r.mediaType === "MOVIE" ? (
+                            <Film style={{ width: 16, height: 16 }} />
+                          ) : (
+                            <Tv2 style={{ width: 16, height: 16 }} />
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <AvailabilityBadges
-                      plexAvailable={availability?.plexAvailable}
-                      jellyfinAvailable={availability?.jellyfinAvailable}
-                      arrPending={availability?.arrPending}
-                      requested={availability?.requested}
-                      showPlex={showPlex}
-                      showJellyfin={showJellyfin}
-                      className="mt-1.5"
-                    />
-                    {r.note && (
-                      <p className="mt-1.5 text-xs text-zinc-400 bg-zinc-800 rounded px-2 py-1 border-l-2 border-indigo-500/50">
-                        &quot;{r.note}&quot;
+
+                    <div className="flex-1 min-w-0">
+                      <p
+                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent)]"
+                        style={{ fontSize: 14, color: "var(--ds-fg)" }}
+                      >
+                        {r.title}
                       </p>
-                    )}
-                  </div>
+                      <div
+                        className="ds-mono flex items-center"
+                        style={{
+                          gap: 6,
+                          fontSize: 10.5,
+                          color: "var(--ds-fg-subtle)",
+                          marginTop: 2,
+                        }}
+                      >
+                        <span>
+                          {r.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                          {r.releaseYear ? ` · ${r.releaseYear}` : ""}
+                        </span>
+                        <span>·</span>
+                        <span>{new Date(r.createdAt).toLocaleDateString()}</span>
+                      </div>
+                      <AvailabilityBadges
+                        plexAvailable={availability?.plexAvailable}
+                        jellyfinAvailable={availability?.jellyfinAvailable}
+                        arrPending={availability?.arrPending}
+                        requested={availability?.requested}
+                        showPlex={showPlex}
+                        showJellyfin={showJellyfin}
+                        className="mt-1.5"
+                      />
+                      {r.note && (
+                        <p
+                          style={{
+                            marginTop: 8,
+                            padding: "6px 10px",
+                            borderRadius: 4,
+                            background: "var(--ds-bg-1)",
+                            borderLeft:
+                              "2px solid var(--ds-accent-ring)",
+                            fontSize: 11.5,
+                            color: "var(--ds-fg-muted)",
+                          }}
+                        >
+                          &quot;{r.note}&quot;
+                        </p>
+                      )}
+                    </div>
                   </Link>
 
-                  <Badge className={`shrink-0 border text-xs font-medium ${STATUS_STYLES[r.status]}`}>
+                  <Chip tone={STATUS_TONE[r.status]}>
                     {STATUS_LABEL[r.status]}
-                  </Badge>
+                  </Chip>
                 </div>
               );
             })}
           </div>
 
           {totalPages > 1 && (
-            <div className="flex items-center justify-between mt-6">
-              <p className="text-xs text-zinc-500">
+            <div
+              className="flex items-center justify-between"
+              style={{ marginTop: 24 }}
+            >
+              <p
+                className="ds-mono"
+                style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+              >
                 Page {page} of {totalPages}
               </p>
               <div className="flex items-center gap-2">
-                {page > 1 ? (
-                  <Link href={pageHref(page - 1)}>
-                    <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white">
-                      Previous
-                    </Button>
-                  </Link>
-                ) : (
-                  <Button size="sm" variant="outline" disabled className="h-7 px-3 text-xs border-zinc-700 opacity-40">
-                    Previous
-                  </Button>
-                )}
-                {page < totalPages ? (
-                  <Link href={pageHref(page + 1)}>
-                    <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white">
-                      Next
-                    </Button>
-                  </Link>
-                ) : (
-                  <Button size="sm" variant="outline" disabled className="h-7 px-3 text-xs border-zinc-700 opacity-40">
-                    Next
-                  </Button>
-                )}
+                <PagerLink href={page > 1 ? pageHref(page - 1) : undefined}>
+                  Previous
+                </PagerLink>
+                <PagerLink
+                  href={page < totalPages ? pageHref(page + 1) : undefined}
+                >
+                  Next
+                </PagerLink>
               </div>
             </div>
           )}
         </>
       )}
     </div>
+  );
+}
+
+function PagerLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children: React.ReactNode;
+}) {
+  const style: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0 12px",
+    height: 28,
+    borderRadius: 6,
+    border: "1px solid var(--ds-border)",
+    background: href ? "var(--ds-bg-2)" : "transparent",
+    color: href ? "var(--ds-fg-muted)" : "var(--ds-fg-disabled)",
+    fontSize: 11,
+    fontWeight: 500,
+  };
+  if (!href) return <span style={style}>{children}</span>;
+  return (
+    <Link href={href} style={style}>
+      {children}
+    </Link>
   );
 }

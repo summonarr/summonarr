@@ -1,13 +1,13 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { Card } from "@/components/ui/card";
 import Link from "next/link";
 import { WarmCacheButton } from "@/components/admin/warm-cache-button";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
+import { PageHeader } from "@/components/ui/design";
 
 const LIBRARY_REFRESH_THRESHOLD = 5 * 24 * 60 * 60 * 1000;
 
@@ -170,15 +170,26 @@ function folderOf(filePath: string): string {
   return filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, "");
 }
 
-function TypeTab({ label, href, active }: { label: string; href: string; active: boolean }) {
+function TypeTab({
+  label,
+  href,
+  active,
+}: {
+  label: string;
+  href: string;
+  active: boolean;
+}) {
   return (
     <Link
       href={href}
-      className={`px-4 py-1.5 rounded-full text-sm font-medium transition-colors ${
-        active
-          ? "bg-indigo-600 text-white"
-          : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-      }`}
+      className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+      style={{
+        padding: "5px 12px",
+        borderRadius: 6,
+        fontSize: 12,
+        background: active ? "var(--ds-bg-3)" : "transparent",
+        color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+      }}
     >
       {label}
     </Link>
@@ -395,60 +406,133 @@ export default async function LibraryDiffPage({
   }));
 
   const stats = [
-    { label: "Plex Library",     value: plexItems.length,     color: "text-yellow-400" },
-    { label: "Jellyfin Library", value: jellyfinItems.length, color: "text-purple-400" },
-    { label: "In Sync",          value: inSyncCount,          color: "text-green-400"  },
-    { label: "Differences",      value: rawOnlyPlex.length + rawOnlyJellyfin.length, color: "text-red-400" },
-    { label: "Bad Matches",      value: allRawBadMatches.length, color: "text-orange-400" },
+    { label: "Plex Library",     value: plexItems.length,     color: "var(--ds-plex)" },
+    { label: "Jellyfin Library", value: jellyfinItems.length, color: "var(--ds-jellyfin)" },
+    { label: "In Sync",          value: inSyncCount,          color: "var(--ds-success)"  },
+    { label: "Differences",      value: rawOnlyPlex.length + rawOnlyJellyfin.length, color: "var(--ds-danger)" },
+    { label: "Bad Matches",      value: allRawBadMatches.length, color: "var(--ds-warning)" },
   ];
 
   return (
-    <div>
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="text-2xl font-bold mb-1">Library Diff</h1>
-          <p className="text-zinc-400 text-sm">
-            Media present on one server but missing from the other.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <ResyncLibraryButton />
-          <SyncTVEpisodesButton />
-          <WarmCacheButton uncachedCount={uncachedCount} />
-        </div>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Library Diff"
+        subtitle="Media present on one server but missing from the other."
+        right={
+          <div className="flex items-center gap-2 flex-wrap">
+            <ResyncLibraryButton />
+            <SyncTVEpisodesButton />
+            <WarmCacheButton uncachedCount={uncachedCount} />
+          </div>
+        }
+      />
 
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+      <div
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5"
+        style={{ gap: 10, marginBottom: 20 }}
+      >
         {stats.map((s) => (
-          <Card key={s.label} className="bg-zinc-900 border-zinc-800 p-4">
-            <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{s.label}</p>
-            <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
-          </Card>
+          <div
+            key={s.label}
+            style={{
+              padding: "14px 16px",
+              background: "var(--ds-bg-2)",
+              border: "1px solid var(--ds-border)",
+              borderRadius: 8,
+            }}
+          >
+            <p
+              className="ds-mono uppercase"
+              style={{
+                fontSize: 10.5,
+                color: "var(--ds-fg-subtle)",
+                letterSpacing: "0.08em",
+                margin: "0 0 6px",
+              }}
+            >
+              {s.label}
+            </p>
+            <p
+              className="font-semibold"
+              style={{
+                fontSize: 22,
+                color: s.color,
+                margin: 0,
+                letterSpacing: "-0.02em",
+              }}
+            >
+              {s.value}
+            </p>
+          </div>
         ))}
       </div>
 
       {libraryCapped && (
-        <div className="mb-4 px-4 py-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-sm">
-          Library exceeds {LIBRARY_ITEM_CAP.toLocaleString()} items — results are truncated and the diff may be incomplete.
+        <div
+          style={{
+            marginBottom: 16,
+            padding: "10px 14px",
+            borderRadius: 8,
+            background:
+              "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+            border:
+              "1px solid color-mix(in oklab, var(--ds-warning) 30%, transparent)",
+            color: "var(--ds-warning)",
+            fontSize: 12.5,
+          }}
+        >
+          Library exceeds {LIBRARY_ITEM_CAP.toLocaleString()} items — results are
+          truncated and the diff may be incomplete.
         </div>
       )}
 
       {neither ? (
-        <Card className="bg-zinc-900 border-zinc-800 p-8 text-center text-zinc-500 text-sm">
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
           Neither Plex nor Jellyfin has been synced yet.{" "}
-          <Link href="/admin" className="text-indigo-400 hover:underline">Run a sync</Link> first.
-        </Card>
+          <Link
+            href="/admin"
+            className="hover:underline"
+            style={{ color: "var(--ds-accent)" }}
+          >
+            Run a sync
+          </Link>{" "}
+          first.
+        </div>
       ) : (
         <>
-          <div className="flex items-center gap-2 mb-6">
-            <TypeTab label={`All (${rawOnlyPlex.length + rawOnlyJellyfin.length})`} href="/admin/library" active={!activeType} />
+          <div
+            className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+            style={{
+              padding: 2,
+              background: "var(--ds-bg-1)",
+              border: "1px solid var(--ds-border)",
+              borderRadius: 8,
+              marginBottom: 24,
+              width: "fit-content",
+            }}
+          >
             <TypeTab
-              label={`Movies (${rawOnlyPlex.filter(i => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter(i => i.mediaType === "MOVIE").length})`}
+              label={`All (${rawOnlyPlex.length + rawOnlyJellyfin.length})`}
+              href="/admin/library"
+              active={!activeType}
+            />
+            <TypeTab
+              label={`Movies (${rawOnlyPlex.filter((i) => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter((i) => i.mediaType === "MOVIE").length})`}
               href="/admin/library?type=movie"
               active={activeType === "MOVIE"}
             />
             <TypeTab
-              label={`TV Shows (${rawOnlyPlex.filter(i => i.mediaType === "TV").length + rawOnlyJellyfin.filter(i => i.mediaType === "TV").length})`}
+              label={`TV Shows (${rawOnlyPlex.filter((i) => i.mediaType === "TV").length + rawOnlyJellyfin.filter((i) => i.mediaType === "TV").length})`}
               href="/admin/library?type=tv"
               active={activeType === "TV"}
             />

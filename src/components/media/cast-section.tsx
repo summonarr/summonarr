@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";
 import type { CastMember, PersonDetails, PersonCredit } from "@/lib/tmdb-types";
@@ -117,16 +116,42 @@ export function CastSection({ cast }: CastSectionProps) {
 
   return (
     <>
-      <div className="px-6 pb-10">
-        <h2 className="text-lg font-semibold text-white mb-4">Cast</h2>
+      <section style={{ padding: "0 16px 32px" }}>
+        <h2
+          className="section-title font-semibold"
+          style={{
+            fontSize: 15,
+            letterSpacing: "-0.01em",
+            color: "var(--ds-fg)",
+            margin: "0 0 12px",
+          }}
+        >
+          Cast
+        </h2>
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-12 2xl:grid-cols-16 gap-3">
           {cast.map((member) => (
             <button
               key={member.id}
+              type="button"
               onClick={() => openActor(member)}
-              className="flex flex-col items-center gap-1.5 text-center group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 rounded-lg p-1"
+              className="flex flex-col items-center text-center group rounded-lg focus-visible:outline-none focus-visible:ring-2"
+              style={{
+                gap: 6,
+                padding: 4,
+                background: "transparent",
+                border: 0,
+                color: "var(--ds-fg)",
+              }}
             >
-              <div className="relative w-14 h-14 rounded-full overflow-hidden bg-zinc-700 shrink-0 ring-2 ring-transparent group-hover:ring-indigo-500 transition-all">
+              <div
+                className="relative shrink-0 overflow-hidden rounded-full transition-all"
+                style={{
+                  width: 56,
+                  height: 56,
+                  background: "var(--ds-bg-3)",
+                  boxShadow: "0 0 0 2px transparent",
+                }}
+              >
                 {member.profilePath ? (
                   <Image
                     src={`https://image.tmdb.org/t/p/w185${member.profilePath}`}
@@ -136,17 +161,30 @@ export function CastSection({ cast }: CastSectionProps) {
                     className="object-cover"
                   />
                 ) : (
-                  <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
-                    <User className="w-6 h-6" />
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ color: "var(--ds-fg-subtle)" }}
+                  >
+                    <User style={{ width: 22, height: 22 }} />
                   </div>
                 )}
               </div>
               <div>
-                <p className="text-xs font-medium text-white leading-tight line-clamp-2 group-hover:text-indigo-400 transition-colors">
+                <p
+                  className="font-medium leading-tight line-clamp-2 transition-colors group-hover:text-[var(--ds-accent)]"
+                  style={{ fontSize: 12, color: "var(--ds-fg)" }}
+                >
                   {member.name}
                 </p>
                 {member.character && (
-                  <p className="text-[10px] text-zinc-400 leading-tight line-clamp-1 mt-0.5">
+                  <p
+                    className="leading-tight line-clamp-1"
+                    style={{
+                      fontSize: 10,
+                      color: "var(--ds-fg-subtle)",
+                      marginTop: 2,
+                    }}
+                  >
                     {member.character}
                   </p>
                 )}
@@ -154,7 +192,7 @@ export function CastSection({ cast }: CastSectionProps) {
             </button>
           ))}
         </div>
-      </div>
+      </section>
 
       {selectedActor && (
         <div
@@ -164,63 +202,162 @@ export function CastSection({ cast }: CastSectionProps) {
           aria-label={`Credits for ${selectedActor.name}`}
         >
           <div
-            className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+            className="absolute inset-0 backdrop-blur-sm"
+            style={{ background: "rgba(0,0,0,0.7)" }}
             onClick={close}
           />
 
-          <div className="relative z-10 w-full sm:max-w-2xl xl:max-w-5xl 2xl:max-w-6xl max-h-[85vh] bg-zinc-900 rounded-t-2xl sm:rounded-2xl overflow-hidden flex flex-col shadow-2xl border border-zinc-700/50">
-            <div className="flex items-center gap-4 p-5 border-b border-zinc-800">
-              <div className="relative w-16 h-16 rounded-full overflow-hidden bg-zinc-700 shrink-0">
+          <div
+            className="relative z-10 w-full sm:max-w-2xl xl:max-w-5xl 2xl:max-w-6xl max-h-[85vh] overflow-hidden flex flex-col"
+            style={{
+              background: "var(--ds-bg-1)",
+              border: "1px solid var(--ds-border)",
+              borderTopLeftRadius: 16,
+              borderTopRightRadius: 16,
+              borderBottomLeftRadius: 0,
+              borderBottomRightRadius: 0,
+              boxShadow: "var(--ds-shadow-lg)",
+            }}
+          >
+            <div
+              className="flex items-center gap-4"
+              style={{
+                padding: 18,
+                borderBottom: "1px solid var(--ds-border)",
+              }}
+            >
+              <div
+                className="relative rounded-full overflow-hidden shrink-0"
+                style={{
+                  width: 56,
+                  height: 56,
+                  background: "var(--ds-bg-3)",
+                  border: "1px solid var(--ds-border)",
+                }}
+              >
                 {selectedActor.profilePath ? (
                   <Image
                     src={`https://image.tmdb.org/t/p/w185${selectedActor.profilePath}`}
                     alt={selectedActor.name}
                     fill
-                    sizes="64px"
+                    sizes="56px"
                     className="object-cover"
                   />
                 ) : (
-                  <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
-                    <User className="w-8 h-8" />
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ color: "var(--ds-fg-subtle)" }}
+                  >
+                    <User style={{ width: 28, height: 28 }} />
                   </div>
                 )}
               </div>
               <div className="flex-1 min-w-0">
-                <h3 className="text-lg font-bold text-white">{selectedActor.name}</h3>
-                <p className="text-sm text-zinc-400">
-                  as <span className="text-zinc-300 italic">{selectedActor.character}</span>
+                <h3
+                  className="font-bold"
+                  style={{
+                    fontSize: 18,
+                    letterSpacing: "-0.01em",
+                    color: "var(--ds-fg)",
+                    margin: 0,
+                  }}
+                >
+                  {selectedActor.name}
+                </h3>
+                <p
+                  style={{
+                    fontSize: 13,
+                    color: "var(--ds-fg-muted)",
+                    margin: "2px 0 0",
+                  }}
+                >
+                  as{" "}
+                  <span className="italic" style={{ color: "var(--ds-fg)" }}>
+                    {selectedActor.character}
+                  </span>
                 </p>
                 {personData && (
-                  <p className="text-xs text-zinc-500 mt-0.5">{personData.knownForDepartment}</p>
+                  <p
+                    className="ds-mono"
+                    style={{
+                      fontSize: 10.5,
+                      color: "var(--ds-fg-subtle)",
+                      marginTop: 2,
+                    }}
+                  >
+                    {personData.knownForDepartment}
+                  </p>
                 )}
               </div>
               <button
+                type="button"
                 onClick={close}
-                className="p-2 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors shrink-0"
+                className="ds-tap rounded-full transition-colors shrink-0 inline-flex items-center justify-center"
+                style={{
+                  width: 32,
+                  height: 32,
+                  background: "transparent",
+                  color: "var(--ds-fg-muted)",
+                  border: 0,
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--ds-bg-3)";
+                  e.currentTarget.style.color = "var(--ds-fg)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = "var(--ds-fg-muted)";
+                }}
               >
-                <X className="w-5 h-5" />
+                <X style={{ width: 18, height: 18 }} />
               </button>
             </div>
 
-            <div className="overflow-y-auto flex-1 p-5">
+            <div
+              className="overflow-y-auto flex-1"
+              style={{ padding: 18 }}
+            >
               {loading && (
                 <div className="flex flex-col gap-3">
-                  <p className="text-sm text-zinc-400">Loading filmography…</p>
+                  <p
+                    className="ds-mono"
+                    style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+                  >
+                    Loading filmography…
+                  </p>
                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3">
                     {Array.from({ length: 8 }).map((_, i) => (
-                      <div key={i} className="aspect-[2/3] rounded-lg bg-zinc-800 animate-pulse" />
+                      <div
+                        // biome-ignore lint/suspicious/noArrayIndexKey: placeholder skeletons never reorder
+                        key={i}
+                        className="aspect-[2/3] rounded-lg animate-pulse"
+                        style={{ background: "var(--ds-bg-2)" }}
+                      />
                     ))}
                   </div>
                 </div>
               )}
 
               {!loading && personData && personData.credits.length === 0 && (
-                <p className="text-sm text-zinc-400">No recent credits found.</p>
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+                >
+                  No recent credits found.
+                </p>
               )}
 
               {!loading && personData && personData.credits.length > 0 && (
                 <>
-                  <p className="text-xs text-zinc-500 mb-3 uppercase tracking-wide font-medium">
+                  <p
+                    className="ds-mono uppercase font-medium"
+                    style={{
+                      fontSize: 10.5,
+                      color: "var(--ds-fg-subtle)",
+                      marginBottom: 10,
+                      letterSpacing: "0.08em",
+                    }}
+                  >
                     Recent filmography
                   </p>
                   <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7 gap-3">
@@ -247,9 +384,17 @@ export function CastSection({ cast }: CastSectionProps) {
                           role="button"
                           tabIndex={0}
                           onKeyDown={(e) => e.key === "Enter" && handleCreditClick(credit)}
-                          className="group flex flex-col rounded-lg overflow-hidden bg-zinc-800 text-left hover:scale-[1.03] transition-transform cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                          className="group flex flex-col overflow-hidden text-left cursor-pointer ds-card-lift focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                          style={{
+                            background: "var(--ds-bg-2)",
+                            border: "1px solid var(--ds-border)",
+                            borderRadius: 8,
+                          }}
                         >
-                          <div className="relative aspect-[2/3] w-full bg-zinc-700">
+                          <div
+                            className="relative aspect-[2/3] w-full"
+                            style={{ background: "var(--ds-bg-3)" }}
+                          >
                             {credit.posterPath ? (
                               <Image
                                 src={`https://image.tmdb.org/t/p/w342${credit.posterPath}`}
@@ -328,15 +473,20 @@ export function CastSection({ cast }: CastSectionProps) {
                             )}
                           </div>
 
-                          <div className="p-2 flex flex-col gap-1">
-                            <p className="text-xs font-medium text-white leading-tight line-clamp-2">{credit.title}</p>
-                            <div className="flex items-center gap-1 flex-wrap">
-                              {credit.releaseYear && (
-                                <span className="text-[10px] text-zinc-400">{credit.releaseYear}</span>
-                              )}
-                              <Badge variant="secondary" className="text-[9px] px-1 py-0 h-3.5 bg-zinc-700 text-zinc-300 border-0">
-                                {credit.mediaType === "movie" ? "Movie" : "TV"}
-                              </Badge>
+                          <div className="flex flex-col" style={{ padding: 8, gap: 4 }}>
+                            <p
+                              className="font-medium leading-tight line-clamp-2"
+                              style={{ fontSize: 11.5, color: "var(--ds-fg)" }}
+                            >
+                              {credit.title}
+                            </p>
+                            <div
+                              className="ds-mono flex items-center flex-wrap"
+                              style={{ gap: 4, fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                            >
+                              {credit.releaseYear && <span>{credit.releaseYear}</span>}
+                              {credit.releaseYear && <span>·</span>}
+                              <span>{credit.mediaType === "movie" ? "MOVIE" : "TV"}</span>
                             </div>
                             <div className="min-h-[34px] flex items-start">
                               <RatingsBar

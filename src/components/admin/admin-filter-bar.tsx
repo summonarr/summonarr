@@ -36,22 +36,47 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentS
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      <div className="flex items-center gap-1 flex-wrap">
+      <div
+        className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+        style={{
+          padding: 2,
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 8,
+        }}
+      >
         {STATUS_TABS.map((tab) => {
           const count = tab.value ? (statusCounts[tab.value] ?? 0) : totalAll;
           const active = currentStatus === tab.value;
           return (
             <button
               key={tab.value}
+              type="button"
               onClick={() => navigate(tab.value, currentSort)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                active
-                  ? "bg-indigo-600 text-white"
-                  : "text-zinc-400 hover:text-white hover:bg-zinc-800"
-              }`}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
+              style={{
+                padding: "5px 12px",
+                borderRadius: 6,
+                border: 0,
+                fontSize: 12,
+                background: active ? "var(--ds-bg-3)" : "transparent",
+                color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                cursor: "pointer",
+              }}
             >
               {tab.label}
-              <span className={`text-[10px] tabular-nums ${active ? "text-indigo-200" : "text-zinc-600"}`}>
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 10,
+                  padding: "0 5px",
+                  borderRadius: 3,
+                  background: active
+                    ? "var(--ds-accent-soft)"
+                    : "var(--ds-bg-3)",
+                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                }}
+              >
                 {count}
               </span>
             </button>
@@ -62,7 +87,16 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentS
       <select
         value={currentSort}
         onChange={(e) => navigate(currentStatus, e.target.value)}
-        className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        className="focus:outline-none focus:ring-1"
+        style={{
+          padding: "5px 10px",
+          height: 30,
+          borderRadius: 6,
+          fontSize: 12,
+          background: "var(--ds-bg-2)",
+          color: "var(--ds-fg-muted)",
+          border: "1px solid var(--ds-border)",
+        }}
       >
         {SORT_OPTIONS.map((opt) => (
           <option key={opt.value} value={opt.value}>

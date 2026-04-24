@@ -257,7 +257,15 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   return (
     <div className="space-y-5">
       {hasExternalProviders && (
-        <div className="flex gap-1 p-1 bg-zinc-800 rounded-lg">
+        <div
+          className="flex gap-1"
+          style={{
+            padding: 2,
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+          }}
+        >
           {!localLoginDisabled && (
             <ProviderTab active={provider === "credentials"} onClick={() => switchProvider("credentials")}>
               Password
@@ -291,7 +299,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               signIn("oidc", { callbackUrl: callbackUrl });
             }}
             disabled={loading}
-            className="w-full bg-indigo-600 hover:bg-indigo-500"
+            className="w-full"
+            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
           >
             {loading ? (
               <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Redirecting…</>
@@ -325,10 +334,23 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
         <div className="space-y-4">
           <RememberMeCheckbox checked={rememberMe} onChange={setRememberMe} />
           {qcCode ? (
-            <div className="rounded-lg bg-zinc-800 border border-zinc-700 p-5 text-center space-y-3">
-              <p className="text-sm text-zinc-400">Enter this code in your Jellyfin app or server:</p>
-              <p className="text-4xl font-mono font-bold tracking-widest text-white">{qcCode}</p>
-              <div className="flex items-center justify-center gap-2 text-sm text-zinc-400">
+            <div
+              className="text-center space-y-3"
+              style={{
+                background: "var(--ds-bg-2)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: "var(--ds-r-md)",
+                padding: 20,
+              }}
+            >
+              <p className="text-sm m-0" style={{ color: "var(--ds-fg-muted)" }}>Enter this code in your Jellyfin app or server:</p>
+              <p
+                className="ds-mono m-0 font-bold tracking-widest"
+                style={{ fontSize: 32, color: "var(--ds-fg)" }}
+              >
+                {qcCode}
+              </p>
+              <div className="flex items-center justify-center gap-2 text-sm" style={{ color: "var(--ds-fg-muted)" }}>
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Waiting for approval…
               </div>
@@ -337,7 +359,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
             <Button
               onClick={handleQuickConnect}
               disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-500"
+              className="w-full"
+            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             >
               {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> : "Generate QuickConnect Code"}
             </Button>
@@ -417,7 +440,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
 
           <Button
             type="submit"
-            className="w-full bg-indigo-600 hover:bg-indigo-500"
+            className="w-full"
+            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             disabled={loading}
           >
             {loading ? "Signing in…" : "Sign in"}
@@ -451,9 +475,10 @@ function RememberMeCheckbox({
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
+        className="w-4 h-4 rounded"
+        style={{ accentColor: "var(--ds-accent)" }}
       />
-      <span className="text-sm text-zinc-400">Remember me</span>
+      <span className="text-sm" style={{ color: "var(--ds-fg-muted)" }}>Remember me</span>
     </label>
   );
 }
@@ -488,11 +513,14 @@ function ProviderTab({
     <button
       type="button"
       onClick={onClick}
-      className={`flex-1 rounded-md py-1.5 text-sm font-medium transition-colors ${
-        active
-          ? "bg-zinc-700 text-white"
-          : "text-zinc-400 hover:text-zinc-200"
-      }`}
+      className="flex-1 font-medium transition-colors"
+      style={{
+        padding: "6px 10px",
+        borderRadius: 6,
+        fontSize: 13,
+        background: active ? "var(--ds-bg-3)" : "transparent",
+        color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+      }}
     >
       {children}
     </button>

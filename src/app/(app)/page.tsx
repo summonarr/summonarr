@@ -18,6 +18,7 @@ import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
+import { PageHeader } from "@/components/ui/design";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -105,32 +106,39 @@ export default async function DiscoverPage({
   const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
   const trendingItems = project(trending,  emap, hideAvailable, trending.length);
-  const rails = [
-    { title: "Popular Movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
-    { title: "Popular TV",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
-    { title: "Upcoming Movies",  items: project(upMovies,  emap, hideAvailable, RAIL_SIZE) },
-    { title: "On The Air TV",    items: project(upTV,      emap, hideAvailable, RAIL_SIZE) },
-    { title: "Top Rated Movies", items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
-    { title: "Top Rated TV",     items: project(topTV,     emap, hideAvailable, RAIL_SIZE) },
+  const rails: { title: string; subtitle: string; href: string; items: TmdbMedia[] }[] = [
+    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
+    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
+    { title: "Upcoming Movies",  subtitle: "Hitting theaters soon",                 href: "/upcoming", items: project(upMovies,  emap, hideAvailable, RAIL_SIZE) },
+    { title: "On The Air TV",    subtitle: "New episodes this week",                href: "/upcoming", items: project(upTV,      emap, hideAvailable, RAIL_SIZE) },
+    { title: "Top Rated Movies", subtitle: "Highest-rated films of all time",       href: "/top",      items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
+    { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time",       href: "/top",      items: project(topTV,     emap, hideAvailable, RAIL_SIZE) },
   ];
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <h1 className="text-2xl font-bold mb-1">Discover</h1>
-      <p className="text-zinc-400 text-sm mb-4">Trending this week</p>
 
-      <Suspense>
-        <HideAvailableToggle active={hideAvailable} />
-      </Suspense>
+      <PageHeader
+        title="Discover"
+        subtitle="Trending this week"
+        right={
+          <Suspense>
+            <HideAvailableToggle active={hideAvailable} />
+          </Suspense>
+        }
+      />
 
       {trendingItems.length === 0 ? (
-        <div className="text-zinc-500 text-sm mb-10">
+        <div
+          className="ds-mono"
+          style={{ color: "var(--ds-fg-subtle)", fontSize: 12, marginBottom: 40 }}
+        >
           No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local to see trending content.
         </div>
       ) : (
-        <section className="mb-10">
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+        <section style={{ marginBottom: 40 }}>
+          <div className="ds-media-grid">
             {trendingItems.map((media) => (
               <MediaCard
                 key={`${media.mediaType}-${media.id}`}
@@ -148,6 +156,8 @@ export default async function DiscoverPage({
         <DiscoverRow
           key={rail.title}
           title={rail.title}
+          subtitle={rail.subtitle}
+          seeAllHref={rail.href}
           items={rail.items}
           showPlex={showPlex}
           showJellyfin={showJellyfin}

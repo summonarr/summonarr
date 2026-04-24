@@ -9,9 +9,11 @@ interface RequestActionsProps {
   requestId: string;
   currentStatus: string;
   existingAdminNote?: string | null;
+  /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
+  groupPendingIds?: string[];
 }
 
-export function RequestActions({ requestId, currentStatus, existingAdminNote }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
 
@@ -30,13 +32,20 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote }: 
     setLoading("NOTE");
     setReplySaved(false);
     try {
-      const res = await fetch(`/api/requests/${requestId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status, adminNote: replyText.trim() || undefined }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
+      const note = replyText.trim() || undefined;
+      const targetIds = groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : [requestId];
+      const results = await Promise.all(
+        targetIds.map((id) =>
+          fetch(`/api/requests/${id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status, adminNote: note }),
+          }),
+        ),
+      );
+      const failed = results.find((r) => !r.ok);
+      if (failed) {
+        const data = await failed.json().catch(() => ({}));
         setArrError((data as { error?: string }).error ?? "Failed to save reply");
         return;
       }
@@ -54,18 +63,30 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote }: 
     setRetryOk(false);
     setOptimisticStatus(newStatus);
     try {
-      const res = await fetch(`/api/requests/${requestId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus, ...(adminNote !== undefined ? { adminNote } : {}), ...(permanent !== undefined ? { permanent } : {}) }),
-      });
+      const isBatch = (groupPendingIds?.length ?? 0) > 1;
+      const res = isBatch
+        ? await fetch("/api/requests/batch", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ids: groupPendingIds,
+              status: newStatus,
+              ...(adminNote !== undefined ? { adminNote } : {}),
+              ...(permanent !== undefined ? { permanent } : {}),
+            }),
+          })
+        : await fetch(`/api/requests/${requestId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: newStatus, ...(adminNote !== undefined ? { adminNote } : {}), ...(permanent !== undefined ? { permanent } : {}) }),
+          });
       if (!res.ok) {
         setOptimisticStatus(null);
         const data = await res.json().catch(() => ({}));
         setArrError((data as { error?: string }).error ?? "Failed to update");
         return;
       }
-      const data: { arrError?: string } = await res.json();
+      const data: { arrError?: string } = await res.json().catch(() => ({}));
       if (data.arrError) setArrError(data.arrError);
       setShowDeclineNote(false);
       setDeclineNote("");

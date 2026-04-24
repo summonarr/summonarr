@@ -9,19 +9,39 @@ interface CollectionRowProps {
   showJellyfin?: boolean;
 }
 
-export function CollectionRow({ collectionName, items, currentId, showPlex, showJellyfin }: CollectionRowProps) {
+export function CollectionRow({
+  collectionName,
+  items,
+  currentId,
+  showPlex,
+  showJellyfin,
+}: CollectionRowProps) {
   const others = items.filter((m) => m.id !== currentId);
   if (others.length === 0) return null;
   return (
-    <div className="px-6 pb-10">
-      <h2 className="text-lg font-semibold text-white mb-4">{collectionName}</h2>
-      <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-hide lg:grid lg:grid-cols-6 lg:overflow-visible xl:grid-cols-8 2xl:grid-cols-10">
+    <section style={{ padding: "0 16px 32px" }}>
+      <h2
+        className="section-title font-semibold"
+        style={{
+          fontSize: 15,
+          letterSpacing: "-0.01em",
+          color: "var(--ds-fg)",
+          margin: "0 0 12px",
+        }}
+      >
+        {collectionName}
+      </h2>
+      <div className="ds-media-grid">
         {others.map((media) => (
-          <div key={`${media.mediaType}-${media.id}`} className="shrink-0 w-44 lg:w-auto lg:shrink">
-            <MediaCard media={media} size="md" showPlex={showPlex} showJellyfin={showJellyfin} />
-          </div>
+          <MediaCard
+            key={`${media.mediaType}-${media.id}`}
+            media={media}
+            size="md"
+            showPlex={showPlex}
+            showJellyfin={showJellyfin}
+          />
         ))}
       </div>
-    </div>
+    </section>
   );
 }

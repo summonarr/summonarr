@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { AlertTriangle, Loader2, X, ChevronDown } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
@@ -174,53 +173,167 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
 
   return (
     <>
-      <Button
-        variant="outline"
-        size="sm"
+      <button
+        type="button"
         onClick={openDialog}
-        className="gap-1.5 border-zinc-700 text-zinc-400 hover:text-amber-400 hover:border-amber-500/50"
+        className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+        style={{
+          padding: "6px 12px",
+          height: 32,
+          borderRadius: 6,
+          fontSize: 12,
+          background: "var(--ds-bg-2)",
+          color: "var(--ds-fg-muted)",
+          border: "1px solid var(--ds-border)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.color = "var(--ds-warning)";
+          e.currentTarget.style.borderColor =
+            "color-mix(in oklab, var(--ds-warning) 40%, transparent)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.color = "var(--ds-fg-muted)";
+          e.currentTarget.style.borderColor = "var(--ds-border)";
+        }}
       >
-        <AlertTriangle className="w-3.5 h-3.5" />
+        <AlertTriangle style={{ width: 14, height: 14 }} />
         Report Issue
-      </Button>
+      </button>
 
       {dialogState !== "idle" && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70"
-          onClick={(e) => { if (e.target === e.currentTarget) closeDialog(); }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.7)" }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) closeDialog();
+          }}
         >
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl w-full max-w-md">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-800">
+          <div
+            className="w-full max-w-md"
+            style={{
+              background: "var(--ds-bg-1)",
+              border: "1px solid var(--ds-border)",
+              borderRadius: 12,
+              boxShadow: "var(--ds-shadow-lg)",
+            }}
+          >
+            <div
+              className="flex items-center justify-between"
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid var(--ds-border)",
+              }}
+            >
               <div>
-                <h2 className="font-semibold text-white text-base">Report an Issue</h2>
-                <p className="text-xs text-zinc-500 mt-0.5 truncate max-w-72">{title}</p>
+                <h2
+                  className="font-semibold"
+                  style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
+                >
+                  Report an Issue
+                </h2>
+                <p
+                  className="ds-mono truncate max-w-72"
+                  style={{
+                    fontSize: 11,
+                    color: "var(--ds-fg-subtle)",
+                    margin: "2px 0 0",
+                  }}
+                >
+                  {title}
+                </p>
               </div>
               <button
+                type="button"
                 onClick={closeDialog}
-                disabled={dialogState === "submitting" || dialogState === "loading"}
-                className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40"
+                disabled={
+                  dialogState === "submitting" || dialogState === "loading"
+                }
+                className="inline-flex items-center justify-center rounded-full transition-colors disabled:opacity-40"
+                style={{
+                  width: 28,
+                  height: 28,
+                  background: "transparent",
+                  border: 0,
+                  color: "var(--ds-fg-muted)",
+                }}
               >
-                <X className="w-4 h-4" />
+                <X style={{ width: 14, height: 14 }} />
               </button>
             </div>
 
             {dialogState === "loading" && (
-              <div className="px-5 py-8 flex items-center justify-center gap-2 text-zinc-500 text-sm">
-                <Loader2 className="w-4 h-4 animate-spin" />
+              <div
+                className="ds-mono flex items-center justify-center"
+                style={{
+                  gap: 8,
+                  padding: "32px 20px",
+                  fontSize: 12,
+                  color: "var(--ds-fg-subtle)",
+                }}
+              >
+                <Loader2
+                  className="animate-spin"
+                  style={{
+                    width: 14,
+                    height: 14,
+                    color: "var(--ds-accent)",
+                  }}
+                />
                 Loading library info…
               </div>
             )}
 
             {dialogState === "submitted" && (
-              <div className="px-5 py-8 text-center">
-                <div className="w-10 h-10 rounded-full bg-amber-500/10 flex items-center justify-center mx-auto mb-3">
-                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+              <div
+                className="text-center"
+                style={{ padding: "32px 20px" }}
+              >
+                <div
+                  className="mx-auto flex items-center justify-center rounded-full"
+                  style={{
+                    width: 40,
+                    height: 40,
+                    marginBottom: 12,
+                    background:
+                      "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+                  }}
+                >
+                  <AlertTriangle
+                    style={{
+                      width: 20,
+                      height: 20,
+                      color: "var(--ds-warning)",
+                    }}
+                  />
                 </div>
-                <p className="font-medium text-white mb-1">Issue reported</p>
-                <p className="text-sm text-zinc-400">An admin will review it shortly.</p>
-                <Button onClick={closeDialog} size="sm" variant="outline" className="mt-5 border-zinc-700 text-zinc-400">
+                <p
+                  className="font-medium"
+                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: "0 0 4px" }}
+                >
+                  Issue reported
+                </p>
+                <p
+                  style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}
+                >
+                  An admin will review it shortly.
+                </p>
+                <button
+                  type="button"
+                  onClick={closeDialog}
+                  className="ds-tap inline-flex items-center justify-center font-medium transition-colors"
+                  style={{
+                    marginTop: 18,
+                    padding: "6px 14px",
+                    height: 30,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    background: "var(--ds-bg-2)",
+                    color: "var(--ds-fg)",
+                    border: "1px solid var(--ds-border)",
+                  }}
+                >
                   Close
-                </Button>
+                </button>
               </div>
             )}
 
@@ -331,25 +444,45 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
                 )}
 
                 <div className="flex justify-end gap-2 pt-1">
-                  <Button
+                  <button
                     type="button"
-                    variant="outline"
-                    size="sm"
                     onClick={closeDialog}
                     disabled={isSubmitting}
-                    className="border-zinc-700 text-zinc-400"
+                    className="inline-flex items-center justify-center font-medium transition-colors disabled:opacity-50"
+                    style={{
+                      padding: "6px 12px",
+                      height: 30,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      background: "transparent",
+                      color: "var(--ds-fg-muted)",
+                      border: "1px solid var(--ds-border)",
+                    }}
                   >
                     Cancel
-                  </Button>
-                  <Button
+                  </button>
+                  <button
                     type="submit"
-                    size="sm"
                     disabled={isSubmitting}
-                    className="bg-amber-600 hover:bg-amber-500 gap-1.5"
+                    className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors disabled:opacity-50"
+                    style={{
+                      padding: "6px 14px",
+                      height: 30,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      background: "var(--ds-warning)",
+                      color: "oklch(0.18 0 0)",
+                      border: "1px solid transparent",
+                    }}
                   >
-                    {isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    {isSubmitting && (
+                      <Loader2
+                        className="animate-spin"
+                        style={{ width: 12, height: 12 }}
+                      />
+                    )}
                     Submit Report
-                  </Button>
+                  </button>
                 </div>
               </form>
             )}

@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { TrashGuidesClient, type TrashSettings } from "@/components/admin/trash-guides-client";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -38,14 +39,26 @@ export default async function TrashGuidesPage() {
   const sonarrConfigured = !!(map.sonarrUrl && map.sonarrApiKey);
 
   return (
-    <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-1">TRaSH Guides</h1>
-        <p className="text-zinc-400 text-sm">
-          Sync recommended custom formats, quality profiles, naming schemes, and quality sizes from{" "}
-          <a href="https://trash-guides.info" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">trash-guides.info</a>.
-        </p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="TRaSH Guides"
+        subtitle={
+          <>
+            Sync recommended custom formats, quality profiles, naming schemes,
+            and quality sizes from{" "}
+            <a
+              href="https://trash-guides.info"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:underline"
+              style={{ color: "var(--ds-accent)" }}
+            >
+              trash-guides.info
+            </a>
+            .
+          </>
+        }
+      />
       <TrashGuidesClient
         initialSettings={settings}
         radarrConfigured={radarrConfigured}

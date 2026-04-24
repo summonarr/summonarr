@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -17,23 +18,45 @@ const VALID_ACTIONS: AuditAction[] = [
   "AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT",
 ];
 
+type AuditGroup = "auth" | "admin" | "system";
+
+// Coarser filter above per-action pills — server-side expansion to action IN-set
+const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
+  auth: ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT", "SESSION_REVOKE"],
+  admin: [
+    "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
+    "USER_ROLE_CHANGE", "USER_DELETE",
+    "SETTINGS_CHANGE", "MAINTENANCE_TOGGLE",
+    "BACKUP_EXPORT", "BACKUP_IMPORT",
+    "ISSUE_STATUS_CHANGE", "ISSUE_DELETE",
+    "RATINGS_CACHE_CLEAR",
+  ],
+  system: ["LIBRARY_SYNC", "CACHE_WARM"],
+};
+
 export default async function AuditLogPage({
   searchParams,
 }: {
-  searchParams: Promise<{ action?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string; hideCron?: string }>;
+  searchParams: Promise<{ action?: string; group?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string; hideCron?: string }>;
 }) {
   await requireFeature("feature.admin.auditLog");
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const { action: actionParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;
+  const { action: actionParam, group: groupParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;
   const action = VALID_ACTIONS.includes(actionParam as AuditAction)
     ? (actionParam as AuditAction)
     : undefined;
+  const group: AuditGroup | undefined =
+    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
+      ? groupParam
+      : undefined;
   const hideCron = hideCronParam === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
+  // Action is more specific than group — action wins if both are present
   if (action) where.action = action;
+  else if (group) where.action = { in: GROUP_ACTIONS[group] };
   if (dateFrom || dateTo) {
     where.createdAt = {};
     if (dateFrom) where.createdAt.gte = new Date(dateFrom);
@@ -70,17 +93,18 @@ export default async function AuditLogPage({
   }));
 
   return (
-    <div>
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold mb-1">Audit Log</h1>
-        <p className="text-zinc-400 text-sm">Track admin actions and system changes</p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Audit Log"
+        subtitle="Track admin actions and system changes"
+      />
 
       <AuditLogView
         initialLogs={rows}
         initialNextCursor={nextCursor}
         initialHasMore={hasMore}
         currentAction={action ?? ""}
+        currentGroup={group ?? ""}
         currentDateFrom={dateFrom ?? ""}
         currentDateTo={dateTo ?? ""}
         currentUser={user ?? ""}

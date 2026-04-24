@@ -1,8 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { IssueThread } from "@/components/issues/issue-thread";
 import Image from "next/image";
 import Link from "next/link";
@@ -11,16 +9,18 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
+import { Chip, PageHeader } from "@/components/ui/design";
+import type { ChipTone } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
 const VALID_ISSUE_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 
-const STATUS_STYLES: Record<string, string> = {
-  OPEN:        "bg-red-500/10 text-red-400 border-red-500/20",
-  IN_PROGRESS: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  RESOLVED:    "bg-green-500/10 text-green-400 border-green-500/20",
+const STATUS_TONE: Record<string, ChipTone> = {
+  OPEN: "declined",
+  IN_PROGRESS: "pending",
+  RESOLVED: "approved",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -133,17 +133,33 @@ export default async function IssuesPage({
 
   const hasFilters = status !== null || issueType !== null || q !== "";
 
+  const subtitle =
+    `${total} issue${total !== 1 ? "s" : ""} reported` +
+    (hasFilters && totalAllStatuses !== total
+      ? ` (of ${totalAllStatuses} total)`
+      : "");
+
   return (
-    <div>
-      <LiveRefresh on={["issue:updated", "issue:deleted", "issuemessage:created"]} />
-      <h1 className="text-2xl font-bold mb-1">My Issues</h1>
-      <p className="text-zinc-400 text-sm mb-2">
-        {total} issue{total !== 1 ? "s" : ""} reported
-        {hasFilters && totalAllStatuses !== total ? ` (of ${totalAllStatuses} total)` : ""}
-      </p>
-      <p className="text-xs text-zinc-500 mb-6">
-        To report a new issue, search for the movie or TV show using the search bar above, then click{" "}
-        <span className="text-zinc-400 font-medium">Report Issue</span> on its page.
+    <div className="ds-page-enter">
+      <LiveRefresh
+        on={["issue:updated", "issue:deleted", "issuemessage:created"]}
+      />
+      <PageHeader title="My Issues" subtitle={subtitle} />
+      <p
+        className="ds-mono"
+        style={{
+          fontSize: 11,
+          color: "var(--ds-fg-subtle)",
+          marginTop: -12,
+          marginBottom: 20,
+        }}
+      >
+        To report a new issue, search for the movie or TV show using the
+        search bar above, then click{" "}
+        <span style={{ color: "var(--ds-fg-muted)", fontWeight: 500 }}>
+          Report Issue
+        </span>{" "}
+        on its page.
       </p>
 
       {totalAllStatuses > 0 && (
@@ -184,7 +200,17 @@ export default async function IssuesPage({
       )}
 
       {total === 0 ? (
-        <div className="rounded-lg bg-zinc-900 border border-zinc-800 p-10 text-center text-zinc-500 text-sm">
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
           {hasFilters
             ? "No issues match these filters."
             : "No issues reported yet. Use the Report Issue button on any movie or TV show page."}
@@ -192,7 +218,7 @@ export default async function IssuesPage({
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col" style={{ gap: 8 }}>
               {issues.map((issue) => {
                 const poster = posterUrl(issue.posterPath, "w342");
                 const scopeLabel = scopeLabelFor(issue);
@@ -201,67 +227,148 @@ export default async function IssuesPage({
                 return (
                   <div
                     key={issue.id}
-                    className={`rounded-lg bg-zinc-900 border overflow-hidden transition-colors ${
-                      isSelected ? "border-indigo-500/50 xl:ring-1 xl:ring-indigo-500/30" : "border-zinc-800"
-                    }`}
+                    className="overflow-hidden"
+                    style={{
+                      background: "var(--ds-bg-2)",
+                      border: `1px solid ${
+                        isSelected
+                          ? "var(--ds-accent-ring)"
+                          : "var(--ds-border)"
+                      }`,
+                      borderRadius: 8,
+                      boxShadow: isSelected
+                        ? "0 0 0 1px var(--ds-accent-ring)"
+                        : "none",
+                      transition: "border-color 120ms var(--ds-ease)",
+                    }}
                   >
                     <Link
                       href={issueHref(issue.id)}
                       scroll={false}
-                      className="flex items-start gap-4 p-4 hover:bg-zinc-800/30 transition-colors"
+                      className="flex items-start transition-colors hover:bg-[var(--ds-bg-3)]"
+                      style={{ gap: 14, padding: 14 }}
                     >
-                      <div className="relative w-12 h-16 shrink-0 rounded bg-zinc-700 overflow-hidden">
+                      <div
+                        className="relative shrink-0 overflow-hidden"
+                        style={{
+                          width: 44,
+                          aspectRatio: "2 / 3",
+                          borderRadius: 4,
+                          background: "var(--ds-bg-3)",
+                        }}
+                      >
                         {poster ? (
-                          <Image src={poster} alt={issue.title} fill className="object-cover" sizes="48px" />
+                          <Image
+                            src={poster}
+                            alt={issue.title}
+                            fill
+                            className="object-cover"
+                            sizes="44px"
+                          />
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                            {issue.mediaType === "MOVIE" ? <Film className="w-5 h-5" /> : <Tv2 className="w-5 h-5" />}
+                          <div
+                            className="absolute inset-0 flex items-center justify-center"
+                            style={{ color: "var(--ds-fg-subtle)" }}
+                          >
+                            {issue.mediaType === "MOVIE" ? (
+                              <Film style={{ width: 16, height: 16 }} />
+                            ) : (
+                              <Tv2 style={{ width: 16, height: 16 }} />
+                            )}
                           </div>
                         )}
                       </div>
 
                       <div className="flex-1 min-w-0">
-                        <p className="font-medium text-white truncate">{issue.title}</p>
-                        <div className="flex items-center gap-2 mt-1 flex-wrap">
-                          <span className="text-xs text-zinc-400">
-                            {issue.mediaType === "MOVIE" ? "Movie" : "TV Show"}
+                        <p
+                          className="font-medium truncate"
+                          style={{ fontSize: 14, color: "var(--ds-fg)" }}
+                        >
+                          {issue.title}
+                        </p>
+                        <div
+                          className="flex items-center flex-wrap"
+                          style={{ gap: 6, marginTop: 4 }}
+                        >
+                          <span
+                            className="ds-mono"
+                            style={{
+                              fontSize: 10.5,
+                              color: "var(--ds-fg-subtle)",
+                            }}
+                          >
+                            {issue.mediaType === "MOVIE" ? "MOVIE" : "TV"}
                           </span>
-                          <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                            {ISSUE_TYPE_LABELS[issue.issueType] ?? issue.issueType}
-                          </Badge>
-                          {scopeLabel && (
-                            <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                              {scopeLabel}
-                            </Badge>
-                          )}
-                          <span className="text-xs text-zinc-600">
+                          <Chip>
+                            {ISSUE_TYPE_LABELS[issue.issueType] ??
+                              issue.issueType}
+                          </Chip>
+                          {scopeLabel && <Chip>{scopeLabel}</Chip>}
+                          <span
+                            className="ds-mono"
+                            style={{
+                              fontSize: 10.5,
+                              color: "var(--ds-fg-subtle)",
+                            }}
+                          >
                             {new Date(issue.updatedAt).toLocaleDateString()}
                           </span>
                         </div>
                         {issue.note && (
-                          <p className="mt-1.5 text-xs text-zinc-400 bg-zinc-800 rounded px-2 py-1 border-l-2 border-amber-500/40">
+                          <p
+                            style={{
+                              marginTop: 8,
+                              padding: "6px 10px",
+                              borderRadius: 4,
+                              background: "var(--ds-bg-1)",
+                              borderLeft:
+                                "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+                              fontSize: 11.5,
+                              color: "var(--ds-fg-muted)",
+                            }}
+                          >
                             {issue.note}
                           </p>
                         )}
                         {issue.resolution && (
-                          <p className="mt-1 text-xs text-green-400/80 italic">
+                          <p
+                            className="italic"
+                            style={{
+                              marginTop: 6,
+                              fontSize: 11.5,
+                              color:
+                                "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
+                            }}
+                          >
                             ↳ {issue.resolution}
                           </p>
                         )}
                         {issue._count.messages > 0 && (
-                          <p className="mt-1 text-xs text-indigo-400/70">
-                            {issue._count.messages} message{issue._count.messages !== 1 ? "s" : ""}
+                          <p
+                            className="ds-mono"
+                            style={{
+                              marginTop: 6,
+                              fontSize: 10.5,
+                              color:
+                                "color-mix(in oklab, var(--ds-accent) 80%, var(--ds-fg))",
+                            }}
+                          >
+                            {issue._count.messages} message
+                            {issue._count.messages !== 1 ? "s" : ""}
                           </p>
                         )}
                       </div>
 
-                      <Badge className={`shrink-0 border text-xs font-medium ${STATUS_STYLES[issue.status]}`}>
+                      <Chip tone={STATUS_TONE[issue.status]}>
                         {STATUS_LABEL[issue.status]}
-                      </Badge>
+                      </Chip>
                     </Link>
 
                     <div className="xl:hidden">
-                      <IssueThread issueId={issue.id} initialCount={issue._count.messages} />
+                      <IssueThread
+                        issueId={issue.id}
+                        initialCount={issue._count.messages}
+                      />
                     </div>
                   </div>
                 );
@@ -269,27 +376,31 @@ export default async function IssuesPage({
             </div>
 
             {totalPages > 1 && (
-              <div className="flex items-center justify-between mt-6">
-                <p className="text-xs text-zinc-500">Page {page} of {totalPages}</p>
+              <div
+                className="flex items-center justify-between"
+                style={{ marginTop: 24 }}
+              >
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+                >
+                  Page {page} of {totalPages}
+                </p>
                 <div className="flex items-center gap-2">
-                  {page > 1 ? (
-                    <Link href={buildHref({ page: page - 1 })}>
-                      <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white">
-                        Previous
-                      </Button>
-                    </Link>
-                  ) : (
-                    <Button size="sm" variant="outline" disabled className="h-7 px-3 text-xs border-zinc-700 opacity-40">Previous</Button>
-                  )}
-                  {page < totalPages ? (
-                    <Link href={buildHref({ page: page + 1 })}>
-                      <Button size="sm" variant="outline" className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white">
-                        Next
-                      </Button>
-                    </Link>
-                  ) : (
-                    <Button size="sm" variant="outline" disabled className="h-7 px-3 text-xs border-zinc-700 opacity-40">Next</Button>
-                  )}
+                  <IssuePagerLink
+                    href={page > 1 ? buildHref({ page: page - 1 }) : undefined}
+                  >
+                    Previous
+                  </IssuePagerLink>
+                  <IssuePagerLink
+                    href={
+                      page < totalPages
+                        ? buildHref({ page: page + 1 })
+                        : undefined
+                    }
+                  >
+                    Next
+                  </IssuePagerLink>
                 </div>
               </div>
             )}
@@ -297,66 +408,188 @@ export default async function IssuesPage({
 
           <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
             {selectedIssue ? (
-              <div className="h-full rounded-lg bg-zinc-900 border border-zinc-800 flex flex-col overflow-hidden">
-                <div className="flex-shrink-0 p-5 border-b border-zinc-800 overflow-y-auto">
-                  <div className="flex items-start gap-4">
-                    <div className="relative w-16 h-24 shrink-0 rounded bg-zinc-700 overflow-hidden">
+              <div
+                className="h-full flex flex-col overflow-hidden"
+                style={{
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 8,
+                }}
+              >
+                <div
+                  className="flex-shrink-0 overflow-y-auto"
+                  style={{
+                    padding: 18,
+                    borderBottom: "1px solid var(--ds-border)",
+                  }}
+                >
+                  <div className="flex items-start" style={{ gap: 14 }}>
+                    <div
+                      className="relative shrink-0 overflow-hidden"
+                      style={{
+                        width: 64,
+                        aspectRatio: "2 / 3",
+                        borderRadius: 4,
+                        background: "var(--ds-bg-3)",
+                      }}
+                    >
                       {(() => {
-                        const poster = posterUrl(selectedIssue.posterPath, "w342");
+                        const poster = posterUrl(
+                          selectedIssue.posterPath,
+                          "w342",
+                        );
                         return poster ? (
-                          <Image src={poster} alt={selectedIssue.title} fill className="object-cover" sizes="64px" />
+                          <Image
+                            src={poster}
+                            alt={selectedIssue.title}
+                            fill
+                            className="object-cover"
+                            sizes="64px"
+                          />
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                            {selectedIssue.mediaType === "MOVIE" ? <Film className="w-6 h-6" /> : <Tv2 className="w-6 h-6" />}
+                          <div
+                            className="absolute inset-0 flex items-center justify-center"
+                            style={{ color: "var(--ds-fg-subtle)" }}
+                          >
+                            {selectedIssue.mediaType === "MOVIE" ? (
+                              <Film style={{ width: 20, height: 20 }} />
+                            ) : (
+                              <Tv2 style={{ width: 20, height: 20 }} />
+                            )}
                           </div>
                         );
                       })()}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-white">{selectedIssue.title}</p>
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        <Badge className={`border text-[10px] font-medium ${STATUS_STYLES[selectedIssue.status]}`}>
+                      <p
+                        className="font-semibold"
+                        style={{ fontSize: 14, color: "var(--ds-fg)" }}
+                      >
+                        {selectedIssue.title}
+                      </p>
+                      <div
+                        className="flex items-center flex-wrap"
+                        style={{ gap: 6, marginTop: 4 }}
+                      >
+                        <Chip tone={STATUS_TONE[selectedIssue.status]}>
                           {STATUS_LABEL[selectedIssue.status]}
-                        </Badge>
-                        <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ?? selectedIssue.issueType}
-                        </Badge>
+                        </Chip>
+                        <Chip>
+                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??
+                            selectedIssue.issueType}
+                        </Chip>
                         {(() => {
                           const label = scopeLabelFor(selectedIssue);
-                          return label ? (
-                            <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                              {label}
-                            </Badge>
-                          ) : null;
+                          return label ? <Chip>{label}</Chip> : null;
                         })()}
                       </div>
-                      <p className="text-[11px] text-zinc-500 mt-1">
-                        Reported {new Date(selectedIssue.createdAt).toLocaleDateString()}
+                      <p
+                        className="ds-mono"
+                        style={{
+                          marginTop: 4,
+                          fontSize: 10.5,
+                          color: "var(--ds-fg-subtle)",
+                        }}
+                      >
+                        Reported{" "}
+                        {new Date(selectedIssue.createdAt).toLocaleDateString()}
                       </p>
                     </div>
                   </div>
                   {selectedIssue.note && (
-                    <p className="mt-3 text-xs text-zinc-300 bg-zinc-800/60 rounded px-3 py-2 border-l-2 border-amber-500/40 whitespace-pre-wrap">
+                    <p
+                      className="whitespace-pre-wrap"
+                      style={{
+                        marginTop: 12,
+                        padding: "8px 12px",
+                        borderRadius: 4,
+                        background: "var(--ds-bg-1)",
+                        borderLeft:
+                          "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+                        fontSize: 12,
+                        color: "var(--ds-fg-muted)",
+                      }}
+                    >
                       {selectedIssue.note}
                     </p>
                   )}
                   {selectedIssue.resolution && (
-                    <p className="mt-2 text-xs text-green-400/80 italic">
+                    <p
+                      className="italic"
+                      style={{
+                        marginTop: 8,
+                        fontSize: 12,
+                        color:
+                          "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
+                      }}
+                    >
                       Resolution: {selectedIssue.resolution}
                     </p>
                   )}
                 </div>
-                <IssueThread issueId={selectedIssue.id} initialCount={selectedIssue._count.messages} variant="panel" />
+                <IssueThread
+                  issueId={selectedIssue.id}
+                  initialCount={selectedIssue._count.messages}
+                  variant="panel"
+                />
               </div>
             ) : (
-              <div className="h-full rounded-lg bg-zinc-900 border border-zinc-800 border-dashed flex flex-col items-center justify-center text-center p-8">
-                <MessageSquare className="w-8 h-8 text-zinc-700 mb-3" />
-                <p className="text-sm text-zinc-500">Select an issue to view its thread</p>
+              <div
+                className="h-full flex flex-col items-center justify-center text-center"
+                style={{
+                  padding: 32,
+                  background: "var(--ds-bg-1)",
+                  border: "1px dashed var(--ds-border)",
+                  borderRadius: 8,
+                }}
+              >
+                <MessageSquare
+                  style={{
+                    width: 28,
+                    height: 28,
+                    color: "var(--ds-fg-disabled)",
+                    marginBottom: 12,
+                  }}
+                />
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+                >
+                  Select an issue to view its thread
+                </p>
               </div>
             )}
           </aside>
         </div>
       )}
     </div>
+  );
+}
+
+function IssuePagerLink({
+  href,
+  children,
+}: {
+  href?: string;
+  children: React.ReactNode;
+}) {
+  const style: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "0 12px",
+    height: 28,
+    borderRadius: 6,
+    border: "1px solid var(--ds-border)",
+    background: href ? "var(--ds-bg-2)" : "transparent",
+    color: href ? "var(--ds-fg-muted)" : "var(--ds-fg-disabled)",
+    fontSize: 11,
+    fontWeight: 500,
+  };
+  if (!href) return <span style={style}>{children}</span>;
+  return (
+    <Link href={href} style={style}>
+      {children}
+    </Link>
   );
 }

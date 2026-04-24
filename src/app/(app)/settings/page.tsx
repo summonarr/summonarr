@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
-import { Card } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/design";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, RatingsCacheClearButton, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
@@ -21,18 +21,24 @@ export const dynamic = "force-dynamic";
 function StatusBadge({ connected, label = "Connected" }: { connected: boolean; label?: string }) {
   if (connected) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 font-medium border border-green-500/20">
-        <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
+      <span className="ds-chip ds-chip-approved">
+        <span
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            background: "var(--ds-success)",
+          }}
+        />
         {label}
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500 font-medium border border-zinc-700">
-      Not configured
-    </span>
+    <span className="ds-chip">Not configured</span>
   );
 }
+
 
 const ALL_KEYS = [
   "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId",
@@ -226,33 +232,36 @@ export default async function SettingsPage({
   }
 
   return (
-    <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1">Settings</h1>
-        <p className="text-zinc-400 text-sm">Configure integrations and preferences</p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Settings"
+        subtitle="Configure integrations and preferences"
+      />
 
       <SettingsTabNav activeTab={tab} />
 
-      <div className="mt-6 space-y-4 max-w-3xl">
+      <div
+        className="max-w-3xl flex flex-col"
+        style={{ marginTop: 24, gap: 16 }}
+      >
 
         {tab === "site" && (
           <>
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">General</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">Basic branding for your instance.</p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>General</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Basic branding for your instance.</p>
               </div>
               <div className="space-y-6">
                 <SiteTitleForm initialTitle={cfg.siteTitle ?? ""} />
                 <SiteUrlForm initialUrl={cfg.siteUrl ?? ""} />
               </div>
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Rate Limiting</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Rate Limiting</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Maximum actions allowed per user within the time window. Set to 0 to disable.
                 </p>
               </div>
@@ -262,12 +271,12 @@ export default async function SettingsPage({
                 initialIssues={cfg.rateLimitIssues ?? ""}
                 initialMaxPushSubscriptions={cfg.maxPushSubscriptions ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Quotas</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Quotas</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Limit how many requests each user can submit in a rolling time period. Admins and quota-exempt users are never restricted.
                 </p>
               </div>
@@ -275,33 +284,33 @@ export default async function SettingsPage({
                 initialLimit={cfg.quotaLimit ?? ""}
                 initialPeriod={cfg.quotaPeriod ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Deletion Votes</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Deletion Votes</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Users can vote to remove items from the library. When an item reaches the threshold, admins are notified.
                 </p>
               </div>
               <DeletionVoteThresholdForm initialThreshold={cfg.deletionVoteThreshold ?? ""} />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Authentication</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Authentication</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Control which sign-in methods are available. External providers (Plex, Jellyfin, OIDC) are configured via environment variables.
                 </p>
               </div>
               <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
               <EnableMachineSessionToggle initialEnabled={cfg.enableMachineSession === "true"} />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Sessions</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sessions</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Control how long users stay logged in. The &quot;Remember me&quot; duration applies when users check that option at login.
                 </p>
               </div>
@@ -310,12 +319,12 @@ export default async function SettingsPage({
                 initialMobileDuration={cfg.sessionMobileDuration ?? ""}
                 initialMaxDuration={cfg.sessionMaxDuration ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Maintenance Mode</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Maintenance Mode</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   When enabled, non-admin users will see a maintenance page instead of the app.
                 </p>
               </div>
@@ -323,12 +332,12 @@ export default async function SettingsPage({
                 initialEnabled={cfg.maintenanceEnabled === "true"}
                 initialMessage={cfg.maintenanceMessage ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Message of the Day</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Message of the Day</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Optional popup shown to users once per session after login. Leave blank to disable.
                 </p>
               </div>
@@ -337,12 +346,12 @@ export default async function SettingsPage({
                 initialTitle={cfg.motdTitle ?? ""}
                 initialBody={cfg.motdBody ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Donations</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Donations</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Configure donation links shown to users on the Donate page.
                 </p>
               </div>
@@ -352,16 +361,16 @@ export default async function SettingsPage({
                 initialZelle={cfg.donationZelle ?? ""}
                 initialAmazon={cfg.donationAmazon ?? ""}
               />
-            </Card>
+            </div>
           </>
         )}
 
         {tab === "media" && (
           <>
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Plex</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Plex</h2>
                   <StatusBadge connected={!!cfg.plexAdminEmail} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -374,12 +383,12 @@ export default async function SettingsPage({
                 initialPlexLibraries={cfg.plexLibraries ?? ""}
                 siteUrl={cfg.siteUrl ?? process.env.NEXTAUTH_URL ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Jellyfin</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Jellyfin</h2>
                   <StatusBadge connected={!!(cfg.jellyfinUrl && cfg.jellyfinApiKey)} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -391,12 +400,12 @@ export default async function SettingsPage({
                 initialApiKey={cfg.jellyfinApiKey ? "••••••••" : ""}
                 initialJellyfinLibraries={cfg.jellyfinLibraries ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Play History</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Play History</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Track playback sessions from Plex and Jellyfin. Configure webhook URLs in your media server to enable real-time tracking.
                 </p>
               </div>
@@ -408,12 +417,12 @@ export default async function SettingsPage({
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Library Matching</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Library Matching</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Configure how file paths are normalised when comparing Plex and Jellyfin libraries for bad-match detection.
                 </p>
               </div>
@@ -423,12 +432,12 @@ export default async function SettingsPage({
                 initialJellyfinMoviePrefix={cfg.jellyfinMoviePathStripPrefix ?? ""}
                 initialJellyfinTvPrefix={cfg.jellyfinTvPathStripPrefix ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Radarr</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr</h2>
                   <StatusBadge connected={!!(cfg.radarrUrl && cfg.radarrApiKey)} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -442,12 +451,12 @@ export default async function SettingsPage({
                 initialRootFolder={cfg.radarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
               />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Sonarr</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr</h2>
                   <StatusBadge connected={!!(cfg.sonarrUrl && cfg.sonarrApiKey)} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -461,16 +470,16 @@ export default async function SettingsPage({
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
               />
-            </Card>
+            </div>
           </>
         )}
 
         {tab === "notifications" && (
           <>
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Email</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Email</h2>
                   <StatusBadge connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -488,12 +497,12 @@ export default async function SettingsPage({
                 initialResendFrom={cfg.resendFrom ?? ""}
               />
               <EnableUserEmailsToggle initialEnabled={cfg.enableUserEmails === "true"} />
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">Discord Bot</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Discord Bot</h2>
                   <StatusBadge connected={!!cfg.discordBotToken} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -518,16 +527,16 @@ export default async function SettingsPage({
                 initialAdminRoleId={cfg.discordAdminRoleId ?? ""}
                 initialIssueAdminRoleId={cfg.discordIssueAdminRoleId ?? ""}
               />
-            </Card>
+            </div>
           </>
         )}
 
         {tab === "integrations" && (
           <>
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold text-white text-lg">External Ratings</h2>
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>External Ratings</h2>
                   <StatusBadge connected={!!(cfg.mdblistApiKey || cfg.omdbApiKey || cfg.traktClientId)} />
                 </div>
                 <p className="text-sm text-zinc-500">
@@ -551,12 +560,12 @@ export default async function SettingsPage({
                   <RatingsCacheClearButton />
                 </div>
               </div>
-            </Card>
+            </div>
 
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Webhooks</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Webhooks</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
                   Add these URLs in Radarr/Sonarr → Settings → Connect → Webhook so requests
                   are marked Available the moment a download completes.
                 </p>
@@ -567,7 +576,7 @@ export default async function SettingsPage({
                   <WebhookUrls baseUrl={baseUrl} secret={cfg.webhookSecret ?? ""} />
                 </div>
               </div>
-            </Card>
+            </div>
           </>
         )}
 
@@ -588,18 +597,18 @@ export default async function SettingsPage({
 
         {tab === "system" && metrics && (
           <>
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
+          <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
-              <h2 className="font-semibold text-white text-lg">Scheduled Jobs</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">Background cron jobs and their current status. Click Run to trigger on demand.</p>
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Scheduled Jobs</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Background cron jobs and their current status. Click Run to trigger on demand.</p>
             </div>
             <CronJobTable jobs={metrics.cronJobs} />
-          </Card>
+          </div>
 
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
+          <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
-              <h2 className="font-semibold text-white text-lg">DB Metrics</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">Read-only snapshot of database row counts.</p>
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>DB Metrics</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Read-only snapshot of database row counts.</p>
             </div>
             <div className="space-y-6">
 
@@ -737,7 +746,7 @@ export default async function SettingsPage({
               </div>
 
             </div>
-          </Card>
+          </div>
           </>
         )}
 

@@ -1,13 +1,13 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { Card } from "@/components/ui/card";
 import { DiscordLinkSection } from "@/components/discord-link-ui";
 import { NotificationPrefs } from "@/components/profile/notification-prefs";
 import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { User } from "lucide-react";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -51,73 +51,103 @@ export default async function ProfilePage() {
   const currentSessionId = session.sessionId;
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Profile</h1>
-      <p className="text-zinc-400 text-sm mb-8">Manage your account and integrations</p>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Profile"
+        subtitle="Manage your account and integrations"
+      />
 
       <div className="max-w-2xl lg:max-w-6xl lg:grid lg:grid-cols-2 lg:gap-6">
-
-        <div className="space-y-6">
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
-            <div className="flex items-center gap-4">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-zinc-400">
-                <User className="h-5 w-5" />
+        <div className="flex flex-col" style={{ gap: 20 }}>
+          <ProfileCard>
+            <div className="flex items-center" style={{ gap: 14 }}>
+              <div
+                className="flex shrink-0 items-center justify-center rounded-full"
+                style={{
+                  width: 44,
+                  height: 44,
+                  background: "var(--ds-bg-3)",
+                  color: "var(--ds-fg-muted)",
+                  border: "1px solid var(--ds-border)",
+                }}
+              >
+                <User style={{ width: 18, height: 18 }} />
               </div>
               <div>
-                {user?.name && <p className="font-semibold text-white">{user.name}</p>}
-                <p className="text-sm text-zinc-400">{user?.email}</p>
+                {user?.name && (
+                  <p
+                    className="font-semibold"
+                    style={{
+                      fontSize: 14,
+                      color: "var(--ds-fg)",
+                      margin: 0,
+                    }}
+                  >
+                    {user.name}
+                  </p>
+                )}
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: "var(--ds-fg-muted)",
+                    margin: 0,
+                  }}
+                >
+                  {user?.email}
+                </p>
               </div>
             </div>
-          </Card>
+          </ProfileCard>
 
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
-            <div className="mb-5">
-              <h2 className="font-semibold text-white text-lg">Discord</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">
-                Link your Discord account to request media directly from Discord.
-              </p>
-            </div>
-            <DiscordLinkSection linkedDiscordId={user?.discordId ?? null} discordInviteUrl={discordInviteUrl} />
-          </Card>
+          <ProfileCard
+            title="Discord"
+            description="Link your Discord account to request media directly from Discord."
+          >
+            <DiscordLinkSection
+              linkedDiscordId={user?.discordId ?? null}
+              discordInviteUrl={discordInviteUrl}
+            />
+          </ProfileCard>
 
           {session.user.provider === "credentials" && (
-            <Card className="bg-zinc-900 border-zinc-800 p-6">
-              <div className="mb-5">
-                <h2 className="font-semibold text-white text-lg">Change Password</h2>
-                <p className="text-sm text-zinc-500 mt-0.5">Update your local login password.</p>
-              </div>
+            <ProfileCard
+              title="Change Password"
+              description="Update your local login password."
+            >
               <ChangePassword hasPassword={hasPassword} />
-            </Card>
+            </ProfileCard>
           )}
 
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
-            <div className="mb-4">
-              <h2 className="font-semibold text-white text-lg">Active Sessions</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">
-                Devices currently signed in. Revoke any session you don&apos;t recognise.
-              </p>
-            </div>
+          <ProfileCard
+            title="Active Sessions"
+            description="Devices currently signed in. Revoke any session you don't recognise."
+          >
             <AuthSessions
               sessions={authSessions.map((s) => ({
                 ...s,
                 isCurrent: s.sessionId === currentSessionId,
               }))}
             />
-          </Card>
+          </ProfileCard>
         </div>
 
-        <div className="space-y-6 mt-6 lg:mt-0">
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
-            <div className="mb-4">
-              <h2 className="font-semibold text-white text-lg">Notification Preferences</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">
-                Choose which notifications you receive via Discord and email.
-              </p>
-            </div>
+        <div
+          className="flex flex-col lg:mt-0"
+          style={{ gap: 20, marginTop: 20 }}
+        >
+          <ProfileCard
+            title="Notification Preferences"
+            description="Choose which notifications you receive via Discord and email."
+          >
             <NotificationPrefs
               discordLinked={!!user?.discordId}
-              isAdminRole={user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"}
-              isJellyfin={session.user.provider === "jellyfin" || session.user.provider === "jellyfin-quickconnect"}
+              isAdminRole={
+                user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"
+              }
+              isJellyfin={
+                session.user.provider === "jellyfin" ||
+                session.user.provider === "jellyfin-quickconnect"
+              }
               notificationEmail={user?.notificationEmail ?? null}
               notifyOnApproved={user?.notifyOnApproved ?? true}
               notifyOnAvailable={user?.notifyOnAvailable ?? true}
@@ -130,20 +160,67 @@ export default async function ProfilePage() {
               pushOnDeclined={user?.pushOnDeclined ?? true}
               notifyOnIssue={user?.notifyOnIssue ?? true}
             />
-          </Card>
+          </ProfileCard>
 
-          <Card className="bg-zinc-900 border-zinc-800 p-6">
-            <div className="mb-4">
-              <h2 className="font-semibold text-white text-lg">Push Devices</h2>
-              <p className="text-sm text-zinc-500 mt-0.5">
-                Devices registered for push notifications. Remove any you no longer use.
-              </p>
-            </div>
+          <ProfileCard
+            title="Push Devices"
+            description="Devices registered for push notifications. Remove any you no longer use."
+          >
             <PushDevices devices={pushDevices} cap={pushCap} />
-          </Card>
+          </ProfileCard>
         </div>
-
       </div>
     </div>
+  );
+}
+
+function ProfileCard({
+  title,
+  description,
+  children,
+}: {
+  title?: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      style={{
+        padding: 20,
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 10,
+      }}
+    >
+      {(title || description) && (
+        <div style={{ marginBottom: 16 }}>
+          {title && (
+            <h2
+              className="font-semibold"
+              style={{
+                fontSize: 15,
+                letterSpacing: "-0.01em",
+                color: "var(--ds-fg)",
+                margin: 0,
+              }}
+            >
+              {title}
+            </h2>
+          )}
+          {description && (
+            <p
+              style={{
+                fontSize: 12,
+                color: "var(--ds-fg-muted)",
+                margin: "4px 0 0",
+              }}
+            >
+              {description}
+            </p>
+          )}
+        </div>
+      )}
+      {children}
+    </section>
   );
 }

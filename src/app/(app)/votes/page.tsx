@@ -10,6 +10,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
+import { Chip, PageHeader } from "@/components/ui/design";
 
 const PAGE_SIZE = 40;
 const VALID_SORTS = ["votes", "recent"] as const;
@@ -91,13 +92,13 @@ export default async function VotesPage({
   const hasFilters = mine || sort !== "votes" || q !== "";
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Vote to Delete</h1>
-      <p className="text-zinc-400 text-sm mb-6">
-        Nominate library items for removal. Browse movies or TV shows and click the vote button on any item already in your library.
-      </p>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Vote to Delete"
+        subtitle="Nominate library items for removal. Browse movies or TV shows and click the vote button on any item already in your library."
+      />
 
-      <div className="flex flex-col gap-3 mb-6 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
         <FilterPills
           param="mine"
           active={mine ? "1" : ""}
@@ -127,47 +128,109 @@ export default async function VotesPage({
       </div>
 
       {items.length === 0 ? (
-        <div className="text-zinc-500 text-sm">
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
           {hasFilters
             ? "No votes match these filters."
             : "No deletion votes yet. Browse your library and vote on items you think should be removed."}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="flex flex-col" style={{ gap: 8 }}>
           {items.map((item) => {
             const poster = posterUrl(item.posterPath);
             return (
               <div
                 key={`${item.mediaType}-${item.tmdbId}`}
-                className="flex items-start gap-4 bg-zinc-900 border border-zinc-800 rounded-lg p-4"
+                className="flex items-start"
+                style={{
+                  gap: 14,
+                  padding: 14,
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 8,
+                }}
               >
-                <div className="w-16 h-24 rounded overflow-hidden shrink-0 bg-zinc-800">
+                <div
+                  className="relative shrink-0 overflow-hidden"
+                  style={{
+                    width: 56,
+                    aspectRatio: "2 / 3",
+                    borderRadius: 4,
+                    background: "var(--ds-bg-3)",
+                  }}
+                >
                   {poster ? (
-                    <Image src={poster} alt={item.title} width={64} height={96} className="w-full h-full object-cover" />
+                    <Image
+                      src={poster}
+                      alt={item.title}
+                      width={56}
+                      height={84}
+                      className="w-full h-full object-cover"
+                    />
                   ) : (
-                    <div className="w-full h-full flex items-center justify-center text-zinc-600 text-xs">No poster</div>
+                    <div
+                      className="w-full h-full flex items-center justify-center ds-mono"
+                      style={{ color: "var(--ds-fg-subtle)", fontSize: 10 }}
+                    >
+                      No poster
+                    </div>
                   )}
                 </div>
 
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-white font-medium truncate">{item.title}</h3>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 shrink-0">
-                      {item.mediaType === "MOVIE" ? "Movie" : "TV"}
-                    </span>
+                  <div
+                    className="flex items-center flex-wrap"
+                    style={{ gap: 6 }}
+                  >
+                    <h3
+                      className="font-medium truncate"
+                      style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}
+                    >
+                      {item.title}
+                    </h3>
+                    <Chip>{item.mediaType === "MOVIE" ? "MOVIE" : "TV"}</Chip>
                   </div>
 
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-sm font-semibold text-indigo-400">
-                      {item.voteCount} vote{item.voteCount !== 1 ? "s" : ""}
-                    </span>
+                  <div
+                    className="ds-mono"
+                    style={{
+                      marginTop: 6,
+                      fontSize: 12,
+                      color: "var(--ds-accent)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {item.voteCount} vote{item.voteCount !== 1 ? "s" : ""}
                   </div>
 
                   {item.reasons.length > 0 && (
-                    <div className="space-y-1">
+                    <div
+                      className="flex flex-col"
+                      style={{ gap: 3, marginTop: 6 }}
+                    >
                       {item.reasons.map((r, i) => (
-                        <p key={i} className="text-xs text-zinc-500">
-                          <span className="text-zinc-400">{r.userName}:</span> {r.reason}
+                        <p
+                          // biome-ignore lint/suspicious/noArrayIndexKey: reasons are unordered snippets
+                          key={i}
+                          style={{
+                            fontSize: 11,
+                            color: "var(--ds-fg-subtle)",
+                            margin: 0,
+                          }}
+                        >
+                          <span style={{ color: "var(--ds-fg-muted)" }}>
+                            {r.userName}:
+                          </span>{" "}
+                          {r.reason}
                         </p>
                       ))}
                     </div>

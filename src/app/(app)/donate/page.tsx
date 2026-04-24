@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { ExternalLink, Heart } from "lucide-react";
 import { requireFeature } from "@/lib/features";
+import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
@@ -11,8 +12,15 @@ export default async function DonatePage() {
   const session = await auth();
   if (!session) redirect("/login");
 
-  const keys = ["donationPaypal", "donationVenmo", "donationZelle", "donationAmazon"] as const;
-  const rows = await prisma.setting.findMany({ where: { key: { in: [...keys] } } });
+  const keys = [
+    "donationPaypal",
+    "donationVenmo",
+    "donationZelle",
+    "donationAmazon",
+  ] as const;
+  const rows = await prisma.setting.findMany({
+    where: { key: { in: [...keys] } },
+  });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
   const methods = [
@@ -20,8 +28,8 @@ export default async function DonatePage() {
       key: "donationPaypal",
       label: "PayPal",
       value: cfg.donationPaypal ?? "",
-      color: "text-[#003087]",
-      bg: "bg-[#ffc439]",
+      pillBg: "#ffc439",
+      pillColor: "#003087",
       href: (v: string) =>
         v.startsWith("http") ? v : `https://paypal.me/${v.replace(/^@/, "")}`,
       hint: "Click to donate via PayPal",
@@ -30,18 +38,17 @@ export default async function DonatePage() {
       key: "donationVenmo",
       label: "Venmo",
       value: cfg.donationVenmo ?? "",
-      color: "text-white",
-      bg: "bg-[#3d95ce]",
-      href: (v: string) =>
-        `https://venmo.com/${v.replace(/^@/, "")}`,
+      pillBg: "#3d95ce",
+      pillColor: "#ffffff",
+      href: (v: string) => `https://venmo.com/${v.replace(/^@/, "")}`,
       hint: "Click to pay via Venmo",
     },
     {
       key: "donationZelle",
       label: "Zelle",
       value: cfg.donationZelle ?? "",
-      color: "text-white",
-      bg: "bg-[#6d1ed4]",
+      pillBg: "#6d1ed4",
+      pillColor: "#ffffff",
       href: () => "https://www.zellepay.com/",
       hint: "Send via your bank's Zelle to:",
       noLink: true,
@@ -50,37 +57,77 @@ export default async function DonatePage() {
       key: "donationAmazon",
       label: "Amazon Wishlist",
       value: cfg.donationAmazon ?? "",
-      color: "text-white",
-      bg: "bg-[#ff9900]",
+      pillBg: "#ff9900",
+      pillColor: "#ffffff",
       href: (v: string) => v,
       hint: "View my Amazon Wishlist",
     },
   ].filter((m) => m.value);
 
   return (
-    <div className="max-w-lg">
-      <div className="flex items-center gap-3 mb-2">
-        <Heart className="w-6 h-6 text-pink-500 fill-pink-500" />
-        <h1 className="text-2xl font-bold">Support Us</h1>
-      </div>
-      <p className="text-zinc-400 text-sm mb-8">
-        If you enjoy using this service, consider leaving a donation. Every contribution is appreciated!
-      </p>
+    <div className="ds-page-enter max-w-lg">
+      <PageHeader
+        title={
+          <span className="flex items-center gap-2.5">
+            <Heart
+              style={{ width: 20, height: 20, color: "#f472b6", fill: "#f472b6" }}
+            />
+            Support Us
+          </span>
+        }
+        subtitle="If you enjoy using this service, consider leaving a donation. Every contribution is appreciated."
+      />
 
       {methods.length === 0 ? (
-        <p className="text-zinc-500 text-sm">No donation methods have been configured yet.</p>
+        <p
+          className="ds-mono"
+          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+        >
+          No donation methods have been configured yet.
+        </p>
       ) : (
-        <div className="space-y-4">
+        <div className="flex flex-col" style={{ gap: 10 }}>
           {methods.map((m) =>
             m.noLink ? (
-              <div key={m.key} className="rounded-xl border border-zinc-800 bg-zinc-900 p-5">
-                <div className="flex items-center justify-between mb-3">
-                  <span className={`text-sm font-semibold px-3 py-1 rounded-full ${m.bg} ${m.color}`}>
+              <div
+                key={m.key}
+                style={{
+                  padding: 18,
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 10,
+                }}
+              >
+                <div className="flex items-center" style={{ marginBottom: 10 }}>
+                  <span
+                    className="font-semibold inline-flex"
+                    style={{
+                      padding: "3px 12px",
+                      borderRadius: 999,
+                      fontSize: 12,
+                      background: m.pillBg,
+                      color: m.pillColor,
+                    }}
+                  >
                     {m.label}
                   </span>
                 </div>
-                <p className="text-xs text-zinc-500 mb-1">{m.hint}</p>
-                <p className="text-white font-mono text-sm">{m.value}</p>
+                <p
+                  className="ds-mono"
+                  style={{
+                    fontSize: 10.5,
+                    color: "var(--ds-fg-subtle)",
+                    margin: "0 0 4px",
+                  }}
+                >
+                  {m.hint}
+                </p>
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
+                >
+                  {m.value}
+                </p>
               </div>
             ) : (
               <a
@@ -88,17 +135,47 @@ export default async function DonatePage() {
                 href={m.href(m.value)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900 p-5 hover:bg-zinc-800 transition-colors group"
+                className="group flex items-center justify-between transition-colors bg-[var(--ds-bg-2)] border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] hover:border-[var(--ds-border-strong)]"
+                style={{
+                  padding: 18,
+                  borderRadius: 10,
+                  color: "var(--ds-fg)",
+                }}
               >
                 <div>
-                  <span className={`text-sm font-semibold px-3 py-1 rounded-full ${m.bg} ${m.color}`}>
+                  <span
+                    className="font-semibold inline-flex"
+                    style={{
+                      padding: "3px 12px",
+                      borderRadius: 999,
+                      fontSize: 12,
+                      background: m.pillBg,
+                      color: m.pillColor,
+                    }}
+                  >
                     {m.label}
                   </span>
-                  <p className="text-xs text-zinc-500 mt-3">{m.hint}</p>
+                  <p
+                    className="ds-mono"
+                    style={{
+                      fontSize: 10.5,
+                      color: "var(--ds-fg-subtle)",
+                      margin: "12px 0 0",
+                    }}
+                  >
+                    {m.hint}
+                  </p>
                 </div>
-                <ExternalLink className="w-4 h-4 text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0" />
+                <ExternalLink
+                  className="shrink-0 transition-colors"
+                  style={{
+                    width: 14,
+                    height: 14,
+                    color: "var(--ds-fg-subtle)",
+                  }}
+                />
               </a>
-            )
+            ),
           )}
         </div>
       )}

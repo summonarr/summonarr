@@ -3,8 +3,6 @@ import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { IssueActions } from "@/components/admin/issue-actions";
 import { IssueCardShell } from "@/components/admin/issue-card-shell";
 import { IssueThread } from "@/components/issues/issue-thread";
@@ -13,11 +11,13 @@ import { Film, Tv2, MessageSquare } from "lucide-react";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
+import { Chip, PageHeader, StatCard } from "@/components/ui/design";
+import type { ChipTone } from "@/components/ui/design";
 
-const STATUS_STYLES: Record<string, string> = {
-  OPEN: "bg-red-500/10 text-red-400 border-red-500/20",
-  IN_PROGRESS: "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  RESOLVED: "bg-green-500/10 text-green-400 border-green-500/20",
+const STATUS_TONE: Record<string, ChipTone> = {
+  OPEN: "declined",
+  IN_PROGRESS: "pending",
+  RESOLVED: "approved",
 };
 
 const STATUS_LABEL: Record<string, string> = {
@@ -154,47 +154,100 @@ export default async function AdminIssuesPage({
   }
 
   return (
-    <div>
-      <LiveRefresh on={["issue:new", "issue:updated", "issue:deleted", "issuemessage:created"]} />
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1">Issues</h1>
-        <p className="text-zinc-400 text-sm">User-reported media quality problems</p>
+    <div className="ds-page-enter">
+      <LiveRefresh
+        on={[
+          "issue:new",
+          "issue:updated",
+          "issue:deleted",
+          "issuemessage:created",
+        ]}
+      />
+      <PageHeader
+        title="Issues"
+        subtitle="User-reported media quality problems"
+      />
+
+      <div className="ds-stat-row" style={{ marginBottom: 20 }}>
+        {stats.map((s) => {
+          const active = filter === s.filter;
+          return (
+            <Link
+              key={s.label}
+              href={`?filter=${s.filter}`}
+              className="block transition-colors"
+              style={{
+                borderRadius: 8,
+                boxShadow: active
+                  ? "0 0 0 1px var(--ds-border-strong)"
+                  : "none",
+              }}
+            >
+              <StatCard label={s.label} value={s.value} mono />
+            </Link>
+          );
+        })}
       </div>
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {stats.map((s) => (
-          <Link key={s.label} href={`?filter=${s.filter}`}>
-            <Card className={`bg-zinc-900 border-zinc-800 p-5 cursor-pointer transition-colors hover:border-zinc-600 ${filter === s.filter ? "border-zinc-600 ring-1 ring-zinc-600" : ""}`}>
-              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{s.label}</p>
-              <p className="text-3xl font-bold text-white">{s.value}</p>
-            </Card>
-          </Link>
-        ))}
-      </div>
-
-      <div className="flex gap-1 mb-5 border-b border-zinc-800 pb-0">
-        {tabs.map((tab) => (
-          <Link
-            key={tab.value}
-            href={`?filter=${tab.value}`}
-            className={`px-4 py-2 text-sm rounded-t transition-colors flex items-center gap-2 ${
-              filter === tab.value
-                ? "text-white border-b-2 border-white -mb-px"
-                : "text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            {tab.label}
-            <span className={`text-[11px] rounded-full px-1.5 py-0.5 ${filter === tab.value ? "bg-zinc-700 text-zinc-300" : "bg-zinc-800 text-zinc-500"}`}>
-              {tab.count}
-            </span>
-          </Link>
-        ))}
+      <div
+        className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+        style={{
+          padding: 2,
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 8,
+          marginBottom: 20,
+        }}
+      >
+        {tabs.map((tab) => {
+          const active = filter === tab.value;
+          return (
+            <Link
+              key={tab.value}
+              href={`?filter=${tab.value}`}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium transition-colors"
+              style={{
+                padding: "5px 12px",
+                borderRadius: 6,
+                fontSize: 12,
+                background: active ? "var(--ds-bg-3)" : "transparent",
+                color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+              }}
+            >
+              {tab.label}
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 10,
+                  padding: "0 5px",
+                  borderRadius: 3,
+                  background: active
+                    ? "var(--ds-accent-soft)"
+                    : "var(--ds-bg-3)",
+                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                }}
+              >
+                {tab.count}
+              </span>
+            </Link>
+          );
+        })}
       </div>
 
       {groups.length === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800">
-          <div className="p-8 text-center text-zinc-500 text-sm">No issues in this category.</div>
-        </Card>
+        <div
+          className="text-center ds-mono"
+          style={{
+            padding: "40px 20px",
+            background: "var(--ds-bg-1)",
+            border: "1px dashed var(--ds-border)",
+            borderRadius: 8,
+            fontSize: 12,
+            color: "var(--ds-fg-subtle)",
+          }}
+        >
+          No issues in this category.
+        </div>
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
@@ -221,54 +274,98 @@ export default async function AdminIssuesPage({
                         )}
                       </div>
 
-                      <Link href={issueHref(issue.id)} scroll={false} className="flex-1 min-w-0 block hover:bg-zinc-800/20 -m-1 p-1 rounded transition-colors">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="font-medium text-white truncate">{issue.title}</p>
-                          <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700 shrink-0">
-                            {ISSUE_TYPE_LABELS[issue.issueType] ?? issue.issueType}
-                          </Badge>
+                      <Link
+                        href={issueHref(issue.id)}
+                        scroll={false}
+                        className="flex-1 min-w-0 block rounded transition-colors"
+                        style={{ margin: -4, padding: 4 }}
+                      >
+                        <div
+                          className="flex items-center flex-wrap"
+                          style={{ gap: 6 }}
+                        >
+                          <p
+                            className="font-medium truncate"
+                            style={{ color: "var(--ds-fg)", margin: 0 }}
+                          >
+                            {issue.title}
+                          </p>
+                          <Chip>
+                            {ISSUE_TYPE_LABELS[issue.issueType] ??
+                              issue.issueType}
+                          </Chip>
                           {issue.mediaType === "TV" && issue.scope !== "FULL" && (
-                            <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700 shrink-0">
+                            <Chip>
                               {SCOPE_LABELS[issue.scope]}
-                              {issue.scope === "SEASON" && issue.seasonNumber != null && ` ${issue.seasonNumber}`}
-                              {issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null &&
+                              {issue.scope === "SEASON" &&
+                                issue.seasonNumber != null &&
+                                ` ${issue.seasonNumber}`}
+                              {issue.scope === "EPISODE" &&
+                                issue.seasonNumber != null &&
+                                issue.episodeNumber != null &&
                                 ` S${String(issue.seasonNumber).padStart(2, "0")}E${String(issue.episodeNumber).padStart(2, "0")}`}
-                            </Badge>
+                            </Chip>
                           )}
                           {count > 1 && (
-                            <Badge className="border text-[10px] font-medium bg-amber-500/10 text-amber-400 border-amber-500/20 shrink-0">
-                              {count} reports
-                            </Badge>
+                            <Chip tone="pending">{count} reports</Chip>
                           )}
                         </div>
-                        <p className="text-xs text-zinc-400 mt-0.5">
-                          {issue.mediaType === "MOVIE" ? "Movie" : "TV Show"}
+                        <p
+                          className="ds-mono"
+                          style={{
+                            fontSize: 10.5,
+                            color: "var(--ds-fg-subtle)",
+                            marginTop: 4,
+                          }}
+                        >
+                          {issue.mediaType === "MOVIE" ? "MOVIE" : "TV"}
                           {" · "}
-                          <span className="text-zinc-500">
+                          <span style={{ color: "var(--ds-fg-muted)" }}>
                             {count > 1
                               ? `${reporterNames.slice(0, 2).join(", ")}${count > 2 ? ` +${count - 2} more` : ""}`
                               : `by ${issue.user.name ?? issue.user.email}`}
                           </span>
                           {" · "}
-                          <span className="text-zinc-600">{new Date(issue.createdAt).toLocaleDateString()}</span>
+                          {new Date(issue.createdAt).toLocaleDateString()}
                         </p>
                         {issue.note && (
-                          <p className="text-xs text-zinc-400 mt-1.5 bg-zinc-800/60 rounded px-2 py-1 max-w-lg">
+                          <p
+                            style={{
+                              marginTop: 6,
+                              padding: "6px 10px",
+                              borderRadius: 4,
+                              background: "var(--ds-bg-1)",
+                              fontSize: 11.5,
+                              color: "var(--ds-fg-muted)",
+                              maxWidth: "32rem",
+                            }}
+                          >
                             {issue.note}
                           </p>
                         )}
                         {issue.resolution && (
-                          <p className="text-xs text-green-400/70 mt-1">
+                          <p
+                            className="italic"
+                            style={{
+                              marginTop: 4,
+                              fontSize: 11,
+                              color:
+                                "color-mix(in oklab, var(--ds-success) 80%, var(--ds-fg))",
+                            }}
+                          >
                             Resolution: {issue.resolution}
                           </p>
                         )}
                       </Link>
 
-                      <Badge
-                        className={`shrink-0 border text-xs font-medium hidden sm:inline-flex ${STATUS_STYLES[issue.status]}`}
-                      >
-                        {issue.status === "IN_PROGRESS" ? "In Progress" : issue.status.charAt(0) + issue.status.slice(1).toLowerCase()}
-                      </Badge>
+                      <div className="hidden sm:inline-flex shrink-0">
+                        <Chip tone={STATUS_TONE[issue.status]}>
+                          {issue.status === "IN_PROGRESS"
+                            ? "In Progress"
+                            : issue.status.charAt(0) +
+                              issue.status.slice(1).toLowerCase()}
+                        </Chip>
+                      </div>
 
                       <div className="contents xl:hidden">
                         {issue.issueType === "WRONG_MATCH" && (() => {
@@ -306,57 +403,139 @@ export default async function AdminIssuesPage({
 
           <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
             {selectedIssue ? (
-              <div className="h-full rounded-lg bg-zinc-900 border border-zinc-800 flex flex-col overflow-hidden">
-                <div className="flex-shrink-0 p-5 border-b border-zinc-800 overflow-y-auto">
-                  <div className="flex items-start gap-4">
-                    <div className="relative w-16 h-24 shrink-0 rounded bg-zinc-700 overflow-hidden">
+              <div
+                className="h-full flex flex-col overflow-hidden"
+                style={{
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 8,
+                }}
+              >
+                <div
+                  className="flex-shrink-0 overflow-y-auto"
+                  style={{
+                    padding: 18,
+                    borderBottom: "1px solid var(--ds-border)",
+                  }}
+                >
+                  <div className="flex items-start" style={{ gap: 14 }}>
+                    <div
+                      className="relative shrink-0 overflow-hidden"
+                      style={{
+                        width: 64,
+                        aspectRatio: "2 / 3",
+                        borderRadius: 4,
+                        background: "var(--ds-bg-3)",
+                      }}
+                    >
                       {(() => {
-                        const poster = posterUrl(selectedIssue.posterPath, "w342");
+                        const poster = posterUrl(
+                          selectedIssue.posterPath,
+                          "w342",
+                        );
                         return poster ? (
-                          <Image src={poster} alt={selectedIssue.title} fill className="object-cover" sizes="64px" />
+                          <Image
+                            src={poster}
+                            alt={selectedIssue.title}
+                            fill
+                            className="object-cover"
+                            sizes="64px"
+                          />
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                            {selectedIssue.mediaType === "MOVIE" ? <Film className="w-6 h-6" /> : <Tv2 className="w-6 h-6" />}
+                          <div
+                            className="absolute inset-0 flex items-center justify-center"
+                            style={{ color: "var(--ds-fg-subtle)" }}
+                          >
+                            {selectedIssue.mediaType === "MOVIE" ? (
+                              <Film style={{ width: 20, height: 20 }} />
+                            ) : (
+                              <Tv2 style={{ width: 20, height: 20 }} />
+                            )}
                           </div>
                         );
                       })()}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-white">{selectedIssue.title}</p>
-                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                        <Badge className={`border text-[10px] font-medium ${STATUS_STYLES[selectedIssue.status]}`}>
+                      <p
+                        className="font-semibold"
+                        style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}
+                      >
+                        {selectedIssue.title}
+                      </p>
+                      <div
+                        className="flex items-center flex-wrap"
+                        style={{ gap: 6, marginTop: 4 }}
+                      >
+                        <Chip tone={STATUS_TONE[selectedIssue.status]}>
                           {STATUS_LABEL[selectedIssue.status]}
-                        </Badge>
-                        <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ?? selectedIssue.issueType}
-                        </Badge>
-                        {selectedIssue.mediaType === "TV" && selectedIssue.scope !== "FULL" && (
-                          <Badge className="border text-[10px] font-medium bg-zinc-800 text-zinc-400 border-zinc-700">
-                            {SCOPE_LABELS[selectedIssue.scope]}
-                            {selectedIssue.scope === "SEASON" && selectedIssue.seasonNumber != null && ` ${selectedIssue.seasonNumber}`}
-                            {selectedIssue.scope === "EPISODE" && selectedIssue.seasonNumber != null && selectedIssue.episodeNumber != null &&
-                              ` S${String(selectedIssue.seasonNumber).padStart(2, "0")}E${String(selectedIssue.episodeNumber).padStart(2, "0")}`}
-                          </Badge>
-                        )}
+                        </Chip>
+                        <Chip>
+                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??
+                            selectedIssue.issueType}
+                        </Chip>
+                        {selectedIssue.mediaType === "TV" &&
+                          selectedIssue.scope !== "FULL" && (
+                            <Chip>
+                              {SCOPE_LABELS[selectedIssue.scope]}
+                              {selectedIssue.scope === "SEASON" &&
+                                selectedIssue.seasonNumber != null &&
+                                ` ${selectedIssue.seasonNumber}`}
+                              {selectedIssue.scope === "EPISODE" &&
+                                selectedIssue.seasonNumber != null &&
+                                selectedIssue.episodeNumber != null &&
+                                ` S${String(selectedIssue.seasonNumber).padStart(2, "0")}E${String(selectedIssue.episodeNumber).padStart(2, "0")}`}
+                            </Chip>
+                          )}
                       </div>
-                      <p className="text-[11px] text-zinc-500 mt-1">
-                        Reported by {selectedIssue.user.name ?? selectedIssue.user.email} ·{" "}
+                      <p
+                        className="ds-mono"
+                        style={{
+                          marginTop: 4,
+                          fontSize: 10.5,
+                          color: "var(--ds-fg-subtle)",
+                        }}
+                      >
+                        Reported by{" "}
+                        {selectedIssue.user.name ?? selectedIssue.user.email} ·{" "}
                         {new Date(selectedIssue.createdAt).toLocaleDateString()}
                       </p>
                     </div>
                   </div>
                   {selectedIssue.note && (
-                    <p className="mt-3 text-xs text-zinc-300 bg-zinc-800/60 rounded px-3 py-2 border-l-2 border-amber-500/40 whitespace-pre-wrap">
+                    <p
+                      className="whitespace-pre-wrap"
+                      style={{
+                        marginTop: 12,
+                        padding: "8px 12px",
+                        borderRadius: 4,
+                        background: "var(--ds-bg-1)",
+                        borderLeft:
+                          "2px solid color-mix(in oklab, var(--ds-warning) 40%, transparent)",
+                        fontSize: 12,
+                        color: "var(--ds-fg-muted)",
+                      }}
+                    >
                       {selectedIssue.note}
                     </p>
                   )}
                   {selectedIssue.resolution && (
-                    <p className="mt-2 text-xs text-green-400/80 italic">
+                    <p
+                      className="italic"
+                      style={{
+                        marginTop: 8,
+                        fontSize: 12,
+                        color:
+                          "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
+                      }}
+                    >
                       Resolution: {selectedIssue.resolution}
                     </p>
                   )}
 
-                  <div className="mt-4 flex items-center gap-2 flex-wrap">
+                  <div
+                    className="flex items-center flex-wrap"
+                    style={{ gap: 8, marginTop: 16 }}
+                  >
                     {selectedIssue.issueType === "WRONG_MATCH" && (() => {
                       const key = `${selectedIssue.tmdbId}:${selectedIssue.mediaType}`;
                       return (
@@ -387,9 +566,29 @@ export default async function AdminIssuesPage({
                 <IssueThread issueId={selectedIssue.id} initialCount={selectedIssue._count.messages} variant="panel" />
               </div>
             ) : (
-              <div className="h-full rounded-lg bg-zinc-900 border border-zinc-800 border-dashed flex flex-col items-center justify-center text-center p-8">
-                <MessageSquare className="w-8 h-8 text-zinc-700 mb-3" />
-                <p className="text-sm text-zinc-500">Select an issue to view its thread</p>
+              <div
+                className="h-full flex flex-col items-center justify-center text-center"
+                style={{
+                  padding: 32,
+                  background: "var(--ds-bg-1)",
+                  border: "1px dashed var(--ds-border)",
+                  borderRadius: 8,
+                }}
+              >
+                <MessageSquare
+                  style={{
+                    width: 28,
+                    height: 28,
+                    color: "var(--ds-fg-disabled)",
+                    marginBottom: 12,
+                  }}
+                />
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+                >
+                  Select an issue to view its thread
+                </p>
               </div>
             )}
           </aside>

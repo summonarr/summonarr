@@ -4,9 +4,13 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
-import { LogOut, Bell } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { userNavItems, getVisibleAdminItems, filterNavByFeatures } from "@/lib/nav-items";
+import { LogOut, Bell, type LucideIcon } from "lucide-react";
+import {
+  userNavItems,
+  getVisibleAdminItems,
+  filterNavByFeatures,
+  type NavItem,
+} from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import {
@@ -24,14 +28,27 @@ interface MobileNavDrawerProps {
   featureFlags?: FeatureFlags;
 }
 
-export function MobileNavDrawer({ open, onOpenChange, featureFlags }: MobileNavDrawerProps) {
+export function MobileNavDrawer({
+  open,
+  onOpenChange,
+  featureFlags,
+}: MobileNavDrawerProps) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = session?.user?.role;
-  const adminItems = filterNavByFeatures(getVisibleAdminItems(role), featureFlags);
+  const adminItems = filterNavByFeatures(
+    getVisibleAdminItems(role),
+    featureFlags,
+  );
 
-  const browseItems   = filterNavByFeatures(userNavItems.filter((i) => i.section === "browse"),   featureFlags);
-  const personalItems = filterNavByFeatures(userNavItems.filter((i) => i.section === "personal"), featureFlags);
+  const browseItems = filterNavByFeatures(
+    userNavItems.filter((i) => i.section === "browse"),
+    featureFlags,
+  );
+  const personalItems = filterNavByFeatures(
+    userNavItems.filter((i) => i.section === "personal"),
+    featureFlags,
+  );
 
   useEffect(() => {
     onOpenChange(false);
@@ -45,42 +62,31 @@ export function MobileNavDrawer({ open, onOpenChange, featureFlags }: MobileNavD
     <Drawer open={open} onOpenChange={onOpenChange}>
       <DrawerPortal>
         <DrawerBackdrop />
-        <DrawerPopup>
+        <DrawerPopup
+          style={{
+            background: "var(--ds-bg-1)",
+            borderTop: "1px solid var(--ds-border)",
+          }}
+        >
           <DrawerTitle>Navigation menu</DrawerTitle>
           <DrawerContent>
             <SectionHeader>Browse</SectionHeader>
             {browseItems.map((item) => (
               <NavLink
                 key={item.href}
-                href={item.href}
-                label={item.label}
-                icon={item.icon}
+                item={item}
                 active={isActive(item.href, item.exact)}
                 onClick={() => onOpenChange(false)}
               />
             ))}
 
-            <SectionHeader>My Stuff</SectionHeader>
-            {personalItems.map((item) => (
-              <NavLink
-                key={item.href}
-                href={item.href}
-                label={item.label}
-                icon={item.icon}
-                active={isActive(item.href, item.exact)}
-                onClick={() => onOpenChange(false)}
-              />
-            ))}
-
-            {adminItems.length > 0 && (
+            {personalItems.length > 0 && (
               <>
-                <SectionHeader>Admin</SectionHeader>
-                {adminItems.map((item) => (
+                <SectionHeader>You</SectionHeader>
+                {personalItems.map((item) => (
                   <NavLink
                     key={item.href}
-                    href={item.href}
-                    label={item.label}
-                    icon={item.icon}
+                    item={item}
                     active={isActive(item.href, item.exact)}
                     onClick={() => onOpenChange(false)}
                   />
@@ -88,23 +94,105 @@ export function MobileNavDrawer({ open, onOpenChange, featureFlags }: MobileNavD
               </>
             )}
 
-            <div className="mt-4 pt-4 border-t border-zinc-800 space-y-1">
-              <div className="flex items-center gap-3 px-4 py-3">
-                <Bell className="w-5 h-5 shrink-0 text-zinc-400" />
-                <span className="text-sm font-medium text-zinc-300 flex-1">Push Notifications</span>
+            {adminItems.length > 0 && (
+              <>
+                <SectionHeader>Admin</SectionHeader>
+                {adminItems.map((item) => (
+                  <NavLink
+                    key={item.href}
+                    item={item}
+                    active={isActive(item.href, item.exact)}
+                    onClick={() => onOpenChange(false)}
+                  />
+                ))}
+              </>
+            )}
+
+            <div
+              style={{
+                marginTop: 16,
+                paddingTop: 16,
+                borderTop: "1px solid var(--ds-border)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              <div
+                className="flex items-center gap-3"
+                style={{
+                  padding: "10px 12px",
+                }}
+              >
+                <Bell
+                  className="shrink-0"
+                  style={{
+                    width: 18,
+                    height: 18,
+                    color: "var(--ds-fg-muted)",
+                  }}
+                />
+                <span
+                  className="font-medium flex-1"
+                  style={{ fontSize: 13, color: "var(--ds-fg)" }}
+                >
+                  Push notifications
+                </span>
                 <PushNotifications />
               </div>
               <button
+                type="button"
                 onClick={() => signOut({ callbackUrl: "/login" })}
-                className="flex items-center gap-3 w-full px-4 py-3 rounded-lg text-sm font-medium text-red-400 hover:bg-zinc-800/50 transition-colors"
+                className="flex items-center gap-3 w-full font-medium transition-colors"
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  background: "transparent",
+                  border: 0,
+                  fontSize: 13,
+                  color: "var(--ds-danger)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background =
+                    "color-mix(in oklab, var(--ds-danger) 10%, transparent)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                }}
               >
-                <LogOut className="w-5 h-5" />
-                Sign Out
+                <LogOut style={{ width: 18, height: 18 }} />
+                Sign out
               </button>
             </div>
 
-            {}
-            <div className="h-20" aria-hidden="true" />
+            <div
+              style={{
+                marginTop: 16,
+                paddingTop: 14,
+                borderTop: "1px solid var(--ds-border)",
+                display: "flex",
+                justifyContent: "center",
+              }}
+            >
+              <a
+                href="https://www.themoviedb.org"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="This product uses the TMDB API but is not endorsed or certified by TMDB."
+                className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/tmdb-logo.svg" alt="TMDB" className="h-3 w-auto" />
+                <span
+                  className="ds-mono"
+                  style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                >
+                  Data via TMDB
+                </span>
+              </a>
+            </div>
+
+            <div style={{ height: 80 }} aria-hidden />
           </DrawerContent>
         </DrawerPopup>
       </DrawerPortal>
@@ -114,38 +202,67 @@ export function MobileNavDrawer({ open, onOpenChange, featureFlags }: MobileNavD
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
-    <p className="px-4 pt-4 pb-1 text-xs font-semibold text-zinc-500 uppercase tracking-wider">
+    <p
+      className="ds-mono uppercase"
+      style={{
+        padding: "14px 12px 6px",
+        fontSize: 10,
+        fontWeight: 600,
+        color: "var(--ds-fg-subtle)",
+        letterSpacing: "0.08em",
+      }}
+    >
       {children}
     </p>
   );
 }
 
 function NavLink({
-  href,
-  label,
-  icon: Icon,
+  item,
   active,
   onClick,
 }: {
-  href: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
+  item: NavItem;
   active: boolean;
   onClick: () => void;
 }) {
+  const Icon = item.icon as LucideIcon;
   return (
     <Link
-      href={href}
+      href={item.href}
       onClick={onClick}
-      className={cn(
-        "flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors",
-        active
-          ? "text-indigo-400 bg-zinc-800/50"
-          : "text-zinc-300 hover:text-white hover:bg-zinc-800/50"
-      )}
+      className="flex items-center gap-3 font-medium transition-colors relative"
+      style={{
+        padding: "10px 12px",
+        borderRadius: 6,
+        background: active ? "var(--ds-accent-soft)" : "transparent",
+        color: active ? "var(--ds-accent)" : "var(--ds-fg)",
+        fontSize: 13,
+      }}
     >
-      <Icon className={cn("w-5 h-5 shrink-0", active && "text-indigo-400")} />
-      {label}
+      {active && (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 8,
+            bottom: 8,
+            width: 2,
+            background: "var(--ds-accent)",
+            borderRadius: 2,
+          }}
+        />
+      )}
+      <Icon
+        className="shrink-0"
+        style={{
+          width: 18,
+          height: 18,
+          color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        }}
+      />
+      {item.label}
     </Link>
   );
 }

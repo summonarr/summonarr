@@ -95,7 +95,17 @@ export function BrowseGrid({
 
   return (
     <>
-      <p className="text-zinc-400 text-sm mb-6">{subtitle}</p>
+      <p
+        className="ds-mono"
+        style={{
+          fontSize: 12,
+          color: "var(--ds-fg-subtle)",
+          marginTop: -12,
+          marginBottom: 16,
+        }}
+      >
+        {subtitle}
+      </p>
 
       <FilterBar
         genres={genres}
@@ -113,18 +123,35 @@ export function BrowseGrid({
 
       <div className="relative min-h-[200px]">
         {loading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-zinc-950/60 rounded-lg">
-            <Loader2 className="w-8 h-8 text-indigo-400 animate-spin" />
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center"
+            style={{
+              background:
+                "color-mix(in oklab, var(--ds-bg) 65%, transparent)",
+              borderRadius: 8,
+            }}
+          >
+            <Loader2
+              className="animate-spin"
+              style={{
+                width: 28,
+                height: 28,
+                color: "var(--ds-accent)",
+              }}
+            />
           </div>
         )}
         {items.length === 0 && !loading ? (
-          <div className="text-zinc-500 text-sm">
+          <div
+            className="ds-mono"
+            style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
+          >
             {hasFilters
               ? `No ${mediaType === "tv" ? "TV shows" : "movies"} match these filters.`
               : "No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local."}
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5">
+          <div className="ds-media-grid">
             {items.map((media) => (
               <MediaCard key={media.id} media={media} showPlex={showPlex} showJellyfin={showJellyfin} size="md" />
             ))}

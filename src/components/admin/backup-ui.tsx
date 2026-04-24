@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Download, Upload, Loader2, CheckCircle, XCircle, Lock } from "lucide-react";
+import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "lucide-react";
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -22,9 +21,63 @@ export function BackupUI({ mode }: { mode: "db-export" | "db-import" }) {
   return <DbImportSection />;
 }
 
+function PrimaryButton({
+  onClick,
+  disabled,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="ds-tap inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+      style={{
+        padding: "8px 14px",
+        fontSize: 13,
+        borderRadius: 8,
+        background: "var(--ds-accent)",
+        color: "var(--ds-accent-fg)",
+        border: "1px solid var(--ds-accent)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function SecondaryButton({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+      style={{
+        padding: "5px 12px",
+        fontSize: 12,
+        borderRadius: 6,
+        background: "var(--ds-bg-2)",
+        color: "var(--ds-fg-muted)",
+        border: "1px solid var(--ds-border)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function DbExportSection() {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lastFilename, setLastFilename] = useState<string | null>(null);
 
   async function handleExport() {
     setDownloading(true);
@@ -39,9 +92,11 @@ function DbExportSection() {
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       const date = new Date().toISOString().slice(0, 10);
-      a.download = `summonarr-full-backup-${date}.sql.enc`;
+      const filename = `summonarr-full-backup-${date}.sql.enc`;
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(a.href);
+      setLastFilename(filename);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -50,21 +105,59 @@ function DbExportSection() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-2 text-xs text-zinc-300 bg-zinc-800/60 border border-zinc-700 rounded-md p-3">
-        <Lock className="w-4 h-4 shrink-0 mt-0.5" />
-        <span>
-          Full-DB backups are always encrypted with the server&apos;s
-          <code className="mx-1 px-1 rounded bg-zinc-900">BACKUP_DB_PASSWORD</code>
-          environment variable. Only someone with shell access to the server can decrypt the resulting file.
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div
+        className="flex items-center"
+        style={{
+          gap: 10,
+          padding: "10px 12px",
+          background: "var(--ds-bg-inset, var(--ds-bg))",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+        }}
+      >
+        <span
+          className="ds-mono uppercase"
+          style={{
+            fontSize: 10.5,
+            color: "var(--ds-fg-subtle)",
+            letterSpacing: "0.06em",
+          }}
+        >
+          Filename
+        </span>
+        <span
+          className="ds-mono break-all"
+          style={{ fontSize: 11.5, color: "var(--ds-fg)", flex: 1 }}
+        >
+          {lastFilename ?? `summonarr-full-backup-${new Date().toISOString().slice(0, 10)}.sql.enc`}
         </span>
       </div>
-      <Button onClick={handleExport} disabled={downloading}>
-        {downloading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
-        Download Encrypted Database Dump
-      </Button>
+
+      <PrimaryButton onClick={handleExport} disabled={downloading}>
+        {downloading ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" /> Generating…
+          </>
+        ) : (
+          <>
+            <Download className="w-4 h-4" /> Download encrypted dump
+          </>
+        )}
+      </PrimaryButton>
+
       {error && (
-        <div className="flex items-start gap-2 text-sm rounded-md p-3 bg-red-900/20 border border-red-800/30 text-red-400">
+        <div
+          className="flex items-start gap-2"
+          style={{
+            padding: "10px 12px",
+            borderRadius: 6,
+            background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, var(--ds-border))",
+            color: "var(--ds-danger)",
+            fontSize: 12.5,
+          }}
+        >
           <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{error}</span>
         </div>
@@ -75,23 +168,31 @@ function DbExportSection() {
 
 function DbImportSection() {
   const [file, setFile] = useState<File | null>(null);
-  const [encrypted, setEncrypted] = useState(false);
-  const [preview, setPreview] = useState<{ size: string } | null>(null);
+  const [encrypted, setEncrypted] = useState<boolean | null>(null);
+  const [size, setSize] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; summary?: { total: number; executed: number; skipped: number; errors: number }; errors?: string[]; error?: string } | null>(null);
+  const [result, setResult] = useState<
+    | {
+        ok: boolean;
+        summary?: { total: number; executed: number; skipped: number; errors: number };
+        errors?: string[];
+        error?: string;
+      }
+    | null
+  >(null);
 
   async function handleFileChange(f: File | null) {
     setFile(f);
     setResult(null);
-    setPreview(null);
-    setEncrypted(false);
+    setSize(null);
+    setEncrypted(null);
     if (!f) return;
     try {
       const isEnc = await isEncryptedFile(f);
       setEncrypted(isEnc);
       const kb = (f.size / 1024).toFixed(1);
       const mb = (f.size / (1024 * 1024)).toFixed(1);
-      setPreview({ size: f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB` });
+      setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
     } catch {
       setResult({ ok: false, error: "Could not read file" });
     }
@@ -106,7 +207,6 @@ function DbImportSection() {
     setImporting(true);
     setResult(null);
     try {
-
       // Stream the raw file bytes; the server decrypts with BACKUP_DB_PASSWORD before executing
       const res = await fetch("/api/admin/backup/db-import", {
         method: "POST",
@@ -126,66 +226,250 @@ function DbImportSection() {
     }
   }
 
+  function clearFile() {
+    setFile(null);
+    setEncrypted(null);
+    setSize(null);
+    setResult(null);
+  }
+
+  const dropBorder =
+    encrypted === false
+      ? "var(--ds-danger)"
+      : encrypted === true
+        ? "color-mix(in oklab, var(--ds-success) 40%, var(--ds-border))"
+        : "var(--ds-border-strong, var(--ds-border))";
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-2 text-xs text-zinc-300 bg-zinc-800/60 border border-zinc-700 rounded-md p-3">
-        <Lock className="w-4 h-4 shrink-0 mt-0.5" />
-        <span>
-          The server will decrypt the file using its
-          <code className="mx-1 px-1 rounded bg-zinc-900">BACKUP_DB_PASSWORD</code>
-          environment variable. Only encrypted dumps produced with the same password can be restored.
-        </span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div
+        style={{
+          border: `1px dashed ${dropBorder}`,
+          borderRadius: 8,
+          padding: 18,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          minHeight: 110,
+          textAlign: "center",
+          background: file ? "var(--ds-bg-inset, var(--ds-bg))" : "transparent",
+          transition: "background 120ms, border-color 120ms",
+        }}
+      >
+        {file ? (
+          <>
+            <div className="flex items-center gap-2">
+              {encrypted === true ? (
+                <FileCheck style={{ width: 18, height: 18, color: "var(--ds-success)" }} />
+              ) : encrypted === false ? (
+                <FileX style={{ width: 18, height: 18, color: "var(--ds-danger)" }} />
+              ) : (
+                <FileText style={{ width: 18, height: 18, color: "var(--ds-fg-muted)" }} />
+              )}
+              <span className="ds-mono font-medium break-all" style={{ fontSize: 12 }}>
+                {file.name}
+              </span>
+              {size && (
+                <span
+                  className="ds-mono"
+                  style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+                >
+                  · {size}
+                </span>
+              )}
+            </div>
+            {encrypted === true && (
+              <span
+                className="ds-chip ds-chip-approved inline-flex items-center"
+                style={{ gap: 4, fontSize: 10, letterSpacing: "0.04em" }}
+              >
+                <CheckCircle style={{ width: 10, height: 10 }} />
+                VALID HEADER · RBKBKP01
+              </span>
+            )}
+            {encrypted === false && (
+              <span
+                className="ds-chip ds-chip-declined"
+                style={{ fontSize: 10, letterSpacing: "0.04em" }}
+              >
+                NOT ENCRYPTED · REJECTED
+              </span>
+            )}
+          </>
+        ) : (
+          <>
+            <Upload
+              style={{ width: 22, height: 22, color: "var(--ds-fg-subtle)" }}
+            />
+            <span
+              className="ds-mono uppercase"
+              style={{
+                fontSize: 10.5,
+                color: "var(--ds-fg-subtle)",
+                letterSpacing: "0.06em",
+              }}
+            >
+              Drop .sql.enc file or choose below
+            </span>
+          </>
+        )}
       </div>
 
-      <input
-        type="file"
-        accept=".enc"
-        onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
-        className="block w-full text-sm text-zinc-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-medium file:bg-zinc-800 file:text-zinc-300 hover:file:bg-zinc-700 file:cursor-pointer"
-      />
+      <div className="flex items-center gap-2 flex-wrap">
+        <label
+          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors cursor-pointer"
+          style={{
+            padding: "5px 12px",
+            fontSize: 12,
+            borderRadius: 6,
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg-muted)",
+            border: "1px solid var(--ds-border)",
+          }}
+        >
+          Choose file
+          <input
+            type="file"
+            accept=".enc"
+            onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
+            className="hidden"
+          />
+        </label>
+        {file && <SecondaryButton onClick={clearFile}>Clear</SecondaryButton>}
+      </div>
 
-      {preview && (
-        <div className="bg-zinc-800 rounded-lg p-4 text-sm space-y-1">
-          <p className="text-zinc-300 font-medium mb-2">SQL backup contents:</p>
-          <p className="text-zinc-400">{preview.size} file size</p>
-          <p className="text-zinc-400 flex items-center gap-1">
-            <Lock className="w-3 h-3" /> {encrypted ? "Encrypted" : "Not an encrypted backup — will be rejected"}
-          </p>
+      {!result?.summary && (
+        <PrimaryButton
+          onClick={handleImport}
+          disabled={!file || !encrypted || importing}
+        >
+          {importing ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" /> Restoring…
+            </>
+          ) : (
+            <>
+              <Upload className="w-4 h-4" /> Restore from file
+            </>
+          )}
+        </PrimaryButton>
+      )}
+
+      {result?.summary && (
+        <div
+          style={{
+            padding: 14,
+            background: "var(--ds-bg-inset, var(--ds-bg))",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+          }}
+        >
+          <div
+            className="ds-mono uppercase"
+            style={{
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+              letterSpacing: "0.06em",
+              marginBottom: 10,
+            }}
+          >
+            Result · {result.ok ? "import complete" : "import completed with errors"}
+          </div>
+          <div
+            className="grid grid-cols-2 sm:grid-cols-4"
+            style={{ gap: 10 }}
+          >
+            {[
+              { label: "Total", value: result.summary.total, color: "var(--ds-fg)" },
+              { label: "Executed", value: result.summary.executed, color: "var(--ds-success)" },
+              { label: "Skipped", value: result.summary.skipped, color: "var(--ds-warning)" },
+              {
+                label: "Errors",
+                value: result.summary.errors,
+                color: result.summary.errors > 0 ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
+              },
+            ].map((kpi) => (
+              <div key={kpi.label}>
+                <div
+                  className="ds-mono uppercase"
+                  style={{
+                    fontSize: 10,
+                    color: "var(--ds-fg-subtle)",
+                    letterSpacing: "0.06em",
+                  }}
+                >
+                  {kpi.label}
+                </div>
+                <div
+                  className="ds-mono font-semibold"
+                  style={{
+                    fontSize: 18,
+                    color: kpi.color,
+                    marginTop: 2,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {kpi.value.toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+          {result.errors && result.errors.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div
+                className="ds-mono uppercase"
+                style={{
+                  fontSize: 10,
+                  color: "var(--ds-fg-subtle)",
+                  letterSpacing: "0.06em",
+                  marginBottom: 6,
+                }}
+              >
+                Errors ({result.errors.length})
+              </div>
+              <ul
+                className="ds-mono"
+                style={{
+                  margin: 0,
+                  paddingLeft: 18,
+                  fontSize: 11,
+                  color: "var(--ds-fg-muted)",
+                  lineHeight: 1.6,
+                }}
+              >
+                {result.errors.slice(0, 10).map((e, i) => (
+                  <li key={`${i}-${e}`} className="break-all">
+                    {e}
+                  </li>
+                ))}
+                {result.errors.length > 10 && (
+                  <li style={{ color: "var(--ds-fg-subtle)" }}>
+                    …and {result.errors.length - 10} more
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
         </div>
       )}
 
-      {preview && !result?.ok && (
-        <Button onClick={handleImport} disabled={importing || !encrypted}>
-          {importing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Upload className="w-4 h-4 mr-2" />}
-          Import Encrypted Database Dump
-        </Button>
-      )}
-
-      {result && (
-        <div className={`flex items-start gap-2 text-sm rounded-md p-3 ${result.ok ? "bg-green-900/20 border border-green-800/30 text-green-400" : "bg-red-900/20 border border-red-800/30 text-red-400"}`}>
-          {result.ok ? <CheckCircle className="w-4 h-4 shrink-0 mt-0.5" /> : <XCircle className="w-4 h-4 shrink-0 mt-0.5" />}
-          <div>
-            {result.summary ? (
-              <div>
-                <p className="font-medium">{result.ok ? "Import complete" : "Import completed with errors"}</p>
-                <p className="text-xs mt-1 opacity-70">
-                  {result.summary.executed} executed, {result.summary.skipped} skipped, {result.summary.errors} errors
-                </p>
-                {result.errors && result.errors.length > 0 && (
-                  <ul className="text-xs mt-2 space-y-1 opacity-70">
-                    {result.errors.map((e, i) => (
-                      <li key={`${i}-${e}`} className="truncate max-w-[500px]">{e}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ) : (
-              <p>{result.error}</p>
-            )}
-          </div>
+      {result?.error && (
+        <div
+          className="flex items-start gap-2"
+          style={{
+            padding: "10px 12px",
+            borderRadius: 6,
+            background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, var(--ds-border))",
+            color: "var(--ds-danger)",
+            fontSize: 12.5,
+          }}
+        >
+          <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{result.error}</span>
         </div>
       )}
     </div>
   );
 }
-

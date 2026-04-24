@@ -5,44 +5,76 @@ import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import Image from "next/image";
 import { Film, Tv2, Loader2, Check, X, ExternalLink } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
+import { Chip } from "@/components/ui/design";
+import type { ChipTone } from "@/components/ui/design";
 
-const STATUS_STYLES: Record<string, string> = {
-  PENDING:   "bg-yellow-500/10 text-yellow-400 border-yellow-500/20",
-  APPROVED:  "bg-green-500/10 text-green-400 border-green-500/20",
-  DECLINED:  "bg-red-500/10 text-red-400 border-red-500/20",
-  AVAILABLE: "bg-indigo-500/10 text-indigo-400 border-indigo-500/20",
+const STATUS_TONE: Record<string, ChipTone> = {
+  PENDING: "pending",
+  APPROVED: "approved",
+  DECLINED: "declined",
+  AVAILABLE: "accent",
 };
 
-export interface RequestRow {
-  id: string;
-  tmdbId: number;
-  title: string;
-  mediaType: string;
+export interface Requester {
+  requestId: string;
   status: string;
-  posterUrl: string | null;
-  releaseYear: string | null;
-  createdAt: string;
   note: string | null;
   adminNote: string | null;
+  createdAt: string;
   userName: string | null;
   userEmail: string;
   userDiscordId: string | null;
-  onPlex: boolean;
-  onJellyfin: boolean;
   userRequestCount: number;
 }
 
+export interface GroupedRequestRow {
+  groupKey: string;
+  tmdbId: number;
+  title: string;
+  mediaType: string;
+  posterUrl: string | null;
+  releaseYear: string | null;
+  onPlex: boolean;
+  onJellyfin: boolean;
+  aggregateStatus: string;
+  requesters: Requester[];
+}
+
 interface AdminRequestListProps {
-  requests: RequestRow[];
+  requests: GroupedRequestRow[];
   page: number;
   total: number;
   pageSize: number;
   statusFilter?: string;
   sort?: string;
+}
+
+function formatUserLabel(r: Requester) {
+  if (r.userEmail.endsWith("@discord.local")) {
+    return (
+      <>
+        <span style={{ color: "var(--ds-accent)" }}>Discord</span>
+        {r.userName ? `: ${r.userName}` : ""}
+      </>
+    );
+  }
+  if (r.userDiscordId) {
+    return (
+      <>
+        {r.userName ?? r.userEmail}{" "}
+        <span
+          style={{
+            color: "color-mix(in oklab, var(--ds-accent) 60%, transparent)",
+          }}
+        >
+          (Discord linked)
+        </span>
+      </>
+    );
+  }
+  return r.userName ?? r.userEmail;
 }
 
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, sort }: AdminRequestListProps) {
@@ -58,26 +90,35 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
 
-  const pendingIds = requests.filter((r) => r.status === "PENDING").map((r) => r.id);
-  const allPendingSelected = pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
+  const allPendingIds = requests.flatMap((g) =>
+    g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
+  );
+  const allPendingSelected = allPendingIds.length > 0 && allPendingIds.every((id) => selected.has(id));
+
+  function pendingIdsFor(group: GroupedRequestRow) {
+    return group.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId);
+  }
 
   function toggleAll() {
     if (allPendingSelected) {
       setSelected((prev) => {
         const next = new Set(prev);
-        pendingIds.forEach((id) => next.delete(id));
+        allPendingIds.forEach((id) => next.delete(id));
         return next;
       });
     } else {
-      setSelected((prev) => new Set([...prev, ...pendingIds]));
+      setSelected((prev) => new Set([...prev, ...allPendingIds]));
     }
   }
 
-  function toggleOne(id: string) {
+  function toggleGroup(group: GroupedRequestRow) {
+    const ids = pendingIdsFor(group);
+    if (ids.length === 0) return;
+    const allSelected = ids.every((id) => selected.has(id));
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (allSelected) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
       return next;
     });
   }
@@ -114,11 +155,37 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     return `/admin${qs ? `?${qs}` : ""}`;
   }
 
+  const actionBtn: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "4px 10px",
+    height: 28,
+    borderRadius: 6,
+    fontSize: 11,
+    fontWeight: 500,
+    border: "1px solid transparent",
+    cursor: "pointer",
+    transition: "background 120ms var(--ds-ease)",
+  };
+
   return (
     <div>
       {selected.size > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-4 py-3">
-          <span className="text-sm font-medium text-indigo-300">
+        <div
+          className="flex flex-wrap items-center gap-3"
+          style={{
+            marginBottom: 12,
+            padding: "10px 14px",
+            background: "var(--ds-accent-soft)",
+            border: "1px solid var(--ds-accent-ring)",
+            borderRadius: 8,
+          }}
+        >
+          <span
+            className="font-medium"
+            style={{ fontSize: 13, color: "var(--ds-accent)" }}
+          >
             {selected.size} selected
           </span>
 
@@ -129,191 +196,403 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 value={batchNote}
                 onChange={(e) => setBatchNote(e.target.value)}
                 placeholder="Decline reason (optional)"
-                className="flex-1 min-w-40 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="flex-1 min-w-40 focus:outline-none"
+                style={{
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: "var(--ds-bg-1)",
+                  color: "var(--ds-fg)",
+                  border: "1px solid var(--ds-border)",
+                }}
               />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { setShowBatchNote(null); setBatchNote(""); }}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBatchNote(null);
+                  setBatchNote("");
+                }}
                 disabled={batchLoading}
-                className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white"
+                style={{
+                  ...actionBtn,
+                  background: "var(--ds-bg-2)",
+                  color: "var(--ds-fg-muted)",
+                  borderColor: "var(--ds-border)",
+                }}
               >
                 Cancel
-              </Button>
-              <Button
-                size="sm"
+              </button>
+              <button
+                type="button"
                 onClick={() => batchAction("DECLINED", batchNote)}
                 disabled={batchLoading}
-                className="h-7 px-3 text-xs bg-red-800 hover:bg-red-700 gap-1"
+                style={{
+                  ...actionBtn,
+                  background: "var(--ds-danger)",
+                  color: "#fff",
+                }}
               >
-                {batchLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
+                {batchLoading ? (
+                  <Loader2
+                    className="animate-spin"
+                    style={{ width: 12, height: 12 }}
+                  />
+                ) : (
+                  <X style={{ width: 12, height: 12 }} />
+                )}
                 Decline {selected.size}
-              </Button>
+              </button>
             </>
           ) : (
             <>
-              <Button
-                size="sm"
+              <button
+                type="button"
                 onClick={() => batchAction("APPROVED")}
                 disabled={batchLoading}
-                className="h-7 px-3 text-xs bg-green-700 hover:bg-green-600 gap-1"
+                style={{
+                  ...actionBtn,
+                  background: "var(--ds-success)",
+                  color: "oklch(0.14 0 0)",
+                }}
               >
-                {batchLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                {batchLoading ? (
+                  <Loader2
+                    className="animate-spin"
+                    style={{ width: 12, height: 12 }}
+                  />
+                ) : (
+                  <Check style={{ width: 12, height: 12 }} />
+                )}
                 Approve {selected.size}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
+              </button>
+              <button
+                type="button"
                 onClick={() => setShowBatchNote("DECLINED")}
                 disabled={batchLoading}
-                className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-950 gap-1"
+                style={{
+                  ...actionBtn,
+                  background: "transparent",
+                  color: "var(--ds-danger)",
+                  borderColor:
+                    "color-mix(in oklab, var(--ds-danger) 40%, transparent)",
+                }}
               >
-                <X className="w-3 h-3" />
+                <X style={{ width: 12, height: 12 }} />
                 Decline {selected.size}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
+              </button>
+              <button
+                type="button"
                 onClick={() => setSelected(new Set())}
                 disabled={batchLoading}
-                className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-white ml-auto"
+                style={{
+                  ...actionBtn,
+                  marginLeft: "auto",
+                  background: "transparent",
+                  color: "var(--ds-fg-subtle)",
+                  borderColor: "var(--ds-border)",
+                }}
               >
                 Clear
-              </Button>
+              </button>
             </>
           )}
         </div>
       )}
 
-      {pendingIds.length > 0 && (
-        <div className="mb-2 flex items-center gap-3 px-4 py-2 rounded-lg bg-zinc-900/50">
+      {allPendingIds.length > 0 && (
+        <div
+          className="flex items-center"
+          style={{
+            gap: 12,
+            marginBottom: 8,
+            padding: "6px 14px",
+            borderRadius: 6,
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border)",
+          }}
+        >
           <input
             type="checkbox"
             checked={allPendingSelected}
             onChange={toggleAll}
-            className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
+            className="w-4 h-4"
+            style={{ accentColor: "var(--ds-accent)" }}
           />
-          <span className="text-xs text-zinc-500">Select all pending ({pendingIds.length})</span>
+          <span
+            className="ds-mono"
+            style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+          >
+            Select all pending ({allPendingIds.length})
+          </span>
         </div>
       )}
 
-      <div className="flex flex-col gap-3">
-        {requests.map((r) => (
-          <div
-            key={r.id}
-            className="flex items-start gap-4 rounded-lg bg-zinc-900 border border-zinc-800 p-4"
-          >
-            <div className="flex items-center pt-1 w-5 shrink-0">
-              {r.status === "PENDING" ? (
-                <input
-                  type="checkbox"
-                  checked={selected.has(r.id)}
-                  onChange={() => toggleOne(r.id)}
-                  className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
-                />
-              ) : (
-                <span className="w-4" />
-              )}
-            </div>
+      <div className="flex flex-col" style={{ gap: 8 }}>
+        {requests.map((group) => {
+          const pendingIds = pendingIdsFor(group);
+          const primaryRequester = group.requesters[0];
+          const representativeId =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.requestId ??
+            primaryRequester.requestId;
+          const representativeAdminNote =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.adminNote ??
+            primaryRequester.adminNote;
+          const groupAllPendingSelected =
+            pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
-            <div className="relative w-10 h-14 shrink-0 rounded bg-zinc-700 overflow-hidden">
-              {r.posterUrl ? (
-                <Image src={r.posterUrl} alt={r.title} fill className="object-cover" sizes="40px" />
-              ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
-                  {r.mediaType === "MOVIE" ? <Film className="w-4 h-4" /> : <Tv2 className="w-4 h-4" />}
-                </div>
-              )}
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <Link
-                href={`/${r.mediaType === "MOVIE" ? "movie" : "tv"}/${r.tmdbId}`}
-                className="group inline-flex items-center gap-1 font-medium text-white hover:text-indigo-300 transition-colors truncate max-w-full"
+          return (
+            <div
+              key={group.groupKey}
+              className="flex items-start"
+              style={{
+                gap: 14,
+                padding: 14,
+                background: "var(--ds-bg-2)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 8,
+              }}
+            >
+              <div
+                className="flex items-center shrink-0"
+                style={{ paddingTop: 2, width: 20 }}
               >
-                <span className="truncate">{r.title}</span>
-                <ExternalLink className="w-3 h-3 shrink-0 opacity-0 group-hover:opacity-60 transition-opacity" />
-              </Link>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                {r.mediaType === "MOVIE" ? "Movie" : "TV Show"}
-                {r.releaseYear ? ` · ${r.releaseYear}` : ""}
-                {" · "}
-                <span className="text-zinc-500">
-                  {r.userEmail.endsWith("@discord.local")
-                    ? <><span className="text-indigo-400">Discord</span>{r.userName ? `: ${r.userName}` : ""}</>
-                    : r.userDiscordId
-                    ? <>{r.userName ?? r.userEmail} <span className="text-indigo-400/60">(Discord linked)</span></>
-                    : r.userName ?? r.userEmail}
-                  {r.userRequestCount > 1 && (
-                    <span className="ml-1 inline-flex items-center px-1 py-0 rounded text-[10px] font-medium bg-zinc-700 text-zinc-400">
-                      {r.userRequestCount}
-                    </span>
-                  )}
-                </span>
-                {" · "}
-                <span className="text-zinc-600">{new Date(r.createdAt).toLocaleDateString()}</span>
-              </p>
+                {pendingIds.length > 0 ? (
+                  <input
+                    type="checkbox"
+                    checked={groupAllPendingSelected}
+                    onChange={() => toggleGroup(group)}
+                    className="w-4 h-4"
+                    style={{ accentColor: "var(--ds-accent)" }}
+                  />
+                ) : (
+                  <span style={{ width: 16 }} />
+                )}
+              </div>
 
-              {(r.onPlex || r.onJellyfin) && (
-                <div className="flex items-center gap-1.5 mt-1">
-                  {r.onPlex && (
-                    <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-orange-500/10 text-orange-400 border border-orange-500/20">
-                      On Plex
-                    </span>
+              <div
+                className="relative shrink-0 overflow-hidden"
+                style={{
+                  width: 40,
+                  aspectRatio: "2 / 3",
+                  borderRadius: 4,
+                  background: "var(--ds-bg-3)",
+                }}
+              >
+                {group.posterUrl ? (
+                  <Image
+                    src={group.posterUrl}
+                    alt={group.title}
+                    fill
+                    className="object-cover"
+                    sizes="40px"
+                  />
+                ) : (
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ color: "var(--ds-fg-subtle)" }}
+                  >
+                    {group.mediaType === "MOVIE" ? (
+                      <Film style={{ width: 14, height: 14 }} />
+                    ) : (
+                      <Tv2 style={{ width: 14, height: 14 }} />
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <Link
+                  href={`/${group.mediaType === "MOVIE" ? "movie" : "tv"}/${group.tmdbId}`}
+                  className="group inline-flex items-center gap-1 font-medium transition-colors truncate max-w-full"
+                  style={{ color: "var(--ds-fg)" }}
+                >
+                  <span className="truncate">{group.title}</span>
+                  <ExternalLink
+                    className="shrink-0 transition-opacity"
+                    style={{
+                      width: 12,
+                      height: 12,
+                      opacity: 0,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  />
+                </Link>
+
+                <p
+                  className="ds-mono"
+                  style={{
+                    fontSize: 10.5,
+                    color: "var(--ds-fg-subtle)",
+                    marginTop: 2,
+                  }}
+                >
+                  {group.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                  {group.releaseYear ? ` · ${group.releaseYear}` : ""}
+                  {group.requesters.length > 1 && (
+                    <>
+                      {" · "}
+                      <span style={{ color: "var(--ds-fg-muted)" }}>
+                        {group.requesters.length} requesters
+                      </span>
+                    </>
                   )}
-                  {r.onJellyfin && (
-                    <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                      On Jellyfin
-                    </span>
-                  )}
+                </p>
+
+                <div
+                  className="flex flex-col"
+                  style={{ marginTop: 6, gap: 3 }}
+                >
+                  {group.requesters.map((r) => (
+                    <div
+                      key={r.requestId}
+                      className="flex items-center flex-wrap ds-mono"
+                      style={{
+                        fontSize: 10.5,
+                        gap: 6,
+                        color: "var(--ds-fg-muted)",
+                      }}
+                    >
+                      <span>{formatUserLabel(r)}</span>
+                      {r.userRequestCount > 1 && (
+                        <span
+                          className="inline-flex items-center font-medium"
+                          style={{
+                            padding: "0 4px",
+                            borderRadius: 3,
+                            fontSize: 10,
+                            background: "var(--ds-bg-3)",
+                            color: "var(--ds-fg-muted)",
+                          }}
+                        >
+                          {r.userRequestCount}
+                        </span>
+                      )}
+                      <span style={{ color: "var(--ds-fg-subtle)" }}>
+                        · {new Date(r.createdAt).toLocaleDateString()}
+                      </span>
+                      {group.requesters.length > 1 && r.status !== group.aggregateStatus && (
+                        <span
+                          className="inline-flex items-center"
+                          style={{
+                            padding: "0 5px",
+                            borderRadius: 3,
+                            fontSize: 9.5,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.4,
+                            background: "var(--ds-bg-3)",
+                            color: "var(--ds-fg-subtle)",
+                          }}
+                        >
+                          {r.status}
+                        </span>
+                      )}
+                      {r.note && (
+                        <span
+                          className="italic truncate"
+                          style={{
+                            fontSize: 11,
+                            color: "var(--ds-fg-subtle)",
+                            maxWidth: 260,
+                          }}
+                          title={r.note}
+                        >
+                          &ldquo;{r.note}&rdquo;
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              )}
 
-              {r.note && (
-                <p className="mt-1 text-xs text-zinc-400 bg-zinc-800 rounded px-2 py-1 border-l-2 border-indigo-500/50">
-                  &ldquo;{r.note}&rdquo;
-                </p>
-              )}
-              {r.adminNote && (
-                <p className="mt-1 text-xs text-zinc-500 italic">
-                  ↳ {r.adminNote}
-                </p>
-              )}
+                {(group.onPlex || group.onJellyfin) && (
+                  <div
+                    className="flex items-center flex-wrap"
+                    style={{ gap: 4, marginTop: 6 }}
+                  >
+                    {group.onPlex && (
+                      <span className="ds-chip ds-chip-plex">On Plex</span>
+                    )}
+                    {group.onJellyfin && (
+                      <span className="ds-chip ds-chip-jellyfin">On Jellyfin</span>
+                    )}
+                  </div>
+                )}
+
+                {representativeAdminNote && (
+                  <p
+                    className="italic"
+                    style={{
+                      marginTop: 4,
+                      fontSize: 11,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  >
+                    ↳ {representativeAdminNote}
+                  </p>
+                )}
+              </div>
+
+              <div className="hidden sm:inline-flex shrink-0">
+                <Chip tone={STATUS_TONE[group.aggregateStatus]}>
+                  {group.aggregateStatus.charAt(0) + group.aggregateStatus.slice(1).toLowerCase()}
+                </Chip>
+              </div>
+
+              <RequestActions
+                requestId={representativeId}
+                currentStatus={group.aggregateStatus}
+                existingAdminNote={representativeAdminNote}
+                groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
+              />
             </div>
-
-            <Badge className={`shrink-0 border text-xs font-medium hidden sm:inline-flex ${STATUS_STYLES[r.status]}`}>
-              {r.status.charAt(0) + r.status.slice(1).toLowerCase()}
-            </Badge>
-
-            <RequestActions requestId={r.id} currentStatus={r.status} existingAdminNote={r.adminNote} />
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {totalPages > 1 && (
-        <div className="flex items-center justify-between mt-6">
-          <p className="text-xs text-zinc-500">
+        <div
+          className="flex items-center justify-between"
+          style={{ marginTop: 24 }}
+        >
+          <p
+            className="ds-mono"
+            style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+          >
             {total} total · page {page} of {totalPages}
           </p>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
+            <button
+              type="button"
               disabled={page <= 1}
               onClick={() => router.push(pageUrl(page - 1))}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white disabled:opacity-40"
+              style={{
+                ...actionBtn,
+                background: page <= 1 ? "transparent" : "var(--ds-bg-2)",
+                color:
+                  page <= 1 ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
+                borderColor: "var(--ds-border)",
+                cursor: page <= 1 ? "not-allowed" : "pointer",
+              }}
             >
               Previous
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
+            </button>
+            <button
+              type="button"
               disabled={page >= totalPages}
               onClick={() => router.push(pageUrl(page + 1))}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white disabled:opacity-40"
+              style={{
+                ...actionBtn,
+                background:
+                  page >= totalPages ? "transparent" : "var(--ds-bg-2)",
+                color:
+                  page >= totalPages
+                    ? "var(--ds-fg-disabled)"
+                    : "var(--ds-fg-muted)",
+                borderColor: "var(--ds-border)",
+                cursor: page >= totalPages ? "not-allowed" : "pointer",
+              }}
             >
               Next
-            </Button>
+            </button>
           </div>
         </div>
       )}
