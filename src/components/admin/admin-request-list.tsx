@@ -17,32 +17,64 @@ const STATUS_TONE: Record<string, ChipTone> = {
   AVAILABLE: "accent",
 };
 
-export interface RequestRow {
-  id: string;
-  tmdbId: number;
-  title: string;
-  mediaType: string;
+export interface Requester {
+  requestId: string;
   status: string;
-  posterUrl: string | null;
-  releaseYear: string | null;
-  createdAt: string;
   note: string | null;
   adminNote: string | null;
+  createdAt: string;
   userName: string | null;
   userEmail: string;
   userDiscordId: string | null;
-  onPlex: boolean;
-  onJellyfin: boolean;
   userRequestCount: number;
 }
 
+export interface GroupedRequestRow {
+  groupKey: string;
+  tmdbId: number;
+  title: string;
+  mediaType: string;
+  posterUrl: string | null;
+  releaseYear: string | null;
+  onPlex: boolean;
+  onJellyfin: boolean;
+  aggregateStatus: string;
+  requesters: Requester[];
+}
+
 interface AdminRequestListProps {
-  requests: RequestRow[];
+  requests: GroupedRequestRow[];
   page: number;
   total: number;
   pageSize: number;
   statusFilter?: string;
   sort?: string;
+}
+
+function formatUserLabel(r: Requester) {
+  if (r.userEmail.endsWith("@discord.local")) {
+    return (
+      <>
+        <span style={{ color: "var(--ds-accent)" }}>Discord</span>
+        {r.userName ? `: ${r.userName}` : ""}
+      </>
+    );
+  }
+  if (r.userDiscordId) {
+    return (
+      <>
+        {r.userName ?? r.userEmail}{" "}
+        <span
+          style={{
+            color: "color-mix(in oklab, var(--ds-accent) 60%, transparent)",
+          }}
+        >
+          (Discord linked)
+        </span>
+      </>
+    );
+  }
+  return r.userName ?? r.userEmail;
 }
 
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, sort }: AdminRequestListProps) {
@@ -58,26 +90,35 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
 
-  const pendingIds = requests.filter((r) => r.status === "PENDING").map((r) => r.id);
-  const allPendingSelected = pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
+  const allPendingIds = requests.flatMap((g) =>
+    g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
+  );
+  const allPendingSelected = allPendingIds.length > 0 && allPendingIds.every((id) => selected.has(id));
+
+  function pendingIdsFor(group: GroupedRequestRow) {
+    return group.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId);
+  }
 
   function toggleAll() {
     if (allPendingSelected) {
       setSelected((prev) => {
         const next = new Set(prev);
-        pendingIds.forEach((id) => next.delete(id));
+        allPendingIds.forEach((id) => next.delete(id));
         return next;
       });
     } else {
-      setSelected((prev) => new Set([...prev, ...pendingIds]));
+      setSelected((prev) => new Set([...prev, ...allPendingIds]));
     }
   }
 
-  function toggleOne(id: string) {
+  function toggleGroup(group: GroupedRequestRow) {
+    const ids = pendingIdsFor(group);
+    if (ids.length === 0) return;
+    const allSelected = ids.every((id) => selected.has(id));
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (allSelected) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
       return next;
     });
   }
@@ -258,7 +299,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
         </div>
       )}
 
-      {pendingIds.length > 0 && (
+      {allPendingIds.length > 0 && (
         <div
           className="flex items-center"
           style={{
@@ -281,196 +322,230 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             className="ds-mono"
             style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
           >
-            Select all pending ({pendingIds.length})
+            Select all pending ({allPendingIds.length})
           </span>
         </div>
       )}
 
       <div className="flex flex-col" style={{ gap: 8 }}>
-        {requests.map((r) => (
-          <div
-            key={r.id}
-            className="flex items-start"
-            style={{
-              gap: 14,
-              padding: 14,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 8,
-            }}
-          >
-            <div
-              className="flex items-center shrink-0"
-              style={{ paddingTop: 2, width: 20 }}
-            >
-              {r.status === "PENDING" ? (
-                <input
-                  type="checkbox"
-                  checked={selected.has(r.id)}
-                  onChange={() => toggleOne(r.id)}
-                  className="w-4 h-4"
-                  style={{ accentColor: "var(--ds-accent)" }}
-                />
-              ) : (
-                <span style={{ width: 16 }} />
-              )}
-            </div>
+        {requests.map((group) => {
+          const pendingIds = pendingIdsFor(group);
+          const primaryRequester = group.requesters[0];
+          const representativeId =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.requestId ??
+            primaryRequester.requestId;
+          const representativeAdminNote =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.adminNote ??
+            primaryRequester.adminNote;
+          const groupAllPendingSelected =
+            pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
+          return (
             <div
-              className="relative shrink-0 overflow-hidden"
+              key={group.groupKey}
+              className="flex items-start"
               style={{
-                width: 40,
-                aspectRatio: "2 / 3",
-                borderRadius: 4,
-                background: "var(--ds-bg-3)",
+                gap: 14,
+                padding: 14,
+                background: "var(--ds-bg-2)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 8,
               }}
             >
-              {r.posterUrl ? (
-                <Image
-                  src={r.posterUrl}
-                  alt={r.title}
-                  fill
-                  className="object-cover"
-                  sizes="40px"
-                />
-              ) : (
-                <div
-                  className="absolute inset-0 flex items-center justify-center"
-                  style={{ color: "var(--ds-fg-subtle)" }}
-                >
-                  {r.mediaType === "MOVIE" ? (
-                    <Film style={{ width: 14, height: 14 }} />
-                  ) : (
-                    <Tv2 style={{ width: 14, height: 14 }} />
-                  )}
-                </div>
-              )}
-            </div>
-
-            <div className="flex-1 min-w-0">
-              <Link
-                href={`/${r.mediaType === "MOVIE" ? "movie" : "tv"}/${r.tmdbId}`}
-                className="group inline-flex items-center gap-1 font-medium transition-colors truncate max-w-full"
-                style={{ color: "var(--ds-fg)" }}
+              <div
+                className="flex items-center shrink-0"
+                style={{ paddingTop: 2, width: 20 }}
               >
-                <span className="truncate">{r.title}</span>
-                <ExternalLink
-                  className="shrink-0 transition-opacity"
-                  style={{
-                    width: 12,
-                    height: 12,
-                    opacity: 0,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                />
-              </Link>
-              <p
-                className="ds-mono"
+                {pendingIds.length > 0 ? (
+                  <input
+                    type="checkbox"
+                    checked={groupAllPendingSelected}
+                    onChange={() => toggleGroup(group)}
+                    className="w-4 h-4"
+                    style={{ accentColor: "var(--ds-accent)" }}
+                  />
+                ) : (
+                  <span style={{ width: 16 }} />
+                )}
+              </div>
+
+              <div
+                className="relative shrink-0 overflow-hidden"
                 style={{
-                  fontSize: 10.5,
-                  color: "var(--ds-fg-subtle)",
-                  marginTop: 2,
+                  width: 40,
+                  aspectRatio: "2 / 3",
+                  borderRadius: 4,
+                  background: "var(--ds-bg-3)",
                 }}
               >
-                {r.mediaType === "MOVIE" ? "MOVIE" : "TV"}
-                {r.releaseYear ? ` · ${r.releaseYear}` : ""}
-                {" · "}
-                <span style={{ color: "var(--ds-fg-muted)" }}>
-                  {r.userEmail.endsWith("@discord.local") ? (
+                {group.posterUrl ? (
+                  <Image
+                    src={group.posterUrl}
+                    alt={group.title}
+                    fill
+                    className="object-cover"
+                    sizes="40px"
+                  />
+                ) : (
+                  <div
+                    className="absolute inset-0 flex items-center justify-center"
+                    style={{ color: "var(--ds-fg-subtle)" }}
+                  >
+                    {group.mediaType === "MOVIE" ? (
+                      <Film style={{ width: 14, height: 14 }} />
+                    ) : (
+                      <Tv2 style={{ width: 14, height: 14 }} />
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex-1 min-w-0">
+                <Link
+                  href={`/${group.mediaType === "MOVIE" ? "movie" : "tv"}/${group.tmdbId}`}
+                  className="group inline-flex items-center gap-1 font-medium transition-colors truncate max-w-full"
+                  style={{ color: "var(--ds-fg)" }}
+                >
+                  <span className="truncate">{group.title}</span>
+                  <ExternalLink
+                    className="shrink-0 transition-opacity"
+                    style={{
+                      width: 12,
+                      height: 12,
+                      opacity: 0,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  />
+                </Link>
+
+                <p
+                  className="ds-mono"
+                  style={{
+                    fontSize: 10.5,
+                    color: "var(--ds-fg-subtle)",
+                    marginTop: 2,
+                  }}
+                >
+                  {group.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                  {group.releaseYear ? ` · ${group.releaseYear}` : ""}
+                  {group.requesters.length > 1 && (
                     <>
-                      <span style={{ color: "var(--ds-accent)" }}>Discord</span>
-                      {r.userName ? `: ${r.userName}` : ""}
-                    </>
-                  ) : r.userDiscordId ? (
-                    <>
-                      {r.userName ?? r.userEmail}{" "}
-                      <span
-                        style={{
-                          color: "color-mix(in oklab, var(--ds-accent) 60%, transparent)",
-                        }}
-                      >
-                        (Discord linked)
+                      {" · "}
+                      <span style={{ color: "var(--ds-fg-muted)" }}>
+                        {group.requesters.length} requesters
                       </span>
                     </>
-                  ) : (
-                    (r.userName ?? r.userEmail)
                   )}
-                  {r.userRequestCount > 1 && (
-                    <span
-                      className="inline-flex items-center font-medium"
+                </p>
+
+                <div
+                  className="flex flex-col"
+                  style={{ marginTop: 6, gap: 3 }}
+                >
+                  {group.requesters.map((r) => (
+                    <div
+                      key={r.requestId}
+                      className="flex items-center flex-wrap ds-mono"
                       style={{
-                        marginLeft: 4,
-                        padding: "0 4px",
-                        borderRadius: 3,
-                        fontSize: 10,
-                        background: "var(--ds-bg-3)",
+                        fontSize: 10.5,
+                        gap: 6,
                         color: "var(--ds-fg-muted)",
                       }}
                     >
-                      {r.userRequestCount}
-                    </span>
-                  )}
-                </span>
-                {" · "}
-                <span>{new Date(r.createdAt).toLocaleDateString()}</span>
-              </p>
-
-              {(r.onPlex || r.onJellyfin) && (
-                <div
-                  className="flex items-center flex-wrap"
-                  style={{ gap: 4, marginTop: 6 }}
-                >
-                  {r.onPlex && (
-                    <span className="ds-chip ds-chip-plex">On Plex</span>
-                  )}
-                  {r.onJellyfin && (
-                    <span className="ds-chip ds-chip-jellyfin">On Jellyfin</span>
-                  )}
+                      <span>{formatUserLabel(r)}</span>
+                      {r.userRequestCount > 1 && (
+                        <span
+                          className="inline-flex items-center font-medium"
+                          style={{
+                            padding: "0 4px",
+                            borderRadius: 3,
+                            fontSize: 10,
+                            background: "var(--ds-bg-3)",
+                            color: "var(--ds-fg-muted)",
+                          }}
+                        >
+                          {r.userRequestCount}
+                        </span>
+                      )}
+                      <span style={{ color: "var(--ds-fg-subtle)" }}>
+                        · {new Date(r.createdAt).toLocaleDateString()}
+                      </span>
+                      {group.requesters.length > 1 && r.status !== group.aggregateStatus && (
+                        <span
+                          className="inline-flex items-center"
+                          style={{
+                            padding: "0 5px",
+                            borderRadius: 3,
+                            fontSize: 9.5,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.4,
+                            background: "var(--ds-bg-3)",
+                            color: "var(--ds-fg-subtle)",
+                          }}
+                        >
+                          {r.status}
+                        </span>
+                      )}
+                      {r.note && (
+                        <span
+                          className="italic truncate"
+                          style={{
+                            fontSize: 11,
+                            color: "var(--ds-fg-subtle)",
+                            maxWidth: 260,
+                          }}
+                          title={r.note}
+                        >
+                          &ldquo;{r.note}&rdquo;
+                        </span>
+                      )}
+                    </div>
+                  ))}
                 </div>
-              )}
 
-              {r.note && (
-                <p
-                  style={{
-                    marginTop: 6,
-                    padding: "6px 10px",
-                    borderRadius: 4,
-                    background: "var(--ds-bg-1)",
-                    borderLeft: "2px solid var(--ds-accent-ring)",
-                    fontSize: 11.5,
-                    color: "var(--ds-fg-muted)",
-                  }}
-                >
-                  &ldquo;{r.note}&rdquo;
-                </p>
-              )}
-              {r.adminNote && (
-                <p
-                  className="italic"
-                  style={{
-                    marginTop: 4,
-                    fontSize: 11,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                >
-                  ↳ {r.adminNote}
-                </p>
-              )}
+                {(group.onPlex || group.onJellyfin) && (
+                  <div
+                    className="flex items-center flex-wrap"
+                    style={{ gap: 4, marginTop: 6 }}
+                  >
+                    {group.onPlex && (
+                      <span className="ds-chip ds-chip-plex">On Plex</span>
+                    )}
+                    {group.onJellyfin && (
+                      <span className="ds-chip ds-chip-jellyfin">On Jellyfin</span>
+                    )}
+                  </div>
+                )}
+
+                {representativeAdminNote && (
+                  <p
+                    className="italic"
+                    style={{
+                      marginTop: 4,
+                      fontSize: 11,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  >
+                    ↳ {representativeAdminNote}
+                  </p>
+                )}
+              </div>
+
+              <div className="hidden sm:inline-flex shrink-0">
+                <Chip tone={STATUS_TONE[group.aggregateStatus]}>
+                  {group.aggregateStatus.charAt(0) + group.aggregateStatus.slice(1).toLowerCase()}
+                </Chip>
+              </div>
+
+              <RequestActions
+                requestId={representativeId}
+                currentStatus={group.aggregateStatus}
+                existingAdminNote={representativeAdminNote}
+                groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
+              />
             </div>
-
-            <div className="hidden sm:inline-flex shrink-0">
-              <Chip tone={STATUS_TONE[r.status]}>
-                {r.status.charAt(0) + r.status.slice(1).toLowerCase()}
-              </Chip>
-            </div>
-
-            <RequestActions
-              requestId={r.id}
-              currentStatus={r.status}
-              existingAdminNote={r.adminNote}
-            />
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {totalPages > 1 && (

@@ -20,14 +20,14 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
   }
 
-  let body: { ids?: unknown; status?: unknown; adminNote?: unknown };
+  let body: { ids?: unknown; status?: unknown; adminNote?: unknown; permanent?: unknown };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { ids, status, adminNote } = body;
+  const { ids, status, adminNote, permanent } = body;
 
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100) {
     return NextResponse.json({ error: "ids must be a non-empty array of up to 100 items" }, { status: 400 });
@@ -41,10 +41,14 @@ export async function PATCH(req: NextRequest) {
   if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
     return NextResponse.json({ error: "adminNote must be a string under 1000 characters" }, { status: 400 });
   }
+  if (permanent !== undefined && typeof permanent !== "boolean") {
+    return NextResponse.json({ error: "permanent must be a boolean" }, { status: 400 });
+  }
 
   const typedIds = ids as string[];
   const typedStatus = status as ValidStatus;
   const typedAdminNote = sanitizeOptional(adminNote as string | undefined);
+  const typedPermanent = permanent === true && typedStatus === "DECLINED";
 
   const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
 
@@ -60,6 +64,7 @@ export async function PATCH(req: NextRequest) {
       status: typedStatus,
       pendingNotifyAt,
       ...(typedAdminNote !== undefined ? { adminNote: typedAdminNote } : {}),
+      ...(typedStatus === "DECLINED" ? { permanentlyDeclined: typedPermanent } : {}),
     },
   });
 

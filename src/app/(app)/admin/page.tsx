@@ -1,10 +1,10 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { type RequestStatus } from "@/generated/prisma";
+import { type RequestStatus, Prisma } from "@/generated/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
 import { SyncButton } from "@/components/admin/request-actions";
-import { AdminRequestList, type RequestRow } from "@/components/admin/admin-request-list";
+import { AdminRequestList, type GroupedRequestRow, type Requester } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
 import { PageHeader, StatCard } from "@/components/ui/design";
 
@@ -13,6 +13,13 @@ export const dynamic = "force-dynamic";
 const PAGE_SIZE = 20;
 
 const VALID_STATUSES = ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"];
+
+const STATUS_RANK: Record<string, number> = {
+  PENDING: 0,
+  APPROVED: 1,
+  DECLINED: 2,
+  AVAILABLE: 3,
+};
 
 export default async function AdminPage({
   searchParams,
@@ -29,34 +36,41 @@ export default async function AdminPage({
   const statusFilter = VALID_STATUSES.includes(statusParam ?? "") ? (statusParam as RequestStatus) : undefined;
   const sort = sortParam === "oldest" ? "oldest" : sortParam === "title" ? "title" : "newest";
 
-  const orderBy =
-    sort === "oldest" ? { createdAt: "asc" as const }
-    : sort === "title" ? { title: "asc" as const }
-    : { createdAt: "desc" as const };
-
   const where = statusFilter ? { status: statusFilter } : {};
 
-  const [statusCounts, userCount, requests, total, userRequestCounts] = await Promise.all([
+  const groupOrderBy: Prisma.MediaRequestOrderByWithAggregationInput =
+    sort === "oldest" ? { _min: { createdAt: "asc" } }
+    : sort === "title" ? { _min: { title: "asc" } }
+    : { _max: { createdAt: "desc" } };
+
+  const [statusCounts, userCount, allGroups, pagedGroups, userRequestCounts] = await Promise.all([
     prisma.mediaRequest.groupBy({ by: ["status"], _count: { status: true } }),
     prisma.user.count(),
-    prisma.mediaRequest.findMany({
+    prisma.mediaRequest.groupBy({ by: ["tmdbId", "mediaType"], where }),
+    prisma.mediaRequest.groupBy({
+      by: ["tmdbId", "mediaType"],
       where,
-      include: { user: { select: { name: true, email: true, discordId: true } } },
-      orderBy,
+      orderBy: groupOrderBy,
       skip,
       take: PAGE_SIZE,
     }),
-    prisma.mediaRequest.count({ where }),
     prisma.mediaRequest.groupBy({ by: ["requestedBy"], _count: { id: true } }),
   ]);
 
-  const pairs = requests.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType }));
-  const [plexItems, jellyfinItems] = pairs.length
+  const total = allGroups.length;
+
+  const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
+  const [requests, plexItems, jellyfinItems] = pairs.length
     ? await Promise.all([
+        prisma.mediaRequest.findMany({
+          where: { OR: pairs, ...(statusFilter ? { status: statusFilter } : {}) },
+          include: { user: { select: { name: true, email: true, discordId: true } } },
+          orderBy: { createdAt: "desc" },
+        }),
         prisma.plexLibraryItem.findMany({ where: { OR: pairs } }),
         prisma.jellyfinLibraryItem.findMany({ where: { OR: pairs } }),
       ])
-    : [[], []];
+    : [[], [], []];
 
   const plexSet = new Set(plexItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
@@ -77,24 +91,51 @@ export default async function AdminPage({
   const statusCountsMap: Record<string, number> = {};
   for (const s of statusCounts) statusCountsMap[s.status] = s._count.status;
 
-  const rows: RequestRow[] = requests.map((r) => ({
-    id: r.id,
-    tmdbId: r.tmdbId,
-    title: r.title,
-    mediaType: r.mediaType,
-    status: r.status,
-    posterUrl: posterUrl(r.posterPath, "w342"),
-    releaseYear: r.releaseYear,
-    createdAt: r.createdAt.toISOString(),
-    note: r.note,
-    adminNote: r.adminNote,
-    userName: r.user.name,
-    userEmail: r.user.email,
-    userDiscordId: r.user.discordId,
-    onPlex: plexSet.has(`${r.tmdbId}:${r.mediaType}`),
-    onJellyfin: jellyfinSet.has(`${r.tmdbId}:${r.mediaType}`),
-    userRequestCount: userCountMap.get(r.requestedBy) ?? 1,
-  }));
+  type RequestWithUser = (typeof requests)[number];
+  const grouped = new Map<string, RequestWithUser[]>();
+  for (const r of requests) {
+    const key = `${r.tmdbId}:${r.mediaType}`;
+    const bucket = grouped.get(key);
+    if (bucket) bucket.push(r);
+    else grouped.set(key, [r]);
+  }
+
+  const groupOrder = pagedGroups.map((g) => `${g.tmdbId}:${g.mediaType}`);
+
+  const rows: GroupedRequestRow[] = groupOrder
+    .map((key) => grouped.get(key))
+    .filter((bucket): bucket is RequestWithUser[] => Array.isArray(bucket) && bucket.length > 0)
+    .map((bucket) => {
+      const primary = bucket[0];
+      const requesters: Requester[] = bucket.map((r) => ({
+        requestId: r.id,
+        status: r.status,
+        note: r.note,
+        adminNote: r.adminNote,
+        createdAt: r.createdAt.toISOString(),
+        userName: r.user.name,
+        userEmail: r.user.email,
+        userDiscordId: r.user.discordId,
+        userRequestCount: userCountMap.get(r.requestedBy) ?? 1,
+      }));
+
+      const aggregateStatus = bucket
+        .map((r) => r.status)
+        .sort((a, b) => (STATUS_RANK[a] ?? 99) - (STATUS_RANK[b] ?? 99))[0];
+
+      return {
+        groupKey: `${primary.tmdbId}:${primary.mediaType}`,
+        tmdbId: primary.tmdbId,
+        title: primary.title,
+        mediaType: primary.mediaType,
+        posterUrl: posterUrl(primary.posterPath, "w342"),
+        releaseYear: primary.releaseYear,
+        onPlex: plexSet.has(`${primary.tmdbId}:${primary.mediaType}`),
+        onJellyfin: jellyfinSet.has(`${primary.tmdbId}:${primary.mediaType}`),
+        aggregateStatus,
+        requesters,
+      };
+    });
 
   return (
     <div className="ds-page-enter">
