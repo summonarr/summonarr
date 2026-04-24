@@ -38,6 +38,33 @@ const ACTION_LABELS: Record<string, { label: string; color: string; icon: string
 
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
 
+type AuditGroup = "auth" | "admin" | "system";
+
+const ACTION_GROUP: Record<string, AuditGroup> = {
+  AUTH_LOGIN: "auth",
+  AUTH_LOGIN_FAILED: "auth",
+  AUTH_LOGOUT: "auth",
+  SESSION_REVOKE: "auth",
+  REQUEST_APPROVE: "admin",
+  REQUEST_DECLINE: "admin",
+  REQUEST_DELETE: "admin",
+  USER_ROLE_CHANGE: "admin",
+  USER_DELETE: "admin",
+  SETTINGS_CHANGE: "admin",
+  MAINTENANCE_TOGGLE: "admin",
+  BACKUP_EXPORT: "admin",
+  BACKUP_IMPORT: "admin",
+  ISSUE_STATUS_CHANGE: "admin",
+  LIBRARY_SYNC: "system",
+};
+
+const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
+  { value: "", label: "All" },
+  { value: "auth", label: "Auth" },
+  { value: "admin", label: "Admin" },
+  { value: "system", label: "System" },
+];
+
 const DOT_COLORS: Record<string, string> = {
   REQUEST_APPROVE:    "bg-green-500",
   REQUEST_DECLINE:    "bg-red-500",
@@ -114,6 +141,7 @@ function parseUserAgent(ua: string | null): string {
 
 function AuditLogFilters({
   currentAction,
+  currentGroup,
   currentDateFrom,
   currentDateTo,
   currentUser,
@@ -123,6 +151,7 @@ function AuditLogFilters({
   onViewModeChange,
 }: {
   currentAction: string;
+  currentGroup: string;
   currentDateFrom: string;
   currentDateTo: string;
   currentUser: string;
@@ -137,7 +166,12 @@ function AuditLogFilters({
   const userTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const targetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
-  const hasFilters = currentAction || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron;
+  const hasFilters = currentAction || currentGroup || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron;
+
+  // When a group is selected, scope the per-action pills to that group
+  const visibleActions = currentGroup
+    ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a] === currentGroup)
+    : ALL_ACTIONS;
 
   useEffect(() => {
     clearTimeout(userTimer.current);
@@ -157,6 +191,39 @@ function AuditLogFilters({
 
   return (
     <div className="space-y-3">
+      <div
+        className="inline-flex"
+        style={{
+          padding: 2,
+          background: "var(--ds-bg-2)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 8,
+        }}
+      >
+        {GROUP_OPTIONS.map((g) => {
+          const active = currentGroup === g.value;
+          return (
+            <button
+              key={g.value || "all"}
+              onClick={() => navigate({ group: g.value, action: "" })}
+              className="ds-mono font-medium transition-colors"
+              style={{
+                padding: "5px 12px",
+                fontSize: 11,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase",
+                borderRadius: 6,
+                background: active ? "var(--ds-bg-3)" : "transparent",
+                color: active ? "var(--ds-fg)" : "var(--ds-fg-subtle)",
+                fontWeight: active ? 600 : 500,
+              }}
+            >
+              {g.label}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap gap-1.5">
           <button
@@ -167,7 +234,7 @@ function AuditLogFilters({
           >
             All
           </button>
-          {ALL_ACTIONS.map((a) => (
+          {visibleActions.map((a) => (
             <button
               key={a}
               onClick={() => navigate({ action: a })}
@@ -257,7 +324,7 @@ function AuditLogFilters({
             onClick={() => {
               setUserInput("");
               setTargetInput("");
-              navigate({ action: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" });
+              navigate({ action: "", group: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" });
             }}
             className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
           >
@@ -592,6 +659,7 @@ export function AuditLogView({
   initialNextCursor,
   initialHasMore,
   currentAction,
+  currentGroup,
   currentDateFrom,
   currentDateTo,
   currentUser,
@@ -602,6 +670,7 @@ export function AuditLogView({
   initialNextCursor: string | null;
   initialHasMore: boolean;
   currentAction: string;
+  currentGroup: string;
   currentDateFrom: string;
   currentDateTo: string;
   currentUser: string;
@@ -637,6 +706,7 @@ export function AuditLogView({
       const params = new URLSearchParams();
       params.set("cursor", nextCursor);
       if (currentAction) params.set("action", currentAction);
+      if (currentGroup) params.set("group", currentGroup);
       if (currentDateFrom) params.set("dateFrom", currentDateFrom);
       if (currentDateTo) params.set("dateTo", currentDateTo);
       if (currentUser) params.set("user", currentUser);
@@ -658,6 +728,7 @@ export function AuditLogView({
     <div className="space-y-4">
       <AuditLogFilters
         currentAction={currentAction}
+        currentGroup={currentGroup}
         currentDateFrom={currentDateFrom}
         currentDateTo={currentDateTo}
         currentUser={currentUser}

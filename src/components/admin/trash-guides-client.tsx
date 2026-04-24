@@ -227,6 +227,13 @@ export function TrashGuidesClient({
 
   const configured = activeTab === "RADARR" ? radarrConfigured : sonarrConfigured;
 
+  // KPIs driven by the current service's specs
+  const profilesAvailable = specs.filter((s) => s.kind === "QUALITY_PROFILE").length;
+  const profilesApplied   = specs.filter((s) => s.kind === "QUALITY_PROFILE" && s.application?.enabled).length;
+  const customFormatsTotal   = specs.filter((s) => s.kind === "CUSTOM_FORMAT").length;
+  const customFormatsApplied = specs.filter((s) => s.kind === "CUSTOM_FORMAT" && s.application?.enabled).length;
+  const driftCount = specs.filter((s) => s.application?.enabled && s.application.lastError).length;
+
   return (
     <div className="space-y-6 max-w-6xl">
       {schemaDiagnostic && <SchemaDiagnosticBanner message={schemaDiagnostic} onDismiss={() => setSchemaDiagnostic(null)} />}
@@ -246,6 +253,17 @@ export function TrashGuidesClient({
         onChange={setActiveTab}
         radarrConfigured={radarrConfigured}
         sonarrConfigured={sonarrConfigured}
+        radarrProfileCount={activeTab === "RADARR" ? profilesAvailable : undefined}
+        sonarrProfileCount={activeTab === "SONARR" ? profilesAvailable : undefined}
+      />
+
+      <KpiStrip
+        profilesAvailable={profilesAvailable}
+        profilesApplied={profilesApplied}
+        customFormatsApplied={customFormatsApplied}
+        customFormatsTotal={customFormatsTotal}
+        drift={driftCount}
+        loading={loadState === "loading"}
       />
 
       <SyncSettingsCard
@@ -763,32 +781,143 @@ function TabBar({
   onChange,
   radarrConfigured,
   sonarrConfigured,
+  radarrProfileCount,
+  sonarrProfileCount,
 }: {
   activeTab: TrashService;
   onChange: (t: TrashService) => void;
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
+  radarrProfileCount?: number;
+  sonarrProfileCount?: number;
 }) {
   return (
-    <div className="flex gap-2 border-b border-zinc-800">
+    <div className="flex gap-1" style={{ borderBottom: "1px solid var(--ds-border)" }}>
       {(["RADARR", "SONARR"] as const).map((t) => {
         const active = activeTab === t;
         const cfg = t === "RADARR" ? radarrConfigured : sonarrConfigured;
+        const count = t === "RADARR" ? radarrProfileCount : sonarrProfileCount;
         return (
           <button
             key={t}
             onClick={() => onChange(t)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
-              active
-                ? "border-indigo-500 text-white"
-                : "border-transparent text-zinc-500 hover:text-zinc-300"
-            }`}
+            className="font-medium transition-colors inline-flex items-center gap-2"
+            style={{
+              padding: "8px 14px",
+              marginBottom: -1,
+              fontSize: 13,
+              background: "transparent",
+              borderBottom: active ? "2px solid var(--ds-accent)" : "2px solid transparent",
+              color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+            }}
           >
-            {t === "RADARR" ? "Radarr" : "Sonarr"}
-            {!cfg && <span className="ml-2 text-xs text-zinc-600">(not configured)</span>}
+            <span>
+              {t === "RADARR" ? "Radarr" : "Sonarr"}
+              <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 6 }}>
+                · {t === "RADARR" ? "Movies" : "TV"}
+              </span>
+            </span>
+            {typeof count === "number" && count > 0 && (
+              <span
+                className="ds-mono"
+                style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+              >
+                {count}
+              </span>
+            )}
+            {!cfg && (
+              <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}>
+                (not configured)
+              </span>
+            )}
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function KpiStrip({
+  profilesAvailable,
+  profilesApplied,
+  customFormatsApplied,
+  customFormatsTotal,
+  drift,
+  loading,
+}: {
+  profilesAvailable: number;
+  profilesApplied: number;
+  customFormatsApplied: number;
+  customFormatsTotal: number;
+  drift: number;
+  loading: boolean;
+}) {
+  const kpis = [
+    {
+      label: "Profiles available",
+      value: loading ? "…" : String(profilesAvailable),
+      hint: "from TRaSH-Guides",
+      tint: "var(--ds-fg)",
+    },
+    {
+      label: "Applied to instance",
+      value: loading ? "…" : String(profilesApplied),
+      hint: `of ${profilesAvailable}`,
+      tint: profilesApplied > 0 ? "var(--ds-accent)" : "var(--ds-fg)",
+    },
+    {
+      label: "Custom formats",
+      value: loading ? "…" : String(customFormatsTotal),
+      hint: `${customFormatsApplied} applied`,
+      tint: "var(--ds-fg)",
+    },
+    {
+      label: "Drift",
+      value: loading ? "…" : drift === 0 ? "0 diffs" : `${drift} diff${drift !== 1 ? "s" : ""}`,
+      hint: drift === 0 ? "In sync with upstream" : "Review errors",
+      tint: drift === 0 ? "var(--ds-success)" : "var(--ds-warning)",
+    },
+  ];
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-4" style={{ gap: 10 }}>
+      {kpis.map((k) => (
+        <div
+          key={k.label}
+          style={{
+            padding: "14px 16px",
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+          }}
+        >
+          <p
+            className="ds-mono uppercase"
+            style={{
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+              letterSpacing: "0.08em",
+              margin: "0 0 6px",
+            }}
+          >
+            {k.label}
+          </p>
+          <p
+            className="font-semibold"
+            style={{ fontSize: 22, color: k.tint, margin: 0, letterSpacing: "-0.02em" }}
+          >
+            {k.value}
+          </p>
+          {k.hint && (
+            <p
+              className="ds-mono"
+              style={{ margin: "4px 0 0", fontSize: 10, color: "var(--ds-fg-subtle)" }}
+            >
+              {k.hint}
+            </p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

@@ -13,6 +13,20 @@ const VALID_ACTIONS: AuditAction[] = [
   "SESSION_REVOKE", "CACHE_WARM", "RATINGS_CACHE_CLEAR", "ISSUE_DELETE",
 ];
 
+// Coarse group filter — keep in sync with audit-log/page.tsx
+const GROUP_ACTIONS: Record<"auth" | "admin" | "system", AuditAction[]> = {
+  auth: ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT", "SESSION_REVOKE"],
+  admin: [
+    "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
+    "USER_ROLE_CHANGE", "USER_DELETE",
+    "SETTINGS_CHANGE", "MAINTENANCE_TOGGLE",
+    "BACKUP_EXPORT", "BACKUP_IMPORT",
+    "ISSUE_STATUS_CHANGE", "ISSUE_DELETE",
+    "RATINGS_CACHE_CLEAR",
+  ],
+  system: ["LIBRARY_SYNC", "CACHE_WARM"],
+};
+
 export async function GET(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
@@ -21,6 +35,11 @@ export async function GET(req: NextRequest) {
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));
   const cursor = url.searchParams.get("cursor") ?? undefined;
   const action = url.searchParams.get("action") as AuditAction | null;
+  const groupParam = url.searchParams.get("group");
+  const group: "auth" | "admin" | "system" | null =
+    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
+      ? groupParam
+      : null;
   const dateFrom = url.searchParams.get("dateFrom");
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
@@ -29,8 +48,11 @@ export async function GET(req: NextRequest) {
 
   const where: Prisma.AuditLogWhereInput = {};
 
+  // Action is more specific than group — action wins if both are present
   if (action && VALID_ACTIONS.includes(action)) {
     where.action = action;
+  } else if (group) {
+    where.action = { in: GROUP_ACTIONS[group] };
   }
 
   if (dateFrom || dateTo) {
