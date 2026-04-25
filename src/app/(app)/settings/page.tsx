@@ -12,9 +12,45 @@ import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { MasterDbFillButton } from "@/components/admin/master-db-fill-button";
 import { SettingsTabNav, type TabId } from "@/components/settings/settings-tab-nav";
+import { SettingsNav, type NavItem as SettingsNavItem } from "@/components/settings/settings-nav";
 import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-table";
 import { FeaturesForm } from "@/components/settings/features-form";
 import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
+
+const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
+  site: [
+    { id: "general",          label: "General",            group: "Site" },
+    { id: "rate-limiting",    label: "Rate Limiting",      group: "Site" },
+    { id: "quotas",           label: "Quotas",             group: "Site" },
+    { id: "deletion-votes",   label: "Deletion Votes",     group: "Site" },
+    { id: "authentication",   label: "Authentication",     group: "Site" },
+    { id: "sessions",         label: "Sessions",           group: "Site" },
+    { id: "maintenance",      label: "Maintenance",        group: "Site" },
+    { id: "motd",             label: "Message of the Day", group: "Site" },
+    { id: "donations",        label: "Donations",          group: "Site" },
+  ],
+  media: [
+    { id: "plex",             label: "Plex",               group: "Media Servers" },
+    { id: "jellyfin",         label: "Jellyfin",           group: "Media Servers" },
+    { id: "play-history",     label: "Play History",       group: "Media Servers" },
+    { id: "library-matching", label: "Library Matching",   group: "Media Servers" },
+    { id: "radarr",           label: "Radarr",             group: "Automation" },
+    { id: "sonarr",           label: "Sonarr",             group: "Automation" },
+  ],
+  notifications: [
+    { id: "email",            label: "Email",              group: "Notifications" },
+    { id: "discord-bot",      label: "Discord Bot",        group: "Notifications" },
+  ],
+  integrations: [
+    { id: "external-ratings", label: "External Ratings",   group: "Integrations" },
+    { id: "webhooks",         label: "Webhooks",           group: "Integrations" },
+  ],
+  features: [],
+  system: [
+    { id: "scheduled-jobs",   label: "Scheduled Jobs",     group: "System" },
+    { id: "db-metrics",       label: "DB Metrics",         group: "System" },
+  ],
+};
 
 export const dynamic = "force-dynamic";
 
@@ -240,14 +276,19 @@ export default async function SettingsPage({
 
       <SettingsTabNav activeTab={tab} />
 
-      <div
-        className="max-w-3xl flex flex-col"
-        style={{ marginTop: 24, gap: 16 }}
-      >
+      <div className="lg:flex lg:gap-8" style={{ marginTop: 24 }}>
+        {TAB_SECTIONS[tab].length > 1 && (
+          <aside className="hidden lg:block w-48 shrink-0">
+            <div className="sticky top-4">
+              <SettingsNav items={TAB_SECTIONS[tab]} />
+            </div>
+          </aside>
+        )}
+        <div className="max-w-3xl flex-1 flex flex-col" style={{ gap: 16 }}>
 
         {tab === "site" && (
           <>
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="general" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>General</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Basic branding for your instance.</p>
@@ -258,7 +299,7 @@ export default async function SettingsPage({
               </div>
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="rate-limiting" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Rate Limiting</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -273,7 +314,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="quotas" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Quotas</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -286,7 +327,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="deletion-votes" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Deletion Votes</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -296,7 +337,7 @@ export default async function SettingsPage({
               <DeletionVoteThresholdForm initialThreshold={cfg.deletionVoteThreshold ?? ""} />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="authentication" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Authentication</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -307,7 +348,7 @@ export default async function SettingsPage({
               <EnableMachineSessionToggle initialEnabled={cfg.enableMachineSession === "true"} />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="sessions" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sessions</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -321,7 +362,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="maintenance" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Maintenance Mode</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -334,7 +375,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="motd" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Message of the Day</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -348,7 +389,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="donations" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Donations</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -367,7 +408,7 @@ export default async function SettingsPage({
 
         {tab === "media" && (
           <>
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="plex" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Plex</h2>
@@ -385,7 +426,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="jellyfin" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Jellyfin</h2>
@@ -402,7 +443,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="play-history" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Play History</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -419,7 +460,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="library-matching" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Library Matching</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -434,7 +475,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="radarr" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr</h2>
@@ -453,7 +494,7 @@ export default async function SettingsPage({
               />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="sonarr" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr</h2>
@@ -476,7 +517,7 @@ export default async function SettingsPage({
 
         {tab === "notifications" && (
           <>
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="email" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Email</h2>
@@ -499,7 +540,7 @@ export default async function SettingsPage({
               <EnableUserEmailsToggle initialEnabled={cfg.enableUserEmails === "true"} />
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="discord-bot" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Discord Bot</h2>
@@ -533,7 +574,7 @@ export default async function SettingsPage({
 
         {tab === "integrations" && (
           <>
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="external-ratings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>External Ratings</h2>
@@ -562,7 +603,7 @@ export default async function SettingsPage({
               </div>
             </div>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div id="webhooks" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Webhooks</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
@@ -597,7 +638,7 @@ export default async function SettingsPage({
 
         {tab === "system" && metrics && (
           <>
-          <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+          <div id="scheduled-jobs" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
               <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Scheduled Jobs</h2>
               <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Background cron jobs and their current status. Click Run to trigger on demand.</p>
@@ -605,7 +646,7 @@ export default async function SettingsPage({
             <CronJobTable jobs={metrics.cronJobs} />
           </div>
 
-          <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+          <div id="db-metrics" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
               <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>DB Metrics</h2>
               <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Read-only snapshot of database row counts.</p>
@@ -750,6 +791,7 @@ export default async function SettingsPage({
           </>
         )}
 
+        </div>
       </div>
     </div>
   );

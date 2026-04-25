@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar } from "@/lib/play-history";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, BarChart } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import { ActivityCharts } from "@/components/admin/activity-charts";
 import { ActivityRecentPlays } from "@/components/admin/activity-recent-plays";
@@ -16,27 +16,6 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
-
-function Sparkline({ data }: { data: number[] }) {
-  if (data.length === 0) return null;
-  const max = Math.max(...data, 1);
-  return (
-    <div className="flex items-end gap-px h-6 mt-1">
-      {data.map((v, i) => (
-        <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: positional bars
-          key={i}
-          className="flex-1 rounded-sm"
-          style={{
-            height: `${(v / max) * 100}%`,
-            minHeight: v > 0 ? "2px" : 0,
-            background: "color-mix(in oklab, var(--ds-accent) 45%, transparent)",
-          }}
-        />
-      ))}
-    </div>
-  );
-}
 
 function TrendBadge({ current, previous }: { current: number; previous: number }) {
   if (previous === 0 && current === 0) return null;
@@ -479,11 +458,14 @@ export default async function ActivityPage({
             <p style={activityCardValueStyle}>{stats.totalPlays}</p>
             <TrendBadge current={stats.totalPlays} previous={prevPlaysNum} />
           </div>
-          <Sparkline
-            data={stats.playsByDay.map(
-              (d: (typeof stats.playsByDay)[0]) => d.count,
-            )}
-          />
+          <div style={{ marginTop: 4 }}>
+            <BarChart
+              data={stats.playsByDay.map(
+                (d: (typeof stats.playsByDay)[0]) => d.count,
+              )}
+              height={24}
+            />
+          </div>
         </div>
         <div style={activityCardStyle}>
           <p className={activityCardLabel} style={activityCardLabelStyle}>
@@ -498,11 +480,14 @@ export default async function ActivityPage({
               previous={Math.round(prevWatchTimeNum)}
             />
           </div>
-          <Sparkline
-            data={stats.watchTimeByDay.map(
-              (d: (typeof stats.watchTimeByDay)[0]) => d.hours,
-            )}
-          />
+          <div style={{ marginTop: 4 }}>
+            <BarChart
+              data={stats.watchTimeByDay.map(
+                (d: (typeof stats.watchTimeByDay)[0]) => d.hours,
+              )}
+              height={24}
+            />
+          </div>
         </div>
         <div style={activityCardStyle}>
           <p className={activityCardLabel} style={activityCardLabelStyle}>
