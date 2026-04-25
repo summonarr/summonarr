@@ -8,6 +8,8 @@ import {
   recordCompletedSession,
   getWatchedThreshold,
   resolveShowTmdbId,
+  computePlaytimeIncrement,
+  applyFinalTick,
 } from "@/lib/play-history";
 import { extractTmdbIdFromGuids } from "@/lib/plex";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
@@ -160,67 +162,98 @@ export async function POST(req: NextRequest) {
       posterPath = core?.posterPath ?? null;
     }
 
-    await prisma.activeSession.upsert({
-      where: { id: sessionId },
-      update: { lastSeenAt: now, state: "playing", ...(posterPath ? { posterPath } : {}) },
-      create: {
-        id: sessionId,
-        source: "plex",
-        sessionKey,
-        startedAt: now,
-        lastSeenAt: now,
-        state: "playing",
-        mediaServerUserId: msUserId,
-        serverUsername: account.title ?? "",
-        tmdbId,
-        mediaType,
-        title,
-        year: meta.year != null ? String(meta.year) : null,
-        seasonNumber: meta.parentIndex ?? null,
-        episodeNumber: meta.index ?? null,
-        episodeTitle: meta.type === "episode" ? (meta.title ?? null) : null,
-        sourceItemId: meta.ratingKey,
-        posterPath,
-        durationMs: BigInt(Math.max(0, meta.duration ?? 0)),
-        platform: player?.platform ?? null,
-        player: player?.title ?? null,
-        device: player?.uuid ?? null,
-        ipAddress: player?.publicAddress ?? null,
-      },
-    });
+    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    if (existing) {
+      const increment = computePlaytimeIncrement(existing, now);
+      await prisma.activeSession.update({
+        where: { id: sessionId },
+        data: {
+          lastSeenAt: now,
+          state: "playing",
+          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+          ...(posterPath ? { posterPath } : {}),
+        },
+      });
+    } else {
+      await prisma.activeSession.create({
+        data: {
+          id: sessionId,
+          source: "plex",
+          sessionKey,
+          startedAt: now,
+          lastSeenAt: now,
+          state: "playing",
+          mediaServerUserId: msUserId,
+          serverUsername: account.title ?? "",
+          tmdbId,
+          mediaType,
+          title,
+          year: meta.year != null ? String(meta.year) : null,
+          seasonNumber: meta.parentIndex ?? null,
+          episodeNumber: meta.index ?? null,
+          episodeTitle: meta.type === "episode" ? (meta.title ?? null) : null,
+          sourceItemId: meta.ratingKey,
+          posterPath,
+          durationMs: BigInt(Math.max(0, meta.duration ?? 0)),
+          platform: player?.platform ?? null,
+          player: player?.title ?? null,
+          device: player?.uuid ?? null,
+          ipAddress: player?.publicAddress ?? null,
+        },
+      });
+    }
     return NextResponse.json({ message: `Session ${event} recorded` });
   }
 
   if (event === "media.pause") {
-    await prisma.activeSession.updateMany({
-      where: { id: sessionId },
-      data: {
-        lastSeenAt: now,
-        state: "paused",
-        ...(meta.viewOffset != null ? { progressMs: BigInt(Math.max(0, meta.viewOffset)) } : {}),
-      },
-    });
+    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    if (existing) {
+      const increment = computePlaytimeIncrement(existing, now);
+      await prisma.activeSession.update({
+        where: { id: sessionId },
+        data: {
+          lastSeenAt: now,
+          state: "paused",
+          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+          ...(meta.viewOffset != null ? { progressMs: BigInt(Math.max(0, meta.viewOffset)) } : {}),
+        },
+      });
+    }
     return NextResponse.json({ message: "Session paused" });
   }
 
   if (event === "media.stop") {
     const session = await prisma.activeSession.findUnique({ where: { id: sessionId } });
     if (session) {
-      await recordCompletedSession(session);
+      await recordCompletedSession(applyFinalTick(session, now, {
+        ...(meta.viewOffset != null ? { progressMs: BigInt(Math.max(0, meta.viewOffset)) } : {}),
+        stoppedAt: now,
+      }));
       return NextResponse.json({ message: "Session stopped and recorded" });
     }
     return NextResponse.json({ message: "Session not found (may have already ended)" });
   }
 
   if (event === "media.scrobble") {
-    // Plex fires scrobble at ~90% progress; synthesize a progress position for completion tracking
-    const session = await prisma.activeSession.findUnique({ where: { id: sessionId } });
-    if (session) {
+    // Plex fires scrobble at ~90% progress (Plex's hard-coded scrobble threshold).
+    // Treat scrobble as a hard signal that the session is watched: bump playtime to at least the
+    // configured watched threshold so PlayHistory.watched=true survives a missed media.stop, and
+    // set progressMs to ~90% of duration (the actual scrobble position) to keep `completed` honest.
+    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    if (existing) {
       const threshold = await getWatchedThreshold();
-      const progressMs = Number(session.durationMs) * (threshold / 100);
+      const durationMs = Number(existing.durationMs);
+      const watchedFloorMs = BigInt(Math.floor(durationMs * (threshold / 100)));
+      const scrobblePlayheadMs = BigInt(Math.floor(durationMs * 0.9));
+      const increment = computePlaytimeIncrement(existing, now);
+      const newPlaytime = existing.playtimeMs + increment;
       await prisma.activeSession.update({
         where: { id: sessionId },
-        data: { progressMs: BigInt(Math.floor(progressMs)), lastSeenAt: now },
+        data: {
+          lastSeenAt: now,
+          progressMs: scrobblePlayheadMs,
+          playtimeMs: newPlaytime > watchedFloorMs ? newPlaytime : watchedFloorMs,
+        },
       });
     }
     return NextResponse.json({ message: "Scrobble noted" });

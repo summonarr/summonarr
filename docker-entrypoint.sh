@@ -45,6 +45,56 @@ if (res.rowCount > 0) console.log(`Removed ${res.rowCount} duplicate PlayHistory
 await client.end();
 DEDUP_EOF
 
+echo "Backfilling PlayHistory.playDuration where playhead-as-playtime over-inflated rows..."
+node --input-type=module <<'BACKFILL_EOF'
+const { DATABASE_URL } = process.env;
+// One-shot best-effort fix for rows written before ActiveSession.playtimeMs landed.
+// Pre-fix `playDuration` stored the playhead position at session end — so a user who
+// scrubbed to the credits looked like they watched the whole runtime. New rows store
+// accumulated wall-clock seconds in the "playing" state.
+//
+// Clamp to wall-clock elapsed: a session physically cannot have played longer than
+// (stoppedAt - startedAt). Recomputes `watched` and `pausedDuration` from the clamp.
+//
+// Idempotent — the WHERE filters out rows that don't need clamping, so re-runs are no-ops.
+// Skips cleanly on a fresh DB.
+const { default: { Client } } = await import('pg');
+const client = new Client({ connectionString: DATABASE_URL });
+await client.connect();
+const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
+if (exists.rows[0].t === null) {
+  await client.end();
+  process.exit(0);
+}
+let threshold = 80;
+try {
+  const t = await client.query(
+    `SELECT value FROM "Setting" WHERE key = 'playHistoryWatchedThreshold'`
+  );
+  const parsed = t.rows[0]?.value ? parseInt(t.rows[0].value, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) threshold = parsed;
+} catch { /* Setting table absent on fresh DB — fall back to 80 */ }
+const res = await client.query(
+  `UPDATE "PlayHistory" SET
+     "playDuration"   = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
+     "pausedDuration" = GREATEST(
+       0,
+       EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
+         - LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)
+     ),
+     "watched" = CASE
+       WHEN duration > 0
+       THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+       ELSE false
+     END
+   WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
+     AND "stoppedAt" > "startedAt"`,
+  [threshold],
+);
+if (res.rowCount > 0) console.log(`Clamped ${res.rowCount} PlayHistory row(s) at threshold=${threshold}.`);
+await client.end();
+BACKFILL_EOF
+
 echo "Syncing database schema..."
 # No --accept-data-loss: destructive migrations (dropped columns, narrowed
 # types) will fail fast at boot instead of silently clobbering data. Apply

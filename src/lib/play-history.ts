@@ -103,9 +103,42 @@ export function calculateWatched(
 
 const EXCLUDED_USERNAMES = new Set(["gadgetusaf_space"]);
 const MIN_PLAY_DURATION_S = 90;
+// Cap any single accumulation delta. Protects against missed events, machine sleep, or clock skew
+// inflating playtime. cleanupStaleSessions(30) handles ghost sessions; this is the per-event guard.
+export const MAX_PLAYTIME_DELTA_MS = 5 * 60 * 1000;
+
+// Returns the bigint to add to ActiveSession.playtimeMs when applying an event at `now`.
+// Only accumulates when the prior state was "playing" — pause/buffer/initial state contribute nothing.
+export function computePlaytimeIncrement(
+  session: Pick<ActiveSession, "state" | "lastSeenAt">,
+  now: Date,
+): bigint {
+  if (session.state !== "playing") return BigInt(0);
+  const delta = now.getTime() - session.lastSeenAt.getTime();
+  if (delta <= 0) return BigInt(0);
+  return BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, delta));
+}
+
+// Build a finalized session to pass to recordCompletedSession. Callers that close a "live" session
+// (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt and
+// the close event is counted. cleanupStaleSessions skips this — a stale session has no signal it
+// was still playing.
+export function applyFinalTick(
+  session: ActiveSession,
+  now: Date,
+  override?: { progressMs?: bigint; stoppedAt?: Date },
+): ActiveSession {
+  const increment = computePlaytimeIncrement(session, now);
+  return {
+    ...session,
+    playtimeMs: session.playtimeMs + increment,
+    ...(override?.progressMs !== undefined ? { progressMs: override.progressMs } : {}),
+    ...(override?.stoppedAt ? { lastSeenAt: override.stoppedAt } : {}),
+  };
+}
 
 export async function recordCompletedSession(session: ActiveSession): Promise<void> {
-  const playDurationMs = Number(session.progressMs);
+  const playDurationMs = Number(session.playtimeMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
   // recordCompletedSession must be called exactly once per session end — upsert on sourceSessionId enforces idempotency
@@ -130,9 +163,8 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
   const durationS = Math.max(0, Math.floor(totalDurationMs / 1000));
   const pausedDurationS = Math.max(0, totalElapsedS - playDurationS);
 
-  const durationMs = Number(session.durationMs);
   const progressMs = Number(session.progressMs);
-  const completionRatio = durationMs > 0 ? progressMs / durationMs : 0;
+  const completionRatio = totalDurationMs > 0 ? progressMs / totalDurationMs : 0;
 
   const completed = completionRatio >= 0.95;
 
@@ -241,7 +273,9 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     userHeatmapRaw,
     deviceListRaw,
   ] = await Promise.all([
-    prisma.playHistory.count({ where: { mediaServerUserId } }),
+    // "plays" surfaces filter watched=true (sessions that crossed the configured threshold).
+    // Raw counts are reserved for technical/resource analytics (codec, transcode, bitrate, avg session).
+    prisma.playHistory.count({ where: { mediaServerUserId, watched: true } }),
     prisma.$queryRawUnsafe<{ hours: number | null }[]>(
       `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours FROM "PlayHistory" WHERE "mediaServerUserId" = $1`,
       mediaServerUserId,
@@ -253,13 +287,13 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     }),
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
       `SELECT "title", "tmdbId", "mediaType"::text, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1
+       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
        GROUP BY "title", "tmdbId", "mediaType" ORDER BY count DESC LIMIT 10`,
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint; hours: number }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
-              COUNT(*)::bigint AS count,
+              COUNT(*) FILTER (WHERE "watched" = true)::bigint AS count,
               (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory"
        WHERE "mediaServerUserId" = $1 AND "startedAt" >= $2
@@ -269,7 +303,7 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     ),
     prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
       `SELECT "platform", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1
+       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
        GROUP BY "platform" ORDER BY count DESC`,
       mediaServerUserId,
     ),
@@ -277,7 +311,7 @@ export async function getUserPlayStats(mediaServerUserId: string) {
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "startedAt" >= $2
+       WHERE "mediaServerUserId" = $1 AND "watched" = true AND "startedAt" >= $2
        GROUP BY day ORDER BY day`,
       mediaServerUserId,
       oneYearAgo,
@@ -303,14 +337,14 @@ export async function getUserPlayStats(mediaServerUserId: string) {
       `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow,
               EXTRACT(HOUR FROM "startedAt")::int AS hour,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1
+       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
        GROUP BY dow, hour ORDER BY dow, hour`,
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ device: string | null; count: bigint }[]>(
       `SELECT "device", COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "device" IS NOT NULL
+       WHERE "mediaServerUserId" = $1 AND "watched" = true AND "device" IS NOT NULL
        GROUP BY "device" ORDER BY count DESC LIMIT 6`,
       mediaServerUserId,
     ),
@@ -346,9 +380,9 @@ export async function getMediaPlayStats(tmdbId: number) {
     transcodeRatioRaw,
     resolutionBreakdownRaw,
   ] = await Promise.all([
-    prisma.playHistory.count({ where: { tmdbId } }),
+    prisma.playHistory.count({ where: { tmdbId, watched: true } }),
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count FROM "PlayHistory" WHERE "tmdbId" = $1`,
+      `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count FROM "PlayHistory" WHERE "tmdbId" = $1 AND "watched" = true`,
       tmdbId,
     ),
     prisma.$queryRawUnsafe<{ avg_pct: number | null }[]>(
@@ -362,7 +396,7 @@ export async function getMediaPlayStats(tmdbId: number) {
       `SELECT m."id", m."username", m."source", COUNT(*)::bigint AS count,
               (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-       WHERE p."tmdbId" = $1
+       WHERE p."tmdbId" = $1 AND p."watched" = true
        GROUP BY m."id", m."username", m."source"
        ORDER BY count DESC LIMIT 20`,
       tmdbId,
@@ -386,7 +420,7 @@ export async function getMediaPlayStats(tmdbId: number) {
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "tmdbId" = $1 AND "startedAt" >= $2
+       WHERE "tmdbId" = $1 AND "watched" = true AND "startedAt" >= $2
        GROUP BY day ORDER BY day`,
       tmdbId,
       ninetyDaysAgo,
@@ -449,12 +483,12 @@ export async function getAllUsersStats() {
       m."source",
       m."thumbUrl",
       m."createdAt",
-      COUNT(p."id")::bigint AS plays,
+      COUNT(p."id") FILTER (WHERE p."watched" = true)::bigint AS plays,
       (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours,
       MAX(p."startedAt") AS "lastActive",
       (SELECT p2."platform"
        FROM "PlayHistory" p2
-       WHERE p2."mediaServerUserId" = m."id" AND p2."platform" IS NOT NULL
+       WHERE p2."mediaServerUserId" = m."id" AND p2."platform" IS NOT NULL AND p2."watched" = true
        GROUP BY p2."platform"
        ORDER BY COUNT(*) DESC
        LIMIT 1) AS "favPlatform",
@@ -618,7 +652,7 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
             COUNT(*)::bigint AS plays,
             COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
      FROM "PlayHistory"
-     WHERE ${where} AND "tmdbId" IS NOT NULL
+     WHERE ${where} AND "tmdbId" IS NOT NULL AND "watched" = true
      GROUP BY "tmdbId", "mediaType"
      HAVING COUNT(*) > 1
      ORDER BY plays DESC
@@ -724,6 +758,10 @@ export async function getPlayHistoryStats(
 async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}) {
   const { where, params } = buildStatsFilters(filters);
   const { where: joinWhere, params: joinParams } = buildStatsFilters(filters, "p");
+  // "plays" surfaces use wwhere (filter watched=true); analytics surfaces (completion rate, codecs,
+  // bitrate, bandwidth, peak concurrent) use the raw `where` so the denominator stays complete.
+  const wwhere = `${where} AND "watched" = true`;
+  const joinWWhere = `${joinWhere} AND p."watched" = true`;
 
   const days = filters.days ?? 30;
   const prevStart = new Date(Date.now() - days * 2 * 24 * 60 * 60 * 1000);
@@ -775,7 +813,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     topRewatchedRaw,
   ] = await Promise.all([
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${where}`,
+      `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${wwhere}`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ hours: number | null }[]>(
@@ -784,7 +822,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY day ORDER BY day`,
       ...params,
     ),
@@ -792,7 +830,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `WITH user_counts AS (
          SELECT m."id", m."username", m."source", COUNT(*)::bigint AS count
          FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-         WHERE ${joinWhere}
+         WHERE ${joinWWhere}
          GROUP BY m."id", m."username", m."source"
        ), ranked AS (
          SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "count" DESC) AS rn
@@ -806,7 +844,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
       `SELECT "title", "tmdbId", "mediaType"::text, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY "title", "tmdbId", "mediaType" ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
@@ -818,19 +856,19 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
       `SELECT "platform", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY "platform" ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ hour: number; count: bigint }[]>(
       `SELECT EXTRACT(HOUR FROM "startedAt")::int AS hour, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY hour ORDER BY hour`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ type: string; count: bigint }[]>(
       `SELECT "mediaType"::text AS type, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where} AND "mediaType" IS NOT NULL
+       FROM "PlayHistory" WHERE ${wwhere} AND "mediaType" IS NOT NULL
        GROUP BY "mediaType" ORDER BY count DESC`,
       ...params,
     ),
@@ -845,7 +883,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow,
               EXTRACT(HOUR FROM "startedAt")::int AS hour,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY dow, hour ORDER BY dow, hour`,
       ...params,
     ),
@@ -894,8 +932,10 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       longest_session_s: number | null;
       pause_ratio: number | null;
     }[]>(
-      `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS unique_viewers,
-              COUNT(DISTINCT "tmdbId") FILTER (WHERE "tmdbId" IS NOT NULL)::bigint AS unique_titles,
+      // unique_viewers/unique_titles are plays-semantic (filter watched). avg/longest/pause are
+      // session analytics; keep across all sessions for honest "how long do people sit through this".
+      `SELECT COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS unique_viewers,
+              COUNT(DISTINCT "tmdbId") FILTER (WHERE "tmdbId" IS NOT NULL AND "watched" = true)::bigint AS unique_titles,
               COALESCE(AVG(NULLIF("playDuration", 0)), 0)::float8 AS avg_session_s,
               COALESCE(MAX("playDuration"), 0)::int AS longest_session_s,
               (COALESCE(SUM("pausedDuration"), 0)::float8
@@ -906,13 +946,13 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(DISTINCT "mediaServerUserId")::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY day ORDER BY day`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ dow: number; count: bigint }[]>(
       `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY dow ORDER BY dow`,
       ...params,
     ),
@@ -978,20 +1018,20 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prisma.$queryRawUnsafe<{ device: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF("device", ''), 'Unknown') AS device,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY device ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ player: string; count: bigint }[]>(
       `SELECT COALESCE(NULLIF("player", ''), 'Unknown') AS player,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY player ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ source: string; count: bigint }[]>(
       `SELECT "source", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY "source" ORDER BY count DESC`,
       ...params,
     ),
@@ -1001,7 +1041,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
          WHEN "year" ~ '^[0-9]{4}' THEN (SUBSTRING("year", 1, 3) || '0s')
          ELSE 'Unknown'
        END AS decade, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where}
+       FROM "PlayHistory" WHERE ${wwhere}
        GROUP BY decade ORDER BY decade`,
       ...params,
     ),
@@ -1017,7 +1057,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
               "seasonNumber" AS season, "episodeNumber" AS episode,
               "episodeTitle", COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE ${where} AND "mediaType"::text = 'TV'
+       WHERE ${wwhere} AND "mediaType"::text = 'TV'
          AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL
        GROUP BY "tmdbId", "title", "seasonNumber", "episodeNumber", "episodeTitle"
        ORDER BY count DESC LIMIT 10`,
@@ -1039,9 +1079,10 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       hours: number | null;
       viewers: bigint;
     }[]>(
-      `SELECT COUNT(*)::bigint AS plays,
+      // Mirror current-period stance: plays/viewers filter watched, hours stays raw.
+      `SELECT COUNT(*) FILTER (WHERE "watched" = true)::bigint AS plays,
               (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours,
-              COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
+              COUNT(DISTINCT "mediaServerUserId") FILTER (WHERE "watched" = true)::bigint AS viewers
        FROM "PlayHistory" WHERE ${prevWhere}`,
       ...prevParams,
     ),
@@ -1145,7 +1186,7 @@ async function getActivityCalendarUncached(
   const result = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
     `SELECT DATE("startedAt")::text AS day, COUNT(*)::bigint AS count
      FROM "PlayHistory"
-     WHERE "startedAt" >= CURRENT_DATE - INTERVAL '364 days'${filterSql} -- 365 calendar days inclusive of today
+     WHERE "startedAt" >= CURRENT_DATE - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
      GROUP BY DATE("startedAt")
      ORDER BY day ASC`,
     ...filterParams,
