@@ -15,7 +15,7 @@ export function AdminSubNav({ role }: { role?: string }) {
     <nav
       role="navigation"
       aria-label="Admin pages"
-      className="md:hidden -mx-6 -mt-6 lg:-mx-8 lg:-mt-8 xl:-mx-10 xl:-mt-10 mb-4 sticky top-[57px] z-20 flex gap-1.5 overflow-x-auto px-4 py-2.5 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
+      className="lg:hidden -mx-4 -mt-4 mb-4 sticky top-[52px] z-20 flex gap-1.5 overflow-x-auto px-4 py-2.5 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]"
     >
       {items.map(({ href, label, exact }) => {
         const active = exact ? pathname === href : pathname.startsWith(href);
