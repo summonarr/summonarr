@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation";
 import { auth, isTokenExpired } from "@/lib/auth";
-import { AdminSubNav } from "@/components/layout/admin-sub-nav";
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await auth();
@@ -10,10 +9,5 @@ export default async function AdminLayout({ children }: { children: React.ReactN
     redirect("/");
   }
 
-  return (
-    <>
-      <AdminSubNav role={session.user.role} />
-      {children}
-    </>
-  );
+  return <>{children}</>;
 }
