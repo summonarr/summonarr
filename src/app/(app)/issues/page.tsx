@@ -2,13 +2,9 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { IssueThread } from "@/components/issues/issue-thread";
-import {
-  IssueDetailMobileDrawer,
-  type IssueDrawerPayload,
-} from "@/components/issues/issue-detail-mobile-drawer";
 import Image from "next/image";
 import Link from "next/link";
-import { Film, Tv2, MessageSquare, ChevronRight } from "lucide-react";
+import { Film, Tv2, MessageSquare } from "lucide-react";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
@@ -363,21 +359,17 @@ export default async function IssuesPage({
                         )}
                       </div>
 
-                      <div className="flex items-center shrink-0" style={{ gap: 8 }}>
-                        <Chip tone={STATUS_TONE[issue.status]}>
-                          {STATUS_LABEL[issue.status]}
-                        </Chip>
-                        <ChevronRight
-                          className="xl:hidden"
-                          aria-hidden
-                          style={{
-                            width: 16,
-                            height: 16,
-                            color: "var(--ds-fg-subtle)",
-                          }}
-                        />
-                      </div>
+                      <Chip tone={STATUS_TONE[issue.status]}>
+                        {STATUS_LABEL[issue.status]}
+                      </Chip>
                     </Link>
+
+                    <div className="xl:hidden">
+                      <IssueThread
+                        issueId={issue.id}
+                        initialCount={issue._count.messages}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -570,29 +562,6 @@ export default async function IssuesPage({
           </aside>
         </div>
       )}
-
-      <IssueDetailMobileDrawer
-        selectedIssue={
-          selectedIssue
-            ? ({
-                id: selectedIssue.id,
-                title: selectedIssue.title,
-                posterUrl: posterUrl(selectedIssue.posterPath, "w342"),
-                mediaType: selectedIssue.mediaType,
-                status: selectedIssue.status,
-                issueType: selectedIssue.issueType,
-                scope: selectedIssue.scope,
-                seasonNumber: selectedIssue.seasonNumber,
-                episodeNumber: selectedIssue.episodeNumber,
-                note: selectedIssue.note,
-                resolution: selectedIssue.resolution,
-                createdAt: selectedIssue.createdAt.toISOString(),
-                messageCount: selectedIssue._count.messages,
-              } satisfies IssueDrawerPayload)
-            : null
-        }
-        closeHref={buildHref({ selected: "" })}
-      />
     </div>
   );
 }
