@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "lucide-react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface AuditRow {
   id: string;
@@ -511,7 +512,7 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
   );
 }
 
-function AuditLogTable({ logs }: { logs: AuditRow[] }) {
+function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
   return (
     <Card className="bg-zinc-900 border-zinc-800 overflow-hidden">
       <div className="overflow-x-auto">
@@ -531,8 +532,8 @@ function AuditLogTable({ logs }: { logs: AuditRow[] }) {
               const actionInfo = ACTION_LABELS[log.action] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
               return (
                 <tr key={log.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={new Date(log.createdAt).toLocaleString()}>
-                    {relativeTime(log.createdAt)}
+                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString() : undefined}>
+                    {mounted ? relativeTime(log.createdAt) : ""}
                   </td>
                   <td className="px-4 py-3 text-white text-sm">{log.userName}</td>
                   <td className="px-4 py-3">
@@ -573,7 +574,7 @@ function AuditLogTable({ logs }: { logs: AuditRow[] }) {
   );
 }
 
-function AuditLogTimeline({ logs }: { logs: AuditRow[] }) {
+function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
   const groups: { date: string; logs: AuditRow[] }[] = [];
   let currentDate = "";
 
@@ -591,7 +592,7 @@ function AuditLogTimeline({ logs }: { logs: AuditRow[] }) {
       {groups.map((group) => (
         <div key={group.date}>
           <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">
-            {formatDateGroup(group.date)}
+            {mounted ? formatDateGroup(group.date) : ""}
           </h3>
           <div className="relative pl-6">
             <div className="absolute left-[7px] top-2 bottom-2 w-px bg-zinc-800" />
@@ -614,8 +615,8 @@ function AuditLogTimeline({ logs }: { logs: AuditRow[] }) {
                           </span>
                           <span className="text-xs text-zinc-500 font-mono">{log.target}</span>
                         </div>
-                        <span className="text-xs text-zinc-600" title={new Date(log.createdAt).toLocaleString()}>
-                          {relativeTime(log.createdAt)}
+                        <span className="text-xs text-zinc-600" title={mounted ? new Date(log.createdAt).toLocaleString() : undefined}>
+                          {mounted ? relativeTime(log.createdAt) : ""}
                         </span>
                       </div>
 
@@ -681,12 +682,13 @@ export function AuditLogView({
   const [nextCursor, setNextCursor] = useState(initialNextCursor);
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loading, setLoading] = useState(false);
-  const [viewMode, setViewMode] = useState<"table" | "timeline">(() => {
-    if (typeof window !== "undefined") {
-      return (localStorage.getItem("audit-log-view") as "table" | "timeline") || "table";
-    }
-    return "table";
-  });
+  const [viewMode, setViewMode] = useState<"table" | "timeline">("table");
+  const mounted = useHasMounted();
+
+  useEffect(() => {
+    const saved = localStorage.getItem("audit-log-view");
+    if (saved === "timeline" || saved === "table") setViewMode(saved);
+  }, []);
 
   useEffect(() => {
     setLogs(initialLogs);
@@ -745,9 +747,9 @@ export function AuditLogView({
           </div>
         </Card>
       ) : viewMode === "table" ? (
-        <AuditLogTable logs={logs} />
+        <AuditLogTable logs={logs} mounted={mounted} />
       ) : (
-        <AuditLogTimeline logs={logs} />
+        <AuditLogTimeline logs={logs} mounted={mounted} />
       )}
 
       {hasMore && (

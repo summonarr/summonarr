@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import {
   MoreHorizontal,
   ShieldCheck,
@@ -519,6 +520,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useHasMounted();
 
   async function patch(id: string, key: string, body: object) {
     setBusy(id + key);
@@ -622,7 +624,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
                 }}
               >
                 <span>
-                  Joined {new Date(u.createdAt).toLocaleDateString()}
+                  Joined {mounted ? new Date(u.createdAt).toLocaleDateString() : ""}
                 </span>
                 <span>·</span>
                 <span>

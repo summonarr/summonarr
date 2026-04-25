@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Loader2, Play, CheckCircle, XCircle, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 export interface CronJobInfo {
   name: string;
@@ -33,6 +34,7 @@ function formatDuration(ms: number): string {
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   const [jobs, setJobs] = useState(initialJobs);
   const [running, setRunning] = useState<Set<string>>(new Set());
+  const mounted = useHasMounted();
 
   async function triggerJob(endpoint: string, name: string) {
     setRunning((prev) => new Set(prev).add(name));
@@ -94,8 +96,8 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">{job.interval}</td>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
                   {job.lastRun ? (
-                    <span title={new Date(job.lastRun).toLocaleString()}>
-                      {formatRelativeTime(job.lastRun)}
+                    <span title={mounted ? new Date(job.lastRun).toLocaleString() : undefined}>
+                      {mounted ? formatRelativeTime(job.lastRun) : ""}
                     </span>
                   ) : (
                     <span className="text-zinc-600">never</span>

@@ -10,6 +10,7 @@ import {
   User, Clock, Zap, HardDrive, Globe, Activity,
 } from "lucide-react";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 function formatDuration(ms: number): string {
   if (ms <= 0) return "0:00";
@@ -130,7 +131,7 @@ function StreamDetails({ session: s }: { session: ActiveSessionLive }) {
   );
 }
 
-function SessionCard({ session: s }: { session: ActiveSessionLive }) {
+function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; mounted: boolean }) {
   const isTV = (s.mediaType ?? "").toUpperCase() === "TV";
   const mediaHref = s.tmdbId
     ? isTV ? `/tv/${s.tmdbId}` : `/movie/${s.tmdbId}`
@@ -141,7 +142,7 @@ function SessionCard({ session: s }: { session: ActiveSessionLive }) {
     : null;
 
   const bitrateStr = formatBitrate(s.bitrate);
-  const elapsed = formatElapsed(s.startedAt);
+  const elapsed = mounted ? formatElapsed(s.startedAt) : "";
   const remaining = s.durationMs > 0 && s.progressMs > 0
     ? formatDuration(s.durationMs - s.progressMs)
     : null;
@@ -309,6 +310,7 @@ export function ActivityNowPlaying({
 }) {
   const [sessions, setSessions] = useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
+  const mounted = useHasMounted();
 
   useLiveEvents((event) => {
     if (event.type === "connected") {
@@ -374,7 +376,7 @@ export function ActivityNowPlaying({
       ) : (
         <div className="space-y-3">
           {sessions.map((s) => (
-            <SessionCard key={s.id} session={s} />
+            <SessionCard key={s.id} session={s} mounted={mounted} />
           ))}
         </div>
       )}
