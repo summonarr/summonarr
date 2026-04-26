@@ -58,11 +58,14 @@ async function lookupHostCached(host: string): Promise<string[]> {
   const cached = dnsCache.get(host);
   if (cached && cached.expiresAt > now) return cached.addrs;
 
-  const [v4, v6] = await Promise.all([
-    dns.resolve4(host).catch(() => [] as string[]),
-    dns.resolve6(host).catch(() => [] as string[]),
-  ]);
-  const addrs = [...v4, ...v6];
+  // Use getaddrinfo (dns.lookup) rather than c-ares (dns.resolve4/6) so resolution
+  // matches what fetch() itself does — respects /etc/hosts, mDNS (.local/.lan),
+  // nsswitch, and split-horizon resolvers. dns.resolve* talks only to the DNS
+  // servers in /etc/resolv.conf and misses all of the above.
+  const results = await dns
+    .lookup(host, { all: true, verbatim: true })
+    .catch(() => [] as { address: string }[]);
+  const addrs = results.map((r) => r.address);
   // Evict by insertion order (Map iteration is ordered) when the cache is full
   if (dnsCache.size >= DNS_CACHE_MAX) {
     const oldestKey = dnsCache.keys().next().value;
