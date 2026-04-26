@@ -74,8 +74,8 @@ export default async function BackupPage() {
         <BackupCard
           icon={<Upload style={{ width: 16, height: 16 }} />}
           title="Database Restore"
-          tag="From *.sql.enc · Duplicates skipped"
-          description="Restore from a previously exported encrypted backup. Duplicate rows are skipped automatically; existing data is left in place."
+          tag="From *.sql.enc · Drop-in replacement"
+          description="Restore from a previously exported encrypted backup. Every table in the dump is truncated and re-inserted atomically — the database returns to the exact state at backup time. Failure rolls back."
         >
           <BackupUI mode="db-import" />
         </BackupCard>
@@ -111,7 +111,7 @@ export default async function BackupPage() {
           }}
         >
           <li>Exports are synchronous; large DBs may take up to 30s to generate.</li>
-          <li>Restoring into a non-empty database is safe — rows that already exist are skipped by primary key.</li>
+          <li>Restore is destructive: every listed table is truncated before re-insert, all in a single transaction. Any failure rolls back the entire restore — no half-restored state.</li>
           <li>Schema migrations are <em>not</em> run on import. Restore only into a server running the same version.</li>
           <li>
             Both actions emit{" "}
