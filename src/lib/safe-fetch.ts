@@ -84,14 +84,18 @@ async function doFetch(
       );
     }
     targetUrl = safe.url;
-    const pinnedIp = safe.addrs[0];
-    const family = isIP(pinnedIp) === 6 ? 6 : 4;
-    // Pin the resolved IP in the dispatcher so a DNS rebind between resolve and connect can't bypass the SSRF check
-    dispatcher = new Agent({
-      connect: {
-        lookup: (_hostname, _opts, cb) => cb(null, pinnedIp, family),
-      },
-    });
+    if (mode === "untrusted") {
+      // Pin the resolved IP in the dispatcher so a DNS rebind between resolve and connect can't
+      // bypass the SSRF check. Only worthwhile for end-user-supplied URLs — for admin-set URLs
+      // the rebind window is too narrow to matter and pinning breaks split-horizon resolvers.
+      const pinnedIp = safe.addrs[0];
+      const family = isIP(pinnedIp) === 6 ? 6 : 4;
+      dispatcher = new Agent({
+        connect: {
+          lookup: (_hostname, _opts, cb) => cb(null, pinnedIp, family),
+        },
+      });
+    }
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -140,10 +144,13 @@ async function doFetch(
           );
         }
       }
+      const e = err as Error & { cause?: { code?: string; message?: string; errno?: number } };
+      const causeMsg = e.cause?.message ?? e.cause?.code ?? "";
+      const detail = causeMsg ? `${e.message} (${causeMsg})` : e.message;
       throw new SafeFetchError(
         "network",
         targetUrl,
-        `fetch failed for ${targetUrl}: ${(err as Error).message}`,
+        `fetch failed for ${targetUrl}: ${detail}`,
       );
     }
 
