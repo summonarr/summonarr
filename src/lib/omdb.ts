@@ -2,6 +2,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
+import { sanitizeForLog } from "./sanitize";
 import { tmdbAuth } from "./tmdb-auth";
 
 const OMDB_BASE = "https://www.omdbapi.com";
@@ -48,7 +49,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
-      console.log(`[omdb] OMDB API returned ${res.status} for ${imdbId}`);
+      console.log(`[omdb] OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
       return null;
     }
 
@@ -63,7 +64,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
     };
 
     if (data.Response !== "True") {
-      console.log(`[omdb] OMDB returned Response=False for ${imdbId}: ${data.Error ?? "unknown error"}`);
+      console.log(`[omdb] OMDB returned Response=False for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "unknown error")}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return null;
     }
@@ -84,7 +85,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
   } catch (err) {
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
-    console.error(`[omdb] fetch failed for ${imdbId}: ${reason}`);
+    console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
     return null;
   }
 }
@@ -132,7 +133,7 @@ export async function fetchAndCacheOmdbForTmdb(
       timeoutMs: OMDB_FETCH_TIMEOUT_MS,
     });
     if (!extRes.ok) {
-      console.log(`[omdb] TMDB external_ids fetch failed (${extRes.status}) for ${mediaType}:${tmdbId}`);
+      console.log(`[omdb] TMDB external_ids fetch failed (${extRes.status}) for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       return { found: false, keyConfigured: true };
     }
 
@@ -141,8 +142,8 @@ export async function fetchAndCacheOmdbForTmdb(
     const omdbRatings = ext.imdb_id ? await getOmdbRatings(ext.imdb_id, releaseDate) : null;
 
     if (!omdbRatings) {
-      if (!ext.imdb_id) console.log(`[omdb] No IMDB ID from TMDB for ${mediaType}:${tmdbId}`);
-      else console.log(`[omdb] No ratings from OMDB for ${mediaType}:${tmdbId}`);
+      if (!ext.imdb_id) console.log(`[omdb] No IMDB ID from TMDB for ${sanitizeForLog(mediaType)}:${tmdbId}`);
+      else console.log(`[omdb] No ratings from OMDB for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
@@ -154,7 +155,7 @@ export async function fetchAndCacheOmdbForTmdb(
       rottenTomatoes: omdbRatings.rottenTomatoes,
       metacritic:     omdbRatings.metacritic,
     };
-    console.log(`[omdb] Ratings for ${mediaType}:${tmdbId} — IMDb=${ratings.imdbRating} RT=${ratings.rottenTomatoes}`);
+    console.log(`[omdb] Ratings for ${sanitizeForLog(mediaType)}:${tmdbId} — IMDb=${sanitizeForLog(ratings.imdbRating)} RT=${sanitizeForLog(ratings.rottenTomatoes)}`);
     await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate));
     return { found: true, data: ratings };
   } catch (err) {
@@ -162,7 +163,7 @@ export async function fetchAndCacheOmdbForTmdb(
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
-    console.error(`[omdb] Error fetching for ${mediaType}:${tmdbId}: ${encodeURIComponent(msg)}`);
+    console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
     return { found: false, keyConfigured: true };
   }
 }
@@ -191,7 +192,7 @@ export async function getOmdbRatingsForTmdb(
 
   const apiKey = await getApiKey();
   if (!apiKey) {
-    console.log(`[omdb] No API key configured — skipping for ${mediaType}:${tmdbId}`);
+    console.log(`[omdb] No API key configured — skipping for ${sanitizeForLog(mediaType)}:${tmdbId}`);
     return { found: false, keyConfigured: false };
   }
 

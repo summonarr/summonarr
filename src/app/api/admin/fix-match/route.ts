@@ -8,14 +8,15 @@ import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
-// %s indirection so tainted template results (Plex/TMDB titles, GUIDs, etc.) land
-// in the *value* position of console.* and never get format-specifier-interpreted.
-const flog   = (msg: string, ...rest: unknown[]): void => { console.log("%s", msg, ...rest); };
-const fwarn  = (msg: string, ...rest: unknown[]): void => { console.warn("%s", msg, ...rest); };
-const ferror = (msg: string, ...rest: unknown[]): void => { console.error("%s", msg, ...rest); };
+// %s indirection defuses format-specifier interpretation; sanitizeForLog strips CRLF
+// so tainted template results (Plex/TMDB titles, GUIDs, etc.) can't forge log lines.
+const flog   = (msg: string, ...rest: unknown[]): void => { console.log("%s", sanitizeForLog(msg), ...rest); };
+const fwarn  = (msg: string, ...rest: unknown[]): void => { console.warn("%s", sanitizeForLog(msg), ...rest); };
+const ferror = (msg: string, ...rest: unknown[]): void => { console.error("%s", sanitizeForLog(msg), ...rest); };
 
 type FixMatchBody = {
   server:         "plex" | "jellyfin";

@@ -7,6 +7,7 @@ import {
   isMovieDownloadingInRadarr,
   isSeriesDownloadingInSonarr,
 } from "./arr";
+import { sanitizeForLog } from "./sanitize";
 
 export type ScanMediaType = "movie" | "tv";
 
@@ -83,13 +84,13 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
       entry.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
       const scope = entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue";
       console.warn(
-        `[library-scan] ${mediaType} arr still pending (${scope}), retry ${entry.retries}/${MAX_QUEUE_WAIT_RETRIES} in ${SCAN_DEBOUNCE_MS}ms`,
+        `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${sanitizeForLog(scope)}), retry ${entry.retries}/${MAX_QUEUE_WAIT_RETRIES} in ${SCAN_DEBOUNCE_MS}ms`,
       );
       return;
     }
     const scope = entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue";
     console.warn(
-      `[library-scan] ${mediaType} arr still pending (${scope}) after ${MAX_QUEUE_WAIT_RETRIES} retries, scanning anyway`,
+      `[library-scan] ${sanitizeForLog(mediaType)} arr still pending (${sanitizeForLog(scope)}) after ${MAX_QUEUE_WAIT_RETRIES} retries, scanning anyway`,
     );
   }
 
