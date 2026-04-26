@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { safeFetchTrusted } from "./safe-fetch";
+import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
 
@@ -59,6 +59,7 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
         url.searchParams.set("external_source", "tvdb_id");
         for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
         const res = await safeFetchTrusted(url.toString(), {
+          allowedHosts: ["api.themoviedb.org"],
           headers: auth.headers,
           timeoutMs: 10_000,
         });
@@ -124,7 +125,7 @@ const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<T> {
 
   const { signal, method, body } = options;
-  const res = await safeFetchTrusted(`${cfg.url}${path}`, {
+  const res = await safeFetchAdminConfigured(`${cfg.url}${path}`, {
     method,
     body,
     ...(signal ? { signal } : {}),
@@ -345,6 +346,7 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
       const url = new URL(`https://api.themoviedb.org/3/movie/${tmdbId}`);
       for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
       const res = await safeFetchTrusted(url.toString(), {
+        allowedHosts: ["api.themoviedb.org"],
         headers: auth.headers,
         timeoutMs: 10_000,
       });

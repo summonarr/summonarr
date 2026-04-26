@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
+
+const TMDB_HOSTS = ["api.themoviedb.org"];
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
@@ -71,7 +73,7 @@ async function fixPlexMatch(
 
   if (!title) {
     console.log(`${tag} no TMDB cache hit — falling back to current Plex metadata`);
-    const metaRes = await safeFetchTrusted(`${serverUrl}/library/metadata/${ratingKey}`, {
+    const metaRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}`, {
       headers,
       timeoutMs: 15_000,
     });
@@ -93,6 +95,7 @@ async function fixPlexMatch(
       const extUrl = new URL(`https://api.themoviedb.org/3/${mediaTypePath}/${correctTmdbId}/external_ids`);
       for (const [k, v] of Object.entries(tAuth.query)) extUrl.searchParams.set(k, v);
       const extRes = await safeFetchTrusted(extUrl.toString(), {
+        allowedHosts: TMDB_HOSTS,
         headers: tAuth.headers,
         timeoutMs: 10_000,
       }).catch(() => null);
@@ -117,7 +120,7 @@ async function fixPlexMatch(
   } else {
     const plexMatchSearch = async (label: string, params: Record<string, string>): Promise<PlexSearchResult | null> => {
       console.log(tag, `search [${label}]:`, params);
-      const res = await safeFetchTrusted(
+      const res = await safeFetchAdminConfigured(
         `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
         { headers, timeoutMs: 30_000 },
       ).catch(() => null);
@@ -159,14 +162,14 @@ async function fixPlexMatch(
     }
   }
 
-  const unmatchRes = await safeFetchTrusted(`${serverUrl}/library/metadata/${ratingKey}/unmatch`, {
+  const unmatchRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/unmatch`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
   }).catch(() => null);
   console.log(`${tag} PUT /unmatch response: ${unmatchRes?.status ?? "network error"}`);
 
-  const cleanRes = await safeFetchTrusted(`${serverUrl}/library/clean/bundles`, {
+  const cleanRes = await safeFetchAdminConfigured(`${serverUrl}/library/clean/bundles`, {
     method: "PUT",
     headers,
     timeoutMs: 60_000,
@@ -181,7 +184,7 @@ async function fixPlexMatch(
     if (yr)   params.year = yr;
     const url = `${serverUrl}/library/metadata/${ratingKey}/match?` + new URLSearchParams(params);
     console.log(`${tag} PUT /match url=${url}`);
-    return safeFetchTrusted(url, { method: "PUT", headers, timeoutMs: 30_000 });
+    return safeFetchAdminConfigured(url, { method: "PUT", headers, timeoutMs: 30_000 });
   };
 
   if (canonicalGuid) {
@@ -200,7 +203,7 @@ async function fixPlexMatch(
     }
   }
 
-  const refreshRes = await safeFetchTrusted(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+  const refreshRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
@@ -217,7 +220,7 @@ async function fixPlexMatch(
     let plexImdbId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise((r) => setTimeout(r, intervalMs));
-      const checkRes = await safeFetchTrusted(`${serverUrl}/library/metadata/${ratingKey}?includeGuids=1`, {
+      const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}?includeGuids=1`, {
         headers,
         timeoutMs: 10_000,
       }).catch(() => null);
@@ -295,7 +298,7 @@ async function fixPlexMatch(
         const res = await applyMatch(guid, name, yr);
         console.log(`${tag} [${label}] PUT /match response: ${res.status}`);
         if (!res.ok) return false;
-        const ref = await safeFetchTrusted(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+        const ref = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
           method: "PUT", headers, timeoutMs: 30_000,
         });
         console.log(`${tag} [${label}] PUT /refresh response: ${ref.status}`);
@@ -318,7 +321,7 @@ async function fixPlexMatch(
       for (const [label, params] of altSearches) {
         if (pollConfirmed || allConflated) break;
         console.log(`${tag} trying alternative search [${label}]`);
-        const res = await safeFetchTrusted(
+        const res = await safeFetchAdminConfigured(
           `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
           { headers, timeoutMs: 30_000 },
         ).catch(() => null);
@@ -392,7 +395,7 @@ async function fixJellyfinMatch(
   };
   const searchType = mediaType === "MOVIE" ? "Movie" : "Series";
   console.log(`${tag} POST /Items/RemoteSearch/${searchType}`);
-  const searchRes = await safeFetchTrusted(`${baseUrl}/Items/RemoteSearch/${searchType}`, {
+  const searchRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/${searchType}`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -418,7 +421,7 @@ async function fixJellyfinMatch(
   }) ?? searchResults[0];
   console.log(`${tag} applying result: name="${(target as JellyfinSearchResult).Name}" ids=${JSON.stringify((target as JellyfinSearchResult).ProviderIds)}`);
 
-  const applyRes = await safeFetchTrusted(`${baseUrl}/Items/RemoteSearch/Apply/${itemId}?replaceAllImages=false`, {
+  const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${itemId}?replaceAllImages=false`, {
     method: "POST",
     headers,
     body: JSON.stringify(target),
@@ -427,7 +430,7 @@ async function fixJellyfinMatch(
   console.log(`${tag} Apply response: ${applyRes.status}`);
   if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
 
-  const refreshRes = await safeFetchTrusted(
+  const refreshRes = await safeFetchAdminConfigured(
     `${baseUrl}/Items/${itemId}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`,
     { method: "POST", headers, timeoutMs: 30_000 },
   ).catch((e: unknown) => { console.warn(tag, "Refresh call failed (non-fatal):", e); return null; });
@@ -439,7 +442,7 @@ async function fixJellyfinMatch(
   for (let attempt = 0; attempt < 4; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
 
-    const checkRes = await safeFetchTrusted(
+    const checkRes = await safeFetchAdminConfigured(
       `${baseUrl}/Items/${resolvedItemId}?Fields=ProviderIds`,
       { headers, timeoutMs: 10_000 },
     ).catch(() => null);
@@ -449,7 +452,7 @@ async function fixJellyfinMatch(
       if (filePath) {
         const folderName = filePath.replace(/\\/g, "/").split("/").at(-2) ?? "";
         const searchTerm = folderName.replace(/\s*\(\d{4}\)\s*$/, "").trim();
-        const findRes = await safeFetchTrusted(
+        const findRes = await safeFetchAdminConfigured(
           `${baseUrl}/Items?Recursive=true&Fields=ProviderIds,Path&IncludeItemTypes=Movie,Series` +
           (searchTerm ? `&SearchTerm=${encodeURIComponent(searchTerm)}` : "") +
           `&Limit=50`,

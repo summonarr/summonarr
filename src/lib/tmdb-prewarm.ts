@@ -61,6 +61,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     // Use safeFetchTrusted instead of Next.js fetch so the request bypasses the Next cache and
     // never gets deduped or revalidated against a stale store entry.
     res = await safeFetchTrusted(url.toString(), {
+      allowedHosts: ["api.themoviedb.org"],
       headers: auth.headers,
       timeoutMs: TMDB_FETCH_TIMEOUT_MS,
     });

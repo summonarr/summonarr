@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { resolveToSafeUrl } from "@/lib/ssrf";
-import { safeFetch, safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetch, safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
 export async function GET(request: NextRequest) {
   const session = await auth();
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
   }
 
   const MAX_THUMB_BYTES = 5 * 1024 * 1024;
-  const fetcher = trusted ? safeFetchTrusted : safeFetch;
+  const fetcher = trusted ? safeFetchAdminConfigured : safeFetch;
   const res = await fetcher(fetchUrl, {
     timeoutMs: 10_000,
     maxResponseBytes: MAX_THUMB_BYTES,

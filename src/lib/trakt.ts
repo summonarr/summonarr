@@ -66,6 +66,7 @@ async function traktFetch<T>(path: string, params?: Record<string, string>): Pro
   }
 
   const res = await safeFetchTrusted(url.toString(), {
+    allowedHosts: ["api.trakt.tv"],
     headers: {
       "Content-Type": "application/json",
       "trakt-api-version": "2",

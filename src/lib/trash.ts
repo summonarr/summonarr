@@ -113,6 +113,7 @@ async function ghAuthHeaders(): Promise<HeadersInit> {
 async function ghTree(repo: string, branch: string): Promise<GhTreeEntry[]> {
   const url = `https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`;
   const res = await safeFetchTrusted(url, {
+    allowedHosts: ["api.github.com"],
     headers: await ghAuthHeaders(),
     timeoutMs: TREE_FETCH_TIMEOUT_MS,
   });
@@ -131,6 +132,7 @@ async function ghTree(repo: string, branch: string): Promise<GhTreeEntry[]> {
 async function ghRawFile(repo: string, branch: string, path: string): Promise<string> {
   const url = `https://raw.githubusercontent.com/${repo}/${branch}/${path}`;
   const res = await safeFetchTrusted(url, {
+    allowedHosts: ["raw.githubusercontent.com"],
     headers: { "User-Agent": USER_AGENT },
     timeoutMs: RAW_FETCH_TIMEOUT_MS,
     maxResponseBytes: RAW_FETCH_MAX_BYTES,

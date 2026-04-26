@@ -35,6 +35,20 @@ function isSafeAddr(addr: string): boolean {
   return true;
 }
 
+// For admin-configured server URLs (Plex/Radarr/Sonarr/Jellyfin). Permits RFC1918, ULA,
+// CGNAT, and loopback (admins legitimately point at LAN or same-host servers) while still
+// blocking link-local and unspecified — the goal is to keep cloud metadata services and
+// 0.0.0.0 unreachable even when the admin has typo'd the URL.
+function isSafeAddrForAdmin(addr: string): boolean {
+  if (/^169\.254\./.test(addr)) return false;
+  if (/^::ffff:169\.254\./i.test(addr)) return false;
+  if (/^fe80:/i.test(addr)) return false;
+  if (/^0\./.test(addr)) return false;
+  if (addr === "::") return false;
+  if (/^::ffff:0\./i.test(addr)) return false;
+  return true;
+}
+
 const DNS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DNS_CACHE_MAX = 512;
 const dnsCache = new Map<string, { addrs: string[]; expiresAt: number }>();
@@ -58,8 +72,14 @@ async function lookupHostCached(host: string): Promise<string[]> {
   return addrs;
 }
 
+export interface ResolveSafeUrlOptions {
+  /** Permit RFC1918/ULA/loopback addresses — for admin-configured LAN servers. */
+  allowPrivate?: boolean;
+}
+
 export async function resolveToSafeUrlWithAddrs(
   raw: string,
+  opts: ResolveSafeUrlOptions = {},
 ): Promise<{ url: string; addrs: string[] } | null> {
   let url: URL;
   try {
@@ -75,13 +95,17 @@ export async function resolveToSafeUrlWithAddrs(
   const addrs: string[] = isIP(host) ? [host] : await lookupHostCached(host);
 
   if (addrs.length === 0) return null;
-  // All resolved addresses must be safe — a single private IP in the result set is enough to block the request
-  if (!addrs.every(isSafeAddr)) return null;
+  // All resolved addresses must be safe — a single unsafe IP in the result set is enough to block the request
+  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
+  if (!addrs.every(check)) return null;
 
   return { url: url.toString().replace(/\/$/, ""), addrs };
 }
 
-export async function resolveToSafeUrl(raw: string): Promise<string | null> {
-  const r = await resolveToSafeUrlWithAddrs(raw);
+export async function resolveToSafeUrl(
+  raw: string,
+  opts: ResolveSafeUrlOptions = {},
+): Promise<string | null> {
+  const r = await resolveToSafeUrlWithAddrs(raw, opts);
   return r ? r.url : null;
 }

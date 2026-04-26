@@ -46,7 +46,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
     url.searchParams.set("apikey", apiKey);
     url.searchParams.set("i", imdbId);
 
-    const res = await safeFetchTrusted(url.toString(), { timeoutMs: OMDB_FETCH_TIMEOUT_MS });
+    const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
       console.log(`[omdb] OMDB API returned ${res.status} for ${imdbId}`);
       return null;
@@ -97,7 +97,7 @@ export async function testOmdbConnection(): Promise<string> {
   url.searchParams.set("apikey", apiKey);
   url.searchParams.set("i", "tt0133093");
 
-  const res = await safeFetchTrusted(url.toString(), { timeoutMs: OMDB_FETCH_TIMEOUT_MS });
+  const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
   if (!res.ok) throw new Error(`OMDB returned HTTP ${res.status}`);
 
   const data = await res.json() as { Response: string; Title?: string; Error?: string };
@@ -127,6 +127,7 @@ export async function fetchAndCacheOmdbForTmdb(
     const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids`);
     for (const [k, v] of Object.entries(auth.query)) extUrl.searchParams.set(k, v);
     const extRes = await safeFetchTrusted(extUrl.toString(), {
+      allowedHosts: ["api.themoviedb.org"],
       headers: auth.headers,
       timeoutMs: OMDB_FETCH_TIMEOUT_MS,
     });

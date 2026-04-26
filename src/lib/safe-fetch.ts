@@ -33,14 +33,19 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const USER_AGENT = "Summonarr/0.1";
 
+type FetchMode = "hardcoded" | "admin" | "untrusted";
+
 async function doFetch(
   rawUrl: string,
   opts: SafeFetchOptions,
-  validateUrl: boolean,
+  mode: FetchMode,
+  allowedHosts?: ReadonlySet<string>,
 ): Promise<Response> {
 
+  let parsedUrl: URL;
   try {
-    const proto = new URL(rawUrl).protocol;
+    parsedUrl = new URL(rawUrl);
+    const proto = parsedUrl.protocol;
     if (proto !== "http:" && proto !== "https:") {
       throw new SafeFetchError("ssrf-blocked", rawUrl, `Protocol not allowed: ${proto}`);
     }
@@ -49,10 +54,28 @@ async function doFetch(
     throw new SafeFetchError("ssrf-blocked", rawUrl, `Invalid URL: ${rawUrl}`);
   }
 
+  if (mode === "hardcoded") {
+    if (!allowedHosts || allowedHosts.size === 0) {
+      throw new SafeFetchError(
+        "ssrf-blocked",
+        rawUrl,
+        "safeFetchTrusted requires a non-empty allowedHosts list",
+      );
+    }
+    const host = parsedUrl.hostname.toLowerCase();
+    if (!allowedHosts.has(host)) {
+      throw new SafeFetchError(
+        "ssrf-blocked",
+        rawUrl,
+        `URL blocked by trusted-host policy (host=${host}): ${rawUrl}`,
+      );
+    }
+  }
+
   let targetUrl = rawUrl;
   let dispatcher: Agent | null = null;
-  if (validateUrl) {
-    const safe = await resolveToSafeUrlWithAddrs(rawUrl);
+  if (mode === "untrusted" || mode === "admin") {
+    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: mode === "admin" });
     if (!safe) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -202,13 +225,34 @@ export function safeFetch(
   url: string,
   opts: SafeFetchOptions = {},
 ): Promise<Response> {
-  return doFetch(url, opts, true);
+  return doFetch(url, opts, "untrusted");
 }
 
-// safeFetchTrusted skips SSRF validation — only use for hardcoded URLs (TMDB, Plex.tv, Radarr, Sonarr)
+export interface TrustedFetchOptions extends SafeFetchOptions {
+  /** Hostname allowlist — request is rejected if URL hostname isn't in this set. Required. */
+  allowedHosts: readonly string[];
+}
+
+// safeFetchTrusted skips DNS-based SSRF validation but enforces a hardcoded hostname
+// allowlist — use for fixed third-party APIs (TMDB, plex.tv, discord.com, …). Pass the
+// expected host(s) so a future code change can't accidentally fan out to user-controlled URLs.
 export function safeFetchTrusted(
+  url: string,
+  opts: TrustedFetchOptions,
+): Promise<Response> {
+  const set = new Set(opts.allowedHosts.map((h) => h.toLowerCase()));
+  const { allowedHosts: _ignored, ...rest } = opts;
+  void _ignored;
+  return doFetch(url, rest, "hardcoded", set);
+}
+
+// safeFetchAdminConfigured runs the SSRF policy with allowPrivate=true — use for
+// URLs persisted in the Setting table (Radarr/Sonarr/Jellyfin/Plex server). Admins
+// legitimately point these at LAN/loopback, so RFC1918 is permitted; link-local
+// (cloud metadata) and unspecified addresses stay blocked.
+export function safeFetchAdminConfigured(
   url: string,
   opts: SafeFetchOptions = {},
 ): Promise<Response> {
-  return doFetch(url, opts, false);
+  return doFetch(url, opts, "admin");
 }

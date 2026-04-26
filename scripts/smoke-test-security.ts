@@ -58,7 +58,7 @@ async function main() {
     // Use a 100ms timeout to keep the test snappy.
     const start = Date.now();
     try {
-      await safeFetchTrusted("http://example.com:81/", { timeoutMs: 100 });
+      await safeFetchTrusted("http://example.com:81/", { allowedHosts: ["example.com"], timeoutMs: 100 });
       return false;
     } catch (err) {
       const elapsed = Date.now() - start;

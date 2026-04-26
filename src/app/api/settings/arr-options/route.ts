@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
 async function arrFetch<T>(url: string, apiKey: string, path: string): Promise<T> {
-  const res = await safeFetchTrusted(`${url.replace(/\/$/, "")}${path}`, {
+  const res = await safeFetchAdminConfigured(`${url.replace(/\/$/, "")}${path}`, {
     headers: { "X-Api-Key": apiKey },
     cache: "no-store",
     timeoutMs: 15_000,

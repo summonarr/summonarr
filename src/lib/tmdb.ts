@@ -107,6 +107,7 @@ async function tmdbFetch<T>(path: string, params?: Record<string, string>, reval
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await safeFetchTrusted(tmdbUrl, {
+        allowedHosts: ["api.themoviedb.org"],
         headers: auth.headers,
         next: { revalidate },
       });

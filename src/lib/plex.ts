@@ -1,4 +1,6 @@
-import { safeFetchTrusted } from "./safe-fetch";
+import { safeFetchTrusted, safeFetchAdminConfigured } from "./safe-fetch";
+
+const PLEX_TV_HOSTS = ["plex.tv"];
 
 export const PLEX_CLIENT_ID = "summonarr-server";
 
@@ -22,6 +24,7 @@ export interface PlexUser {
 export async function pingPlexToken(token: string, clientId?: string): Promise<boolean> {
   try {
     const res = await safeFetchTrusted("https://plex.tv/api/v2/ping", {
+      allowedHosts: PLEX_TV_HOSTS,
       headers: {
         ...PLEX_HEADERS,
         ...(clientId ? { "X-Plex-Client-Identifier": clientId } : {}),
@@ -37,6 +40,7 @@ export async function pingPlexToken(token: string, clientId?: string): Promise<b
 
 export async function getPlexUser(token: string, clientId?: string): Promise<PlexUser> {
   const res = await safeFetchTrusted("https://plex.tv/api/v2/user", {
+    allowedHosts: PLEX_TV_HOSTS,
     headers: {
       ...PLEX_HEADERS,
       ...(clientId ? { "X-Plex-Client-Identifier": clientId } : {}),
@@ -118,7 +122,7 @@ async function plexFetchAllPages<T>(
 }
 
 function plexFetch(url: string, token: string): Promise<Response> {
-  return safeFetchTrusted(url, {
+  return safeFetchAdminConfigured(url, {
     headers: plexServerHeaders(token),
     timeoutMs: FETCH_TIMEOUT_MS,
   });
@@ -666,6 +670,7 @@ export async function getPlexAccounts(serverUrl: string, adminToken: string): Pr
   try {
     // plex.tv/api/users returns XML (not JSON) — the v2 JSON endpoint doesn't expose the full friend list
     const res = await safeFetchTrusted("https://plex.tv/api/users", {
+      allowedHosts: PLEX_TV_HOSTS,
       headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
       timeoutMs: 15_000,
     });
@@ -709,6 +714,7 @@ export async function getPlexFriendEmails(adminToken: string, serverUrl?: string
   const machineId = serverUrl ? await getPlexMachineId(serverUrl, adminToken) : null;
 
   const res = await safeFetchTrusted("https://plex.tv/api/users", {
+    allowedHosts: PLEX_TV_HOSTS,
     headers: { "X-Plex-Client-Identifier": PLEX_CLIENT_ID, "X-Plex-Token": adminToken },
     timeoutMs: 15_000,
   });

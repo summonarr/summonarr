@@ -19,6 +19,7 @@ export async function POST() {
   if (session instanceof NextResponse) return session;
 
   const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
+    allowedHosts: ["plex.tv"],
     method: "POST",
     headers: {
       ...PLEX_PIN_HEADERS,
@@ -50,6 +51,7 @@ export async function GET(req: NextRequest) {
   }
 
   const res = await safeFetchTrusted(`https://plex.tv/api/v2/pins/${id}`, {
+    allowedHosts: ["plex.tv"],
     headers: PLEX_PIN_HEADERS,
     timeoutMs: 15_000,
   });
