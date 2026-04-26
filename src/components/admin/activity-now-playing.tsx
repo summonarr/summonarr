@@ -7,9 +7,11 @@ import { Card } from "@/components/ui/card";
 import {
   Monitor, Pause, Play, Tv2, Film, Wifi, WifiOff,
   Smartphone, Laptop, MonitorPlay, Gamepad2, Tablet,
-  User, Clock, Zap, HardDrive, Globe, Activity,
+  User, Clock, Zap, HardDrive, Activity,
 } from "lucide-react";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
+import { useHasMounted } from "@/hooks/use-has-mounted";
+import { IpInfo } from "@/components/admin/ip-info";
 
 function formatDuration(ms: number): string {
   if (ms <= 0) return "0:00";
@@ -130,7 +132,7 @@ function StreamDetails({ session: s }: { session: ActiveSessionLive }) {
   );
 }
 
-function SessionCard({ session: s }: { session: ActiveSessionLive }) {
+function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; mounted: boolean }) {
   const isTV = (s.mediaType ?? "").toUpperCase() === "TV";
   const mediaHref = s.tmdbId
     ? isTV ? `/tv/${s.tmdbId}` : `/movie/${s.tmdbId}`
@@ -141,7 +143,7 @@ function SessionCard({ session: s }: { session: ActiveSessionLive }) {
     : null;
 
   const bitrateStr = formatBitrate(s.bitrate);
-  const elapsed = formatElapsed(s.startedAt);
+  const elapsed = mounted ? formatElapsed(s.startedAt) : "";
   const remaining = s.durationMs > 0 && s.progressMs > 0
     ? formatDuration(s.durationMs - s.progressMs)
     : null;
@@ -283,12 +285,7 @@ function SessionCard({ session: s }: { session: ActiveSessionLive }) {
               </div>
             )}
 
-            {s.ipAddress && (
-              <div className="flex items-center gap-1.5 text-zinc-500">
-                <Globe className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
-                <span className="tabular-nums">{s.ipAddress}</span>
-              </div>
-            )}
+            {s.ipAddress && <IpInfo ip={s.ipAddress} />}
           </div>
 
           <StreamDetails session={s} />
@@ -309,6 +306,7 @@ export function ActivityNowPlaying({
 }) {
   const [sessions, setSessions] = useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
+  const mounted = useHasMounted();
 
   useLiveEvents((event) => {
     if (event.type === "connected") {
@@ -374,7 +372,7 @@ export function ActivityNowPlaying({
       ) : (
         <div className="space-y-3">
           {sessions.map((s) => (
-            <SessionCard key={s.id} session={s} />
+            <SessionCard key={s.id} session={s} mounted={mounted} />
           ))}
         </div>
       )}

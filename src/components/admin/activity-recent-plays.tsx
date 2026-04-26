@@ -4,6 +4,7 @@ import { Fragment, useState } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { Film, Tv2, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 export interface RecentPlay {
   id: string;
@@ -183,6 +184,7 @@ export function ActivityRecentPlays({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(initialPlays.length >= 20);
   const [page, setPage] = useState(1);
+  const mounted = useHasMounted();
 
   const loadMore = async () => {
     setLoading(true);
@@ -339,7 +341,7 @@ export function ActivityRecentPlays({
                       {formatDuration(p.playDuration)}
                     </td>
                     <td className="py-2.5 text-right text-zinc-500">
-                      {formatRelativeTime(p.startedAt)}
+                      {mounted ? formatRelativeTime(p.startedAt) : ""}
                     </td>
                   </tr>
                   {isExpanded && <DetailRow play={p} />}

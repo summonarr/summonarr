@@ -11,6 +11,7 @@ import {
   TranscodeRatioBars,
   HorizontalBar,
 } from "@/components/admin/activity-chart-primitives";
+import { IpInfo } from "@/components/admin/ip-info";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +50,21 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
   if (!msUser) notFound();
 
   const stats = await getUserPlayStats(id);
+
+  const ipGroups = await prisma.playHistory.groupBy({
+    by: ["ipAddress"],
+    where: { mediaServerUserId: id, ipAddress: { not: null } },
+    _count: { _all: true },
+    _max: { startedAt: true },
+  });
+  const knownIps = ipGroups
+    .filter((g): g is typeof g & { ipAddress: string } => !!g.ipAddress)
+    .map((g) => ({
+      ip: g.ipAddress,
+      plays: g._count._all,
+      lastSeen: g._max.startedAt,
+    }))
+    .sort((a, b) => (b.lastSeen?.getTime() ?? 0) - (a.lastSeen?.getTime() ?? 0));
 
   const platformMax = Math.max(...stats.platformBreakdown.map((p) => p.count), 1);
   const resolutionMax = Math.max(...stats.resolutionBreakdown.map((r) => r.count), 1);
@@ -219,6 +235,40 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
                 </div>
               );
             })}
+          </div>
+        </Card>
+      )}
+
+      {knownIps.length > 0 && (
+        <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
+          <h2 className="font-semibold text-white mb-4">
+            Known IP Addresses ({knownIps.length})
+          </h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800">
+                  <th className="text-left py-2 pr-4">IP Address</th>
+                  <th className="text-right py-2 pr-4">Plays</th>
+                  <th className="text-right py-2">Last Seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {knownIps.map((ip) => (
+                  <tr key={ip.ip} className="border-b border-zinc-800/50 align-top">
+                    <td className="py-2.5 pr-4">
+                      <IpInfo ip={ip.ip} />
+                    </td>
+                    <td className="py-2.5 pr-4 text-right text-zinc-400 tabular-nums">
+                      {ip.plays}
+                    </td>
+                    <td className="py-2.5 text-right text-zinc-500">
+                      {ip.lastSeen ? formatRelativeTime(ip.lastSeen) : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </Card>
       )}

@@ -5,7 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import {
   getTrending, getPopularMovies, getPopularTV,
-  getUpcomingMovies, getUpcomingTV,
+  getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
   getTopRatedMovies, getTopRatedTV,
   getPopularMoviesPage, getPopularTVPage,
   getMovieGenres, getTVGenres, getWatchProviders,
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
       const startTime = Date.now();
 
     const [
-      trending, popMovies, popTV, upMovies, upTV,
+      trending, popMovies, popTV, upMovies, upTV, onAirTV,
       topMovies, topTV,
       popMoviesP1, popTVP1,
       movieGenres, tvGenres, providers,
@@ -70,6 +70,7 @@ export async function POST(request: NextRequest) {
       warm(getPopularTV),
       warm(getUpcomingMovies),
       warm(getUpcomingTV),
+      warm(getOnTheAirTV),
       warm(getTopRatedMovies),
       warm(getTopRatedTV),
 
@@ -97,6 +98,7 @@ export async function POST(request: NextRequest) {
       popularTV: extract(popTV),
       upcomingMovies: extract(upMovies),
       upcomingTV: extract(upTV),
+      onAirTV: extract(onAirTV),
       topRatedMovies: extract(topMovies),
       topRatedTV: extract(topTV),
       popularMoviesPage1: extract(popMoviesP1),
@@ -113,7 +115,7 @@ export async function POST(request: NextRequest) {
     };
 
     const allResults = [
-      trending, popMovies, popTV, upMovies, upTV,
+      trending, popMovies, popTV, upMovies, upTV, onAirTV,
       topMovies, topTV, popMoviesP1, popTVP1,
       movieGenres, tvGenres, providers,
       traktPopMovies, traktPopTV, traktTrendMovies, traktTrendTV,

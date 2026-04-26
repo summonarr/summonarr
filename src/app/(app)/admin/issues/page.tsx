@@ -11,7 +11,7 @@ import { Film, Tv2, MessageSquare } from "lucide-react";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
-import { Chip, PageHeader, StatCard } from "@/components/ui/design";
+import { Chip, PageHeader } from "@/components/ui/design";
 import type { ChipTone } from "@/components/ui/design";
 
 const STATUS_TONE: Record<string, ChipTone> = {
@@ -101,13 +101,6 @@ export default async function AdminIssuesPage({
   const countFor = (status: string) =>
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
 
-  const stats = [
-    { label: "Open", value: countFor("OPEN"), filter: "OPEN" as FilterValue },
-    { label: "In Progress", value: countFor("IN_PROGRESS"), filter: "IN_PROGRESS" as FilterValue },
-    { label: "Resolved", value: countFor("RESOLVED"), filter: "RESOLVED" as FilterValue },
-    { label: "Total", value: allIssues.length, filter: "ALL" as FilterValue },
-  ];
-
   const filtered = filter === "ALL" ? allIssues : allIssues.filter((i) => i.status === filter);
   const groups = groupIssues(filtered);
 
@@ -167,27 +160,6 @@ export default async function AdminIssuesPage({
         title="Issues"
         subtitle="User-reported media quality problems"
       />
-
-      <div className="ds-stat-row" style={{ marginBottom: 20 }}>
-        {stats.map((s) => {
-          const active = filter === s.filter;
-          return (
-            <Link
-              key={s.label}
-              href={`?filter=${s.filter}`}
-              className="block transition-colors"
-              style={{
-                borderRadius: 8,
-                boxShadow: active
-                  ? "0 0 0 1px var(--ds-border-strong)"
-                  : "none",
-              }}
-            >
-              <StatCard label={s.label} value={s.value} mono />
-            </Link>
-          );
-        })}
-      </div>
 
       <div
         className="ds-no-scrollbar flex overflow-x-auto max-w-full"

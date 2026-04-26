@@ -9,10 +9,14 @@ import {
   BackupCryptoError,
   ENCRYPTED_MAGIC,
 } from "@/lib/backup-crypto";
+import { BACKUP_TABLES, computeSchemaFingerprint } from "@/lib/backup-schema";
 
 export const dynamic = "force-dynamic";
 
-const MAX_PLAINTEXT_BYTES = 50 * 1024 * 1024;
+// Verbose INSERT-per-row encoding inflates row data 3–5×; 500 MB plaintext
+// covers a fully-loaded Summonarr instance with audit log + play history.
+const MAX_PLAINTEXT_BYTES = 500 * 1024 * 1024;
+const RESTORE_TX_TIMEOUT_MS = 10 * 60 * 1000;
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
@@ -26,18 +30,40 @@ const DANGEROUS_SQL_PATTERN = /\b(SELECT|UPDATE|DELETE|DROP|ALTER|EXECUTE|COPY|C
 
 interface SplitterState {
   current: string;
+  lineComment: string;
   inSingleQuote: boolean;
   inDollarQuote: boolean;
+  inLineComment: boolean;
   pendingDollar: boolean;
+  pendingDash: boolean;
 }
 
+// SQL splitter that:
+//   • Splits statements on `;` (skipping `;` inside '...' or $$...$$).
+//   • Routes `-- ... \n` line comments to onComment instead of accumulating
+//     them into the next statement. The previous implementation conflated
+//     comments with the following statement, which silently dropped the
+//     first INSERT after every `-- Table: ...` summary comment in the dump.
 function feedSqlChunk(
   state: SplitterState,
   chunk: string,
   onStatement: (stmt: string) => void,
+  onComment: (comment: string) => void,
 ): void {
   for (let i = 0; i < chunk.length; i++) {
     const ch = chunk[i];
+
+    if (state.inLineComment) {
+      if (ch === "\n") {
+        state.inLineComment = false;
+        const c = state.lineComment.trim();
+        if (c) onComment(c);
+        state.lineComment = "";
+      } else {
+        state.lineComment += ch;
+      }
+      continue;
+    }
 
     if (state.pendingDollar) {
       state.pendingDollar = false;
@@ -47,6 +73,16 @@ function feedSqlChunk(
         continue;
       }
       state.current += "$";
+    }
+
+    if (state.pendingDash) {
+      state.pendingDash = false;
+      if (ch === "-" && !state.inSingleQuote && !state.inDollarQuote) {
+        state.inLineComment = true;
+        state.lineComment = "";
+        continue;
+      }
+      state.current += "-";
     }
 
     if (state.inSingleQuote) {
@@ -92,9 +128,21 @@ function feedSqlChunk(
       }
       continue;
     }
+    if (ch === "-") {
+      if (chunk[i + 1] === "-") {
+        state.inLineComment = true;
+        state.lineComment = "";
+        i++;
+      } else if (i === chunk.length - 1) {
+        state.pendingDash = true;
+      } else {
+        state.current += "-";
+      }
+      continue;
+    }
     if (ch === ";") {
       const trimmed = state.current.trim();
-      if (trimmed && !trimmed.startsWith("--")) onStatement(trimmed);
+      if (trimmed) onStatement(trimmed);
       state.current = "";
       continue;
     }
@@ -105,13 +153,24 @@ function feedSqlChunk(
 function flushSqlChunk(
   state: SplitterState,
   onStatement: (stmt: string) => void,
+  onComment: (comment: string) => void,
 ): void {
   if (state.pendingDollar) {
     state.current += "$";
     state.pendingDollar = false;
   }
+  if (state.pendingDash) {
+    state.current += "-";
+    state.pendingDash = false;
+  }
+  if (state.inLineComment) {
+    state.inLineComment = false;
+    const c = state.lineComment.trim();
+    if (c) onComment(c);
+    state.lineComment = "";
+  }
   const trimmed = state.current.trim();
-  if (trimmed && !trimmed.startsWith("--")) onStatement(trimmed);
+  if (trimmed) onStatement(trimmed);
   state.current = "";
 }
 
@@ -274,7 +333,15 @@ export async function POST(req: NextRequest) {
   }
 
   const decoder = new TextDecoder("utf-8");
-  const splitter: SplitterState = { current: "", inSingleQuote: false, inDollarQuote: false, pendingDollar: false };
+  const splitter: SplitterState = {
+    current: "",
+    lineComment: "",
+    inSingleQuote: false,
+    inDollarQuote: false,
+    inLineComment: false,
+    pendingDollar: false,
+    pendingDash: false,
+  };
   let totalStatements = 0;
   let skipped = 0;
   const errors: string[] = [];
@@ -282,11 +349,14 @@ export async function POST(req: NextRequest) {
   let aborted = false;
   let abortReason: { error: string; status: number } | null = null;
   const validatedStatements: string[] = [];
+  let receivedFingerprint: string | null = null;
+
+  const FINGERPRINT_RE = /^Schema-Fingerprint:\s*([0-9a-f]{8,64})$/i;
 
   function collectStatement(stmt: string): void {
     if (aborted) return;
     totalStatements++;
-    if (!stmt || stmt.startsWith("--")) { skipped++; return; }
+    if (!stmt) { skipped++; return; }
     const safe = isStatementSafe(stmt);
     if (!safe.ok) {
       errors.push(safe.reason);
@@ -294,6 +364,11 @@ export async function POST(req: NextRequest) {
       return;
     }
     validatedStatements.push(stmt);
+  }
+
+  function collectComment(comment: string): void {
+    const m = FINGERPRINT_RE.exec(comment);
+    if (m) receivedFingerprint = m[1].toLowerCase();
   }
 
   const ptReader = plaintextStream.getReader();
@@ -310,7 +385,7 @@ export async function POST(req: NextRequest) {
       }
       const text = decoder.decode(value, { stream: true });
       const pending: string[] = [];
-      feedSqlChunk(splitter, text, (s) => pending.push(s));
+      feedSqlChunk(splitter, text, (s) => pending.push(s), collectComment);
       for (const stmt of pending) {
         collectStatement(stmt);
         if (aborted) break;
@@ -318,7 +393,7 @@ export async function POST(req: NextRequest) {
     }
     if (!aborted) {
       const pending: string[] = [];
-      flushSqlChunk(splitter, (s) => pending.push(s));
+      flushSqlChunk(splitter, (s) => pending.push(s), collectComment);
       for (const stmt of pending) collectStatement(stmt);
     }
   } catch (err) {
@@ -349,27 +424,57 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Schema-fingerprint guard. If the dump carries a fingerprint and it doesn't
+  // match this server's schema, refuse before TRUNCATE — the existing DB stays
+  // intact and the admin sees a clear schema-mismatch message instead of a
+  // partway-through INSERT failure. Older dumps without a fingerprint are
+  // allowed through with a warning so existing backups still restore.
+  const expectedFingerprint = computeSchemaFingerprint();
+  let fingerprintWarning: string | null = null;
+  if (receivedFingerprint && receivedFingerprint !== expectedFingerprint) {
+    return NextResponse.json(
+      {
+        error:
+          `Schema mismatch — restore refused. Backup fingerprint ${receivedFingerprint} does not match this server's schema fingerprint ${expectedFingerprint}. The database has not been touched. Restore only into a server running the same schema version.`,
+      },
+      { status: 409 },
+    );
+  }
+  if (!receivedFingerprint) {
+    fingerprintWarning =
+      `This backup has no schema fingerprint (it was created by an older version). Proceeding, but if the schema has drifted the restore will roll back partway through.`;
+  }
+
+  // Drop-in replacement semantics: every listed table is truncated inside the
+  // same transaction as the re-insert, so the DB ends in exactly the state of
+  // the backup file. Listing every FK-referenced table in the same TRUNCATE
+  // means we don't need CASCADE — and forgoing CASCADE makes us fail loudly
+  // if a model is added to the schema without being added to BACKUP_TABLES.
+  const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
+  const truncateStmt = `TRUNCATE TABLE ${truncateList} RESTART IDENTITY`;
+
   let executed = 0;
   try {
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe(truncateStmt);
       for (const stmt of validatedStatements) {
-        try {
-          await tx.$executeRawUnsafe(stmt);
-          executed++;
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (msg.includes("unique constraint") || msg.includes("duplicate key")) {
-            skipped++;
-          } else {
-            throw err;
-          }
-        }
+        await tx.$executeRawUnsafe(stmt);
+        executed++;
       }
-    }, { timeout: 120_000 });
+    }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[backup/import] import failed:", msg);
-    return NextResponse.json({ error: "Import failed due to an internal error. Check server logs." }, { status: 500 });
+    // ADMIN-only endpoint: the real Postgres error names the column or enum
+    // value that didn't match, which is the exact info the admin needs to
+    // diagnose a schema-mismatch. Surface it directly. Transaction has rolled
+    // back, so the DB is in its pre-restore state.
+    return NextResponse.json(
+      {
+        error: `Restore failed and was rolled back — database is unchanged. Database error: ${msg}`,
+      },
+      { status: 500 },
+    );
   }
 
   try {
@@ -389,5 +494,6 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({
     ok: true,
     summary: { total: totalStatements, executed, skipped, errors: 0 },
+    ...(fingerprintWarning ? { warning: fingerprintWarning } : {}),
   });
 }

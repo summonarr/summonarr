@@ -5,7 +5,7 @@ import {
   getPopularMovies,
   getPopularTV,
   getUpcomingMovies,
-  getUpcomingTV,
+  getOnTheAirTV,
   getTopRatedMovies,
   getTopRatedTV,
   type TmdbMedia,
@@ -79,7 +79,7 @@ export default async function DiscoverPage({
     getPopularMovies(),
     getPopularTV(),
     getUpcomingMovies(),
-    getUpcomingTV(),
+    getOnTheAirTV(),
     getTopRatedMovies(),
     getTopRatedTV(),
   ]);

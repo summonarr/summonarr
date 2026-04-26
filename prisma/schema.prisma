@@ -515,6 +515,7 @@ enum AuditAction {
   CACHE_WARM
   RATINGS_CACHE_CLEAR
   ISSUE_DELETE
+  PLAY_HISTORY_BACKFILL
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -548,10 +549,10 @@ model PlayHistory {
   startedAt      DateTime
   stoppedAt      DateTime
   duration       Int // Total duration of media in seconds
-  playDuration   Int // Actual time spent playing in seconds
-  pausedDuration Int      @default(0)
-  watched        Boolean  @default(false) // True if playDuration >= threshold
-  completed      Boolean  @default(false) // True if playback position reached >= 95% of duration
+  playDuration   Int // Wall-clock seconds the session was in the "playing" state (excludes pause/buffer). Accumulated on ActiveSession.playtimeMs across every state-change event.
+  pausedDuration Int      @default(0) // (stoppedAt - startedAt) - playDuration. Approximation of paused/buffering time.
+  watched        Boolean  @default(false) // playDuration / duration >= playHistoryWatchedThreshold (default 80%)
+  completed      Boolean  @default(false) // Final playhead position / duration >= 95%
 
   // User
   mediaServerUserId String
@@ -627,7 +628,8 @@ model ActiveSession {
 
   // Progress
   progressPercent Float  @default(0)
-  progressMs      BigInt @default(0)
+  progressMs      BigInt @default(0) // Playhead position in the file (last known viewOffset / PlaybackPositionTicks). Drives PlayHistory.completed.
+  playtimeMs      BigInt @default(0) // Accumulated wall-clock ms spent in the "playing" state. Drives PlayHistory.playDuration / watched.
   durationMs      BigInt @default(0)
 
   // Playback metadata
@@ -646,6 +648,26 @@ model ActiveSession {
 
   @@unique([source, sessionKey])
   @@index([source])
+}
+
+// ─── IP Geolocation Cache ────────────────────────────────────────────────────
+// Cached ipinfo.io lookups, keyed by IP. `notFound=true` means the IP is bogon
+// (RFC1918, loopback, etc) or upstream returned no data — short-TTL re-checked.
+model IpLookupCache {
+  ip          String   @id
+  hostname    String?
+  city        String?
+  region      String?
+  country     String? // ISO 3166-1 alpha-2
+  postal      String?
+  latitude    Float?
+  longitude   Float?
+  timezone    String?
+  org         String? // e.g. "AS7018 AT&T Enterprises, LLC"
+  notFound    Boolean  @default(false)
+  fetchedAt   DateTime @default(now())
+
+  @@index([fetchedAt])
 }
 
 // ─── TRaSH Guides ────────────────────────────────────────────────────────────

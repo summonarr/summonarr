@@ -3,39 +3,9 @@ import { requireAuth } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
+import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
 
 export const dynamic = "force-dynamic";
-
-const TABLES = [
-  "User", "Account", "Session", "VerificationToken",
-  "DiscordLinkToken", "DiscordMergeCode",
-  "MediaRequest", "Issue", "IssueMessage", "IssueGrab",
-  "PushSubscription",
-  "PlexLibraryItem", "JellyfinLibraryItem", "TVEpisodeCache",
-  "RadarrWantedItem", "SonarrWantedItem",
-  "UpcomingCacheItem", "TmdbCache", "Setting", "AuditLog",
-  "DeletionVote",
-  "MediaServerUser", "PlayHistory", "ActiveSession",
-];
-
-// These Setting values are redacted in the export so backups can be shared without leaking credentials
-const SENSITIVE_SETTING_KEYS = new Set([
-  "radarrApiKey", "sonarrApiKey", "webhookSecret", "plexAdminToken",
-  "jellyfinApiKey", "smtpPassword", "discordBotToken", "omdbApiKey",
-  "mdblistApiKey", "vapidPrivateKey",
-]);
-
-const SENSITIVE_TABLE_COLUMNS: Record<string, Set<string>> = {
-  Account: new Set(["access_token", "refresh_token", "id_token"]),
-  Session: new Set(["sessionToken"]),
-  PushSubscription: new Set(["endpoint", "p256dh", "auth"]),
-  User: new Set(["passwordHash"]),
-};
-
-const ENUMS = [
-  "Role", "MediaType", "RequestStatus",
-  "IssueType", "IssueScope", "IssueStatus", "AuditAction",
-];
 
 const CHUNK_SIZE = 1000;
 
@@ -59,6 +29,7 @@ function buildSqlStream(
   const encoder = new TextEncoder();
 
   const EXPORT_TIMEOUT_MS = 20 * 60 * 1000;
+  const fingerprint = computeSchemaFingerprint();
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -67,12 +38,16 @@ function buildSqlStream(
         const write = (s: string) => controller.enqueue(encoder.encode(s));
 
         write("-- Summonarr Full Database Backup\n");
+        // Schema-Fingerprint is parsed by the importer and matched against the
+        // live server's fingerprint. Mismatch refuses the restore before any
+        // mutation. Format must stay parseable by the importer's regex.
+        write(`-- Schema-Fingerprint: ${fingerprint}\n`);
         write(`-- Exported at: ${new Date().toISOString()}\n`);
         write(`-- Exported by: admin (${exportedBy})\n\n`);
 
         // Export enum CREATE statements idempotently so the import is safe on an existing schema
         write("-- Enum types\n");
-        for (const name of ENUMS) {
+        for (const name of BACKUP_ENUMS) {
           const values = await prisma.$queryRawUnsafe<{ enumlabel: string }[]>(
             `SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = $1 ORDER BY enumsortorder`,
             name,
@@ -84,12 +59,11 @@ function buildSqlStream(
         }
         write("\n");
 
-        for (const table of TABLES) {
+        for (const table of BACKUP_TABLES) {
           let totalRows = 0;
           let offset = 0;
           let columns: string[] | null = null;
           let colList = "";
-          const sensitiveColumns = SENSITIVE_TABLE_COLUMNS[table];
           let tableExists = true;
 
           while (true) {
@@ -110,16 +84,11 @@ function buildSqlStream(
             }
 
             for (const row of rows) {
-              const values = columns!.map((c) => {
-                if (table === "Setting" && c === "value" && SENSITIVE_SETTING_KEYS.has(row["key"] as string)) {
-                  return "''";
-                }
-                if (sensitiveColumns?.has(c) && row[c] != null) {
-                  return "''";
-                }
-                return escapeSQL(row[c]);
-              }).join(", ");
-              write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values}) ON CONFLICT DO NOTHING;\n`);
+              const values = columns!.map((c) => escapeSQL(row[c])).join(", ");
+              // Plain INSERTs — the import truncates every listed table inside the
+              // restore transaction, so duplicate-key conflicts cannot occur and
+              // ON CONFLICT DO NOTHING would silently mask a real corruption.
+              write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values});\n`);
               totalRows++;
               counts.rows++;
             }
@@ -184,7 +153,7 @@ export async function GET(req: NextRequest) {
       userName: session.user.name ?? session.user.email,
       action: "BACKUP_EXPORT",
       target: "backup:full-db",
-      details: { format: "sql", tables: TABLES.length, encrypted: true },
+      details: { format: "sql", tables: BACKUP_TABLES.length, encrypted: true },
       ...auditContext(req, session),
     });
   } catch (err) {

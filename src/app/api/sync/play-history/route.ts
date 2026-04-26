@@ -11,6 +11,8 @@ import {
   cleanupStaleSessions,
   purgeOldHistory,
   resolveShowTmdbId,
+  computePlaytimeIncrement,
+  applyFinalTick,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, type PlexSessionData } from "@/lib/plex";
 import { getJellyfinSessions, type JellyfinSessionData } from "@/lib/jellyfin";
@@ -93,56 +95,64 @@ async function syncPlexSessions(): Promise<{ started: number; updated: number; e
       posterPath = core?.posterPath ?? null;
     }
 
-    const result = await prisma.activeSession.upsert({
-      where: { id: sessionId },
-      update: {
-        lastSeenAt: now,
-        state: s.state,
-        progressPercent,
-        progressMs: BigInt(s.viewOffset),
-        playMethod: s.playMethod,
-        resolution: s.resolution,
-        ...(tmdbId != null ? { tmdbId, mediaType } : {}),
-        ...(posterPath ? { posterPath } : {}),
-      },
-      create: {
-        id: sessionId,
-        source: "plex",
-        sessionKey: s.sessionKey,
-        startedAt: now,
-        lastSeenAt: now,
-        state: s.state,
-        mediaServerUserId: msUserId,
-        serverUsername: s.accountName,
-        tmdbId,
-        mediaType,
+    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    if (existing) {
+      const increment = computePlaytimeIncrement(existing, now);
+      await prisma.activeSession.update({
+        where: { id: sessionId },
+        data: {
+          lastSeenAt: now,
+          state: s.state,
+          progressPercent,
+          progressMs: BigInt(s.viewOffset),
+          playMethod: s.playMethod,
+          resolution: s.resolution,
+          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+          ...(tmdbId != null ? { tmdbId, mediaType } : {}),
+          ...(posterPath ? { posterPath } : {}),
+        },
+      });
+      updated++;
+    } else {
+      await prisma.activeSession.create({
+        data: {
+          id: sessionId,
+          source: "plex",
+          sessionKey: s.sessionKey,
+          startedAt: now,
+          lastSeenAt: now,
+          state: s.state,
+          mediaServerUserId: msUserId,
+          serverUsername: s.accountName,
+          tmdbId,
+          mediaType,
 
-        title: s.type === "episode" ? (s.grandparentTitle ?? s.title) : s.title,
-        year: s.year ?? null,
-        seasonNumber: s.parentIndex ?? null,
-        episodeNumber: s.index ?? null,
-        episodeTitle: s.type === "episode" ? (s.title.split(" — ")[1] ?? null) : null,
-        sourceItemId: s.ratingKey,
-        posterPath,
-        progressPercent,
-        progressMs: BigInt(s.viewOffset),
-        durationMs: BigInt(s.duration),
-        platform: s.platform ?? null,
-        player: s.player ?? null,
-        device: s.device ?? null,
-        ipAddress: s.address ?? null,
-        playMethod: s.playMethod ?? null,
-        videoCodec: s.videoCodec ?? null,
-        audioCodec: s.audioCodec ?? null,
-        resolution: s.resolution ?? null,
-        bitrate: s.bitrate ?? null,
-        videoDecision: s.videoDecision ?? null,
-        audioDecision: s.audioDecision ?? null,
-        container: s.container ?? null,
-      },
-    });
-    if (result.startedAt.getTime() === now.getTime()) started++;
-    else updated++;
+          title: s.type === "episode" ? (s.grandparentTitle ?? s.title) : s.title,
+          year: s.year ?? null,
+          seasonNumber: s.parentIndex ?? null,
+          episodeNumber: s.index ?? null,
+          episodeTitle: s.type === "episode" ? (s.title.split(" — ")[1] ?? null) : null,
+          sourceItemId: s.ratingKey,
+          posterPath,
+          progressPercent,
+          progressMs: BigInt(s.viewOffset),
+          durationMs: BigInt(s.duration),
+          platform: s.platform ?? null,
+          player: s.player ?? null,
+          device: s.device ?? null,
+          ipAddress: s.address ?? null,
+          playMethod: s.playMethod ?? null,
+          videoCodec: s.videoCodec ?? null,
+          audioCodec: s.audioCodec ?? null,
+          resolution: s.resolution ?? null,
+          bitrate: s.bitrate ?? null,
+          videoDecision: s.videoDecision ?? null,
+          audioDecision: s.audioDecision ?? null,
+          container: s.container ?? null,
+        },
+      });
+      started++;
+    }
   }
 
   const activePlexSessions = await prisma.activeSession.findMany({
@@ -153,7 +163,7 @@ async function syncPlexSessions(): Promise<{ started: number; updated: number; e
   for (const session of activePlexSessions) {
     if (!seenSessionKeys.has(session.sessionKey)) {
       try {
-        await recordCompletedSession(session);
+        await recordCompletedSession(applyFinalTick(session, now));
         ended++;
       } catch {
 
@@ -227,54 +237,62 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
       jfPosterPath = core?.posterPath ?? null;
     }
 
-    const result = await prisma.activeSession.upsert({
-      where: { id: sessionId },
-      update: {
-        lastSeenAt: now,
-        state: s.state,
-        progressPercent,
-        progressMs: BigInt(positionMs),
-        playMethod: s.playMethod,
-        resolution: s.resolution ?? null,
-        ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
-        ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
-      },
-      create: {
-        id: sessionId,
-        source: "jellyfin",
-        sessionKey: s.playSessionId,
-        startedAt: now,
-        lastSeenAt: now,
-        state: s.state,
-        mediaServerUserId: msUserId,
-        serverUsername: s.userName,
-        tmdbId: resolvedTmdbId,
-        mediaType,
+    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    if (existing) {
+      const increment = computePlaytimeIncrement(existing, now);
+      await prisma.activeSession.update({
+        where: { id: sessionId },
+        data: {
+          lastSeenAt: now,
+          state: s.state,
+          progressPercent,
+          progressMs: BigInt(positionMs),
+          playMethod: s.playMethod,
+          resolution: s.resolution ?? null,
+          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+          ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
+          ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
+        },
+      });
+      updated++;
+    } else {
+      await prisma.activeSession.create({
+        data: {
+          id: sessionId,
+          source: "jellyfin",
+          sessionKey: s.playSessionId,
+          startedAt: now,
+          lastSeenAt: now,
+          state: s.state,
+          mediaServerUserId: msUserId,
+          serverUsername: s.userName,
+          tmdbId: resolvedTmdbId,
+          mediaType,
 
-        title: s.itemType === "Episode" ? (s.seriesName ?? s.title) : s.title,
-        year: s.year != null ? String(s.year) : null,
-        seasonNumber: s.seasonNumber ?? null,
-        episodeNumber: s.episodeNumber ?? null,
-        episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ")[1] ?? null) : null,
-        sourceItemId: s.itemId,
-        posterPath: jfPosterPath,
-        progressPercent,
-        progressMs: BigInt(positionMs),
-        durationMs: BigInt(durationMs),
-        platform: s.client ?? null,
-        player: s.client ?? null,
-        device: s.deviceName ?? null,
-        ipAddress: s.remoteEndPoint ?? null,
-        playMethod: s.playMethod ?? null,
-        videoCodec: s.videoCodec ?? null,
-        audioCodec: s.audioCodec ?? null,
-        resolution: s.resolution ?? null,
-        bitrate: s.bitrate ?? null,
-        container: s.container ?? null,
-      },
-    });
-    if (result.startedAt.getTime() === now.getTime()) started++;
-    else updated++;
+          title: s.itemType === "Episode" ? (s.seriesName ?? s.title) : s.title,
+          year: s.year != null ? String(s.year) : null,
+          seasonNumber: s.seasonNumber ?? null,
+          episodeNumber: s.episodeNumber ?? null,
+          episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ")[1] ?? null) : null,
+          sourceItemId: s.itemId,
+          posterPath: jfPosterPath,
+          progressPercent,
+          progressMs: BigInt(positionMs),
+          durationMs: BigInt(durationMs),
+          platform: s.client ?? null,
+          player: s.client ?? null,
+          device: s.deviceName ?? null,
+          ipAddress: s.remoteEndPoint ?? null,
+          playMethod: s.playMethod ?? null,
+          videoCodec: s.videoCodec ?? null,
+          audioCodec: s.audioCodec ?? null,
+          resolution: s.resolution ?? null,
+          bitrate: s.bitrate ?? null,
+          container: s.container ?? null,
+        },
+      });
+      started++;
+    }
   }
 
   const activeJfSessions = await prisma.activeSession.findMany({
@@ -285,7 +303,7 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
   for (const session of activeJfSessions) {
     if (!seenSessionKeys.has(session.sessionKey)) {
       try {
-        await recordCompletedSession(session);
+        await recordCompletedSession(applyFinalTick(session, now));
         ended++;
       } catch (err) {
         console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);

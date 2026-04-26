@@ -177,6 +177,7 @@ function DbImportSection() {
         summary?: { total: number; executed: number; skipped: number; errors: number };
         errors?: string[];
         error?: string;
+        warning?: string;
       }
     | null
   >(null);
@@ -215,7 +216,7 @@ function DbImportSection() {
       });
       const data = await res.json();
       if (res.ok) {
-        setResult({ ok: data.ok, summary: data.summary, errors: data.errors });
+        setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
       } else {
         setResult({ ok: false, error: data.error ?? "Import failed" });
       }
@@ -415,6 +416,22 @@ function DbImportSection() {
               </div>
             ))}
           </div>
+          {result.warning && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: "8px 10px",
+                borderRadius: 6,
+                background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+                border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, var(--ds-border))",
+                color: "var(--ds-warning)",
+                fontSize: 11.5,
+                lineHeight: 1.5,
+              }}
+            >
+              {result.warning}
+            </div>
+          )}
           {result.errors && result.errors.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div
