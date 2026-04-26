@@ -13,9 +13,11 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader } from "@/components/ui/design";
 
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
+  const today = new Date().toISOString().slice(0, 10);
   const rows = await prisma.upcomingCacheItem.findMany({
     where: {
       cachedAt: { gt: new Date(Date.now() - 49 * 60 * 60 * 1000) },
+      releaseDate: { gte: today },
     },
     orderBy: { releaseDate: "asc" },
     take: 500,
@@ -47,23 +49,29 @@ export default async function UpcomingPage({
     const today = new Date().toISOString().slice(0, 10);
 
     let all = await getUpcomingFromCache();
-    if (all.length === 0) {
-      const [movies, tv] = await Promise.all([getUpcomingMovies(), getUpcomingTV()]);
-      all = [...movies, ...tv];
+    const hasMovies = all.some((m) => m.mediaType === "movie");
+    const hasTV = all.some((m) => m.mediaType === "tv");
+    if (!hasMovies || !hasTV) {
+      // Fall back to live TMDB for whichever side the cache is missing — covers
+      // both a cold cache and the transitional state where prior runs cached
+      // currently-airing TV (past first_air_date) that the gte filter now drops.
+      const [movies, tv] = await Promise.all([
+        hasMovies ? Promise.resolve([] as TmdbMedia[]) : getUpcomingMovies(),
+        hasTV ? Promise.resolve([] as TmdbMedia[]) : getUpcomingTV(),
+      ]);
+      all = [...all, ...movies, ...tv];
     }
 
     const movies = all.filter((m) => m.mediaType === "movie");
     const tv = all.filter((m) => m.mediaType === "tv");
 
-    // Movies use release_date (future). TV uses first_air_date (often past for currently-airing shows)
-    // and comes from /tv/on_the_air which is already scoped to currently airing — no future filter needed
     const futureMovies = movies.filter((m) => m.releaseDate && m.releaseDate >= today);
-    const currentTV = tv;
+    const futureTV = tv.filter((m) => m.releaseDate && m.releaseDate >= today);
 
-    const maxLen = Math.max(futureMovies.length, currentTV.length);
+    const maxLen = Math.max(futureMovies.length, futureTV.length);
     for (let i = 0; i < maxLen; i++) {
       if (i < futureMovies.length) raw.push(futureMovies[i]);
-      if (i < currentTV.length) raw.push(currentTV[i]);
+      if (i < futureTV.length) raw.push(futureTV[i]);
     }
   } catch {
 
@@ -80,7 +88,7 @@ export default async function UpcomingPage({
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
       <PageHeader
         title="Upcoming"
-        subtitle="Movies releasing soon & TV shows currently airing"
+        subtitle="Movies and TV shows premiering soon"
         right={
           <Suspense>
             <HideAvailableToggle active={hideAvailable} />

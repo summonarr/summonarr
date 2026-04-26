@@ -371,7 +371,7 @@ export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
     .map(normalizeMovie);
 }
 
-export async function getUpcomingTV(): Promise<TmdbMedia[]> {
+export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
   const pages = await Promise.allSettled(
     Array.from({ length: UPCOMING_PAGES }, (_, i) =>
       tmdbFetch<PagedResponse<RawTV>>("/tv/on_the_air", { page: String(i + 1) }, 86400)
@@ -381,6 +381,34 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
   return pages
     .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
     .filter((r) => r.id != null && r.id > 0)
+    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    .map(normalizeTV);
+}
+
+export async function getUpcomingTV(): Promise<TmdbMedia[]> {
+  // /tv/on_the_air returns shows whose original first_air_date is often years past
+  // (long-running shows currently airing new episodes). For "Upcoming" we want
+  // shows premiering today or later, so we use /discover/tv with first_air_date.gte.
+  const today = new Date().toISOString().slice(0, 10);
+  const pages = await Promise.allSettled(
+    Array.from({ length: UPCOMING_PAGES }, (_, i) =>
+      tmdbFetch<PagedResponse<RawTV>>(
+        "/discover/tv",
+        {
+          include_adult: "false",
+          sort_by: "popularity.desc",
+          "first_air_date.gte": today,
+          page: String(i + 1),
+        },
+        86400,
+      )
+    )
+  );
+  const seen = new Set<number>();
+  return pages
+    .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
+    .filter((r) => r.id != null && r.id > 0)
+    .filter((r) => r.first_air_date && r.first_air_date >= today)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
 }
