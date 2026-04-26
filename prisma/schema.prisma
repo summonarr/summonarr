@@ -650,6 +650,26 @@ model ActiveSession {
   @@index([source])
 }
 
+// ─── IP Geolocation Cache ────────────────────────────────────────────────────
+// Cached ipinfo.io lookups, keyed by IP. `notFound=true` means the IP is bogon
+// (RFC1918, loopback, etc) or upstream returned no data — short-TTL re-checked.
+model IpLookupCache {
+  ip          String   @id
+  hostname    String?
+  city        String?
+  region      String?
+  country     String? // ISO 3166-1 alpha-2
+  postal      String?
+  latitude    Float?
+  longitude   Float?
+  timezone    String?
+  org         String? // e.g. "AS7018 AT&T Enterprises, LLC"
+  notFound    Boolean  @default(false)
+  fetchedAt   DateTime @default(now())
+
+  @@index([fetchedAt])
+}
+
 // ─── TRaSH Guides ────────────────────────────────────────────────────────────
 
 // Upstream custom formats, quality profiles, naming, and quality-size specs

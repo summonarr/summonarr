@@ -3,6 +3,7 @@ import { requireAuth } from "@/lib/api-auth";
 import { testOmdbConnection } from "@/lib/omdb";
 import { testMdblistConnection } from "@/lib/mdblist";
 import { testTraktConnection } from "@/lib/trakt";
+import { testIpinfoConnection } from "@/lib/ip-lookup";
 
 export async function POST(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
@@ -45,5 +46,15 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  return NextResponse.json({ error: "service must be 'omdb', 'mdblist', or 'trakt'" }, { status: 400 });
+  if (body.service === "ipinfo") {
+    try {
+      const detail = await testIpinfoConnection();
+      return NextResponse.json({ ok: true, message: `Connected — ${detail}` });
+    } catch (err) {
+      console.error("[test-ratings] ipinfo test failed:", err);
+      return NextResponse.json({ ok: false, error: "ipinfo test failed" }, { status: 422 });
+    }
+  }
+
+  return NextResponse.json({ error: "service must be 'omdb', 'mdblist', 'trakt', or 'ipinfo'" }, { status: 400 });
 }

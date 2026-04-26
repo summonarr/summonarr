@@ -7,9 +7,10 @@ import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
 import {
   ArrowLeft, Film, Tv2, User, Monitor, Zap,
-  Globe, Clock, CheckCircle2, Circle,
+  Clock, CheckCircle2, Circle,
 } from "lucide-react";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
+import { IpInfo } from "@/components/admin/ip-info";
 
 export const dynamic = "force-dynamic";
 
@@ -267,13 +268,11 @@ export default async function PlayDetailPage({
             <LabeledValue label="Platform" value={play.platform ?? "—"} />
             <LabeledValue label="Player" value={play.player ?? "—"} />
             <LabeledValue label="Device" value={play.device ?? "—"} />
-            <div className="flex items-center gap-1.5">
-              <div className="flex-1">
-                <LabeledValue label="IP Address" value={play.ipAddress ?? "—"} mono />
-              </div>
-              {play.ipAddress && (
-                <Globe className="w-3.5 h-3.5 text-zinc-600 mt-4 shrink-0" />
-              )}
+            <div>
+              <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">IP Address</p>
+              {play.ipAddress
+                ? <IpInfo ip={play.ipAddress} />
+                : <p className="text-sm text-zinc-200">—</p>}
             </div>
           </div>
         </Card>

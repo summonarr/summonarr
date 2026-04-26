@@ -7,10 +7,11 @@ import { Card } from "@/components/ui/card";
 import {
   Monitor, Pause, Play, Tv2, Film, Wifi, WifiOff,
   Smartphone, Laptop, MonitorPlay, Gamepad2, Tablet,
-  User, Clock, Zap, HardDrive, Globe, Activity,
+  User, Clock, Zap, HardDrive, Activity,
 } from "lucide-react";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { IpInfo } from "@/components/admin/ip-info";
 
 function formatDuration(ms: number): string {
   if (ms <= 0) return "0:00";
@@ -284,12 +285,7 @@ function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; moun
               </div>
             )}
 
-            {s.ipAddress && (
-              <div className="flex items-center gap-1.5 text-zinc-500">
-                <Globe className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
-                <span className="tabular-nums">{s.ipAddress}</span>
-              </div>
-            )}
+            {s.ipAddress && <IpInfo ip={s.ipAddress} />}
           </div>
 
           <StreamDetails session={s} />
