@@ -1,4 +1,4 @@
-import { safeFetchTrusted } from "./safe-fetch";
+import { safeFetchAdminConfigured } from "./safe-fetch";
 
 export interface JellyfinUser {
   id: string;
@@ -13,7 +13,7 @@ export async function authenticateWithJellyfin(
   password: string
 ): Promise<JellyfinUser> {
   const url = baseUrl.replace(/\/$/, "");
-  const res = await safeFetchTrusted(`${url}/Users/AuthenticateByName`, {
+  const res = await safeFetchAdminConfigured(`${url}/Users/AuthenticateByName`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: {
@@ -46,7 +46,7 @@ const QC_AUTH_HEADER = 'MediaBrowser Client="Summonarr", Device="Summonarr", Dev
 
 export async function initiateJellyfinQuickConnect(baseUrl: string): Promise<JellyfinQuickConnectResult> {
   const url = baseUrl.replace(/\/$/, "");
-  const res = await safeFetchTrusted(`${url}/QuickConnect/Initiate`, {
+  const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Initiate`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "X-Emby-Authorization": QC_AUTH_HEADER, "Content-Type": "application/json" },
@@ -58,7 +58,7 @@ export async function initiateJellyfinQuickConnect(baseUrl: string): Promise<Jel
 
 export async function pollJellyfinQuickConnect(baseUrl: string, secret: string): Promise<boolean> {
   const url = baseUrl.replace(/\/$/, "");
-  const res = await safeFetchTrusted(`${url}/QuickConnect/Connect?Secret=${encodeURIComponent(secret)}`, {
+  const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Connect?Secret=${encodeURIComponent(secret)}`, {
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "X-Emby-Authorization": QC_AUTH_HEADER },
   });
@@ -69,7 +69,7 @@ export async function pollJellyfinQuickConnect(baseUrl: string, secret: string):
 
 export async function authenticateWithJellyfinQuickConnect(baseUrl: string, secret: string): Promise<JellyfinUser> {
   const url = baseUrl.replace(/\/$/, "");
-  const res = await safeFetchTrusted(`${url}/Users/AuthenticateWithQuickConnect`, {
+  const res = await safeFetchAdminConfigured(`${url}/Users/AuthenticateWithQuickConnect`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "X-Emby-Authorization": QC_AUTH_HEADER, "Content-Type": "application/json" },
@@ -91,7 +91,7 @@ export async function getJellyfinUserEmail(
 ): Promise<string | null> {
   const url = `${baseUrl.replace(/\/$/, "")}/Users/${encodeURIComponent(userId)}`;
   try {
-    const res = await safeFetchTrusted(url, {
+    const res = await safeFetchAdminConfigured(url, {
       headers: {
         "X-MediaBrowser-Token": apiKey,
         "Content-Type": "application/json",
@@ -148,7 +148,7 @@ export async function hasJellyfinItemByTmdbId(
   const itemType = mediaType === "movie" ? "Movie" : "Series";
   const url = `${baseUrl.replace(/\/$/, "")}/Items?AnyProviderIdEquals=Tmdb.${tmdbId}&IncludeItemTypes=${itemType}&Recursive=true&Limit=1`;
   try {
-    const res = await safeFetchTrusted(url, {
+    const res = await safeFetchAdminConfigured(url, {
       headers: jellyfinHeaders(apiKey),
       timeoutMs: FETCH_TIMEOUT_MS,
     });
@@ -162,7 +162,7 @@ export async function hasJellyfinItemByTmdbId(
 
 export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): Promise<JellyfinMediaFolder[]> {
   const url = `${baseUrl.replace(/\/$/, "")}/Library/MediaFolders`;
-  const res = await safeFetchTrusted(url, {
+  const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
   });
@@ -175,7 +175,7 @@ export async function getJellyfinMediaFolders(baseUrl: string, apiKey: string): 
 
 export async function refreshJellyfinLibrary(baseUrl: string, apiKey: string): Promise<void> {
   const url = `${baseUrl.replace(/\/$/, "")}/Library/Refresh`;
-  const res = await safeFetchTrusted(url, {
+  const res = await safeFetchAdminConfigured(url, {
     method: "POST",
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
@@ -222,7 +222,7 @@ async function fetchPage<T>(
       console.warn(`[jellyfin] retry ${attempt}/${retries} for StartIndex=${startIndex}`);
     }
     try {
-      const res = await safeFetchTrusted(`${baseQuery}&StartIndex=${startIndex}&Limit=${limit}`, {
+      const res = await safeFetchAdminConfigured(`${baseQuery}&StartIndex=${startIndex}&Limit=${limit}`, {
         headers: jellyfinHeaders(apiKey),
         timeoutMs: PAGE_TIMEOUT_MS,
       });
@@ -477,7 +477,7 @@ export async function getJellyfinEpisodeSeriesIds(
     const chunk = itemIds.slice(i, i + CHUNK);
     const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
     try {
-      const res = await safeFetchTrusted(url, {
+      const res = await safeFetchAdminConfigured(url, {
         headers: jellyfinHeaders(apiKey),
         timeoutMs: FETCH_TIMEOUT_MS,
       });
@@ -571,7 +571,7 @@ interface JellyfinSessionRaw {
 
 export async function getJellyfinSessions(baseUrl: string, apiKey: string): Promise<JellyfinSessionData[]> {
   const url = `${baseUrl.replace(/\/$/, "")}/Sessions`;
-  const res = await safeFetchTrusted(url, {
+  const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
   });
@@ -639,7 +639,7 @@ export interface JellyfinUserInfo {
 
 export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Promise<JellyfinUserInfo[]> {
   const url = `${baseUrl.replace(/\/$/, "")}/Users`;
-  const res = await safeFetchTrusted(url, {
+  const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
   });
@@ -657,7 +657,7 @@ export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Prom
 
 export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Promise<number> {
   const url = `${baseUrl.replace(/\/$/, "")}/Users`;
-  const res = await safeFetchTrusted(url, {
+  const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: 10_000,
   });
@@ -765,7 +765,7 @@ export async function getJellyfinPlaybackReporting(
 
   for (let page = 0; page < maxPages; page++) {
     try {
-      const res = await safeFetchTrusted(
+      const res = await safeFetchAdminConfigured(
         `${base}/user_usage_stats/PlayActivity?Days=10000&EndDate=2099-01-01${dateFilter}&StartIndex=${page * 200}&Limit=200`,
         {
           headers: jellyfinHeaders(apiKey),

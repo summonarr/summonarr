@@ -5,6 +5,7 @@ import { isFeatureEnabled } from "@/lib/features";
 const DISCORD_API = "https://discord.com/api/v10";
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
 const DISCORD_FETCH_TIMEOUT_MS = 15_000;
+const DISCORD_HOSTS = ["discord.com"];
 
 function escMd(text: string): string {
   return text.replace(/([*_`~|\\>[\]()@#])/g, "\\$1");
@@ -63,6 +64,7 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
       roleIds.map((roleId) =>
 
         safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
+          allowedHosts: DISCORD_HOSTS,
           method: "PUT",
           headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
           timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
@@ -119,6 +121,7 @@ export async function notifyAdminsNewRequestDiscord(data: {
     }];
 
     const res = await safeFetchTrusted(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
+      allowedHosts: DISCORD_HOSTS,
       method: "POST",
       headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ embeds: [embed], components, allowed_mentions: { parse: [] } }),
@@ -138,6 +141,7 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
     throw new Error(`Invalid snowflake: channelId=${channelId} discordId=${discordId}`);
   }
   const res = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
+    allowedHosts: DISCORD_HOSTS,
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -195,6 +199,7 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
     throw new Error(`Invalid Discord snowflake for DM: ${discordId}`);
   }
   const dmRes = await safeFetchTrusted(`${DISCORD_API}/users/@me/channels`, {
+    allowedHosts: DISCORD_HOSTS,
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ recipient_id: discordId }),
@@ -206,6 +211,7 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
   }
   const { id: channelId } = await dmRes.json() as { id: string };
   const msgRes = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
+    allowedHosts: DISCORD_HOSTS,
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({ embeds: [embed] }),

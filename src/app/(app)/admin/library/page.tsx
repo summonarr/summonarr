@@ -145,9 +145,9 @@ async function buildArrPathMap(
     ]);
     if (!urlRow?.value || !keyRow?.value) return map;
 
-    const { safeFetchTrusted } = await import("@/lib/safe-fetch");
+    const { safeFetchAdminConfigured } = await import("@/lib/safe-fetch");
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    const res = await safeFetchTrusted(`${urlRow.value.replace(/\/$/, "")}/api/v3/${endpoint}`, {
+    const res = await safeFetchAdminConfigured(`${urlRow.value.replace(/\/$/, "")}/api/v3/${endpoint}`, {
       headers: { "X-Api-Key": keyRow.value, "Content-Type": "application/json" },
       timeoutMs: 10_000,
     });

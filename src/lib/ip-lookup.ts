@@ -9,6 +9,10 @@ const IPINFO_TIMEOUT_MS = 8_000;
 const FOUND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NOT_FOUND_TTL_MS = 24 * 60 * 60 * 1000;
 
+function sanitizeForLog(value: string): string {
+  return value.replace(/[\r\n\x00-\x1F\x7F]/g, "");
+}
+
 export interface IpLookup {
   ip: string;
   hostname: string | null;
@@ -159,9 +163,9 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
 
   try {
     const url = `${IPINFO_BASE}/${encodeURIComponent(ip)}/json?token=${encodeURIComponent(token)}`;
-    const res = await safeFetchTrusted(url, { timeoutMs: IPINFO_TIMEOUT_MS });
+    const res = await safeFetchTrusted(url, { allowedHosts: ["ipinfo.io"], timeoutMs: IPINFO_TIMEOUT_MS });
     if (!res.ok) {
-      console.error(`[ip-lookup] ipinfo returned HTTP ${res.status} for ${ip}`);
+      console.error(`[ip-lookup] ipinfo returned HTTP ${res.status} for ${sanitizeForLog(ip)}`);
       return cached ? rowToLookup(cached) : null;
     }
     const data = (await res.json()) as IpinfoResponse;
@@ -196,7 +200,7 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
     return rowToLookup(row);
   } catch (err) {
     const reason = err instanceof SafeFetchError ? err.reason : err instanceof Error ? err.message : String(err);
-    console.error(`[ip-lookup] fetch failed for ${ip}: ${reason}`);
+    console.error(`[ip-lookup] fetch failed for ${sanitizeForLog(ip)}: ${sanitizeForLog(reason)}`);
     return cached ? rowToLookup(cached) : null;
   }
 }
@@ -205,7 +209,7 @@ export async function testIpinfoConnection(): Promise<string> {
   const token = await getToken();
   if (!token) throw new Error("No ipinfo token configured");
   const url = `${IPINFO_BASE}/8.8.8.8/json?token=${encodeURIComponent(token)}`;
-  const res = await safeFetchTrusted(url, { timeoutMs: IPINFO_TIMEOUT_MS });
+  const res = await safeFetchTrusted(url, { allowedHosts: ["ipinfo.io"], timeoutMs: IPINFO_TIMEOUT_MS });
   if (!res.ok) throw new Error(`ipinfo returned HTTP ${res.status}`);
   const data = (await res.json()) as IpinfoResponse;
   if (!data.ip) throw new Error("ipinfo returned malformed response");

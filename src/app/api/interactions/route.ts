@@ -16,6 +16,8 @@ export const dynamic = "force-dynamic";
 
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
 const DISCORD_API = "https://discord.com/api/v10";
+const DISCORD_HOSTS = ["discord.com"];
+const TMDB_HOSTS = ["api.themoviedb.org"];
 
 let cachedPublicKey: string | null = null;
 
@@ -115,6 +117,7 @@ async function searchTmdb(query: string, type: "movie" | "tv"): Promise<TmdbResu
   url.searchParams.set("include_adult", "false");
 
   const res = await safeFetchTrusted(url.toString(), {
+    allowedHosts: TMDB_HOSTS,
     headers: auth.headers,
     timeoutMs: 15_000,
   });
@@ -162,6 +165,7 @@ async function cachedSearchTmdb(query: string, type: "movie" | "tv"): Promise<Tm
 
 async function editOriginal(appId: string, token: string, payload: Record<string, unknown>): Promise<void> {
   const res = await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}/messages/@original`, {
+    allowedHosts: DISCORD_HOSTS,
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -690,6 +694,7 @@ async function handleComponent(interaction: any): Promise<void> {
       });
       if (!adminUser) {
         await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
+          allowedHosts: DISCORD_HOSTS,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: "⛔ Only admins can use these buttons.", flags: 64 }),

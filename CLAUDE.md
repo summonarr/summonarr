@@ -57,8 +57,13 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 **`isCronAuthorized`** — same file. Accepts an admin session *or* `Authorization: Bearer ${CRON_SECRET}`. Every sync/cron route funnels through this — touch carefully.
 
 **arrFetch** — [src/lib/arr.ts](src/lib/arr.ts)
-- Shared Radarr/Sonarr HTTP client. 30s timeout, **50 MB** response cap (`ARR_FETCH_MAX_BYTES`), injects `X-Api-Key`, throws `ArrResponseError` on non-2xx, routes through `safeFetchTrusted`.
+- Shared Radarr/Sonarr HTTP client. 30s timeout, **50 MB** response cap (`ARR_FETCH_MAX_BYTES`), injects `X-Api-Key`, throws `ArrResponseError` on non-2xx, routes through `safeFetchAdminConfigured`.
 - Body cap was raised from 10 MB in `c7902db` because libraries with >3k movies were being silently truncated. Do not lower it.
+
+**safe-fetch helpers** — [src/lib/safe-fetch.ts](src/lib/safe-fetch.ts)
+- `safeFetch(url)` — full SSRF policy (resolve+pin, blocks RFC1918/loopback/link-local/CGNAT/multicast). For user-supplied URLs.
+- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; skips DNS-based SSRF. For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com).
+- `safeFetchAdminConfigured(url)` — runs SSRF policy with `allowPrivate=true` (RFC1918/ULA/loopback OK; link-local + 0.0.0.0 still blocked). For URLs persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server).
 
 **Webhook auth** — [src/app/api/webhooks/](src/app/api/webhooks/) (plex, jellyfin, sonarr, radarr)
 - SHA-256 + `timingSafeEqual` against the stored webhook secret.
@@ -95,6 +100,8 @@ Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `ne
 4. **Bulk writes must use `batchCreateMany` + `BATCH_TX_TIMEOUT`.** Raw `createMany` on library-sized datasets blows transaction timeouts. Always chunk via `batchCreateMany` and pass `{ timeout: BATCH_TX_TIMEOUT }` to `$transaction`.
 
 5. **Do not lower `ARR_FETCH_MAX_BYTES` (50 MB)** and do not bypass `arrFetch` with bare `fetch` for Radarr/Sonarr calls. The cap exists because large libraries silently truncated at 10 MB.
+
+5a. **Pick the right `safe-fetch` helper.** Never call `fetch` directly for outbound HTTP. Hardcoded third-party URL → `safeFetchTrusted(url, { allowedHosts: [...] })`. URL persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server) → `safeFetchAdminConfigured(url)`. URL from end-user input → `safeFetch(url)`. The `allowedHosts` arg on `safeFetchTrusted` is required and exists so a future code change can't accidentally fan that path out to user-controlled hosts.
 
 6. **Route all cron/sync handlers through `isCronAuthorized`.** Do not re-implement `CRON_SECRET` checks inline.
 

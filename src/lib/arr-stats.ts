@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { safeFetchTrusted } from "./safe-fetch";
+import { safeFetchAdminConfigured } from "./safe-fetch";
 
 interface DiskSpaceEntry {
   path: string;
@@ -25,7 +25,7 @@ async function fetchDiskSpace(service: "radarr" | "sonarr"): Promise<DiskSpaceEn
   const baseUrl = map[urlKey].replace(/\/$/, "");
 
   try {
-    const res = await safeFetchTrusted(`${baseUrl}/api/v3/diskspace`, {
+    const res = await safeFetchAdminConfigured(`${baseUrl}/api/v3/diskspace`, {
       cache: "no-store",
       timeoutMs: 30_000,
       headers: { "X-Api-Key": map[keyKey] },

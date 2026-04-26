@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
 import { isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
 import { getCache } from "@/lib/tmdb-cache";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
 export async function GET(req: NextRequest) {
@@ -71,7 +71,7 @@ export async function GET(req: NextRequest) {
       const cfgMap = Object.fromEntries(cfgRows.map((r) => [r.key, r.value]));
       if (cfgMap.sonarrUrl && cfgMap.sonarrApiKey) {
         const url = `${cfgMap.sonarrUrl.replace(/\/$/, "")}/api/v3/series/lookup?term=tmdb:${tmdbId}`;
-        const res = await safeFetchTrusted(url, {
+        const res = await safeFetchAdminConfigured(url, {
           headers: { "X-Api-Key": cfgMap.sonarrApiKey },
           timeoutMs: 10_000,
         });

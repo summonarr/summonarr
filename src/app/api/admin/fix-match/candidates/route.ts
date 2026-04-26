@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
+
+const TMDB_HOSTS = ["api.themoviedb.org"];
 
 export type CandidateMatch = "exact" | "strong" | "likely" | "possible" | "wrong" | "unknown";
 
@@ -87,6 +89,7 @@ async function fetchTmdbDetails(
   url.searchParams.set("append_to_response", "external_ids");
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
   const res = await safeFetchTrusted(url.toString(), {
+    allowedHosts: TMDB_HOSTS,
     headers: auth.headers,
     timeoutMs: 10_000,
   }).catch(() => null);
@@ -269,6 +272,7 @@ export async function GET(request: NextRequest) {
     const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType === "MOVIE" ? "movie" : "tv"}/${correctTmdbId}/external_ids`);
     for (const [k, v] of Object.entries(tAuth.query)) extUrl.searchParams.set(k, v);
     const extRes = await safeFetchTrusted(extUrl.toString(), {
+      allowedHosts: TMDB_HOSTS,
       headers: tAuth.headers,
       timeoutMs: 10_000,
     }).catch(() => null);
@@ -298,10 +302,10 @@ export async function GET(request: NextRequest) {
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       const [correctRes, wrongRes] = await Promise.allSettled([
-        safeFetchTrusted(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${correctTmdbId}`, {
+        safeFetchAdminConfigured(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${correctTmdbId}`, {
           headers: arrHeaders, timeoutMs: 8_000,
         }),
-        safeFetchTrusted(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${tmdbId}`, {
+        safeFetchAdminConfigured(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${tmdbId}`, {
           headers: arrHeaders, timeoutMs: 8_000,
         }),
       ]);
@@ -375,7 +379,7 @@ export async function GET(request: NextRequest) {
   };
 
   const plexSearch = async (params: Record<string, string>): Promise<RawResult[]> => {
-    const res = await safeFetchTrusted(
+    const res = await safeFetchAdminConfigured(
       `${serverUrl}/library/metadata/${item.plexRatingKey}/matches?` + new URLSearchParams(params),
       { headers: plexHeaders, timeoutMs: 30_000 },
     ).catch(() => null);

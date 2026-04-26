@@ -6,6 +6,7 @@ import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 const MDBLIST_REST_BASE  = "https://api.mdblist.com/";
 const MDBLIST_FETCH_TIMEOUT_MS = 10_000;
 const MDBLIST_BATCH_TIMEOUT_MS = 30_000;
+const MDBLIST_HOSTS = ["api.mdblist.com"];
 
 const MDBLIST_NEGATIVE_TTL = 24 * 60 * 60;
 
@@ -77,7 +78,7 @@ export async function fetchAndCacheMdblistForTmdb(
     const url = new URL(`${MDBLIST_REST_BASE}tmdb/${mdbType}/${encodeURIComponent(String(tmdbId))}/`);
     url.searchParams.set("apikey", apiKey);
 
-    const res = await safeFetchTrusted(url.toString(), { timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
 
     if (res.status === 429) {
       tripQuotaLockout(`HTTP 429 for ${mediaType}:${tmdbId}`);
@@ -202,6 +203,7 @@ export async function fetchMdblistBatch(
 
       for (let attempt = 0; attempt < 2; attempt++) {
         res = await safeFetchTrusted(url.toString(), {
+          allowedHosts: MDBLIST_HOSTS,
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,
@@ -317,7 +319,7 @@ export async function testMdblistConnection(): Promise<string> {
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/show/1396/`);
   url.searchParams.set("apikey", apiKey);
 
-  const res = await safeFetchTrusted(url.toString(), { timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+  const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
   if (!res.ok) throw new Error(`MDBList returned HTTP ${res.status}`);
 
   const data = await res.json() as {
@@ -370,7 +372,7 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
     url.searchParams.set("apikey", apiKey);
     url.searchParams.set("limit", String(limit));
 
-    const res = await safeFetchTrusted(url.toString(), { timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
     if (res.status === 429) { tripQuotaLockout("HTTP 429 on top lists"); return []; }
     if (!res.ok) return [];
 
@@ -399,7 +401,7 @@ export async function getMdblistListItems(
     const url = new URL(`${MDBLIST_REST_BASE}lists/${listId}/items`);
     url.searchParams.set("apikey", apiKey);
 
-    const res = await safeFetchTrusted(url.toString(), { timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
+    const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
     if (res.status === 429) { tripQuotaLockout("HTTP 429 on list items"); return []; }
     if (!res.ok) return [];
 
