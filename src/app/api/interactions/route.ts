@@ -9,6 +9,7 @@ import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 
@@ -773,7 +774,7 @@ export async function POST(req: NextRequest) {
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
   const body = await req.text();
   const safeTs = String(parseInt(timestamp, 10) || 0);
-  console.log(`[interactions] POST sigLen=${signature.length} ts=${safeTs} bodyLen=${body.length}`);
+  console.log(`[interactions] POST sigLen=${signature.length} ts=${sanitizeForLog(safeTs)} bodyLen=${body.length}`);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
@@ -781,7 +782,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!verifySignature(publicKey, signature, timestamp, body)) {
-    console.log(`[interactions] Signature verification FAILED pkLen=${publicKey.length} sigLen=${signature.length} bodyLen=${body.length}`);
+    console.log(`[interactions] Signature verification FAILED pkLen=${Number(publicKey.length)} sigLen=${Number(signature.length)} bodyLen=${Number(body.length)}`);
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 

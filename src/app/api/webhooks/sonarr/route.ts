@@ -7,6 +7,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -113,7 +114,7 @@ export async function POST(req: NextRequest) {
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId } });
       } else if (!req) {
-        console.warn("[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId", safeVdbId);
+        console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId ${sanitizeForLog(safeVdbId)}`);
       }
     }, { timeout: 30_000 });
     if (updated.count > 0) effectiveVdbId = safeVdbId;
@@ -198,7 +199,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.warn(
-    `[webhook/sonarr] 200 event=Download tmdbId=${safeMdbId ?? "none"} tvdbId=${safeVdbId ?? "none"} title=${JSON.stringify(title)} marked=${updated.count}`,
+    `[webhook/sonarr] 200 event=Download tmdbId=${sanitizeForLog(safeMdbId ?? "none")} tvdbId=${sanitizeForLog(safeVdbId ?? "none")} title=${sanitizeForLog(JSON.stringify(title))} marked=${updated.count}`,
   );
   return NextResponse.json({ ok: true, marked: updated.count });
 }

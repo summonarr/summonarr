@@ -2,6 +2,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl, TTL } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
+import { sanitizeForLog } from "./sanitize";
 
 const MDBLIST_REST_BASE  = "https://api.mdblist.com/";
 const MDBLIST_FETCH_TIMEOUT_MS = 10_000;
@@ -51,7 +52,7 @@ export function isMdblistQuotaLocked(): boolean {
 
 function tripQuotaLockout(reason: string) {
   quotaLockoutUntil = Date.now() + QUOTA_LOCKOUT_MS;
-  console.warn(`[mdblist] Quota lockout tripped (${reason}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
+  console.warn(`[mdblist] Quota lockout tripped (${sanitizeForLog(reason)}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
 }
 
 function isQuotaErrorMessage(msg: string | null | undefined): boolean {
@@ -91,7 +92,7 @@ export async function fetchAndCacheMdblistForTmdb(
     }
 
     if (!res.ok) {
-      console.log(`[mdblist] API returned ${res.status} for ${mediaType}:${tmdbId}`);
+      console.log(`[mdblist] API returned ${res.status} for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
@@ -109,7 +110,7 @@ export async function fetchAndCacheMdblistForTmdb(
           tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
           return { found: false, keyConfigured: true, quotaExhausted: true };
         }
-        console.log(`[mdblist] API error for ${mediaType}:${tmdbId}: ${encodeURIComponent(errMsg)}`);
+        console.log(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(errMsg)}`);
         await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
         return { found: false, keyConfigured: true };
       }
@@ -122,7 +123,7 @@ export async function fetchAndCacheMdblistForTmdb(
   } catch (err) {
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
-    console.error(`[mdblist] Error fetching for ${mediaType}:${tmdbId}: ${encodeURIComponent(reason)}`);
+    console.error(`[mdblist] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(reason)}`);
     return { found: false, keyConfigured: true };
   }
 }
@@ -305,7 +306,7 @@ export async function getMdblistRatingsForTmdb(
 
   const apiKey = await getApiKey();
   if (!apiKey) {
-    console.log(`[mdblist] No API key configured — skipping for ${mediaType}:${tmdbId}`);
+    console.log(`[mdblist] No API key configured — skipping for ${sanitizeForLog(mediaType)}:${tmdbId}`);
     return { found: false, keyConfigured: false };
   }
 

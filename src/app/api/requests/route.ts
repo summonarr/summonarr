@@ -9,6 +9,7 @@ import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 
 async function resolveMediaMeta(
@@ -283,7 +284,7 @@ export async function POST(req: NextRequest) {
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {
-      console.error("[arr] Auto-approve push failed:", err);
+      console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
       await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
     }
 

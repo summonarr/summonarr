@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
+import { sanitizeForLog } from "./sanitize";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
 
@@ -136,7 +137,7 @@ export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestIni
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    console.error(`[arr] ${path} → ${res.status}`);
+    console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
     throw new ArrResponseError(res.status, text);
   }
 

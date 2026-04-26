@@ -7,6 +7,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -71,7 +72,7 @@ export async function POST(req: NextRequest) {
     const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
     const loggedTmdbId = Number.isInteger(payload.movie?.tmdbId) ? payload.movie!.tmdbId : 0;
     console.warn(
-      `[webhook/radarr] 200 skipped event=${loggedEvent} tmdbId=${loggedTmdbId}`,
+      `[webhook/radarr] 200 skipped event=${sanitizeForLog(loggedEvent)} tmdbId=${loggedTmdbId}`,
     );
     return NextResponse.json({ ok: true, skipped: true });
   }
@@ -157,7 +158,7 @@ export async function POST(req: NextRequest) {
   }
 
   console.warn(
-    `[webhook/radarr] 200 event=Download tmdbId=${tmdbId} title=${JSON.stringify(title)} marked=${updated.count}`,
+    `[webhook/radarr] 200 event=Download tmdbId=${tmdbId} title=${sanitizeForLog(JSON.stringify(title))} marked=${updated.count}`,
   );
   return NextResponse.json({ ok: true, marked: updated.count });
 }

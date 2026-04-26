@@ -149,45 +149,6 @@ export default async function ActivityPage({
     getActivityCalendar(source, mediaType),
   ]);
 
-  const todayCutoff = new Date();
-  todayCutoff.setHours(0, 0, 0, 0);
-  const yesterdayCutoff = new Date(todayCutoff.getTime() - 24 * 60 * 60 * 1000);
-
-  const f1 = withFilters(todayCutoff);
-  const f2 = withFilters(yesterdayCutoff, todayCutoff);
-
-  const [playsToday, watchTimeToday, activeUsersToday, playsYesterday, watchTimeYesterday, activeUsersYesterday] =
-    await Promise.all([
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE "startedAt" >= $1${f1.sql}`,
-        ...f1.params,
-      ),
-      prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-        `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
-         FROM "PlayHistory" WHERE "startedAt" >= $1${f1.sql}`,
-        ...f1.params,
-      ),
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count
-         FROM "PlayHistory" WHERE "startedAt" >= $1${f1.sql}`,
-        ...f1.params,
-      ),
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE "startedAt" >= $1 AND "startedAt" < $2${f2.sql}`,
-        ...f2.params,
-      ),
-      prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-        `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
-         FROM "PlayHistory" WHERE "startedAt" >= $1 AND "startedAt" < $2${f2.sql}`,
-        ...f2.params,
-      ),
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count
-         FROM "PlayHistory" WHERE "startedAt" >= $1 AND "startedAt" < $2${f2.sql}`,
-        ...f2.params,
-      ),
-    ]);
-
   const prevPeriodStart = new Date(periodCutoff.getTime() - days * 24 * 60 * 60 * 1000);
 
   const fp = withFilters(periodCutoff);
