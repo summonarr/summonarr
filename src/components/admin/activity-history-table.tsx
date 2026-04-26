@@ -8,6 +8,7 @@ import {
   ArrowUpDown, ArrowUp, ArrowDown, Download, Search,
   X, Trash2, ExternalLink, Calendar,
 } from "lucide-react";
+import { IpInfo } from "@/components/admin/ip-info";
 
 interface HistoryRow {
   id: string;
@@ -169,7 +170,9 @@ function DetailRow({ play }: { play: HistoryRow }) {
           </div>
           <div>
             <span className="text-zinc-500">IP Address</span>
-            <p className="text-zinc-300 tabular-nums">{play.ipAddress ?? "—"}</p>
+            {play.ipAddress
+              ? <div className="mt-0.5"><IpInfo ip={play.ipAddress} /></div>
+              : <p className="text-zinc-300">—</p>}
           </div>
           <div>
             <span className="text-zinc-500">Container</span>
