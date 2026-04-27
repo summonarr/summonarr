@@ -793,7 +793,7 @@ export async function POST(req: NextRequest) {
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
   const interactionType = Number(JSON.parse(body).type);
-  console.log(`[interactions] Signature OK, type=${interactionType} bodyLen=${body.length}`);
+  console.log(`[interactions] Signature OK, type=${Number(interactionType)} bodyLen=${Number(body.length)}`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const interaction: any = JSON.parse(body);

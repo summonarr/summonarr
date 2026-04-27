@@ -54,6 +54,9 @@ async function doFetch(
     throw new SafeFetchError("ssrf-blocked", rawUrl, `Invalid URL: ${rawUrl}`);
   }
 
+  let targetUrl = rawUrl;
+  let dispatcher: Agent | null = null;
+
   if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
       throw new SafeFetchError(
@@ -70,11 +73,12 @@ async function doFetch(
         `URL blocked by trusted-host policy (host=${host}): ${rawUrl}`,
       );
     }
-  }
-
-  let targetUrl = rawUrl;
-  let dispatcher: Agent | null = null;
-  if (mode === "untrusted" || mode === "admin") {
+    // Rebuild targetUrl from the URL we just validated. Same value as rawUrl,
+    // but the data-flow now passes through `parsedUrl` whose hostname has been
+    // checked against `allowedHosts` — that breaks CodeQL's request-forgery
+    // taint flow (CodeQL js/request-forgery, alert #4).
+    targetUrl = parsedUrl.toString();
+  } else if (mode === "untrusted" || mode === "admin") {
     const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: mode === "admin" });
     if (!safe) {
       throw new SafeFetchError(
