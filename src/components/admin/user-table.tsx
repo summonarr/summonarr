@@ -25,6 +25,7 @@ import {
   KeyRound,
   MapPin,
   Clock,
+  AlertTriangle,
 } from "lucide-react";
 
 interface User {
@@ -47,6 +48,7 @@ interface User {
   pushOnApproved: boolean;
   pushOnAvailable: boolean;
   pushOnDeclined: boolean;
+  notifyOnIssue: boolean;
   _count: { requests: number };
 }
 
@@ -79,7 +81,7 @@ const avatarColors: Record<User["source"], string> = {
   local:    "bg-indigo-700",
 };
 
-type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined";
+type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
 
 function AdminToggleRow({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: () => void; disabled: boolean }) {
   return (
@@ -111,6 +113,7 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
     pushOnApproved: u.pushOnApproved,
     pushOnAvailable: u.pushOnAvailable,
     pushOnDeclined: u.pushOnDeclined,
+    notifyOnIssue: u.notifyOnIssue,
   });
   const [saving, setSaving] = useState(false);
 
@@ -187,6 +190,15 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
           <AdminToggleRow label="Now Available" checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} disabled={saving} />
           <AdminToggleRow label="Request Declined" checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} disabled={saving} />
         </div>
+
+        {(u.role === "ADMIN" || u.role === "ISSUE_ADMIN") && (
+          <div className="mt-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-yellow-400 mb-1 flex items-center gap-1.5">
+              <AlertTriangle className="w-3 h-3" /> Issues
+            </p>
+            <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
+          </div>
+        )}
 
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">

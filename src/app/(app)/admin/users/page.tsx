@@ -32,6 +32,7 @@ export default async function UsersPage() {
         pushOnApproved: true,
         pushOnAvailable: true,
         pushOnDeclined: true,
+        notifyOnIssue: true,
         _count: { select: { requests: true } },
       },
       orderBy: [{ name: "asc" }, { email: "asc" }],
@@ -73,6 +74,7 @@ export default async function UsersPage() {
             pushOnApproved: u.pushOnApproved,
             pushOnAvailable: u.pushOnAvailable,
             pushOnDeclined: u.pushOnDeclined,
+            notifyOnIssue: u.notifyOnIssue,
             mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
             source: localAuthIds.has(u.id)
               ? "local"
