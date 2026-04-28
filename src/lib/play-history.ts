@@ -456,6 +456,20 @@ export async function getMediaPlayStats(tmdbId: number) {
     ),
   ]);
 
+  let resolvedMedia: { title: string | null; mediaType: MediaType | null; year: string | null } = {
+    title: mediaInfo?.title ?? null,
+    mediaType: mediaInfo?.mediaType ?? null,
+    year: mediaInfo?.year ?? null,
+  };
+  if (!mediaInfo) {
+    const [plexFallback, jellyfinFallback] = await Promise.all([
+      prisma.plexLibraryItem.findFirst({ where: { tmdbId }, select: { title: true, mediaType: true, year: true } }),
+      prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId }, select: { title: true, mediaType: true, year: true } }),
+    ]);
+    const fallback = plexFallback ?? jellyfinFallback;
+    if (fallback) resolvedMedia = fallback;
+  }
+
   return {
     totalPlays,
     uniqueViewers: Number(uniqueViewers[0]?.count ?? 0),
@@ -468,9 +482,9 @@ export async function getMediaPlayStats(tmdbId: number) {
       hours: Math.round(Number(r.hours) * 10) / 10,
     })),
     recentPlays,
-    title: mediaInfo?.title ?? `TMDB ${tmdbId}`,
-    mediaType: mediaInfo?.mediaType ?? null,
-    year: mediaInfo?.year ?? null,
+    title: resolvedMedia.title ?? `TMDB ${tmdbId}`,
+    mediaType: resolvedMedia.mediaType,
+    year: resolvedMedia.year,
     playsByDay: playsByDayRaw.map((r) => ({ day: r.day, count: Number(r.count) })),
     transcodeRatio: transcodeRatioRaw.map((r) => ({ method: r.method ?? "Unknown", count: Number(r.count) })),
     resolutionBreakdown: resolutionBreakdownRaw.map((r) => ({ resolution: r.resolution!, count: Number(r.count) })),

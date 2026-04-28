@@ -45,8 +45,6 @@ export default async function MediaActivityPage({
 
   const stats = await getMediaPlayStats(tmdbId);
 
-  if (stats.totalPlays === 0) notFound();
-
   const mediaHref = stats.mediaType === "TV" ? `/tv/${tmdbId}` : `/movie/${tmdbId}`;
   const resolutionMax = Math.max(...stats.resolutionBreakdown.map((r) => r.count), 1);
 
