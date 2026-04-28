@@ -81,7 +81,7 @@ const ALL_KEYS = [
   "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
   "webhookSecret", "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
-  "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon",
+  "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
   "motdEnabled", "motdTitle", "motdBody",
   "siteTitle", "siteUrl",
   "rateLimitRegister", "rateLimitRequests", "rateLimitIssues",
@@ -403,6 +403,8 @@ export default async function SettingsPage({
                 initialVenmo={cfg.donationVenmo ?? ""}
                 initialZelle={cfg.donationZelle ?? ""}
                 initialAmazon={cfg.donationAmazon ?? ""}
+                initialPatreon={cfg.donationPatreon ?? ""}
+                initialBuyMeACoffee={cfg.donationBuyMeACoffee ?? ""}
               />
             </div>
           </>

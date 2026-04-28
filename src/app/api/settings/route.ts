@@ -41,6 +41,8 @@ const SETTINGS_SCHEMA = [
   ["donationVenmo",                 false],
   ["donationZelle",                 false],
   ["donationAmazon",                false],
+  ["donationPatreon",               false],
+  ["donationBuyMeACoffee",          false],
   ["motdEnabled",                    false],
   ["motdTitle",                     false],
   ["motdBody",                      false],

@@ -17,6 +17,8 @@ export default async function DonatePage() {
     "donationVenmo",
     "donationZelle",
     "donationAmazon",
+    "donationPatreon",
+    "donationBuyMeACoffee",
   ] as const;
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...keys] } },
@@ -61,6 +63,26 @@ export default async function DonatePage() {
       pillColor: "#ffffff",
       href: (v: string) => v,
       hint: "View my Amazon Wishlist",
+    },
+    {
+      key: "donationPatreon",
+      label: "Patreon",
+      value: cfg.donationPatreon ?? "",
+      pillBg: "#f96854",
+      pillColor: "#ffffff",
+      href: (v: string) =>
+        v.startsWith("http") ? v : `https://www.patreon.com/${v.replace(/^@/, "")}`,
+      hint: "Become a patron on Patreon",
+    },
+    {
+      key: "donationBuyMeACoffee",
+      label: "Buy Me a Coffee",
+      value: cfg.donationBuyMeACoffee ?? "",
+      pillBg: "#ffdd00",
+      pillColor: "#000000",
+      href: (v: string) =>
+        v.startsWith("http") ? v : `https://www.buymeacoffee.com/${v.replace(/^@/, "")}`,
+      hint: "Buy me a coffee",
     },
   ].filter((m) => m.value);
 
