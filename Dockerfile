@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
 FROM node:25-alpine3.21 AS deps
 WORKDIR /app
@@ -5,7 +6,12 @@ WORKDIR /app
 RUN apk upgrade --no-cache
 
 COPY package*.json ./
-RUN npm ci --legacy-peer-deps
+# BuildKit cache mount keeps ~/.npm warm across builds — repeat installs
+# pull from local cache instead of re-downloading from the registry.
+# --prefer-offline forces use of the cache when present; --no-audit/--no-fund
+# skip the registry round-trips that npm normally adds to ci runs.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
 # ── Stage 1b: prisma-gen (runs on native builder platform) ───────────────────
 # Running `prisma generate` under QEMU (when cross-building for a non-native
@@ -19,10 +25,16 @@ WORKDIR /app
 
 RUN apk upgrade --no-cache
 
-COPY package*.json ./
-# --ignore-scripts skips any target-arch postinstall hooks; we only need the
-# prisma CLI and its deps to run `prisma generate` on the build host.
-RUN npm ci --legacy-peer-deps --ignore-scripts
+COPY package-lock.json ./
+# `prisma generate` only needs the prisma CLI installed — installing the full
+# 700-package tree here was wasted work (~90s of duplicate downloads with the
+# `deps` stage). Synthesize a minimal package.json pinning prisma to the exact
+# version from the lockfile, then install just that. Cache mount shares the
+# npm cache with the `deps` stage so repeat builds are near-instant.
+RUN node -e "const v = require('./package-lock.json').packages['node_modules/prisma'].version; \
+             require('fs').writeFileSync('package.json', JSON.stringify({ private: true, dependencies: { prisma: v } }))"
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --no-audit --no-fund --prefer-offline
 
 COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
@@ -56,12 +68,15 @@ WORKDIR /app
 
 RUN apk upgrade --no-cache
 COPY package-lock.json ./
+# Pin prisma + dotenv + pg to exact lockfile versions. Single npm install
+# replaces the prior two-call sequence (saves ~10s of npm startup).
+# Cache mount shares ~/.npm with deps + prisma-gen stages.
 RUN node -e " \
   const lock = JSON.parse(require('fs').readFileSync('package-lock.json', 'utf8')); \
   const v = (name) => lock.packages['node_modules/' + name].version; \
   const pkg = { \
     private: true, \
-    dependencies: { prisma: v('prisma'), dotenv: v('dotenv') }, \
+    dependencies: { prisma: v('prisma'), dotenv: v('dotenv'), pg: v('pg') }, \
     overrides: { \
       '@hono/node-server': '^1.19.13', \
       'hono': '^4.12.12', \
@@ -70,7 +85,9 @@ RUN node -e " \
     } \
   }; \
   require('fs').writeFileSync('package.json', JSON.stringify(pkg)); \
-" && npm install --legacy-peer-deps && npm install pg
+"
+RUN --mount=type=cache,target=/root/.npm \
+    npm install --legacy-peer-deps --no-audit --no-fund --prefer-offline
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
 FROM node:25-alpine3.21 AS runner
