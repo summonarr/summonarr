@@ -127,7 +127,9 @@ export async function notifyUserIssueMessagePush(data: {
     const keys = await getVapidKeys();
     if (!keys) return;
 
-    const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
+    const subs = await prisma.pushSubscription.findMany({
+      where: { userId: data.userId, user: { notifyOnIssue: true } },
+    });
     if (!subs.length) return;
 
     const payload = {
