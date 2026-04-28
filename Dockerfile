@@ -26,13 +26,22 @@ WORKDIR /app
 RUN apk upgrade --no-cache
 
 COPY package-lock.json ./
-# `prisma generate` only needs the prisma CLI installed — installing the full
-# 700-package tree here was wasted work (~90s of duplicate downloads with the
-# `deps` stage). Synthesize a minimal package.json pinning prisma to the exact
-# version from the lockfile, then install just that. Cache mount shares the
-# npm cache with the `deps` stage so repeat builds are near-instant.
-RUN node -e "const v = require('./package-lock.json').packages['node_modules/prisma'].version; \
-             require('fs').writeFileSync('package.json', JSON.stringify({ private: true, dependencies: { prisma: v } }))"
+# `prisma generate` needs only the prisma CLI + @prisma/client (which the
+# generator imports types from) — installing the full 700-package tree here
+# was wasted work (~90s of duplicate downloads with the `deps` stage).
+# Synthesize a minimal package.json pinning both to exact lockfile versions,
+# then install just those. Cache mount shares ~/.npm with the deps stage so
+# repeat builds are near-instant.
+RUN node -e "const lock = require('./package-lock.json').packages; \
+             const v = (n) => lock['node_modules/' + n].version; \
+             require('fs').writeFileSync('package.json', JSON.stringify({ \
+               private: true, \
+               dependencies: { \
+                 prisma: v('prisma'), \
+                 '@prisma/client': v('@prisma/client'), \
+                 dotenv: v('dotenv') \
+               } \
+             }))"
 RUN --mount=type=cache,target=/root/.npm \
     npm install --no-audit --no-fund --prefer-offline
 
