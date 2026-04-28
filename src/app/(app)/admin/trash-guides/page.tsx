@@ -9,6 +9,7 @@ export const dynamic = "force-dynamic";
 const SETTING_KEYS = [
   "trashGuidesEnabled",
   "trashSyncCustomFormats",
+  "trashSyncCustomFormatGroups",
   "trashSyncQualityProfiles",
   "trashSyncNaming",
   "trashSyncQualitySizes",
@@ -30,6 +31,7 @@ export default async function TrashGuidesPage() {
   const settings: TrashSettings = {
     enabled: map.trashGuidesEnabled === "true",
     syncCustomFormats: map.trashSyncCustomFormats !== "false",
+    syncCustomFormatGroups: map.trashSyncCustomFormatGroups !== "false",
     syncQualityProfiles: map.trashSyncQualityProfiles !== "false",
     syncNaming: map.trashSyncNaming !== "false",
     syncQualitySizes: map.trashSyncQualitySizes !== "false",

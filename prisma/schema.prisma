@@ -734,6 +734,7 @@ enum TrashService {
 
 enum TrashSpecKind {
   CUSTOM_FORMAT
+  CUSTOM_FORMAT_GROUP
   QUALITY_PROFILE
   NAMING
   QUALITY_SIZE
