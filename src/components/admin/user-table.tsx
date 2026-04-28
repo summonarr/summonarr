@@ -191,14 +191,12 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
           <AdminToggleRow label="Request Declined" checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} disabled={saving} />
         </div>
 
-        {(u.role === "ADMIN" || u.role === "ISSUE_ADMIN") && (
-          <div className="mt-3">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-yellow-400 mb-1 flex items-center gap-1.5">
-              <AlertTriangle className="w-3 h-3" /> Issues
-            </p>
-            <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
-          </div>
-        )}
+        <div className="mt-3">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-yellow-400 mb-1 flex items-center gap-1.5">
+            <AlertTriangle className="w-3 h-3" /> Issues
+          </p>
+          <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
+        </div>
 
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
