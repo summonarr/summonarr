@@ -119,9 +119,13 @@ async function getAdminEmails(): Promise<string[]> {
 
 // For issue-related admin emails: includes ISSUE_ADMIN and honors the
 // per-user notifyOnIssue toggle. Mirrors getIssueAdminSubscriptions in push.ts.
-async function getIssueAdminEmails(): Promise<string[]> {
+async function getIssueAdminEmails(excludeUserId?: string): Promise<string[]> {
   const admins = await prisma.user.findMany({
-    where: { role: { in: ["ADMIN", "ISSUE_ADMIN"] }, notifyOnIssue: true },
+    where: {
+      role: { in: ["ADMIN", "ISSUE_ADMIN"] },
+      notifyOnIssue: true,
+      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+    },
     select: { email: true, notificationEmail: true },
   });
   return admins
@@ -398,19 +402,23 @@ export async function notifyAdminsIssueMessageEmail(data: {
   userName: string;
   body: string;
   issueId: string;
+  excludeUserId?: string;
+  fromAdmin?: boolean;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    const to = await getIssueAdminEmails();
+    const to = await getIssueAdminEmails(data.excludeUserId);
     if (!to.length) return;
 
-    const subject = `New reply on issue: ${data.issueTitle}`;
+    const subject = data.fromAdmin
+      ? `Admin reply on issue: ${data.issueTitle}`
+      : `New reply on issue: ${data.issueTitle}`;
     const html = richEmailHtml({
       preheader: `${data.userName} replied to the issue "${data.issueTitle}"`,
       accent: "amber",
-      heading: "New Issue Reply",
+      heading: data.fromAdmin ? "Admin Reply on Issue" : "New Issue Reply",
       subheading: `${data.userName} replied to an open issue.`,
       details: [
         ["Issue", esc(data.issueTitle)],

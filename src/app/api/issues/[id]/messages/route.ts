@@ -111,6 +111,10 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
         return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text });
       })
       .catch(() => {});
+    // Fan out to other admins so collaborators see the reply too
+    void notifyAdminsIssueMessage(issue.title, authorName, text, { excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
   } else {
     void notifyAdminsIssueMessage(issue.title, authorName, text).catch(() => {});
     void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text }).catch(() => {});

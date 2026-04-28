@@ -57,9 +57,10 @@ async function getAdminSubscriptions() {
   });
 }
 
-async function getIssueAdminSubscriptions() {
+async function getIssueAdminSubscriptions(excludeUserId?: string) {
   return prisma.pushSubscription.findMany({
     where: {
+      ...(excludeUserId ? { userId: { not: excludeUserId } } : {}),
       user: {
         role: { in: ["ADMIN", "ISSUE_ADMIN"] },
         notifyOnIssue: true,
@@ -148,16 +149,18 @@ export async function notifyAdminsIssueMessagePush(data: {
   title: string;
   userName: string;
   body: string;
+  excludeUserId?: string;
+  fromAdmin?: boolean;
 }) {
   try {
     const keys = await getVapidKeys();
     if (!keys) return;
 
-    const subs = await getIssueAdminSubscriptions();
+    const subs = await getIssueAdminSubscriptions(data.excludeUserId);
     if (!subs.length) return;
 
     const payload = {
-      title: `User reply on issue: ${data.title}`,
+      title: data.fromAdmin ? `Admin reply on issue: ${data.title}` : `User reply on issue: ${data.title}`,
       body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
       url: "/admin/issues",
     };
