@@ -597,6 +597,9 @@ model PlayHistory {
   @@index([source, sourceSessionId])
   @@index([source, sourceItemId, mediaServerUserId, startedAt])
   @@index([watched])
+  // Powers the arc-detection window functions in getMostPopularOnServer — partition key
+  // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.
+  @@index([mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt])
   @@unique([source, sourceSessionId])
 }
 

@@ -91,6 +91,8 @@ const SETTINGS_SCHEMA = [
   ["playHistoryPlexEnabled",         false],
   ["playHistoryJellyfinEnabled",     false],
   ["playHistoryWatchedThreshold",    false],
+  ["playHistoryCompletionThreshold", false],
+  ["playHistoryArcGapDays",          false],
   ["playHistoryPollingInterval",     false],
   ["playHistoryRetentionDays",       false],
   ["enableMachineSession",           false],

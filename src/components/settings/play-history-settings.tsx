@@ -13,6 +13,8 @@ export function PlayHistorySettingsForm({
   initialPlexEnabled,
   initialJellyfinEnabled,
   initialWatchedThreshold,
+  initialCompletionThreshold,
+  initialArcGapDays,
   initialPollingInterval,
   initialRetentionDays,
 }: {
@@ -20,6 +22,8 @@ export function PlayHistorySettingsForm({
   initialPlexEnabled: string;
   initialJellyfinEnabled: string;
   initialWatchedThreshold: string;
+  initialCompletionThreshold: string;
+  initialArcGapDays: string;
   initialPollingInterval: string;
   initialRetentionDays: string;
 }) {
@@ -27,6 +31,8 @@ export function PlayHistorySettingsForm({
   const [plexEnabled, setPlexEnabled] = useState(initialPlexEnabled === "true");
   const [jellyfinEnabled, setJellyfinEnabled] = useState(initialJellyfinEnabled === "true");
   const [watchedThreshold, setWatchedThreshold] = useState(initialWatchedThreshold);
+  const [completionThreshold, setCompletionThreshold] = useState(initialCompletionThreshold);
+  const [arcGapDays, setArcGapDays] = useState(initialArcGapDays);
   const [pollingInterval, setPollingInterval] = useState(initialPollingInterval);
   const [retentionDays, setRetentionDays] = useState(initialRetentionDays);
   const [status, setStatus] = useState<SaveStatus>("idle");
@@ -43,6 +49,8 @@ export function PlayHistorySettingsForm({
           playHistoryPlexEnabled: plexEnabled ? "true" : "false",
           playHistoryJellyfinEnabled: jellyfinEnabled ? "true" : "false",
           playHistoryWatchedThreshold: watchedThreshold,
+          playHistoryCompletionThreshold: completionThreshold,
+          playHistoryArcGapDays: arcGapDays,
           playHistoryPollingInterval: pollingInterval,
           playHistoryRetentionDays: retentionDays,
         }),
@@ -125,6 +133,34 @@ export function PlayHistorySettingsForm({
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
             <p className="text-xs text-zinc-600">Minimum percentage of media that must be played to count as &quot;watched&quot;</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="completion-threshold">Completion Threshold (%)</Label>
+            <Input
+              id="completion-threshold"
+              type="number"
+              min={0}
+              max={100}
+              value={completionThreshold}
+              onChange={(e) => { setCompletionThreshold(e.target.value); setStatus("idle"); }}
+              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+            />
+            <p className="text-xs text-zinc-600">Cumulative watch percentage across one viewing arc to count as a completion in &quot;Popular on Server&quot;. Stricter than the per-session Watched threshold.</p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="arc-gap-days">Arc Gap (days)</Label>
+            <Input
+              id="arc-gap-days"
+              type="number"
+              min={1}
+              max={365}
+              value={arcGapDays}
+              onChange={(e) => { setArcGapDays(e.target.value); setStatus("idle"); }}
+              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+            />
+            <p className="text-xs text-zinc-600">Sessions on the same media farther apart than this start a new viewing arc. A weekend chunked watch stays one arc; a months-later rewatch starts a new one.</p>
           </div>
 
           <div className="space-y-1.5">

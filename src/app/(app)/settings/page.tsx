@@ -97,7 +97,8 @@ const ALL_KEYS = [
   "disableLocalLogin",
   "enableMachineSession",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
-  "playHistoryWatchedThreshold", "playHistoryPollingInterval", "playHistoryRetentionDays",
+  "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
+  "playHistoryPollingInterval", "playHistoryRetentionDays",
   "omdbApiKey", "mdblistApiKey", "traktClientId",
   "ipinfoToken",
 ] as const;
@@ -456,6 +457,8 @@ export default async function SettingsPage({
                 initialPlexEnabled={cfg.playHistoryPlexEnabled ?? ""}
                 initialJellyfinEnabled={cfg.playHistoryJellyfinEnabled ?? ""}
                 initialWatchedThreshold={cfg.playHistoryWatchedThreshold ?? "80"}
+                initialCompletionThreshold={cfg.playHistoryCompletionThreshold ?? "90"}
+                initialArcGapDays={cfg.playHistoryArcGapDays ?? "14"}
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
               />
