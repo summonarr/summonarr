@@ -81,7 +81,7 @@ const ALL_KEYS = [
   "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
   "webhookSecret", "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
-  "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon",
+  "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
   "motdEnabled", "motdTitle", "motdBody",
   "siteTitle", "siteUrl",
   "rateLimitRegister", "rateLimitRequests", "rateLimitIssues",
@@ -97,7 +97,8 @@ const ALL_KEYS = [
   "disableLocalLogin",
   "enableMachineSession",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
-  "playHistoryWatchedThreshold", "playHistoryPollingInterval", "playHistoryRetentionDays",
+  "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
+  "playHistoryPollingInterval", "playHistoryRetentionDays",
   "omdbApiKey", "mdblistApiKey", "traktClientId",
   "ipinfoToken",
 ] as const;
@@ -402,6 +403,8 @@ export default async function SettingsPage({
                 initialVenmo={cfg.donationVenmo ?? ""}
                 initialZelle={cfg.donationZelle ?? ""}
                 initialAmazon={cfg.donationAmazon ?? ""}
+                initialPatreon={cfg.donationPatreon ?? ""}
+                initialBuyMeACoffee={cfg.donationBuyMeACoffee ?? ""}
               />
             </div>
           </>
@@ -456,6 +459,8 @@ export default async function SettingsPage({
                 initialPlexEnabled={cfg.playHistoryPlexEnabled ?? ""}
                 initialJellyfinEnabled={cfg.playHistoryJellyfinEnabled ?? ""}
                 initialWatchedThreshold={cfg.playHistoryWatchedThreshold ?? "80"}
+                initialCompletionThreshold={cfg.playHistoryCompletionThreshold ?? "90"}
+                initialArcGapDays={cfg.playHistoryArcGapDays ?? "14"}
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
               />

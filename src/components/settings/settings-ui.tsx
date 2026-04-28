@@ -935,14 +935,18 @@ interface DonationFormProps {
   initialVenmo: string;
   initialZelle: string;
   initialAmazon: string;
+  initialPatreon: string;
+  initialBuyMeACoffee: string;
 }
 
-export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initialAmazon }: DonationFormProps) {
-  const [paypal,  setPaypal]  = useState(initialPaypal);
-  const [venmo,   setVenmo]   = useState(initialVenmo);
-  const [zelle,   setZelle]   = useState(initialZelle);
-  const [amazon,  setAmazon]  = useState(initialAmazon);
-  const [status,  setStatus]  = useState<SaveStatus>("idle");
+export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initialAmazon, initialPatreon, initialBuyMeACoffee }: DonationFormProps) {
+  const [paypal,        setPaypal]        = useState(initialPaypal);
+  const [venmo,         setVenmo]         = useState(initialVenmo);
+  const [zelle,         setZelle]         = useState(initialZelle);
+  const [amazon,        setAmazon]        = useState(initialAmazon);
+  const [patreon,       setPatreon]       = useState(initialPatreon);
+  const [buyMeACoffee,  setBuyMeACoffee]  = useState(initialBuyMeACoffee);
+  const [status,        setStatus]        = useState<SaveStatus>("idle");
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -951,10 +955,12 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        donationPaypal: paypal,
-        donationVenmo:  venmo,
-        donationZelle:  zelle,
-        donationAmazon: amazon,
+        donationPaypal:       paypal,
+        donationVenmo:        venmo,
+        donationZelle:        zelle,
+        donationAmazon:       amazon,
+        donationPatreon:      patreon,
+        donationBuyMeACoffee: buyMeACoffee,
       }),
     });
     const data: { ok: boolean } = await res.json();
@@ -1001,6 +1007,26 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           value={amazon}
           onChange={(e) => { setAmazon(e.target.value); setStatus("idle"); }}
           placeholder="https://www.amazon.com/hz/wishlist/ls/…"
+          className="bg-zinc-800 border-zinc-700 text-sm"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="donation-patreon">Patreon</Label>
+        <Input
+          id="donation-patreon"
+          value={patreon}
+          onChange={(e) => { setPatreon(e.target.value); setStatus("idle"); }}
+          placeholder="your-patreon-handle or full Patreon URL"
+          className="bg-zinc-800 border-zinc-700 text-sm"
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="donation-bmac">Buy Me a Coffee</Label>
+        <Input
+          id="donation-bmac"
+          value={buyMeACoffee}
+          onChange={(e) => { setBuyMeACoffee(e.target.value); setStatus("idle"); }}
+          placeholder="your-bmac-handle or full Buy Me a Coffee URL"
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>

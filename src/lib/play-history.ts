@@ -33,6 +33,22 @@ export async function getWatchedThreshold(): Promise<number> {
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 80;
 }
 
+// Cumulative-watch threshold for an arc to count as a completion in getMostPopularOnServer.
+// Stricter than getWatchedThreshold (per-session) — a "completion" should mean they basically finished it.
+export async function getCompletionThreshold(): Promise<number> {
+  const val = await getSetting("playHistoryCompletionThreshold");
+  const parsed = val ? parseInt(val, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 90;
+}
+
+// Gap (days) between consecutive sessions on the same media that splits one arc from the next.
+// A weekend chunked watch stays one arc; a months-later rewatch starts a new arc.
+export async function getArcGapDays(): Promise<number> {
+  const val = await getSetting("playHistoryArcGapDays");
+  const parsed = val ? parseInt(val, 10) : NaN;
+  return Number.isFinite(parsed) && parsed >= 1 && parsed <= 365 ? parsed : 14;
+}
+
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
@@ -525,18 +541,63 @@ export type PopularSort = "plays" | "viewers" | "trending";
 
 export const POPULAR_PER_PAGE = 40;
 
+type PopularItem = {
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  title: string;
+  year: string | null;
+  plays: number;
+  allTimePlays: number;
+  viewers: number;
+  episodes: number;
+  totalHours: number;
+};
+
+type PopularResult = {
+  items: PopularItem[];
+  totalItems: number;
+  totalPages: number;
+  page: number;
+};
+
+const POPULAR_CACHE_TTL_MS = 5 * 60 * 1000;
+const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>();
+
+// Popularity counts *completed arcs*, not raw sessions. An "arc" is a run of consecutive
+// sessions on the same (user, tmdbId, season, episode) that hasn't been broken by either
+// a `completed=true` finish (a rewatch boundary) or a gap longer than playHistoryArcGapDays.
+// For TV the unit is per-episode; show-level "plays" sum across episodes.
+// totalHours and episodes are computed from raw sessions so partial sittings still contribute.
 export async function getMostPopularOnServer(
   opts: { mediaType?: "MOVIE" | "TV"; sort?: PopularSort; page?: number; limit?: number } = {},
-) {
+): Promise<PopularResult> {
   const { mediaType, sort = "plays", page = 1, limit = POPULAR_PER_PAGE } = opts;
 
-  const conditions: string[] = ['"tmdbId" IS NOT NULL', '"watched" = true'];
+  const cacheKey = JSON.stringify({ mediaType, sort, page, limit });
+  const cached = popularCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+  const [completionPct, arcGapDays] = await Promise.all([
+    getCompletionThreshold(),
+    getArcGapDays(),
+  ]);
+  const completionRatio = completionPct / 100;
+  const arcGapSeconds = arcGapDays * 24 * 60 * 60;
+
   const params: unknown[] = [];
 
+  const baseConditions: string[] = ['"tmdbId" IS NOT NULL'];
   if (mediaType) {
     params.push(mediaType);
-    conditions.push(`"mediaType"::text = $${params.length}`);
+    baseConditions.push(`"mediaType"::text = $${params.length}`);
   }
+  const baseWhere = baseConditions.join(" AND ");
+
+  params.push(arcGapSeconds);
+  const arcGapIdx = params.length;
+
+  params.push(completionRatio);
+  const completionIdx = params.length;
 
   let trendingIdx: number | null = null;
   if (sort === "trending") {
@@ -544,76 +605,116 @@ export async function getMostPopularOnServer(
     trendingIdx = params.length;
   }
 
-  const whereSql = conditions.join(" AND ");
-
-  const windowFilter = trendingIdx ? ` FILTER (WHERE "startedAt" >= $${trendingIdx})` : "";
-  const playsExpr = `(COUNT(*)${windowFilter})::bigint`;
-  const allTimePlaysExpr = `COUNT(*)::bigint`;
-  const viewersExpr = `(COUNT(DISTINCT "mediaServerUserId")${windowFilter})::bigint`;
+  const trendArcFilter = trendingIdx ? `FILTER (WHERE arc_started_at >= $${trendingIdx})` : "";
+  const trendRawFilter = trendingIdx ? `FILTER (WHERE "startedAt" >= $${trendingIdx})` : "";
   const episodesFilter = trendingIdx
     ? `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL AND "startedAt" >= $${trendingIdx})`
     : `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL)`;
-  const totalHoursExpr = trendingIdx
-    ? `(COALESCE(SUM("playDuration") FILTER (WHERE "startedAt" >= $${trendingIdx}), 0) / 3600.0)::float8`
-    : `(COALESCE(SUM("playDuration"), 0) / 3600.0)::float8`;
-  const havingSql = trendingIdx ? `HAVING COUNT(*) FILTER (WHERE "startedAt" >= $${trendingIdx}) > 0` : "";
+  const havingSql = trendingIdx ? `HAVING COUNT(*) ${trendArcFilter} > 0` : "";
 
   const orderBy =
-    sort === "viewers"
-      ? "viewers DESC, plays DESC"
-      : "plays DESC, viewers DESC";
+    sort === "viewers" ? "viewers DESC, plays DESC" : "plays DESC, viewers DESC";
 
-  const offset = (page - 1) * limit;
-  const limitIdx = params.length + 1;
-  const offsetIdx = params.length + 2;
+  params.push(limit);
+  const limitIdx = params.length;
+  params.push((page - 1) * limit);
+  const offsetIdx = params.length;
 
-  const [rows, countRows] = await Promise.all([
-    prisma.$queryRawUnsafe<
-      {
-        tmdbId: number;
-        mediaType: string;
-        title: string;
-        year: number | null;
-        plays: bigint;
-        allTimePlays: bigint;
-        viewers: bigint;
-        episodes: bigint;
-        totalHours: number;
-      }[]
-    >(
-      `SELECT "tmdbId", "mediaType"::text,
-              MAX("title") AS title,
-              MAX("year") AS year,
-              ${playsExpr} AS plays,
-              ${allTimePlaysExpr} AS "allTimePlays",
-              ${viewersExpr} AS viewers,
-              (COUNT(DISTINCT ("seasonNumber", "episodeNumber"))
-                ${episodesFilter})::bigint AS episodes,
-              ${totalHoursExpr} AS "totalHours"
-       FROM "PlayHistory"
-       WHERE ${whereSql}
-       GROUP BY "tmdbId", "mediaType"
-       ${havingSql}
-       ORDER BY ${orderBy}
-       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
-      ...params,
-      limit,
-      offset,
+  const sql = `
+    WITH base AS (
+      SELECT "mediaServerUserId", "tmdbId", "mediaType",
+             "seasonNumber", "episodeNumber",
+             "startedAt", "playDuration", "duration", "completed"
+      FROM "PlayHistory"
+      WHERE ${baseWhere}
     ),
-    prisma.$queryRawUnsafe<{ total: bigint }[]>(
-      `SELECT COUNT(*)::bigint AS total FROM (
-         SELECT 1 FROM "PlayHistory"
-         WHERE ${whereSql}
-         GROUP BY "tmdbId", "mediaType"
-         ${havingSql}
-       ) sub`,
-      ...params,
+    arc_flags AS (
+      SELECT *,
+        CASE
+          WHEN LAG("startedAt") OVER w IS NULL
+            OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
+            OR LAG("completed") OVER w = true
+          THEN 1 ELSE 0
+        END AS arc_start
+      FROM base
+      WINDOW w AS (
+        PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                     COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+        ORDER BY "startedAt"
+      )
     ),
-  ]);
+    arc_ids AS (
+      SELECT *,
+        SUM(arc_start) OVER (
+          PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                       COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+          ORDER BY "startedAt"
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS arc_id
+      FROM arc_flags
+    ),
+    arcs AS (
+      SELECT "tmdbId", "mediaType", "mediaServerUserId",
+             "seasonNumber", "episodeNumber", arc_id,
+             SUM("playDuration") AS arc_play,
+             MAX("duration") AS arc_dur,
+             MIN("startedAt") AS arc_started_at
+      FROM arc_ids
+      GROUP BY "tmdbId", "mediaType", "mediaServerUserId",
+               "seasonNumber", "episodeNumber", arc_id
+    ),
+    completed_arcs AS (
+      SELECT *
+      FROM arcs
+      WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx}
+    ),
+    session_aggregates AS (
+      SELECT "tmdbId", "mediaType"::text AS "mediaType",
+             MAX("title") AS title,
+             MAX("year") AS year,
+             (COUNT(DISTINCT ("seasonNumber", "episodeNumber")) ${episodesFilter})::bigint AS episodes,
+             (COALESCE(SUM("playDuration") ${trendRawFilter}, 0) / 3600.0)::float8 AS "totalHours"
+      FROM "PlayHistory"
+      WHERE ${baseWhere}
+      GROUP BY "tmdbId", "mediaType"
+    ),
+    popular AS (
+      SELECT ca."tmdbId", ca."mediaType"::text AS "mediaType",
+             sa.title, sa.year, sa.episodes, sa."totalHours",
+             (COUNT(*) ${trendArcFilter})::bigint AS plays,
+             COUNT(*)::bigint AS "allTimePlays",
+             (COUNT(DISTINCT ca."mediaServerUserId") ${trendArcFilter})::bigint AS viewers
+      FROM completed_arcs ca
+      JOIN session_aggregates sa
+        ON sa."tmdbId" = ca."tmdbId" AND sa."mediaType" = ca."mediaType"::text
+      GROUP BY ca."tmdbId", ca."mediaType", sa.title, sa.year, sa.episodes, sa."totalHours"
+      ${havingSql}
+    )
+    SELECT *,
+           (COUNT(*) OVER ())::bigint AS total_items
+    FROM popular
+    ORDER BY ${orderBy}
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
+  `;
 
-  const totalItems = Number(countRows[0]?.total ?? 0);
+  const rows = await prisma.$queryRawUnsafe<
+    {
+      tmdbId: number;
+      mediaType: string;
+      title: string;
+      year: string | null;
+      plays: bigint;
+      allTimePlays: bigint;
+      viewers: bigint;
+      episodes: bigint;
+      totalHours: number;
+      total_items: bigint;
+    }[]
+  >(sql, ...params);
 
-  return {
+  const totalItems = rows.length > 0 ? Number(rows[0].total_items) : 0;
+
+  const result: PopularResult = {
     items: rows.map((r) => ({
       tmdbId: r.tmdbId,
       mediaType: r.mediaType as "MOVIE" | "TV",
@@ -629,6 +730,9 @@ export async function getMostPopularOnServer(
     totalPages: Math.max(1, Math.ceil(totalItems / limit)),
     page,
   };
+
+  popularCache.set(cacheKey, { data: result, expiresAt: Date.now() + POPULAR_CACHE_TTL_MS });
+  return result;
 }
 
 export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, limit = 10) {
