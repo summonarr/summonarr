@@ -1,12 +1,24 @@
 name: CI
 
+# Lint, typecheck, and dependency audit. PR-only by default — security scans
+# (codeql.yml, gitleaks.yml, trivy.yml) own the push-to-main + Security-tab
+# story; this workflow validates author intent before a merge lands.
+#
+# A weekly schedule keeps a heartbeat on main without re-running on every
+# merge commit (the merge tree is identical to the PR head that just passed).
+# The CodeQL job that used to live here was removed in favour of codeql.yml,
+# which already runs CodeQL on a properly-configured matrix.
+
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Monday 15:03 UTC — offset from gitleaks (15:15), trivy (15:27),
+    # and codeql (15:39) so Security-tab uploads don't pile up.
+    - cron: '3 15 * * 1'
+  workflow_dispatch:
 
-# Cancel stale runs when new commits land on the same ref
+# Cancel stale runs when new commits land on the same ref.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -49,10 +61,10 @@ jobs:
       BACKUP_DB_PASSWORD: "ci-backup-password-placeholder"
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -65,39 +77,18 @@ jobs:
       - name: Generate Prisma client
         run: npx prisma generate
 
-      # Lint and typecheck are reported but non-blocking while the
-      # codebase is brought up to strict-clean. Flip continue-on-error
-      # to false once the backlog is drained.
+      # Lint and typecheck are blocking. src/generated/** is excluded in
+      # eslint.config.mjs so Prisma client output (guardrail 12) doesn't
+      # poison the run.
       - name: Lint
         run: npm run lint
-        continue-on-error: true
 
       - name: Typecheck
         run: npx tsc --noEmit
-        continue-on-error: true
 
+      # Dependency audit reports CVEs in the lockfile. Kept non-blocking
+      # because upstream advisory churn shouldn't gate PRs — Dependabot
+      # opens patch PRs weekly. The Actions log + summary is the signal.
       - name: Dependency audit
         run: npm run audit:deps
         continue-on-error: true
-
-  codeql:
-    name: CodeQL
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: javascript-typescript
-          queries: security-and-quality
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:javascript-typescript"
