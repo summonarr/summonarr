@@ -119,12 +119,18 @@ async function getAdminEmails(): Promise<string[]> {
 
 // For issue-related admin emails: includes ISSUE_ADMIN and honors the
 // per-user notifyOnIssue toggle. Mirrors getIssueAdminSubscriptions in push.ts.
-async function getIssueAdminEmails(excludeUserId?: string): Promise<string[]> {
+async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<string[]> {
+  if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
+  const idFilter = opts.restrictToUserId
+    ? { id: opts.restrictToUserId }
+    : opts.excludeUserId
+      ? { id: { not: opts.excludeUserId } }
+      : {};
   const admins = await prisma.user.findMany({
     where: {
       role: { in: ["ADMIN", "ISSUE_ADMIN"] },
       notifyOnIssue: true,
-      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+      ...idFilter,
     },
     select: { email: true, notificationEmail: true },
   });
@@ -404,12 +410,16 @@ export async function notifyAdminsIssueMessageEmail(data: {
   issueId: string;
   excludeUserId?: string;
   fromAdmin?: boolean;
+  restrictToUserId?: string;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    const to = await getIssueAdminEmails(data.excludeUserId);
+    const to = await getIssueAdminEmails({
+      excludeUserId: data.excludeUserId,
+      restrictToUserId: data.restrictToUserId,
+    });
     if (!to.length) return;
 
     const subject = data.fromAdmin

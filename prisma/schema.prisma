@@ -38,7 +38,7 @@ model User {
   // Handed back to any browser this user later signs in from so subsequent sign-ins reuse the
   // same clientId, avoiding the "Another device is attempting to sign in" warning on Plex's
   // OAuth approval page (Plex only warns on clientIds not yet registered to the user's account).
-  plexClientId  String?
+  plexClientId String?
 
   // Discord notification preferences (opt-in by default)
   notifyOnApproved  Boolean @default(true)
@@ -61,7 +61,8 @@ model User {
   accounts          Account[]
   sessions          Session[]
   requests          MediaRequest[]
-  issues            Issue[]
+  issues            Issue[]            @relation(name: "IssueReporter")
+  claimedIssues     Issue[]            @relation(name: "IssueClaimer")
   issueMessages     IssueMessage[]
   issueGrabs        IssueGrab[]
   pushSubscriptions PushSubscription[]
@@ -169,18 +170,18 @@ model DiscordMergeCode {
 // ─── Requests ───────────────────────────────────────────────────────────────
 
 model MediaRequest {
-  id          String        @id @default(cuid(2))
-  mediaType   MediaType
-  tmdbId      Int
-  title       String
-  posterPath  String?
-  releaseYear String?
-  status      RequestStatus @default(PENDING)
-  note        String?   @db.VarChar(500)
-  adminNote           String?   @db.VarChar(500)
-  permanentlyDeclined Boolean   @default(false)
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  id                  String        @id @default(cuid(2))
+  mediaType           MediaType
+  tmdbId              Int
+  title               String
+  posterPath          String?
+  releaseYear         String?
+  status              RequestStatus @default(PENDING)
+  note                String?       @db.VarChar(500)
+  adminNote           String?       @db.VarChar(500)
+  permanentlyDeclined Boolean       @default(false)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
 
   tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
 
@@ -382,7 +383,13 @@ model Issue {
   updatedAt DateTime @updatedAt
 
   reportedBy String
-  user       User   @relation(fields: [reportedBy], references: [id], onDelete: Cascade)
+  user       User   @relation(name: "IssueReporter", fields: [reportedBy], references: [id], onDelete: Cascade)
+
+  // Optional admin/issue-admin claim. When set, notifications for replies on
+  // this issue narrow to the claimer + reporter (instead of all admins).
+  claimedBy   String?
+  claimedAt   DateTime?
+  claimedUser User?     @relation(name: "IssueClaimer", fields: [claimedBy], references: [id], onDelete: SetNull)
 
   mediaType  MediaType
   tmdbId     Int
@@ -403,6 +410,7 @@ model Issue {
   grabs    IssueGrab[]
 
   @@index([reportedBy])
+  @@index([claimedBy])
   @@index([status])
 }
 
@@ -416,7 +424,7 @@ model IssueMessage {
   authorId String
   author   User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
 
-  body      String   @db.VarChar(10000)
+  body      String  @db.VarChar(10000)
   fromAdmin Boolean @default(false)
 
   @@index([issueId])
@@ -505,6 +513,8 @@ enum AuditAction {
   SETTINGS_CHANGE
   LIBRARY_SYNC
   ISSUE_STATUS_CHANGE
+  ISSUE_CLAIM
+  ISSUE_UNCLAIM
   MAINTENANCE_TOGGLE
   BACKUP_EXPORT
   BACKUP_IMPORT
@@ -590,6 +600,7 @@ model PlayHistory {
 
   createdAt DateTime @default(now())
 
+  @@unique([source, sourceSessionId])
   @@index([mediaServerUserId, startedAt(sort: Desc)])
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
@@ -600,7 +611,6 @@ model PlayHistory {
   // Powers the arc-detection window functions in getMostPopularOnServer — partition key
   // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.
   @@index([mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt])
-  @@unique([source, sourceSessionId])
 }
 
 model ActiveSession {
@@ -657,18 +667,18 @@ model ActiveSession {
 // Cached ipinfo.io lookups, keyed by IP. `notFound=true` means the IP is bogon
 // (RFC1918, loopback, etc) or upstream returned no data — short-TTL re-checked.
 model IpLookupCache {
-  ip          String   @id
-  hostname    String?
-  city        String?
-  region      String?
-  country     String? // ISO 3166-1 alpha-2
-  postal      String?
-  latitude    Float?
-  longitude   Float?
-  timezone    String?
-  org         String? // e.g. "AS7018 AT&T Enterprises, LLC"
-  notFound    Boolean  @default(false)
-  fetchedAt   DateTime @default(now())
+  ip        String   @id
+  hostname  String?
+  city      String?
+  region    String?
+  country   String? // ISO 3166-1 alpha-2
+  postal    String?
+  latitude  Float?
+  longitude Float?
+  timezone  String?
+  org       String? // e.g. "AS7018 AT&T Enterprises, LLC"
+  notFound  Boolean  @default(false)
+  fetchedAt DateTime @default(now())
 
   @@index([fetchedAt])
 }
@@ -693,7 +703,7 @@ model TrashSpec {
   fetchedAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  application  TrashApplication?
+  application TrashApplication?
 
   @@unique([service, kind, trashId])
   @@index([service, kind])
@@ -704,15 +714,15 @@ model TrashSpec {
 // id Radarr/Sonarr assigned on first apply so we can PUT (overwrite) on subsequent
 // syncs without depending on name lookups.
 model TrashApplication {
-  id          String     @id @default(cuid(2))
-  trashSpecId String     @unique
-  trashSpec   TrashSpec  @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
-  enabled     Boolean    @default(true)
+  id          String    @id @default(cuid(2))
+  trashSpecId String    @unique
+  trashSpec   TrashSpec @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
+  enabled     Boolean   @default(true)
   remoteId    Int?
   appliedAt   DateTime?
   lastError   String?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────

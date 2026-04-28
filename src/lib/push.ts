@@ -57,10 +57,16 @@ async function getAdminSubscriptions() {
   });
 }
 
-async function getIssueAdminSubscriptions(excludeUserId?: string) {
+async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restrictToUserId?: string } = {}) {
+  if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
+  const userIdFilter = opts.restrictToUserId
+    ? { userId: opts.restrictToUserId }
+    : opts.excludeUserId
+      ? { userId: { not: opts.excludeUserId } }
+      : {};
   return prisma.pushSubscription.findMany({
     where: {
-      ...(excludeUserId ? { userId: { not: excludeUserId } } : {}),
+      ...userIdFilter,
       user: {
         role: { in: ["ADMIN", "ISSUE_ADMIN"] },
         notifyOnIssue: true,
@@ -151,12 +157,16 @@ export async function notifyAdminsIssueMessagePush(data: {
   body: string;
   excludeUserId?: string;
   fromAdmin?: boolean;
+  restrictToUserId?: string;
 }) {
   try {
     const keys = await getVapidKeys();
     if (!keys) return;
 
-    const subs = await getIssueAdminSubscriptions(data.excludeUserId);
+    const subs = await getIssueAdminSubscriptions({
+      excludeUserId: data.excludeUserId,
+      restrictToUserId: data.restrictToUserId,
+    });
     if (!subs.length) return;
 
     const payload = {

@@ -96,6 +96,14 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
 
   const authorName = session.user.name ?? session.user.email ?? "Someone";
 
+  // When the issue is claimed, narrow the admin audience to the claimer only —
+  // other admins/issue-admins are intentionally kept out of the conversation.
+  const adminOpts = {
+    excludeUserId: session.user.id,
+    fromAdmin: isAdmin,
+    ...(issue.claimedBy ? { restrictToUserId: issue.claimedBy } : {}),
+  };
+
   if (isAdmin) {
     void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
     void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text }).catch(() => {});
@@ -111,14 +119,13 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
         return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text });
       })
       .catch(() => {});
-    // Fan out to other admins so collaborators see the reply too
-    void notifyAdminsIssueMessage(issue.title, authorName, text, { excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, excludeUserId: session.user.id, fromAdmin: true }).catch(() => {});
+    void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   } else {
-    void notifyAdminsIssueMessage(issue.title, authorName, text).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id }).catch(() => {});
+    void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   }
 
   return NextResponse.json(message, { status: 201 });

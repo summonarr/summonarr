@@ -311,19 +311,27 @@ export async function notifyUserIssueMessage(userId: string, title: string, admi
   }, "notifyOnIssue");
 }
 
-export async function notifyAdminsIssueMessage(title: string, userName: string, body: string, opts: { excludeUserId?: string; fromAdmin?: boolean } = {}): Promise<void> {
+export async function notifyAdminsIssueMessage(title: string, userName: string, body: string, opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string } = {}): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
     if (!cfg.channelId) return;
     if (!isValidSnowflake(cfg.channelId)) return;
 
+    if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return;
+
+    const idFilter = opts.restrictToUserId
+      ? { id: opts.restrictToUserId }
+      : opts.excludeUserId
+        ? { id: { not: opts.excludeUserId } }
+        : {};
+
     const admins = await (await import("@/lib/prisma")).prisma.user.findMany({
       where: {
         role: { in: ["ADMIN", "ISSUE_ADMIN"] },
         discordId: { not: null },
         notifyOnIssue: true,
-        ...(opts.excludeUserId ? { id: { not: opts.excludeUserId } } : {}),
+        ...idFilter,
       },
       select: { discordId: true },
     });
