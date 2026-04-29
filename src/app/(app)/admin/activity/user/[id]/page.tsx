@@ -131,7 +131,7 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
       {stats.activityCalendar.length > 0 && (
         <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
           <h2 className="font-semibold text-white mb-4">Activity (365 days)</h2>
-          <ActivityCalendar data={stats.activityCalendar} />
+          <ActivityCalendar data={stats.activityCalendar} today={new Date().toISOString()} />
         </Card>
       )}
 

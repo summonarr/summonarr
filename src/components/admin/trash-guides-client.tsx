@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { stripTrashHtml } from "@/lib/trash-html";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import {
   Loader2,
   RefreshCw,
@@ -1124,6 +1125,9 @@ function SpecSection({
   onApplied: (results: ApplyResult[]) => void;
   disabled: boolean;
 }) {
+  // Gate `formatRelative` (uses Date.now()) behind mounted to avoid React #418
+  // text mismatches when SSR's "1m ago" disagrees with the client's "2m ago".
+  const mounted = useHasMounted();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
@@ -1333,7 +1337,7 @@ function SpecSection({
                         <StatusBadge spec={spec} />
                       </td>
                       <td className="py-2.5 pr-4 text-zinc-400 text-xs">
-                        {formatRelative(spec.application?.appliedAt ?? null)}
+                        {mounted ? formatRelative(spec.application?.appliedAt ?? null) : ""}
                         {spec.application?.lastError && (
                           <div className="text-red-400 text-xs mt-1 max-w-xs truncate" title={spec.application.lastError}>
                             {spec.application.lastError}

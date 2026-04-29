@@ -9,11 +9,16 @@ interface CalendarData {
   count: number;
 }
 
-export function ActivityCalendar({ data }: { data: CalendarData[] }) {
+// `today` arrives as an ISO date string from the server page so SSR and
+// hydration agree on the 365-day window. DO NOT replace with `new Date()`
+// in render — module/render-level Date.now() is the canonical React #418
+// hydration source (server's day vs client's day can disagree across
+// timezones and second-of-the-day rollovers).
+export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData[]; today: string }) {
   const countMap = new Map(data.map((d) => [d.day, d.count]));
   const max = Math.max(...data.map((d) => d.count), 1);
 
-  const today = new Date();
+  const today = new Date(todayIso);
   const days: { date: string; dow: number }[] = [];
   for (let i = 364; i >= 0; i--) {
     const d = new Date(today);

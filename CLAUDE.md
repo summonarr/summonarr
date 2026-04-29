@@ -177,6 +177,45 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 15. **The `stillPending` snapshot is taken once per sync run.** If you add a third source to the orchestrator, remember that changes made by the Plex pass won't be visible to the Jellyfin pass within the same run — that's intentional.
 
+16. **NEVER call `Date.now()` or `new Date()` inside the render path of a `"use client"` component.** Module-level constants and direct calls in JSX are both render-time evaluations.
+
+    Why:
+    - Server-side: the value is captured during SSR (frozen at module load if at module level, or at the moment of `renderToString` if inside the component).
+    - Client-side: the value is captured again at hydration, milliseconds-to-hours later.
+    - The two values disagree → React #418 hydration error (`args[]=text` for relative-time strings, `args[]=HTML` for `<option>` lists derived from `getFullYear()`).
+    - Bundlers can also bake module-level values at build time, widening the drift to days.
+    - Six distinct hydration bugs in this codebase have come from this single antipattern: `filter-bar.tsx`, `top-filter-bar.tsx`, `activity-history-table.tsx`, `activity-recent-plays.tsx`, `trash-guides-client.tsx`, `activity-calendar.tsx`.
+
+    Fix shape — pick one:
+
+    a. **Pass the reference time as a prop from a server component** (preferred when the consumer is itself a server component or sits one level below):
+    ```ts
+    // server page.tsx
+    <ActivityCalendar data={data} today={new Date().toISOString()} />
+    <FilterBar maxYear={new Date().getUTCFullYear() + 1} />
+    ```
+
+    b. **Gate on `useHasMounted` from `@/hooks/use-has-mounted`** (when the value is purely cosmetic — relative-time labels in tables, "X ago" timestamps):
+    ```tsx
+    const mounted = useHasMounted();
+    return <td>{mounted ? formatRelativeTime(row.startedAt) : ""}</td>;
+    ```
+
+    Examples already in the codebase: `cron-job-table.tsx`, `audit-log-table.tsx`, `activity-now-playing.tsx`. Match the pattern when adding a new component.
+
+    ❌ Wrong:
+    ```ts
+    const currentYear = new Date().getFullYear(); // module-level: bake-or-drift
+    function Row({ ts }) { return <span>{formatAgo(Date.now() - ts)}</span>; }
+    ```
+
+    ✅ Right:
+    ```ts
+    function Row({ ts, mounted }: { ts: number; mounted: boolean }) {
+      return <span>{mounted ? formatAgo(Date.now() - ts) : ""}</span>;
+    }
+    ```
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

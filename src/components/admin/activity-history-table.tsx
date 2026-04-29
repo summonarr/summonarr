@@ -9,6 +9,7 @@ import {
   X, Trash2, ExternalLink, Calendar,
 } from "lucide-react";
 import { IpInfo } from "@/components/admin/ip-info";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface HistoryRow {
   id: string;
@@ -284,6 +285,12 @@ export function ActivityHistoryTable({
   mediaType?: string;
   days: number;
 }) {
+  // `Date.now()` in `formatRelativeTime` would diverge between SSR and CSR
+  // (the server timestamp at render is older than the client's by the network
+  // round-trip), producing React #418 text mismatches. Gate the relative-time
+  // cell behind `useHasMounted` so SSR emits an empty string and the client
+  // fills it in after hydration.
+  const mounted = useHasMounted();
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -698,7 +705,7 @@ export function ActivityHistoryTable({
                         </div>
                       </td>
                       <td className="py-2.5 text-right text-zinc-500" title={formatTimestamp(p.startedAt)}>
-                        {formatRelativeTime(p.startedAt)}
+                        {mounted ? formatRelativeTime(p.startedAt) : ""}
                       </td>
                       <td className="py-2.5 pl-2">
                         <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100">
