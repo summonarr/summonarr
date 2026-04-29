@@ -17,6 +17,7 @@ import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 type MediaFilter = "all" | "movie" | "tv";
 
@@ -336,6 +337,7 @@ export function Header() {
   const pathname = usePathname();
   const router = useRouter();
   const { data: session } = useSession();
+  const mounted = useHasMounted();
   const role = session?.user?.role;
   const provider = session?.user?.provider;
   const showPlex =
@@ -413,10 +415,23 @@ export function Header() {
         <SearchBar showPlex={showPlex} showJellyfin={showJellyfin} />
       </div>
 
-      {/* Actions */}
-      <div className="flex items-center gap-1.5">
-        {session && <PushNotifications />}
+      {/* Actions
+       *
+       * Gated on `useHasMounted` to avoid React #418 hydration mismatches.
+       * `<DropdownMenu>` (base-ui) and `<PushNotifications>` both have
+       * client-only state machines whose first-render output can differ
+       * subtly between SSR and CSR (image-load probes, permission lookups,
+       * etc.). Rendering them only after mount produces a deterministic SSR
+       * tree at the cost of a 1-frame avatar pop-in — a trade we accept,
+       * see CLAUDE.md guardrail-1 (Next.js 16 + React 19 hydration is strict).
+       */}
+      <div
+        className="flex items-center gap-1.5"
+        style={{ minWidth: 28, minHeight: 28 }}
+      >
+        {mounted && session && <PushNotifications />}
 
+        {mounted && (
         <DropdownMenu>
           <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
             <Avatar
@@ -476,6 +491,7 @@ export function Header() {
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+        )}
       </div>
     </header>
   );
