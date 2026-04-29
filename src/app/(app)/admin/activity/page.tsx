@@ -654,7 +654,7 @@ export default async function ActivityPage({
           >
             365-Day Activity
           </h2>
-          <ActivityCalendar data={calendarData} />
+          <ActivityCalendar data={calendarData} today={new Date().toISOString()} />
         </section>
       )}
 

@@ -28,6 +28,9 @@ const ACTION_LABELS: Record<string, { label: string; color: string; icon: string
   SETTINGS_CHANGE:    { label: "Settings Changed",    color: "bg-yellow-900/50 text-yellow-400", icon: "settings" },
   LIBRARY_SYNC:       { label: "Library Synced",      color: "bg-purple-900/50 text-purple-400", icon: "sync" },
   ISSUE_STATUS_CHANGE:{ label: "Issue Updated",       color: "bg-orange-900/50 text-orange-400", icon: "issue" },
+  ISSUE_CLAIM:        { label: "Issue Claimed",       color: "bg-orange-900/50 text-orange-400", icon: "issue" },
+  ISSUE_UNCLAIM:      { label: "Issue Unclaimed",     color: "bg-zinc-700/50 text-zinc-400",     icon: "issue" },
+  ISSUE_DELETE:       { label: "Issue Deleted",       color: "bg-red-900/50 text-red-400",       icon: "delete" },
   MAINTENANCE_TOGGLE: { label: "Maintenance Toggle",  color: "bg-yellow-900/50 text-yellow-400", icon: "maintenance" },
   BACKUP_EXPORT:      { label: "Backup Exported",     color: "bg-indigo-900/50 text-indigo-400", icon: "export" },
   BACKUP_IMPORT:      { label: "Backup Imported",     color: "bg-indigo-900/50 text-indigo-400", icon: "import" },
@@ -35,6 +38,9 @@ const ACTION_LABELS: Record<string, { label: string; color: string; icon: string
   AUTH_LOGIN_FAILED:  { label: "Login Failed",        color: "bg-red-900/50 text-red-400",       icon: "login_failed" },
   AUTH_LOGOUT:        { label: "Logout",              color: "bg-zinc-700/50 text-zinc-400",     icon: "logout" },
   SESSION_REVOKE:     { label: "Session Revoked",     color: "bg-orange-900/50 text-orange-400", icon: "revoke" },
+  CACHE_WARM:         { label: "Cache Warmed",        color: "bg-purple-900/50 text-purple-400", icon: "sync" },
+  RATINGS_CACHE_CLEAR:{ label: "Ratings Cache Cleared", color: "bg-purple-900/50 text-purple-400", icon: "sync" },
+  PLAY_HISTORY_BACKFILL: { label: "Play History Backfilled", color: "bg-purple-900/50 text-purple-400", icon: "sync" },
 };
 
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
@@ -56,7 +62,13 @@ const ACTION_GROUP: Record<string, AuditGroup> = {
   BACKUP_EXPORT: "admin",
   BACKUP_IMPORT: "admin",
   ISSUE_STATUS_CHANGE: "admin",
+  ISSUE_CLAIM: "admin",
+  ISSUE_UNCLAIM: "admin",
+  ISSUE_DELETE: "admin",
   LIBRARY_SYNC: "system",
+  CACHE_WARM: "system",
+  RATINGS_CACHE_CLEAR: "system",
+  PLAY_HISTORY_BACKFILL: "system",
 };
 
 const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
@@ -75,6 +87,9 @@ const DOT_COLORS: Record<string, string> = {
   SETTINGS_CHANGE:    "bg-yellow-500",
   LIBRARY_SYNC:       "bg-purple-500",
   ISSUE_STATUS_CHANGE:"bg-orange-500",
+  ISSUE_CLAIM:        "bg-orange-500",
+  ISSUE_UNCLAIM:      "bg-zinc-500",
+  ISSUE_DELETE:       "bg-red-500",
   MAINTENANCE_TOGGLE: "bg-yellow-500",
   BACKUP_EXPORT:      "bg-indigo-500",
   BACKUP_IMPORT:      "bg-indigo-500",
@@ -82,6 +97,9 @@ const DOT_COLORS: Record<string, string> = {
   AUTH_LOGIN_FAILED:  "bg-red-500",
   AUTH_LOGOUT:        "bg-zinc-500",
   SESSION_REVOKE:     "bg-orange-500",
+  CACHE_WARM:         "bg-purple-500",
+  RATINGS_CACHE_CLEAR:"bg-purple-500",
+  PLAY_HISTORY_BACKFILL: "bg-purple-500",
 };
 
 function useAuditNav() {

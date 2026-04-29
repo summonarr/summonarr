@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import type { Genre, WatchProvider } from "@/lib/tmdb-types";
 import { X } from "lucide-react";
 import { StyledSelect } from "@/components/ui/styled-select";
@@ -18,6 +18,11 @@ interface FilterBarProps {
   activeSortBy?: string;
   activeWatchProvider?: string;
   activeHideAvailable?: boolean;
+  // Latest year to show in the From/To Year dropdowns. Computed by the
+  // server component (so SSR and hydration share one value) and threaded
+  // through. Module-level `new Date()` here is the canonical React #418
+  // source — see the comment over `buildYears` below.
+  maxYear: number;
 }
 
 const SORT_OPTIONS = [
@@ -63,8 +68,15 @@ const VOTE_COUNT_OPTIONS = [
   { value: "10000", label: "10,000+ votes" },
 ];
 
-const currentYear = new Date().getFullYear();
-const YEARS = Array.from({ length: currentYear - 1899 }, (_, i) => String(currentYear - i));
+// `maxYear` is a prop, not a module-level constant. DO NOT introduce a
+// module-level `const x = new Date()...` here — that's the canonical React
+// #418 hydration source: Node freezes it at module load, the client
+// re-evaluates at page load, and once the year rolls over (or the bundler
+// bakes the build-time year), the SSR and CSR `<option>` lists drift.
+// Compute on the server, pass through props, so SSR + hydration agree.
+function buildYears(maxYear: number): string[] {
+  return Array.from({ length: maxYear - 1899 }, (_, i) => String(maxYear - i));
+}
 
 function ratingChipLabel(minRating?: string, ratingFilter?: string): string | null {
   if (ratingFilter) {
@@ -101,10 +113,12 @@ export function FilterBar({
   activeSortBy,
   activeWatchProvider,
   activeHideAvailable,
+  maxYear,
 }: FilterBarProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
   const push = useCallback((updates: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -201,7 +215,7 @@ export function FilterBar({
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
           <option value="">From Year</option>
-          {YEARS.map((y) => (
+          {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>
@@ -211,7 +225,7 @@ export function FilterBar({
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >
           <option value="">To Year</option>
-          {YEARS.map((y) => (
+          {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>

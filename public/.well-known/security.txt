@@ -1,0 +1,7 @@
+# Summonarr security contact (RFC 9116)
+
+Contact: https://github.com/summonarr/summonarr/security/advisories/new
+Policy: https://github.com/summonarr/summonarr/blob/main/SECURITY.md
+Preferred-Languages: en
+Canonical: https://summonarr.com/.well-known/security.txt
+Expires: 2027-04-29T00:00:00Z

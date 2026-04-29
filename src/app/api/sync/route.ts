@@ -14,7 +14,7 @@ import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 
 const CONCURRENCY_LIMIT = 5;
@@ -32,6 +32,8 @@ export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+
+  const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
     prisma.mediaRequest.findMany({
@@ -446,6 +448,14 @@ export async function POST(request: NextRequest) {
     console.error("[sync] TMDB cache purge failed:", err);
   }
 
+  const durationMs = Date.now() - startTime;
+
+  // `lastRunAt` observability for /settings?tab=system. Always written so that
+  // cron-triggered runs (which have no `session.user`) still surface their
+  // last-run timestamp, while the audit row stays scoped to admin-triggered
+  // runs to avoid hourly flooding of the audit table.
+  await recordCronRun("sync:full", durationMs);
+
   const session = await auth();
   if (session?.user) {
     void logAudit({
@@ -453,7 +463,7 @@ export async function POST(request: NextRequest) {
       userName: session.user.name ?? session.user.id,
       action: "LIBRARY_SYNC",
       target: "sync:full",
-      details: { marked, reverted, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted },
+      details: { marked, reverted, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted, durationMs },
     });
   }
 

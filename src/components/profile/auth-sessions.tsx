@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface AuthSessionRow {
   id: string;
@@ -38,6 +39,9 @@ function timeAgo(date: Date): string {
 export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
+  // `timeAgo` and `toLocaleDateString` both diverge between SSR and CSR
+  // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
+  const mounted = useHasMounted();
 
   async function revoke(sessionId: string) {
     setRevoking(sessionId);
@@ -92,11 +96,11 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   </span>
                 )}
                 <span className="flex items-center gap-1 text-xs text-zinc-500">
-                  <Clock className="w-3 h-3" />Active {timeAgo(s.lastSeenAt)}
+                  <Clock className="w-3 h-3" />Active {mounted ? timeAgo(s.lastSeenAt) : ""}
                 </span>
               </div>
               <p className="text-xs text-zinc-600">
-                Expires {new Date(s.expiresAt).toLocaleDateString()}
+                Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
               </p>
             </div>
           </div>

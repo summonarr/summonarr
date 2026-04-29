@@ -4,6 +4,7 @@ import { auth, isTokenExpired } from "@/lib/auth";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { recordCronRun } from "@/lib/cron-auth";
 
 function safeCompareStrings(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -41,6 +42,11 @@ export async function POST(request: NextRequest) {
       const startTime = Date.now();
       const { warmed } = await warmActivityCache();
       const durationMs = Date.now() - startTime;
+
+      // `lastRunAt` observability — written for both admin and cron triggers
+      // (cf. /settings?tab=system). Stored in Setting, not AuditLog, so cron
+      // runs don't flood the audit table.
+      await recordCronRun("activity", durationMs);
 
       // Skip audit log for automated cron runs to avoid flooding the audit table
       if (authCtx.trigger !== "cron") {

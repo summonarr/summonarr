@@ -301,10 +301,15 @@ export async function getUserPlayStats(mediaServerUserId: string) {
       orderBy: { startedAt: "desc" },
       take: 50,
     }),
+    // Group by tmdbId (cross-source dedupe — Plex + Jellyfin entries for the
+    // same show collapse) with title fallback for unmapped rows. See bug #7
+    // notes: previously the GROUP BY also keyed on title, so the same show
+    // appeared twice when one source resolved tmdbId and the other didn't.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT "title", "tmdbId", "mediaType"::text, COUNT(*)::bigint AS count
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
-       GROUP BY "title", "tmdbId", "mediaType" ORDER BY count DESC LIMIT 10`,
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT 10`,
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint; hours: number }[]>(
@@ -960,10 +965,12 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        ORDER BY "count" DESC`,
       ...joinParams,
     ),
+    // See per-user equivalent earlier in this file — same dedupe strategy.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT "title", "tmdbId", "mediaType"::text, COUNT(*)::bigint AS count
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY "title", "tmdbId", "mediaType" ORDER BY count DESC LIMIT 10`,
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(

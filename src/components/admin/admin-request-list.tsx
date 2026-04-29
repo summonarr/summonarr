@@ -448,7 +448,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       className="flex items-center flex-wrap ds-mono"
                       style={{
                         fontSize: 10.5,
-                        gap: 6,
+                        gap: 8,
                         color: "var(--ds-fg-muted)",
                       }}
                     >

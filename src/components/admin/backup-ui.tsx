@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "lucide-react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -78,6 +79,9 @@ function DbExportSection() {
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastFilename, setLastFilename] = useState<string | null>(null);
+  // Default-filename preview includes today's date; gate to avoid SSR/CSR
+  // drift across midnight UTC. See CLAUDE.md guardrail 16.
+  const mounted = useHasMounted();
 
   async function handleExport() {
     setDownloading(true);
@@ -130,7 +134,7 @@ function DbExportSection() {
           className="ds-mono break-all"
           style={{ fontSize: 11.5, color: "var(--ds-fg)", flex: 1 }}
         >
-          {lastFilename ?? `summonarr-full-backup-${new Date().toISOString().slice(0, 10)}.sql.enc`}
+          {lastFilename ?? (mounted ? `summonarr-full-backup-${new Date().toISOString().slice(0, 10)}.sql.enc` : "")}
         </span>
       </div>
 

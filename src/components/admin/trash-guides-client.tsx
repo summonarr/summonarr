@@ -3,6 +3,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { stripTrashHtml } from "@/lib/trash-html";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import {
   Loader2,
   RefreshCw,
@@ -774,7 +776,7 @@ function StarterPackRow({
               {status.label}
             </span>
           </div>
-          <p className="text-xs text-zinc-500 mt-1">{item.rationale}</p>
+          <p className="text-xs text-zinc-500 mt-1 whitespace-pre-line">{item.rationale}</p>
           {spec && (
             <p className="text-[11px] text-zinc-600 mt-2 font-mono truncate" title={spec.trashId}>
               {spec.name} · {spec.trashId.slice(0, 14)}…
@@ -1123,6 +1125,9 @@ function SpecSection({
   onApplied: (results: ApplyResult[]) => void;
   disabled: boolean;
 }) {
+  // Gate `formatRelative` (uses Date.now()) behind mounted to avoid React #418
+  // text mismatches when SSR's "1m ago" disagrees with the client's "2m ago".
+  const mounted = useHasMounted();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
@@ -1332,7 +1337,7 @@ function SpecSection({
                         <StatusBadge spec={spec} />
                       </td>
                       <td className="py-2.5 pr-4 text-zinc-400 text-xs">
-                        {formatRelative(spec.application?.appliedAt ?? null)}
+                        {mounted ? formatRelative(spec.application?.appliedAt ?? null) : ""}
                         {spec.application?.lastError && (
                           <div className="text-red-400 text-xs mt-1 max-w-xs truncate" title={spec.application.lastError}>
                             {spec.application.lastError}
@@ -1472,7 +1477,7 @@ function CustomFormatGroupDetail({ detail }: { detail: SpecDetail }) {
         <div className="col-span-2"><span className="text-zinc-500">Upstream path:</span> <span className="font-mono">{detail.upstreamPath}</span></div>
       </div>
       {payload.trash_description && (
-        <p className="text-zinc-400 italic">{payload.trash_description}</p>
+        <p className="text-zinc-400 italic whitespace-pre-line">{stripTrashHtml(payload.trash_description)}</p>
       )}
       {members.length > 0 && (
         <div>

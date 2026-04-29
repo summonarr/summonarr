@@ -427,7 +427,16 @@ export function Header() {
                 border: "1px solid var(--ds-border)",
               }}
             >
-              <AvatarImage src={session?.user?.image ?? ""} />
+              {/*
+                Only render <AvatarImage> when we have a real src. Passing src=""
+                triggers a Radix/base-ui hydration mismatch (React #418) — server
+                renders the <img> in idle state, but on the client an empty src
+                fires `onerror` immediately, switching to the fallback before
+                hydration completes.
+              */}
+              {session?.user?.image ? (
+                <AvatarImage src={session.user.image} />
+              ) : null}
               <AvatarFallback
                 className="font-semibold"
                 style={{
