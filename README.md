@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.9.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.9.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -151,9 +151,32 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - The container runs as non-root (`nextjs:nodejs`, UID 1001), with `npm`/`npx` removed from the runtime image.
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
+## Changelog
+
+### v0.9.2
+
+**Added**
+
+- TRaSH integration: import Custom Format Groups directly from the TRaSH `cf-groups` catalog.
+- Issue claim: admins can claim an issue to scope subsequent reply notifications to themselves.
+- Admin user management: per-user issue-notification toggle, visible for all users.
+
+**Changed**
+
+- Issue replies now fan out via email to the reporter and to other admins (not just the responder), honoring each user's `notifyOnIssue` preference.
+
+**Fixed**
+
+- Media activity page renders correctly when a user has no play history.
+- `notifyOnIssue` is now respected when an admin replies to a reporter.
+
+### v0.9.1
+
+Prior release. See `git log v0.9.1` for details.
+
 ## Beta testing
 
-Summonarr v0.9.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.9.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

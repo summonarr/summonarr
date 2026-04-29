@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { IssueActions } from "@/components/admin/issue-actions";
 import { IssueCardShell } from "@/components/admin/issue-card-shell";
+import { IssueClaimButton } from "@/components/admin/issue-claim-button";
 import { IssueThread } from "@/components/issues/issue-thread";
 import Image from "next/image";
 import { Film, Tv2, MessageSquare } from "lucide-react";
@@ -90,6 +91,7 @@ export default async function AdminIssuesPage({
     prisma.issue.findMany({
       include: {
         user: { select: { name: true, email: true } },
+        claimedUser: { select: { name: true, email: true } },
         _count: { select: { messages: true } },
       },
       orderBy: { createdAt: "desc" },
@@ -110,6 +112,7 @@ export default async function AdminIssuesPage({
       where: { id: selectedId },
       include: {
         user: { select: { name: true, email: true } },
+        claimedUser: { select: { name: true, email: true } },
         _count: { select: { messages: true } },
       },
     });
@@ -471,6 +474,21 @@ export default async function AdminIssuesPage({
                         {selectedIssue.user.name ?? selectedIssue.user.email} ·{" "}
                         {new Date(selectedIssue.createdAt).toLocaleDateString()}
                       </p>
+                      {selectedIssue.claimedBy && (
+                        <p
+                          className="ds-mono"
+                          style={{
+                            marginTop: 2,
+                            fontSize: 10.5,
+                            color: "var(--ds-accent)",
+                          }}
+                        >
+                          Claimed by{" "}
+                          {selectedIssue.claimedUser?.name ??
+                            selectedIssue.claimedUser?.email ??
+                            "unknown"}
+                        </p>
+                      )}
                     </div>
                   </div>
                   {selectedIssue.note && (
@@ -522,6 +540,12 @@ export default async function AdminIssuesPage({
                         />
                       );
                     })()}
+                    <IssueClaimButton
+                      issueId={selectedIssue.id}
+                      claimedBy={selectedIssue.claimedBy}
+                      claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
+                      currentUserId={session.user.id}
+                    />
                     <IssueActions
                       issueId={selectedIssue.id}
                       currentStatus={selectedIssue.status}

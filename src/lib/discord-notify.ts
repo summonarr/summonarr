@@ -223,14 +223,14 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
   }
 }
 
-async function notifyUser(userId: string, embed: Embed, prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined"): Promise<void> {
+async function notifyUser(userId: string, embed: Embed, prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue"): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true },
+      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true },
     });
     if (!user?.discordId) return;
     if (prefKey && user[prefKey] === false) return;
@@ -308,26 +308,41 @@ export async function notifyUserIssueMessage(userId: string, title: string, admi
     title: `💬 Admin Reply — ${escMd(title)}`,
     description: `**${escMd(adminName)}** replied to your issue:\n\n> ${escMd(body)}`,
     timestamp: new Date().toISOString(),
-  });
+  }, "notifyOnIssue");
 }
 
-export async function notifyAdminsIssueMessage(title: string, userName: string, body: string): Promise<void> {
+export async function notifyAdminsIssueMessage(title: string, userName: string, body: string, opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string } = {}): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
     if (!cfg.channelId) return;
     if (!isValidSnowflake(cfg.channelId)) return;
 
+    if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return;
+
+    const idFilter = opts.restrictToUserId
+      ? { id: opts.restrictToUserId }
+      : opts.excludeUserId
+        ? { id: { not: opts.excludeUserId } }
+        : {};
+
     const admins = await (await import("@/lib/prisma")).prisma.user.findMany({
-      where: { role: { in: ["ADMIN", "ISSUE_ADMIN"] }, discordId: { not: null }, notifyOnIssue: true },
+      where: {
+        role: { in: ["ADMIN", "ISSUE_ADMIN"] },
+        discordId: { not: null },
+        notifyOnIssue: true,
+        ...idFilter,
+      },
       select: { discordId: true },
     });
     if (!admins.length) return;
 
+    const heading = opts.fromAdmin ? "💬 Admin Reply on Issue" : "💬 User Reply on Issue";
+    const verb = opts.fromAdmin ? "replied" : "added a message";
     const embed: Embed = {
       color: 0xFEE75C,
-      title: `💬 User Reply on Issue — ${escMd(title)}`,
-      description: `**${escMd(userName)}** added a message:\n\n> ${escMd(body)}`,
+      title: `${heading} — ${escMd(title)}`,
+      description: `**${escMd(userName)}** ${verb}:\n\n> ${escMd(body)}`,
       timestamp: new Date().toISOString(),
     };
 

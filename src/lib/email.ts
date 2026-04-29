@@ -117,6 +117,28 @@ async function getAdminEmails(): Promise<string[]> {
     .filter((e): e is string => Boolean(e));
 }
 
+// For issue-related admin emails: includes ISSUE_ADMIN and honors the
+// per-user notifyOnIssue toggle. Mirrors getIssueAdminSubscriptions in push.ts.
+async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<string[]> {
+  if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
+  const idFilter = opts.restrictToUserId
+    ? { id: opts.restrictToUserId }
+    : opts.excludeUserId
+      ? { id: { not: opts.excludeUserId } }
+      : {};
+  const admins = await prisma.user.findMany({
+    where: {
+      role: { in: ["ADMIN", "ISSUE_ADMIN"] },
+      notifyOnIssue: true,
+      ...idFilter,
+    },
+    select: { email: true, notificationEmail: true },
+  });
+  return admins
+    .map((a) => resolveUserNotificationEmail(a))
+    .filter((e): e is string => Boolean(e));
+}
+
 // ─── Template ────────────────────────────────────────────────────────────────
 //
 // One shared dark-zinc template with an accent bar, optional poster artwork,
@@ -378,6 +400,80 @@ export async function notifyAdminsNewIssue(data: {
     await sendMany(cfg, to, subject, html);
   } catch (err) {
     console.error("[email] Failed to send new issue notification:", err instanceof Error ? err.message : err);
+  }
+}
+
+export async function notifyAdminsIssueMessageEmail(data: {
+  issueTitle: string;
+  userName: string;
+  body: string;
+  issueId: string;
+  excludeUserId?: string;
+  fromAdmin?: boolean;
+  restrictToUserId?: string;
+}): Promise<void> {
+  try {
+    const cfg = await getEmailConfig();
+    if (!cfg || !isBackendConfigured(cfg)) return;
+
+    const to = await getIssueAdminEmails({
+      excludeUserId: data.excludeUserId,
+      restrictToUserId: data.restrictToUserId,
+    });
+    if (!to.length) return;
+
+    const subject = data.fromAdmin
+      ? `Admin reply on issue: ${data.issueTitle}`
+      : `New reply on issue: ${data.issueTitle}`;
+    const html = richEmailHtml({
+      preheader: `${data.userName} replied to the issue "${data.issueTitle}"`,
+      accent: "amber",
+      heading: data.fromAdmin ? "Admin Reply on Issue" : "New Issue Reply",
+      subheading: `${data.userName} replied to an open issue.`,
+      details: [
+        ["Issue", esc(data.issueTitle)],
+        ["From", esc(data.userName)],
+      ],
+      bodyHtml: noteBlockHtml(data.body, "Message"),
+      ctaLabel: "View Issue",
+      ctaHref: buildSiteUrl(cfg.siteUrl, `/admin/issues/${data.issueId}`),
+      siteUrl: cfg.siteUrl,
+    });
+    await sendMany(cfg, to, subject, html);
+  } catch (err) {
+    console.error("[email] Failed to send admin issue-message notification:", err instanceof Error ? err.message : err);
+  }
+}
+
+export async function notifyUserIssueMessageEmail(data: {
+  toEmail: string;
+  issueTitle: string;
+  authorName: string;
+  body: string;
+}): Promise<void> {
+  try {
+    if (!(await isUserEmailsEnabled())) return;
+    const cfg = await getEmailConfig();
+    if (!cfg || !isBackendConfigured(cfg)) return;
+
+    const subject = `Admin replied on: ${data.issueTitle}`;
+    const html = richEmailHtml({
+      preheader: `${data.authorName} replied to your issue "${data.issueTitle}"`,
+      accent: "indigo",
+      heading: "Admin Replied to Your Issue",
+      subheading: `${data.authorName} sent you a message about your open issue.`,
+      details: [
+        ["Issue", esc(data.issueTitle)],
+        ["From", esc(data.authorName)],
+      ],
+      bodyHtml: noteBlockHtml(data.body, "Message"),
+      ctaLabel: "View Issue",
+      ctaHref: buildSiteUrl(cfg.siteUrl, "/issues"),
+      siteUrl: cfg.siteUrl,
+    });
+    await sendOne(cfg, data.toEmail, subject, html);
+  } catch (err) {
+    console.error("[email] Failed to send user issue-message notification:", err instanceof Error ? err.message : err);
   }
 }
 

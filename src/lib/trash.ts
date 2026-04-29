@@ -22,6 +22,12 @@ export function describeSchemaError(err: unknown): string | null {
       "Run `npx prisma db push` to apply the latest schema."
     );
   }
+  if (/invalid input value for enum.*TrashSpecKind.*CUSTOM_FORMAT_GROUP/i.test(message)) {
+    return (
+      "TrashSpecKind enum is missing CUSTOM_FORMAT_GROUP. Run `npx prisma db push` " +
+      "to add the new enum value before refreshing CF-Groups."
+    );
+  }
   return null;
 }
 
@@ -34,15 +40,23 @@ const TREE_FETCH_TIMEOUT_MS = 30_000;
 const RAW_FETCH_TIMEOUT_MS = 15_000;
 const GH_CONCURRENCY = 8;
 
-const TRASH_PATHS: Record<TrashService, { cf: string; naming: string; qualityProfiles: string; qualitySizes: string }> = {
+const TRASH_PATHS: Record<TrashService, {
+  cf: string;
+  cfGroups: string;
+  naming: string;
+  qualityProfiles: string;
+  qualitySizes: string;
+}> = {
   RADARR: {
     cf: "docs/json/radarr/cf",
+    cfGroups: "docs/json/radarr/cf-groups",
     naming: "docs/json/radarr/naming/radarr-naming.json",
     qualityProfiles: "docs/json/radarr/quality-profiles",
     qualitySizes: "docs/json/radarr/quality-size",
   },
   SONARR: {
     cf: "docs/json/sonarr/cf",
+    cfGroups: "docs/json/sonarr/cf-groups",
     naming: "docs/json/sonarr/naming/sonarr-naming.json",
     qualityProfiles: "docs/json/sonarr/quality-profiles",
     qualitySizes: "docs/json/sonarr/quality-size",
@@ -61,6 +75,22 @@ export interface TrashCustomFormat {
   name: string;
   includeCustomFormatWhenRenaming?: boolean;
   specifications?: unknown[];
+  [k: string]: unknown;
+}
+
+export interface TrashCustomFormatGroupMember {
+  name: string;
+  trash_id: string;
+  required: boolean;
+}
+
+export interface TrashCustomFormatGroup {
+  trash_id: string;
+  name: string;
+  trash_description?: string;
+  default?: string;
+  custom_formats: TrashCustomFormatGroupMember[];
+  quality_profiles?: { include?: Record<string, string> };
   [k: string]: unknown;
 }
 
@@ -146,6 +176,7 @@ async function ghRawFile(repo: string, branch: string, path: string): Promise<st
 export interface RefreshResult {
   service: TrashService;
   customFormats: { fetched: number; updated: number; unchanged: number };
+  customFormatGroups: { fetched: number; updated: number; unchanged: number };
   naming: { fetched: number; updated: number };
   qualityProfiles: { fetched: number; updated: number };
   qualitySizes: { fetched: number; updated: number };
@@ -167,11 +198,21 @@ export async function refreshCatalog(service: TrashService): Promise<RefreshResu
   );
 
   const cf = await refreshCustomFormats(service, trashTree, existingSha, now, errors);
+  // CF-Groups must refresh AFTER CFs so member trash_ids resolve against fresh spec rows
+  const cfg = await refreshCustomFormatGroups(service, trashTree, existingSha, now, errors);
   const naming = await refreshNaming(service, trashTree, existingSha, now, errors);
   const qp = await refreshQualityProfiles(service, trashTree, existingSha, now, errors);
   const qs = await refreshQualitySizes(service, trashTree, existingSha, now, errors);
 
-  return { service, customFormats: cf, naming, qualityProfiles: qp, qualitySizes: qs, errors };
+  return {
+    service,
+    customFormats: cf,
+    customFormatGroups: cfg,
+    naming,
+    qualityProfiles: qp,
+    qualitySizes: qs,
+    errors,
+  };
 }
 
 async function refreshCustomFormats(
@@ -247,6 +288,97 @@ async function refreshCustomFormats(
             kind: "CUSTOM_FORMAT",
             trashId: row.trashId,
             name: row.name,
+            payload: row.payload as object,
+            upstreamPath: row.path,
+            upstreamSha: row.sha,
+            fetchedAt: now,
+          },
+        });
+        updated++;
+      }
+    }, { timeout: BATCH_TX_TIMEOUT });
+  }
+
+  return { fetched, updated, unchanged };
+}
+
+async function refreshCustomFormatGroups(
+  service: TrashService,
+  trashTree: GhTreeEntry[],
+  existingSha: Map<string, string | null>,
+  now: Date,
+  errors: string[],
+): Promise<{ fetched: number; updated: number; unchanged: number }> {
+  const dir = TRASH_PATHS[service].cfGroups;
+  const files = trashTree.filter(
+    (t) => t.type === "blob" && t.path.startsWith(`${dir}/`) && t.path.endsWith(".json"),
+  );
+
+  let fetched = 0;
+  let updated = 0;
+  let unchanged = 0;
+
+  const toUpsert: Array<{
+    trashId: string;
+    name: string;
+    description: string | null;
+    payload: TrashCustomFormatGroup;
+    path: string;
+    sha: string;
+  }> = [];
+
+  for (let i = 0; i < files.length; i += GH_CONCURRENCY) {
+    const batch = files.slice(i, i + GH_CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(async (f) => {
+        const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
+        const parsed = JSON.parse(content) as TrashCustomFormatGroup;
+        if (!parsed.trash_id) throw new Error(`cf-group missing trash_id: ${f.path}`);
+        return { parsed, file: f };
+      }),
+    );
+    for (const r of results) {
+      if (r.status !== "fulfilled") {
+        errors.push(`cf-group: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+        continue;
+      }
+      fetched++;
+      const { parsed, file } = r.value;
+      const key = `CUSTOM_FORMAT_GROUP::${parsed.trash_id}`;
+      if (existingSha.get(key) === file.sha) {
+        unchanged++;
+        continue;
+      }
+      toUpsert.push({
+        trashId: parsed.trash_id,
+        name: parsed.name,
+        description: parsed.trash_description ?? null,
+        payload: parsed,
+        path: file.path,
+        sha: file.sha,
+      });
+    }
+  }
+
+  if (toUpsert.length > 0) {
+    await prisma.$transaction(async (tx) => {
+      for (const row of toUpsert) {
+        await tx.trashSpec.upsert({
+          where: { service_kind_trashId: { service, kind: "CUSTOM_FORMAT_GROUP", trashId: row.trashId } },
+          update: {
+            name: row.name,
+            description: row.description,
+            payload: row.payload as object,
+            upstreamPath: row.path,
+            upstreamSha: row.sha,
+            fetchedAt: now,
+          },
+          create: {
+            service,
+            kind: "CUSTOM_FORMAT_GROUP",
+            trashId: row.trashId,
+            name: row.name,
+            description: row.description,
             payload: row.payload as object,
             upstreamPath: row.path,
             upstreamSha: row.sha,
@@ -603,6 +735,71 @@ export async function applyCustomFormats(
   return results;
 }
 
+export async function applyCustomFormatGroups(
+  service: TrashService,
+  specIds: string[],
+): Promise<ApplyResult[]> {
+  const groups = await prisma.trashSpec.findMany({
+    where: { id: { in: specIds }, service, kind: "CUSTOM_FORMAT_GROUP" },
+  });
+  if (groups.length === 0) return [];
+
+  // Collect every referenced member trash_id across all selected groups, then
+  // resolve them to local TrashSpec rows in a single query — duplicates collapse naturally
+  const memberTrashIds = new Set<string>();
+  const groupMembers = new Map<string, string[]>();
+  for (const g of groups) {
+    const payload = g.payload as unknown as TrashCustomFormatGroup;
+    const ids = (payload.custom_formats ?? []).map((m) => m.trash_id).filter(Boolean);
+    groupMembers.set(g.id, ids);
+    for (const id of ids) memberTrashIds.add(id);
+  }
+
+  const memberSpecs = await prisma.trashSpec.findMany({
+    where: { service, kind: "CUSTOM_FORMAT", trashId: { in: [...memberTrashIds] } },
+    select: { id: true, trashId: true, name: true },
+  });
+  const cfSpecIdByTrashId = new Map(memberSpecs.map((s) => [s.trashId, s.id]));
+
+  // Apply every member CF in one batch — applyCustomFormats handles dedup of remoteIds
+  const allCfSpecIds = [...new Set(memberSpecs.map((s) => s.id))];
+  const cfResults = allCfSpecIds.length > 0 ? await applyCustomFormats(service, allCfSpecIds) : [];
+  const cfResultByTrashId = new Map(cfResults.map((r) => [r.trashId, r]));
+
+  // Roll up per-group: a group "ok" means every required member resolved + applied successfully
+  const results: ApplyResult[] = [];
+  for (const g of groups) {
+    const payload = g.payload as unknown as TrashCustomFormatGroup;
+    const required = (payload.custom_formats ?? []).filter((m) => m.required);
+    const memberIds = groupMembers.get(g.id) ?? [];
+
+    const missing = memberIds.filter((id) => !cfSpecIdByTrashId.has(id));
+    const failedRequired = required.filter((m) => {
+      const r = cfResultByTrashId.get(m.trash_id);
+      return !r || !r.ok;
+    });
+
+    if (missing.length === memberIds.length && memberIds.length > 0) {
+      results.push(await recordApply(g, {
+        ok: false,
+        error: `No member custom formats found in catalog (${memberIds.length} expected). Refresh Catalog first.`,
+      }));
+      continue;
+    }
+    if (failedRequired.length > 0) {
+      const names = failedRequired.slice(0, 3).map((m) => m.name).join(", ");
+      const more = failedRequired.length > 3 ? ` (+${failedRequired.length - 3} more)` : "";
+      results.push(await recordApply(g, {
+        ok: false,
+        error: `Required CF apply failed: ${names}${more}`,
+      }));
+      continue;
+    }
+    results.push(await recordApply(g, { ok: true }));
+  }
+  return results;
+}
+
 function buildNamingPatch(
   service: TrashService,
   payload: Record<string, unknown>,
@@ -932,10 +1129,39 @@ export async function applyQualityProfiles(
 export async function applySpecs(specIds: string[]): Promise<ApplyResult[]> {
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds } },
-    select: { id: true, service: true, kind: true },
+    select: { id: true, service: true, kind: true, payload: true },
   });
+
+  // Dedupe: if a CF-Group is being applied alongside any of its member CFs, drop the redundant
+  // standalone CFs — the group's apply cascade already applies them, and a second PUT would just
+  // double the Radarr/Sonarr HTTP roundtrips.
+  const cfGroupSpecs = specs.filter((s) => s.kind === "CUSTOM_FORMAT_GROUP");
+  const memberTrashIdsByService = new Map<TrashService, Set<string>>();
+  for (const g of cfGroupSpecs) {
+    const payload = g.payload as unknown as TrashCustomFormatGroup;
+    const set = memberTrashIdsByService.get(g.service) ?? new Set<string>();
+    for (const m of payload.custom_formats ?? []) {
+      if (m.trash_id) set.add(m.trash_id);
+    }
+    memberTrashIdsByService.set(g.service, set);
+  }
+  const cascadedCfSpecIds = new Set<string>();
+  if (memberTrashIdsByService.size > 0) {
+    const allMemberTrashIds = [...memberTrashIdsByService.values()].flatMap((s) => [...s]);
+    const memberCfSpecs = await prisma.trashSpec.findMany({
+      where: { kind: "CUSTOM_FORMAT", trashId: { in: allMemberTrashIds } },
+      select: { id: true, service: true, trashId: true },
+    });
+    for (const m of memberCfSpecs) {
+      if (memberTrashIdsByService.get(m.service)?.has(m.trashId)) {
+        cascadedCfSpecIds.add(m.id);
+      }
+    }
+  }
+
   const groups = new Map<string, string[]>();
   for (const s of specs) {
+    if (s.kind === "CUSTOM_FORMAT" && cascadedCfSpecIds.has(s.id)) continue;
     const key = `${s.service}::${s.kind}`;
     const list = groups.get(key) ?? [];
     list.push(s.id);
@@ -943,9 +1169,25 @@ export async function applySpecs(specIds: string[]): Promise<ApplyResult[]> {
   }
 
   const all: ApplyResult[] = [];
-  for (const [key, ids] of groups) {
+  // CF-Groups must run before CUSTOM_FORMAT (groups cascade to members) and before QUALITY_PROFILE
+  // (profiles depend on member CFs being present in Arr); naming and quality-sizes are independent.
+  const orderedKinds: TrashSpecKind[] = [
+    "CUSTOM_FORMAT_GROUP",
+    "CUSTOM_FORMAT",
+    "QUALITY_PROFILE",
+    "NAMING",
+    "QUALITY_SIZE",
+  ];
+  const orderedKeys = [...groups.keys()].sort((a, b) => {
+    const ak = a.split("::")[1] as TrashSpecKind;
+    const bk = b.split("::")[1] as TrashSpecKind;
+    return orderedKinds.indexOf(ak) - orderedKinds.indexOf(bk);
+  });
+  for (const key of orderedKeys) {
+    const ids = groups.get(key)!;
     const [service, kind] = key.split("::") as [TrashService, TrashSpecKind];
     if (kind === "CUSTOM_FORMAT") all.push(...(await applyCustomFormats(service, ids)));
+    else if (kind === "CUSTOM_FORMAT_GROUP") all.push(...(await applyCustomFormatGroups(service, ids)));
     else if (kind === "NAMING") all.push(...(await applyNaming(service, ids)));
     else if (kind === "QUALITY_PROFILE") all.push(...(await applyQualityProfiles(service, ids)));
     else if (kind === "QUALITY_SIZE") all.push(...(await applyQualitySizes(service, ids)));
@@ -966,6 +1208,7 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
         in: [
           "trashGuidesEnabled",
           "trashSyncCustomFormats",
+          "trashSyncCustomFormatGroups",
           "trashSyncQualityProfiles",
           "trashSyncNaming",
           "trashSyncQualitySizes",
@@ -994,6 +1237,7 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
 
   const enabledKinds: TrashSpecKind[] = [];
   if (map.trashSyncCustomFormats !== "false") enabledKinds.push("CUSTOM_FORMAT");
+  if (map.trashSyncCustomFormatGroups !== "false") enabledKinds.push("CUSTOM_FORMAT_GROUP");
   if (map.trashSyncNaming !== "false") enabledKinds.push("NAMING");
   if (map.trashSyncQualityProfiles !== "false") enabledKinds.push("QUALITY_PROFILE");
   if (map.trashSyncQualitySizes !== "false") enabledKinds.push("QUALITY_SIZE");

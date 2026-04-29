@@ -89,6 +89,30 @@ Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, 
 
 Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `nextjs` user. Postgres 17-alpine sidecar with `postgres-data` volume. Internal port 3000 → host 3001. Volumes: `/data` (app) and `/app/.next/cache`. External `sync-cron` / `upcoming-cron` services POST to the API routes with `CRON_SECRET`.
 
+## Releasing — version bump checklist
+
+The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit. The Docker image tag (`v<X.Y.Z>`) is what users actually pull, so the README examples must agree with the package version or `SUMMONARR_VERSION=v0.9.2` (etc.) will point at an image that doesn't exist.
+
+**ALWAYS** bump these together when cutting a release. `<X.Y.Z>` is the bare semver (no `v`); the docker tag form is `v<X.Y.Z>`.
+
+1. [package.json](package.json) — `"version": "<X.Y.Z>"` (root field).
+2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both, and `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
+3. [README.md](README.md) — `Status: v<X.Y.Z> beta` line and the `Summonarr v<X.Y.Z> is a beta release` line under Beta testing.
+4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=v<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block).
+5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source the entries from `git log v<previous>..HEAD --oneline`, surfacing only user-visible changes (skip `chore`, `refactor`, `deps`). Conventional-commit scopes (`feat(issues): …`, `fix(play-history): …`) translate cleanly.
+
+Then tag and push:
+
+```bash
+git commit -am "chore(release): v<X.Y.Z>"
+git tag v<X.Y.Z>
+git push && git push --tags
+```
+
+The `v<X.Y.Z>` push triggers [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml), which builds and publishes the GHCR image with `<X.Y.Z>`, `<X.Y>`, `<X>`, and `latest` tags. **Do not** push the tag before the README/package version edits land — users pulling `v<X.Y.Z>` will get an image whose `package.json` reports the previous version.
+
+There is no version constant in `src/`. Don't add one to "fix" this — the package.json field plus the git tag is the source of truth, and adding a third copy just creates another place to forget.
+
 ## Guardrails
 
 1. **Next.js 16 is not the Next.js in your training data.** Before editing routing, caching, metadata, `fetch`, server/client boundaries, or anything framework-shaped, read the relevant file under [node_modules/next/dist/docs/](node_modules/next/dist/docs/) (`01-app/`, `03-architecture/`). Do not pattern-match from Next 13/14/15 memory.

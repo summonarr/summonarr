@@ -19,11 +19,12 @@ import {
 } from "lucide-react";
 
 type TrashService = "RADARR" | "SONARR";
-type TrashSpecKind = "CUSTOM_FORMAT" | "QUALITY_PROFILE" | "NAMING" | "QUALITY_SIZE";
+type TrashSpecKind = "CUSTOM_FORMAT" | "CUSTOM_FORMAT_GROUP" | "QUALITY_PROFILE" | "NAMING" | "QUALITY_SIZE";
 
 export interface TrashSettings {
   enabled: boolean;
   syncCustomFormats: boolean;
+  syncCustomFormatGroups: boolean;
   syncQualityProfiles: boolean;
   syncNaming: boolean;
   syncQualitySizes: boolean;
@@ -81,6 +82,7 @@ interface StarterPackItem {
 
 const KIND_LABEL: Record<TrashSpecKind, string> = {
   CUSTOM_FORMAT: "Custom Format",
+  CUSTOM_FORMAT_GROUP: "CF Group",
   QUALITY_PROFILE: "Quality Profile",
   NAMING: "Naming",
   QUALITY_SIZE: "Quality Size",
@@ -303,6 +305,19 @@ export function TrashGuidesClient({
       )}
       {loadState === "ready" && (
         <>
+          <SpecSection
+            title="Custom Format Groups"
+            description="TRaSH-curated bundles (HDR Formats, Release Groups HQ, Streaming Services, etc.). Applying a group applies every member custom format in one shot."
+            specs={specs.filter((s) => s.kind === "CUSTOM_FORMAT_GROUP")}
+            kind="CUSTOM_FORMAT_GROUP"
+            service={activeTab}
+            onChanged={() => loadSpecs(activeTab)}
+            onApplied={(results) => {
+              setApplyLog(results);
+              void loadSpecs(activeTab);
+            }}
+            disabled={!configured}
+          />
           <SpecSection
             title="Custom Formats"
             description="CFs that will be POSTed/PUT to Radarr/Sonarr. Unmanage to stop overwriting upstream changes."
@@ -944,6 +959,7 @@ function SyncSettingsCard({
     const body: Record<string, string> = {};
     if (partial.enabled !== undefined) body.trashGuidesEnabled = String(partial.enabled);
     if (partial.syncCustomFormats !== undefined) body.trashSyncCustomFormats = String(partial.syncCustomFormats);
+    if (partial.syncCustomFormatGroups !== undefined) body.trashSyncCustomFormatGroups = String(partial.syncCustomFormatGroups);
     if (partial.syncQualityProfiles !== undefined) body.trashSyncQualityProfiles = String(partial.syncQualityProfiles);
     if (partial.syncNaming !== undefined) body.trashSyncNaming = String(partial.syncNaming);
     if (partial.syncQualitySizes !== undefined) body.trashSyncQualitySizes = String(partial.syncQualitySizes);
@@ -984,6 +1000,14 @@ function SyncSettingsCard({
           description="Re-apply managed CFs on every sync. Overwrites manual edits in Radarr/Sonarr."
           checked={settings.syncCustomFormats}
           onChange={(v) => patchSettings({ syncCustomFormats: v })}
+          indent
+          disabled={!settings.enabled}
+        />
+        <ToggleRow
+          label="Sync Custom Format Groups"
+          description="Re-apply managed TRaSH CF-Groups (HDR Formats, Release Groups HQ, etc.). Each group cascades to its member CFs."
+          checked={settings.syncCustomFormatGroups}
+          onChange={(v) => patchSettings({ syncCustomFormatGroups: v })}
           indent
           disabled={!settings.enabled}
         />
@@ -1422,10 +1446,64 @@ function SpecDetailView({ detail, kind }: { detail: SpecDetail | null; kind: Tra
     );
   }
   if (kind === "CUSTOM_FORMAT") return <CustomFormatDetail detail={detail} />;
+  if (kind === "CUSTOM_FORMAT_GROUP") return <CustomFormatGroupDetail detail={detail} />;
   if (kind === "QUALITY_PROFILE") return <QualityProfileDetail detail={detail} />;
   if (kind === "NAMING") return <NamingDetail detail={detail} />;
   if (kind === "QUALITY_SIZE") return <QualitySizeDetail detail={detail} />;
   return null;
+}
+
+function CustomFormatGroupDetail({ detail }: { detail: SpecDetail }) {
+  const payload = detail.payload as {
+    trash_id?: string;
+    trash_description?: string;
+    default?: string;
+    custom_formats?: Array<{ name: string; trash_id: string; required: boolean }>;
+    quality_profiles?: { include?: Record<string, string> };
+  };
+  const members = payload.custom_formats ?? [];
+  const requiredCount = members.filter((m) => m.required).length;
+  const includedProfiles = Object.entries(payload.quality_profiles?.include ?? {});
+  return (
+    <div className="space-y-3 text-xs text-zinc-300">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+        <div><span className="text-zinc-500">trash_id:</span> <span className="font-mono">{payload.trash_id ?? "—"}</span></div>
+        <div><span className="text-zinc-500">default:</span> {payload.default ?? "false"}</div>
+        <div className="col-span-2"><span className="text-zinc-500">Upstream path:</span> <span className="font-mono">{detail.upstreamPath}</span></div>
+      </div>
+      {payload.trash_description && (
+        <p className="text-zinc-400 italic">{payload.trash_description}</p>
+      )}
+      {members.length > 0 && (
+        <div>
+          <p className="text-zinc-400 font-medium mb-1">
+            Member CFs ({members.length}{requiredCount > 0 ? ` · ${requiredCount} required` : ""})
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-0.5 max-h-60 overflow-y-auto">
+            {members.map((m) => (
+              <div key={m.trash_id} className="flex items-center gap-2 min-w-0">
+                <span className="font-mono text-[11px] text-zinc-500 shrink-0" title={m.trash_id}>{m.trash_id.slice(0, 10)}…</span>
+                <span className="text-zinc-300 truncate">{m.name}</span>
+                {m.required && <span className="text-blue-400 text-[10px] uppercase shrink-0">required</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {includedProfiles.length > 0 && (
+        <div>
+          <p className="text-zinc-400 font-medium mb-1">Auto-included by profiles ({includedProfiles.length})</p>
+          <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+            {includedProfiles.map(([label, trashId]) => (
+              <span key={trashId} className="px-2 py-0.5 bg-zinc-800 rounded">
+                <span className="text-zinc-300">{label}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function QualitySizeDetail({ detail }: { detail: SpecDetail }) {
