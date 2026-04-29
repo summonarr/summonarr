@@ -109,6 +109,7 @@ export default async function TVPage({
         watchProviders={providers}
         showPlex={showPlex}
         showJellyfin={showJellyfin}
+        maxYear={new Date().getUTCFullYear() + 1}
       />
     </div>
   );

@@ -220,6 +220,7 @@ export default async function TopRatedPage({
           activeFromYear={fromYear}
           activeToYear={toYear}
           activeHideAvailable={hideAvailable}
+          maxYear={new Date().getUTCFullYear() + 1}
         />
       </Suspense>
 

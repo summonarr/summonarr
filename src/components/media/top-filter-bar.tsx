@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { X } from "lucide-react";
 import { StyledSelect } from "@/components/ui/styled-select";
 
@@ -13,6 +13,10 @@ interface TopFilterBarProps {
   activeFromYear?: string;
   activeToYear?: string;
   activeHideAvailable?: boolean;
+  // See filter-bar.tsx — `maxYear` arrives as a prop from the server so SSR
+  // and CSR render the same `<option>` list. DO NOT switch back to a
+  // module-level `new Date()` here.
+  maxYear: number;
 }
 
 const SORT_OPTIONS = [
@@ -43,8 +47,9 @@ const VOTE_OPTIONS = [
   { value: "50000", label: "50,000+ votes" },
 ];
 
-const currentYear = new Date().getFullYear();
-const YEARS = Array.from({ length: currentYear - 1899 }, (_, i) => String(currentYear - i));
+function buildYears(maxYear: number): string[] {
+  return Array.from({ length: maxYear - 1899 }, (_, i) => String(maxYear - i));
+}
 
 export function TopFilterBar({
   activeMediaType,
@@ -54,10 +59,12 @@ export function TopFilterBar({
   activeFromYear,
   activeToYear,
   activeHideAvailable,
+  maxYear,
 }: TopFilterBarProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
   const push = useCallback((updates: Record<string, string | undefined>) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -138,7 +145,7 @@ export function TopFilterBar({
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
           <option value="">From Year</option>
-          {YEARS.map((y) => (
+          {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>
@@ -148,7 +155,7 @@ export function TopFilterBar({
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >
           <option value="">To Year</option>
-          {YEARS.map((y) => (
+          {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>

@@ -17,6 +17,9 @@ interface BrowseGridProps {
   watchProviders: WatchProvider[];
   showPlex: boolean;
   showJellyfin: boolean;
+  // Latest year to show in From/To Year filter dropdowns. Computed by the
+  // server page so SSR and hydration match — see filter-bar.tsx.
+  maxYear: number;
 }
 
 interface BrowseResult {
@@ -34,6 +37,7 @@ export function BrowseGrid({
   watchProviders,
   showPlex,
   showJellyfin,
+  maxYear,
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
 
@@ -119,6 +123,7 @@ export function BrowseGrid({
         activeSortBy={sortBy}
         activeWatchProvider={watchProvider}
         activeHideAvailable={hideAvailable}
+        maxYear={maxYear}
       />
 
       <div className="relative min-h-[200px]">
