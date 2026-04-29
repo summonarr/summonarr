@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { stripTrashHtml } from "@/lib/trash-html";
 import {
   Loader2,
   RefreshCw,
@@ -774,7 +775,7 @@ function StarterPackRow({
               {status.label}
             </span>
           </div>
-          <p className="text-xs text-zinc-500 mt-1">{item.rationale}</p>
+          <p className="text-xs text-zinc-500 mt-1 whitespace-pre-line">{item.rationale}</p>
           {spec && (
             <p className="text-[11px] text-zinc-600 mt-2 font-mono truncate" title={spec.trashId}>
               {spec.name} · {spec.trashId.slice(0, 14)}…
@@ -1472,7 +1473,7 @@ function CustomFormatGroupDetail({ detail }: { detail: SpecDetail }) {
         <div className="col-span-2"><span className="text-zinc-500">Upstream path:</span> <span className="font-mono">{detail.upstreamPath}</span></div>
       </div>
       {payload.trash_description && (
-        <p className="text-zinc-400 italic">{payload.trash_description}</p>
+        <p className="text-zinc-400 italic whitespace-pre-line">{stripTrashHtml(payload.trash_description)}</p>
       )}
       {members.length > 0 && (
         <div>

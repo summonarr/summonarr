@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
+import { parseCronLastRun } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
 import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
@@ -218,13 +219,40 @@ export default async function SettingsPage({
       "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
       "trash-sync",
     ];
-    const lastRuns = await prisma.auditLog.findMany({
-      where: { target: { in: cronTargets } },
-      orderBy: { createdAt: "desc" },
-      distinct: ["target"],
-      select: { target: true, createdAt: true, details: true },
-    });
-    const lastRunMap = new Map(lastRuns.map((r) => [r.target, r]));
+    // Primary source: `Setting` rows written by `recordCronRun` on every run
+    // (admin- or cron-triggered). Several warm jobs deliberately skip the
+    // audit log on cron to avoid flooding, so reading the audit table alone
+    // showed stale "Last Run" values for those jobs.
+    const settingKeys = cronTargets.map((t) => `cron:lastRun:${t}`);
+    const [lastRunSettings, lastRuns] = await Promise.all([
+      prisma.setting.findMany({
+        where: { key: { in: settingKeys } },
+        select: { key: true, value: true },
+      }),
+      prisma.auditLog.findMany({
+        where: { target: { in: cronTargets } },
+        orderBy: { createdAt: "desc" },
+        distinct: ["target"],
+        select: { target: true, createdAt: true, details: true },
+      }),
+    ]);
+    const lastRunMap = new Map<string, { createdAt: Date; details: string | null }>();
+    // Audit log is the fallback for jobs that already wrote there before this
+    // change shipped (e.g. upcoming-cache, trash-sync) — nothing about that
+    // breaks, the Setting row simply takes precedence once it exists.
+    for (const r of lastRuns) {
+      lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
+    }
+    for (const s of lastRunSettings) {
+      const target = s.key.replace(/^cron:lastRun:/, "");
+      const parsed = parseCronLastRun(s.value);
+      if (parsed) {
+        lastRunMap.set(target, {
+          createdAt: new Date(parsed.at),
+          details: JSON.stringify({ durationMs: parsed.durationMs, ok: parsed.ok }),
+        });
+      }
+    }
 
     metrics = {
       totalRequests, pendingRequests, approvedRequests, availableRequests, declinedRequests,

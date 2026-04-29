@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { recordCronRun } from "@/lib/cron-auth";
 import {
   getTrending, getPopularMovies, getPopularTV,
   getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
@@ -128,6 +129,9 @@ export async function POST(request: NextRequest) {
 
     const durationMs = Date.now() - startTime;
     const totalItems = Object.values(counts).reduce((s, n) => s + n, 0);
+
+    // `lastRunAt` observability — see warm-activity for rationale.
+    await recordCronRun("list-cache", durationMs, errorCount === 0);
 
     if (authCtx.trigger !== "cron") {
       await logAudit({

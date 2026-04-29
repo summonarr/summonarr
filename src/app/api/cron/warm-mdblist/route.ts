@@ -4,6 +4,7 @@ import { auth, isTokenExpired } from "@/lib/auth";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { recordCronRun } from "@/lib/cron-auth";
 
 function safeCompareStrings(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -40,6 +41,9 @@ export async function POST(request: NextRequest) {
       const startTime = Date.now();
       const result = await prewarmMdblistCache();
       const durationMs = Date.now() - startTime;
+
+      // `lastRunAt` observability — see warm-activity for rationale.
+      await recordCronRun("mdblist", durationMs);
 
       if (authCtx.trigger !== "cron") {
         await logAudit({

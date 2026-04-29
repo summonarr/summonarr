@@ -1,6 +1,7 @@
 
 
 import { prisma } from "./prisma";
+import { stripTrashHtml } from "./trash-html";
 import type { TrashService, TrashSpecKind } from "@/generated/prisma";
 
 export interface StarterPackItem {
@@ -77,7 +78,7 @@ function deriveLabel(spec: { service: TrashService; kind: TrashSpecKind; name: s
 function deriveRationale(spec: { kind: TrashSpecKind; payload: unknown }): string {
   if (spec.kind === "QUALITY_PROFILE") {
     const desc = (spec.payload as { trash_description?: string } | null)?.trash_description?.trim();
-    if (desc) return desc;
+    if (desc) return stripTrashHtml(desc);
     return "TRaSH quality profile. Applying it cascades to every referenced custom format.";
   }
   if (spec.kind === "NAMING") return "TRaSH naming pattern — merged into Radarr/Sonarr's media-management config on apply.";

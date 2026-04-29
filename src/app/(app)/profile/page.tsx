@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { redirect } from "next/navigation";
 import { DiscordLinkSection } from "@/components/discord-link-ui";
 import { NotificationPrefs } from "@/components/profile/notification-prefs";
@@ -148,7 +149,14 @@ export default async function ProfilePage() {
                 session.user.provider === "jellyfin" ||
                 session.user.provider === "jellyfin-quickconnect"
               }
-              notificationEmail={user?.notificationEmail ?? null}
+              notificationEmail={
+                user
+                  ? resolveUserNotificationEmail({
+                      email: user.email,
+                      notificationEmail: user.notificationEmail,
+                    })
+                  : null
+              }
               notifyOnApproved={user?.notifyOnApproved ?? true}
               notifyOnAvailable={user?.notifyOnAvailable ?? true}
               notifyOnDeclined={user?.notifyOnDeclined ?? true}
