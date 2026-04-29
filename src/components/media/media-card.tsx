@@ -136,11 +136,28 @@ function MediaCardImpl({
     );
   };
 
+  // The card uses a <div> rather than <button> because it contains nested
+  // <button> elements (Request/Confirm/Cancel/View). Browsers' HTML parser
+  // does not allow <button> inside <button>; it auto-closes the outer button
+  // when it sees a nested one, lifting the inner buttons up to the body level
+  // — and the resulting parsed DOM no longer matches what React rendered. That
+  // mismatch is the canonical React #418 source on /movies, /tv, /, /popular,
+  // /upcoming, and /tv/[id]. Don't change this back to <button>.
+  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleCardClick();
+    }
+  }
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       onClick={handleCardClick}
+      onKeyDown={handleKeyDown}
+      aria-label={media.title}
       className={cn(
-        "group relative flex flex-col w-full overflow-hidden text-left",
+        "group relative flex flex-col w-full overflow-hidden text-left cursor-pointer",
         "ds-card-lift focus-visible:outline-none",
         "focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]",
         className,
@@ -392,7 +409,7 @@ function MediaCardImpl({
           />
         </div>
       </div>
-    </button>
+    </div>
   );
 }
 

@@ -2,11 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Bell, BellOff, Send, X } from "lucide-react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";
 type TestState = "idle" | "sending" | "ok" | "error";
 
 export function PushNotifications() {
+  // Gate first render on `useHasMounted` so SSR and the first client render
+  // both emit nothing. Without this, the parent's child count can disagree
+  // with the SSR DOM (canonical React #418 source on /, /movies, /admin/library
+  // etc.) — we observed the parent receiving an extra <div> child between
+  // hydration and useEffect resolution.
+  const mounted = useHasMounted();
   const [state, setState] = useState<State>("loading");
   const [busy, setBusy] = useState(false);
   const [testState, setTestState] = useState<TestState>("idle");
@@ -116,7 +123,7 @@ export function PushNotifications() {
     }
   }
 
-  if (state === "loading") return null;
+  if (!mounted || state === "loading") return null;
 
   if (state === "unsupported") {
     return (
