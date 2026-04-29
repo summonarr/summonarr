@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.9.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.9.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,28 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.9.3
+
+**Added**
+
+- `lastRunAt` tracking for cron-only jobs (warm-activity, warm-list-cache, warm-mdblist, warm-omdb, ratings sync) so they surface in **Admin → Settings**.
+- Public `/.well-known/security.txt` for security-disclosure contact.
+
+**Changed**
+
+- Expanded `SECURITY.md` with clearer disclosure policy and contact details.
+
+**Fixed**
+
+- React #418 hydration errors across six components — purged `Date.now()` / `new Date()` from `"use client"` render paths in `filter-bar`, `top-filter-bar`, `activity-history-table`, `activity-recent-plays`, `trash-guides-client`, and `activity-calendar`.
+- Hydration mismatch from a nested `<button>` inside `MediaCard`.
+- Hydration mismatch when `user.image` is unset (skip `AvatarImage` rather than render an empty `<img>`).
+- TRaSH-Guides descriptions: HTML now stripped before render, with hardened sanitization against CodeQL-flagged tag-confusion patterns.
+- Audit log labels: `ISSUE_CLAIM` and previously unmapped actions now render their human-readable label.
+- Profile page falls back to the login email when `notificationEmail` is unset.
+- **Most Played** now dedupes by `tmdbId` across Plex + Jellyfin so the same title doesn't double-count.
+- Admin requester row: widened gap so the count badge stays readable next to long usernames.
+
 ### v0.9.2
 
 **Added**
@@ -176,7 +198,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.9.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.9.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
