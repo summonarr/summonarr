@@ -89,29 +89,52 @@ Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, 
 
 Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `nextjs` user. Postgres 17-alpine sidecar with `postgres-data` volume. Internal port 3000 → host 3001. Volumes: `/data` (app) and `/app/.next/cache`. External `sync-cron` / `upcoming-cron` services POST to the API routes with `CRON_SECRET`.
 
-## Releasing — version bump checklist
+## Releasing — PR-then-tag flow
 
-The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit. The Docker image tag (`v<X.Y.Z>`) is what users actually pull, so the README examples must agree with the package version or `SUMMONARR_VERSION=v0.9.2` (etc.) will point at an image that doesn't exist.
+The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit. The Docker image tag (`v<X.Y.Z>`) is what users actually pull, so the README examples must agree with the package version or `SUMMONARR_VERSION=v<X.Y.Z>` will point at an image that doesn't exist.
 
-**ALWAYS** bump these together when cutting a release. `<X.Y.Z>` is the bare semver (no `v`); the docker tag form is `v<X.Y.Z>`.
+The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, merge, *then* tag the merge commit on `main`. Tagging before the merge orphans the tag on a feature-branch commit unreachable from `main` — `git describe` breaks, `:v<X.Y.Z>` and `:main` reference different SHAs, and the [docker-publish workflow](.github/workflows/docker-publish.yml) builds the same release twice from two different commits. (`v0.9.1` and `v0.9.2` were tagged this way; both are orphan tags. Don't repeat it.)
+
+### Step 1 — Bump versions on `build`
+
+`<X.Y.Z>` is bare semver; the docker tag form is `v<X.Y.Z>`. Edit all five locations in one commit:
 
 1. [package.json](package.json) — `"version": "<X.Y.Z>"` (root field).
-2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both, and `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
+2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both; `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
 3. [README.md](README.md) — `Status: v<X.Y.Z> beta` line and the `Summonarr v<X.Y.Z> is a beta release` line under Beta testing.
 4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=v<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block).
-5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source the entries from `git log v<previous>..HEAD --oneline`, surfacing only user-visible changes (skip `chore`, `refactor`, `deps`). Conventional-commit scopes (`feat(issues): …`, `fix(play-history): …`) translate cleanly.
-
-Then tag and push:
+5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source entries from `git log v<previous>..HEAD --oneline`, surfacing user-visible changes only (skip `chore`, `refactor`, `deps`). Conventional-commit scopes translate cleanly.
 
 ```bash
 git commit -am "chore(release): v<X.Y.Z>"
-git tag v<X.Y.Z>
-git push && git push --tags
+git push origin build
 ```
 
-The `v<X.Y.Z>` push triggers [.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml), which builds and publishes the GHCR image with `<X.Y.Z>`, `<X.Y>`, `<X>`, and `latest` tags. **Do not** push the tag before the README/package version edits land — users pulling `v<X.Y.Z>` will get an image whose `package.json` reports the previous version.
+### Step 2 — PR `build` → `main`
 
-There is no version constant in `src/`. Don't add one to "fix" this — the package.json field plus the git tag is the source of truth, and adding a third copy just creates another place to forget.
+```bash
+gh pr create --base main --head build --title "Build" --body "<changelog summary + test plan>"
+```
+
+Wait for review and CI. Merge.
+
+### Step 3 — Tag the merge commit on `main`
+
+```bash
+git checkout main && git pull
+git tag -a v<X.Y.Z> -m "v<X.Y.Z>"
+git push origin v<X.Y.Z>
+```
+
+### Why this order
+
+- The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) once on the `main` push → publishes `:main` and `:sha-<merge>`.
+- The tag push fires it a second time → publishes `:v<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>`. Because both events hit the **same commit**, the second build hits the GHA buildx cache (`cache-from: type=gha` on [docker-publish.yml:70](.github/workflows/docker-publish.yml#L70)) and finishes in ~3 min instead of ~15.
+- Tag is reachable from `main` — `git describe` works, and `:latest` / `:main` / `:v<X.Y.Z>` all reference the same commit SHA.
+
+**NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=v<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
+
+There is no version constant in `src/`. Don't add one — `package.json` + the git tag is the source of truth, and a third copy is a third place to forget.
 
 ## Guardrails
 
