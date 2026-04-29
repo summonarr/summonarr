@@ -27,6 +27,15 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Skip the main-push build when the push contains a `chore(release):`
+    # commit — the subsequent tag push (per the PR-then-tag flow in CLAUDE.md)
+    # publishes the same SHA with version tags + `:latest`, so the main-push
+    # build would just duplicate work. Tag pushes and manual dispatches always
+    # run; non-release main pushes still publish `:main` and `:sha-<short>`.
+    if: |
+      startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'workflow_dispatch' ||
+      !contains(toJSON(github.event.commits), 'chore(release):')
     permissions:
       contents: read
       packages: write
