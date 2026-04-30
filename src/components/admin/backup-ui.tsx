@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "lucide-react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -175,6 +176,7 @@ function DbImportSection() {
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
   const [size, setSize] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
     | {
         ok: boolean;
@@ -189,6 +191,7 @@ function DbImportSection() {
   async function handleFileChange(f: File | null) {
     setFile(f);
     setResult(null);
+    setProgress(null);
     setSize(null);
     setEncrypted(null);
     if (!f) return;
@@ -211,24 +214,27 @@ function DbImportSection() {
     }
     setImporting(true);
     setResult(null);
-    try {
-      // Stream the raw file bytes; the server decrypts with BACKUP_DB_PASSWORD before executing
-      const res = await fetch("/api/admin/backup/db-import", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: file,
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
-      } else {
-        setResult({ ok: false, error: data.error ?? "Import failed" });
-      }
-    } catch (err) {
-      setResult({ ok: false, error: (err as Error).message });
-    } finally {
-      setImporting(false);
+    setProgress({ uploaded: 0, total: file.size, phase: "upload" });
+
+    const outcome = await uploadInChunks({
+      file,
+      endpoint: "/api/admin/backup/db-import-chunk",
+      onProgress: setProgress,
+    });
+
+    setImporting(false);
+
+    if (outcome.kind === "error") {
+      setResult({ ok: false, error: outcome.error });
+      return;
     }
+    const data = outcome.data as {
+      ok: boolean;
+      summary?: { total: number; executed: number; skipped: number; errors: number };
+      errors?: string[];
+      warning?: string;
+    };
+    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
   }
 
   function clearFile() {
@@ -236,6 +242,7 @@ function DbImportSection() {
     setEncrypted(null);
     setSize(null);
     setResult(null);
+    setProgress(null);
   }
 
   const dropBorder =
@@ -351,7 +358,12 @@ function DbImportSection() {
         >
           {importing ? (
             <>
-              <Loader2 className="w-4 h-4 animate-spin" /> Restoring…
+              <Loader2 className="w-4 h-4 animate-spin" />
+              {progress?.phase === "import"
+                ? "Importing…"
+                : progress
+                  ? `Uploading… ${Math.round((progress.uploaded / progress.total) * 100)}%`
+                  : "Starting…"}
             </>
           ) : (
             <>
@@ -359,6 +371,45 @@ function DbImportSection() {
             </>
           )}
         </PrimaryButton>
+      )}
+
+      {importing && progress && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div
+            style={{
+              height: 6,
+              borderRadius: 999,
+              background: "var(--ds-bg-3)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                width: `${Math.round((progress.uploaded / progress.total) * 100)}%`,
+                background: "var(--ds-accent)",
+                transition: "width 120ms",
+              }}
+            />
+          </div>
+          <div
+            className="ds-mono"
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              fontSize: 10.5,
+              color: "var(--ds-fg-subtle)",
+            }}
+          >
+            <span>
+              {(progress.uploaded / (1024 * 1024)).toFixed(1)} MB /{" "}
+              {(progress.total / (1024 * 1024)).toFixed(1)} MB
+            </span>
+            <span>
+              {progress.phase === "import" ? "Decrypting + restoring on server…" : "Uploading"}
+            </span>
+          </div>
+        </div>
       )}
 
       {result?.summary && (

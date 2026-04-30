@@ -2,7 +2,9 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
-import { SetupForm } from "./setup-form";
+import { SetupShell } from "./setup-shell";
+
+const MIN_BACKUP_PASSWORD_LEN = 12;
 
 // First-run wizard; inaccessible once any user exists so the admin account can't be hijacked
 export default async function SetupPage() {
@@ -11,6 +13,9 @@ export default async function SetupPage() {
 
   const siteTitleRow = await prisma.setting.findUnique({ where: { key: "siteTitle" } });
   const siteTitle = siteTitleRow?.value || "Summonarr";
+
+  const backupPassword = process.env.BACKUP_DB_PASSWORD ?? "";
+  const importAvailable = backupPassword.length >= MIN_BACKUP_PASSWORD_LEN;
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
@@ -27,14 +32,7 @@ export default async function SetupPage() {
           </p>
         </div>
 
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
-          <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
-            <span className="text-indigo-400 text-xs font-medium">
-              First user automatically becomes administrator
-            </span>
-          </div>
-          <SetupForm />
-        </div>
+        <SetupShell importAvailable={importAvailable} />
       </div>
     </div>
   );
