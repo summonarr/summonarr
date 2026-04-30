@@ -33,22 +33,13 @@ export async function register() {
       }
     }
 
-    const tp = process.env.TRUST_PROXY;
-    if (tp !== undefined && tp !== "true" && tp !== "") {
-      console.warn(
-        `[startup] TRUST_PROXY="${tp}" is not recognized — only "true" enables proxy trust. Per-IP rate limiting may be disabled.`
-      );
-    }
-
     if (process.env.TRUST_PROXY !== "true") {
-      console.error(
-        "[startup] TRUST_PROXY is not set to 'true'. All requests share a single rate-limit " +
-          "bucket and per-IP rate limiting is disabled. Set TRUST_PROXY=true when running behind " +
+      console.warn(
+        "[startup] TRUST_PROXY is not 'true' — running in LOCAL-ONLY mode. The proxy will refuse " +
+          "any request whose Host header is not localhost or an RFC1918 address, and per-IP rate " +
+          "limiting is disabled (single shared bucket). Set TRUST_PROXY=true when running behind " +
           "a trusted reverse proxy (Nginx, Traefik, Caddy, etc.) that reliably sets X-Forwarded-For."
       );
-      if (process.env.NODE_ENV === "production") {
-        process.exit(1);
-      }
     }
 
     if (process.env.TRUST_PROXY === "true") {

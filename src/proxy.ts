@@ -4,8 +4,11 @@ import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
 import type { NextFetchEvent, NextRequest } from "next/server";
 import { authConfig } from "@/lib/auth.config";
+import { isLocalHost } from "@/lib/local-only";
 
 const { auth } = NextAuth(authConfig);
+
+const trustProxy = process.env.TRUST_PROXY === "true";
 
 // Trusted origins are computed once at module load from env; per-request fallback uses the incoming host
 const envOrigins: ReadonlySet<string> = (() => {
@@ -44,6 +47,21 @@ export const proxy = auth(function proxyHandler(
   request: NextRequest,
   _event: NextFetchEvent,
 ) {
+  // Local-only mode: when TRUST_PROXY is not "true" we cannot read the real
+  // client IP, so we refuse any request whose Host header is not a
+  // loopback/RFC1918 address. Footgun-prevention for misconfigured public
+  // deployments — see src/lib/local-only.ts.
+  if (!trustProxy && !isLocalHost(request.headers.get("host"))) {
+    return NextResponse.json(
+      {
+        error:
+          "TRUST_PROXY is not enabled. This server only serves local network requests. " +
+          "Set TRUST_PROXY=true when running behind a reverse proxy.",
+      },
+      { status: 403 },
+    );
+  }
+
   const { pathname } = request.nextUrl;
 
   const NEXTAUTH_PATHS = [
