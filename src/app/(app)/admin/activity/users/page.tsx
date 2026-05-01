@@ -160,8 +160,13 @@ export default async function UsersActivityPage({
                 <SortHeader label="Plays" field="plays" currentSort={sort} currentDir={dir} search={search} align="right" />
                 <SortHeader label="Watch Time" field="hours" currentSort={sort} currentDir={dir} search={search} align="right" />
                 <SortHeader label="Last Active" field="lastActive" currentSort={sort} currentDir={dir} search={search} />
-                <th className="text-left py-3 px-4">Fav Platform</th>
-                <th className="text-right py-3 px-4">Direct %</th>
+                {/* Mobile audit F-6.3: hide Fav Platform + Direct % below the
+                    sm breakpoint — the 7-col table sums to ~831 px (≈1.9× a
+                    440 px viewport). User / Source / Plays / Watch Time / Last
+                    Active are the at-a-glance columns; the two hidden columns
+                    are the lowest-information for a mobile leaderboard view. */}
+                <th className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
+                <th className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
               </tr>
             </thead>
             <tbody>
@@ -209,10 +214,10 @@ export default async function UsersActivityPage({
                     <td className="py-3 px-4 text-zinc-400 text-xs">
                       {formatRelativeTime(u.lastActive)}
                     </td>
-                    <td className="py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
+                    <td className="hidden sm:table-cell py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
                       {u.favPlatform ?? <span className="text-zinc-600">—</span>}
                     </td>
-                    <td className="py-3 px-4 text-right">
+                    <td className="hidden sm:table-cell py-3 px-4 text-right">
                       {u.directPct !== null ? (
                         <div className="flex items-center justify-end gap-2">
                           <div className="w-16 h-1.5 bg-zinc-800 rounded-full overflow-hidden">

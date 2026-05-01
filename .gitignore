@@ -52,3 +52,9 @@ next-env.d.ts
 SECURITY_AUDIT.md
 docs/security-audit-plain-english.md
 docs/security-audit-technical.md
+
+# mobile audit (iPhone 17 Pro Max) output and harness — local-only
+/audit/
+docs/mobile-audit-iphone17pm.md
+docs/mobile-audit-screenshots/
+docs/mobile-audit-data/

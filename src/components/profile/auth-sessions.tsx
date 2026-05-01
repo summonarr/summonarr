@@ -110,7 +110,13 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               type="button"
               size="sm"
               variant="ghost"
-              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-7 w-7 p-0 mt-0.5"
+              // Mobile audit F-4.2: bumped from h-7 w-7 (28x28, below HIG) to
+              // h-9 w-9 (36x36, matches the chrome-icon convention) and added
+              // aria-label so screen readers announce purpose. The action is
+              // destructive (sign out the device) so labelling matters.
+              aria-label={`Revoke session ${s.deviceLabel ?? `${s.deviceType} device`}${s.ipAddress ? ` from ${s.ipAddress}` : ""}`}
+              title="Revoke session"
+              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
               disabled={revoking === s.sessionId}
               onClick={() => revoke(s.sessionId)}
             >

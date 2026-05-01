@@ -79,7 +79,12 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
             <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Job</th>
             <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Interval</th>
             <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Last Run</th>
-            <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
+            {/* Mobile audit F-5.2: Duration is the lowest-information column;
+                hidden below the sm breakpoint so the rest of the table fits in
+                a 440 px viewport without horizontal scroll. The wrapping
+                <div className="overflow-x-auto"> still allows scroll if the
+                user widens the window or rotates landscape. */}
+            <th className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
             <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
             <th className="py-2 text-xs font-semibold uppercase tracking-wider text-zinc-500"></th>
           </tr>
@@ -103,7 +108,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     <span className="text-zinc-600">never</span>
                   )}
                 </td>
-                <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
+                <td className="hidden sm:table-cell py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
                   {job.lastDuration != null ? formatDuration(job.lastDuration) : "—"}
                 </td>
                 <td className="py-3 pr-4">

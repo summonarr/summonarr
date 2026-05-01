@@ -299,7 +299,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               signIn("oidc", { callbackUrl: callbackUrl });
             }}
             disabled={loading}
-            className="w-full"
+            className="w-full min-h-11"
             style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
           >
             {loading ? (
@@ -318,7 +318,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
           <Button
             onClick={handlePlexSignIn}
             disabled={loading}
-            className="w-full bg-[#e5a00d] hover:bg-[#f0ac14] text-black font-semibold"
+            className="w-full min-h-11 bg-[#e5a00d] hover:bg-[#f0ac14] text-black font-semibold"
           >
             {loading ? (
               <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Waiting for Plex…</>
@@ -359,7 +359,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
             <Button
               onClick={handleQuickConnect}
               disabled={loading}
-              className="w-full"
+              className="w-full min-h-11"
             style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             >
               {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> : "Generate QuickConnect Code"}
@@ -440,7 +440,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
 
           <Button
             type="submit"
-            className="w-full"
+            className="w-full min-h-11"
             style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             disabled={loading}
           >
@@ -515,7 +515,10 @@ function ProviderTab({
       onClick={onClick}
       className="flex-1 font-medium transition-colors"
       style={{
-        padding: "6px 10px",
+        // Mobile audit F-1.5: padding alone landed at ~43.5 px (just under 44),
+        // so we add an explicit minHeight to guarantee Apple HIG compliance.
+        padding: "12px 12px",
+        minHeight: 44,
         borderRadius: 6,
         fontSize: 13,
         background: active ? "var(--ds-bg-3)" : "transparent",
