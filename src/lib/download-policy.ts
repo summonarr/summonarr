@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import { getJellyfinAllUsers, setJellyfinDownloadPolicy } from "./jellyfin";
-import { getPlexAccounts, setPlexDownloadPolicy, getPlexMachineId } from "./plex";
+import { getPlexAccounts, setPlexDownloadPolicy } from "./plex";
 
 interface PolicySyncResult {
   source: string;
@@ -208,9 +208,9 @@ async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisab
       });
       result.upserted++;
 
-      if (!u.isAdmin && downloadsEnabled === false && u.sharingId) {
+      if (!u.isAdmin && downloadsEnabled === false) {
         try {
-          await setPlexDownloadPolicy(adminToken, u.sharingId, false);
+          await setPlexDownloadPolicy(adminToken, u.id, false);
           result.enforced++;
         } catch (err) {
           console.warn(`[download-policy] Plex enforce failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
@@ -248,21 +248,8 @@ export async function enforceUserDownloadPolicy(mediaServerUserId: string): Prom
   }
 
   if (record.source === "plex") {
-    const [serverUrlRow, tokenRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-    ]);
-    if (!tokenRow?.value || !serverUrlRow?.value) return;
-
-    // The sharing-relationship ID (sharingId) is required by the Plex API and is
-    // only available via a fresh getPlexAccounts call — it cannot be derived from
-    // the stored sourceUserId (which is the user's Plex account ID, not the share ID).
-    const accounts = await getPlexAccounts(serverUrlRow.value, tokenRow.value);
-    const account = accounts.find((a) => a.id === record.sourceUserId);
-    if (!account?.sharingId) {
-      console.warn(`[download-policy] Cannot enforce Plex policy for ${record.username}: no sharingId found`);
-      return;
-    }
-    await setPlexDownloadPolicy(tokenRow.value, account.sharingId, record.downloadsEnabled);
+    const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
+    if (!tokenRow?.value) return;
+    await setPlexDownloadPolicy(tokenRow.value, record.sourceUserId, record.downloadsEnabled);
   }
 }
