@@ -217,7 +217,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync",
+      "trash-sync", "download-policies",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -294,6 +294,7 @@ export default async function SettingsPage({
       { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: `${process.env.PURGE_SESSIONS_INTERVAL ?? "86400"}s`, ...lastRunInfo("auth-sessions:purge-expired") },
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: `${process.env.SCRUB_AUDIT_PII_INTERVAL ?? "86400"}s`, ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog and re-apply managed specs", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
+      { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("download-policies") },
     ];
   }
 

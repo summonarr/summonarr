@@ -654,15 +654,23 @@ export interface PlexAccountInfo {
   name: string;
   email: string;
   thumb: string;
+  isAdmin: boolean;
+  downloadsEnabled: boolean;
+  // Sharing-relationship ID from <Server id="..."> in GET /api/users XML.
+  // Required for PUT /api/v2/shared_servers/{sharingId} — different from the user's account ID.
+  sharingId: string | null;
 }
 
 export async function getPlexAccounts(serverUrl: string, adminToken: string): Promise<PlexAccountInfo[]> {
   const accounts: PlexAccountInfo[] = [];
 
+  // Fetch machineIdentifier so we can read the correct server's allowSync from the XML
+  const machineId = await getPlexMachineId(serverUrl, adminToken);
+
   try {
     // The server owner doesn't appear in the shared-users list, so fetch separately and assign a synthetic id of "1"
     const owner = await getPlexUser(adminToken);
-    accounts.push({ id: "1", name: owner.username, email: owner.email, thumb: owner.thumb });
+    accounts.push({ id: "1", name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true, downloadsEnabled: true, sharingId: null });
   } catch (err) {
     console.warn("[plex] Failed to fetch server owner info:", err instanceof Error ? err.message : String(err));
   }
@@ -683,11 +691,31 @@ export async function getPlexAccounts(serverUrl: string, adminToken: string): Pr
         const emailMatch = block.match(/\bemail="([^"]+)"/);
         const thumbMatch = block.match(/\bthumb="([^"]+)"/);
         if (idMatch && nameMatch) {
+          // Parse allowSync and sharing relationship ID from the <Server> child element.
+          // The sharing ID (Server/@id) is what PUT /api/v2/shared_servers/{id} requires —
+          // it is NOT the same as the user's Plex account ID.
+          let downloadsEnabled = true;
+          let sharingId: string | null = null;
+          if (machineId) {
+            const serverTags = [...block.matchAll(/<Server\b([^/]*)\/?>/g)];
+            for (const [, attrs] of serverTags) {
+              if (attrs.includes(`machineIdentifier="${machineId}"`)) {
+                const syncMatch = attrs.match(/\ballowSync="([01])"/);
+                if (syncMatch) downloadsEnabled = syncMatch[1] === "1";
+                const serverIdMatch = attrs.match(/\bid="(\d+)"/);
+                if (serverIdMatch) sharingId = serverIdMatch[1];
+                break;
+              }
+            }
+          }
           accounts.push({
             id: idMatch[1],
             name: nameMatch[1],
             email: emailMatch?.[1]?.toLowerCase() ?? "",
             thumb: thumbMatch?.[1] ?? "",
+            isAdmin: false,
+            downloadsEnabled,
+            sharingId,
           });
         }
       }
@@ -699,7 +727,7 @@ export async function getPlexAccounts(serverUrl: string, adminToken: string): Pr
   return accounts;
 }
 
-async function getPlexMachineId(serverUrl: string, adminToken: string): Promise<string | null> {
+export async function getPlexMachineId(serverUrl: string, adminToken: string): Promise<string | null> {
   try {
     const res = await plexFetch(`${serverUrl}/identity`, adminToken);
     if (!res.ok) return null;
@@ -708,6 +736,29 @@ async function getPlexMachineId(serverUrl: string, adminToken: string): Promise<
   } catch {
     return null;
   }
+}
+
+export async function setPlexDownloadPolicy(
+  adminToken: string,
+  sharingId: string,
+  enabled: boolean,
+): Promise<void> {
+  // sharingId is the <Server id="..."> attribute from GET /api/users XML — the sharing
+  // relationship ID, NOT the user's Plex account ID.
+  const allowSync = enabled ? "1" : "0";
+  const url =
+    `https://plex.tv/api/v2/shared_servers/${encodeURIComponent(sharingId)}` +
+    `?allowSync=${allowSync}` +
+    `&X-Plex-Token=${encodeURIComponent(adminToken)}` +
+    `&X-Plex-Client-Identifier=${encodeURIComponent(PLEX_CLIENT_ID)}`;
+
+  const res = await safeFetchTrusted(url, {
+    allowedHosts: PLEX_TV_HOSTS,
+    method: "PUT",
+    headers: { ...PLEX_HEADERS, "X-Plex-Token": adminToken, Accept: "application/json" },
+    timeoutMs: 10_000,
+  });
+  if (!res.ok) throw new Error(`Plex set sharing policy ${sharingId}: ${res.status}`);
 }
 
 export async function getPlexFriendEmails(adminToken: string, serverUrl?: string): Promise<Set<string>> {
