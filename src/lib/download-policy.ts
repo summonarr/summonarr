@@ -138,6 +138,15 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
     }
   }
 
+  // Remove users no longer on the Jellyfin server. Guard against empty list
+  // to avoid nuking everyone if the API call silently returns nothing.
+  if (users.length > 0) {
+    const currentIds = users.map((u) => u.id);
+    await prisma.mediaServerUser.deleteMany({
+      where: { source: "jellyfin", sourceUserId: { notIn: currentIds } },
+    });
+  }
+
   return result;
 }
 
@@ -208,9 +217,9 @@ async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisab
       });
       result.upserted++;
 
-      if (!u.isAdmin && downloadsEnabled === false) {
+      if (!u.isAdmin && downloadsEnabled === false && u.sharingId) {
         try {
-          await setPlexDownloadPolicy(adminToken, u.id, false);
+          await setPlexDownloadPolicy(adminToken, u.sharingId, false);
           result.enforced++;
         } catch (err) {
           console.warn(`[download-policy] Plex enforce failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
@@ -221,6 +230,15 @@ async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisab
       console.warn(`[download-policy] Plex upsert failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
       result.errors++;
     }
+  }
+
+  // Remove users no longer shared with this Plex server.
+  // nonOwners is the authoritative list from GET /api/users — anyone not in it is gone.
+  if (nonOwners.length > 0) {
+    const currentIds = nonOwners.map((u) => u.id);
+    await prisma.mediaServerUser.deleteMany({
+      where: { source: "plex", sourceUserId: { notIn: currentIds } },
+    });
   }
 
   return result;
@@ -248,8 +266,20 @@ export async function enforceUserDownloadPolicy(mediaServerUserId: string): Prom
   }
 
   if (record.source === "plex") {
-    const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
-    if (!tokenRow?.value) return;
-    await setPlexDownloadPolicy(tokenRow.value, record.sourceUserId, record.downloadsEnabled);
+    const [serverUrlRow, tokenRow] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
+      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+    ]);
+    if (!tokenRow?.value || !serverUrlRow?.value) return;
+
+    // sharingId is not stored in the DB — look it up live from the XML.
+    // getPlexAccounts fetches machineId internally; accounts include sharingId per user.
+    const accounts = await getPlexAccounts(serverUrlRow.value, tokenRow.value);
+    const account = accounts.find((a) => a.id === record.sourceUserId);
+    if (!account?.sharingId) {
+      console.warn(`[download-policy] No sharingId for Plex user ${record.username} — skipping enforce`);
+      return;
+    }
+    await setPlexDownloadPolicy(tokenRow.value, account.sharingId, record.downloadsEnabled);
   }
 }
