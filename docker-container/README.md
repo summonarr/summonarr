@@ -167,7 +167,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.9.3`.                                                                                                    |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.9.4`.                                                                                                    |
 | `DATABASE_URL`                 | postgres:// URI                  | Normally overridden automatically by the entrypoint from `POSTGRES_PASSWORD`. Set manually only when pointing at an external Postgres.                          |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
@@ -337,7 +337,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.9.3
+SUMMONARR_VERSION=v0.9.4
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:
