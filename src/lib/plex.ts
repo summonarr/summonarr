@@ -692,12 +692,14 @@ export async function getPlexAccounts(serverUrl: string, adminToken: string): Pr
         const thumbMatch = block.match(/\bthumb="([^"]+)"/);
         if (idMatch && nameMatch) {
           // Parse allowSync and sharing relationship ID from the <Server> child element.
-          // The sharing ID (Server/@id) is what PUT /api/v2/shared_servers/{id} requires —
+          // The sharing ID (Server/@id) is what POST /shared_servers/{id} requires —
           // it is NOT the same as the user's Plex account ID.
+          // Use [^>]* not [^/]* — the accessToken attribute value contains "/" which
+          // would cut the match short before reaching machineIdentifier.
           let downloadsEnabled = true;
           let sharingId: string | null = null;
           if (machineId) {
-            const serverTags = [...block.matchAll(/<Server\b([^/]*)\/?>/g)];
+            const serverTags = [...block.matchAll(/<Server\b([^>]*)>/g)];
             for (const [, attrs] of serverTags) {
               if (attrs.includes(`machineIdentifier="${machineId}"`)) {
                 const syncMatch = attrs.match(/\ballowSync="([01])"/);
@@ -745,16 +747,17 @@ export async function setPlexDownloadPolicy(
 ): Promise<void> {
   // sharingId is the <Server id="..."> attribute from GET /api/users XML — the sharing
   // relationship ID, NOT the user's Plex account ID.
+  // Endpoint confirmed from python-plexapi: POST /shared_servers/{id} (no /api/v2/ prefix).
   const allowSync = enabled ? "1" : "0";
   const url =
-    `https://plex.tv/api/v2/shared_servers/${encodeURIComponent(sharingId)}` +
+    `https://plex.tv/shared_servers/${encodeURIComponent(sharingId)}` +
     `?allowSync=${allowSync}` +
     `&X-Plex-Token=${encodeURIComponent(adminToken)}` +
     `&X-Plex-Client-Identifier=${encodeURIComponent(PLEX_CLIENT_ID)}`;
 
   const res = await safeFetchTrusted(url, {
     allowedHosts: PLEX_TV_HOSTS,
-    method: "PUT",
+    method: "POST",
     headers: { ...PLEX_HEADERS, "X-Plex-Token": adminToken, Accept: "application/json" },
     timeoutMs: 10_000,
   });
