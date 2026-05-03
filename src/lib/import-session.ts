@@ -4,8 +4,8 @@
 // concurrent runs would race the same transaction — so a single global
 // slot is enough. A second open while one is active returns 409.
 //
-// Temp file lives under os.tmpdir() and is deleted on success, cancel, or
-// session expiry. The route handler holds the only references to the path.
+// Each session gets a mkdtemp-generated directory so the path is unpredictable.
+// The directory (and its contents) is removed on success, cancel, or expiry.
 
 import { promises as fs, createReadStream } from "node:fs";
 import { Readable } from "node:stream";
@@ -14,10 +14,11 @@ import os from "node:os";
 import { MAX_CIPHERTEXT_BYTES } from "@/lib/backup-import";
 
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min — long enough for a slow upload, short enough that a stale temp file can't linger forever
-const UPLOAD_DIR = path.join(os.tmpdir(), "summonarr-imports");
+const TEMP_PREFIX = path.join(os.tmpdir(), "summonarr-upload-");
 
 type Session = {
   uploadId: string;
+  tempDir: string;
   filePath: string;
   totalSize: number;
   totalChunks: number;
@@ -34,9 +35,9 @@ function isExpired(s: Session): boolean {
   return Date.now() > s.expiresAt;
 }
 
-async function deleteTempFile(filePath: string): Promise<void> {
+async function cleanupSession(s: Session): Promise<void> {
   try {
-    await fs.unlink(filePath);
+    await fs.rm(s.tempDir, { recursive: true, force: true });
   } catch {
     // already gone — fine
   }
@@ -69,7 +70,7 @@ export async function startSession(
   }
 
   if (active && isExpired(active)) {
-    await deleteTempFile(active.filePath);
+    await cleanupSession(active);
     active = null;
   }
 
@@ -77,12 +78,12 @@ export async function startSession(
     return { ok: true, session: active };
   }
 
-  await fs.mkdir(UPLOAD_DIR, { recursive: true });
-  const filePath = path.join(UPLOAD_DIR, `${opts.uploadId}.bin`);
-  await deleteTempFile(filePath); // wipe any stragglers before starting
+  const tempDir = await fs.mkdtemp(TEMP_PREFIX);
+  const filePath = path.join(tempDir, "upload.bin");
 
   const session: Session = {
     uploadId: opts.uploadId,
+    tempDir,
     filePath,
     totalSize: opts.totalSize,
     totalChunks: opts.totalChunks,
@@ -109,7 +110,7 @@ export async function appendChunk(
   if (!active) return { ok: false, error: { kind: "no-session" } };
   if (active.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
   if (isExpired(active)) {
-    await deleteTempFile(active.filePath);
+    await cleanupSession(active);
     active = null;
     return { ok: false, error: { kind: "expired" } };
   }
@@ -120,7 +121,7 @@ export async function appendChunk(
     return { ok: false, error: { kind: "size-overflow", max: active.totalSize } };
   }
 
-  const handle = await fs.open(active.filePath, active.receivedChunks === 0 ? "ax" : "a");
+  const handle = await fs.open(active.filePath, active.receivedChunks === 0 ? "w" : "a");
   try {
     await handle.write(data);
   } finally {
@@ -147,6 +148,6 @@ export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> |
 
 export async function clearSession(uploadId: string): Promise<void> {
   if (!active || active.uploadId !== uploadId) return;
-  await deleteTempFile(active.filePath);
+  await cleanupSession(active);
   active = null;
 }
