@@ -120,7 +120,7 @@ export async function appendChunk(
     return { ok: false, error: { kind: "size-overflow", max: active.totalSize } };
   }
 
-  const handle = await fs.open(active.filePath, "a");
+  const handle = await fs.open(active.filePath, active.receivedChunks === 0 ? "ax" : "a");
   try {
     await handle.write(data);
   } finally {
