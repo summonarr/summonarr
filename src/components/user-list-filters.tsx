@@ -35,9 +35,15 @@ export function FilterPills({
     [router, pathname, searchParams, param, preserve],
   );
 
+  // Mobile audit F-4.1: switched from `overflow-x-auto` (with hidden scrollbar)
+  // to `flex-wrap gap-1` so pills wrap to a second row on narrow viewports
+  // instead of being clipped off-screen with no visual cue. With 5 short status
+  // pills on /requests totalling ~464 px, the row now becomes 3+2 on a 440 px
+  // viewport. Wider viewports (where the row fits) are unaffected because wrap
+  // only kicks in when content exceeds the container width.
   return (
     <div
-      className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+      className="flex flex-wrap gap-1 max-w-full"
       style={{
         padding: 2,
         background: "var(--ds-bg-1)",

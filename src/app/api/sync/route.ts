@@ -11,6 +11,7 @@ import {
 } from "@/lib/arr";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
+import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -199,8 +200,9 @@ export async function POST(request: NextRequest) {
     isFeatureEnabled("feature.integration.sonarr"),
   ]);
 
-  // Plex and Jellyfin library writes run concurrently; errors in one don't abort the other
+  // Plex and Jellyfin library writes + download-policy enforcement run concurrently
   const syncResults = await Promise.allSettled([
+    syncDownloadPolicies(),
     (async () => {
       if (!plexEnabled) return;
       if (!plexUrlRow?.value || !plexTokenRow?.value) return;

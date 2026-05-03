@@ -15,14 +15,18 @@ export type TabId = typeof TABS[number]["id"];
 
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
   return (
+    // Mobile audit F-5.1: switched from `overflow-x-auto` (with hidden scrollbar
+    // and no scroll affordance — "System" was being cut off mid-word at 440 px)
+    // to `flex-wrap gap-1`. With 6 short tab labels, the row wraps to two lines
+    // on narrow viewports and stays a single row when content fits naturally.
+    // Removed `width: fit-content` so wrap can use the full container width.
     <nav
-      className="ds-no-scrollbar flex overflow-x-auto max-w-full"
+      className="flex flex-wrap gap-1 max-w-full"
       style={{
         padding: 2,
         background: "var(--ds-bg-1)",
         border: "1px solid var(--ds-border)",
         borderRadius: 8,
-        width: "fit-content",
       }}
     >
       {TABS.map(({ id, label }) => {

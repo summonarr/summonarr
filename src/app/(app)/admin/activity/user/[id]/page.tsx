@@ -76,9 +76,9 @@ export default async function UserActivityPage({ params }: { params: Promise<{ i
 
   return (
     <div>
-      <Link href="/admin/activity" className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-white mb-4 transition-colors">
+      <Link href="/admin/activity/users" className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-white mb-4 transition-colors">
         <ArrowLeft className="w-4 h-4" />
-        Back to Activity
+        Back to Users
       </Link>
 
       <div className="mb-8">

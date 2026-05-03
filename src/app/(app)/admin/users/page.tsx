@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { UserTable } from "@/components/admin/user-table";
+import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { PageHeader } from "@/components/ui/design";
 
@@ -11,7 +12,7 @@ export default async function UsersPage() {
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const [users, localAuthRows] = await Promise.all([
+  const [users, localAuthRows, serverUsers, autoDisableRow] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -42,8 +43,28 @@ export default async function UsersPage() {
       where: { passwordHash: { not: null } },
       select: { id: true },
     }),
+    prisma.mediaServerUser.findMany({
+      select: {
+        id: true,
+        source: true,
+        sourceUserId: true,
+        username: true,
+        email: true,
+        thumbUrl: true,
+        downloadsEnabled: true,
+        isServerAdmin: true,
+        userId: true,
+        user: { select: { name: true, email: true } },
+      },
+      orderBy: [{ source: "asc" }, { username: "asc" }],
+    }),
+    prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
   ]);
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
+
+  const hasPlex = serverUsers.some((u) => u.source === "plex");
+  const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
+  const autoDisableNew = autoDisableRow?.value === "true";
 
   return (
     <div className="ds-page-enter">
@@ -85,6 +106,23 @@ export default async function UsersPage() {
           currentUserId={session.user.id}
         />
       </div>
+
+      {(hasPlex || hasJellyfin || serverUsers.length === 0) && (
+        <div className="mt-10">
+          <div className="mb-4">
+            <h2 className="text-base font-semibold text-white">Media Server Users</h2>
+            <p className="text-xs text-zinc-500 mt-0.5">
+              All Plex and Jellyfin accounts. Download permissions are synced and enforced each run.
+            </p>
+          </div>
+          <ServerUserTable
+            users={serverUsers}
+            hasPlex={hasPlex}
+            hasJellyfin={hasJellyfin}
+            autoDisableNew={autoDisableNew}
+          />
+        </div>
+      )}
     </div>
   );
 }

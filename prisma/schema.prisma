@@ -532,16 +532,18 @@ enum AuditAction {
 // Tracks playback sessions from Plex and Jellyfin — Tautulli-style analytics.
 
 model MediaServerUser {
-  id           String   @id @default(cuid(2))
-  source       String // "plex" | "jellyfin"
-  sourceUserId String // Plex accountID or Jellyfin userId UUID
-  username     String
-  email        String?
-  thumbUrl     String?
-  userId       String? // FK to User — nullable for unlinked server users
-  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id               String   @id @default(cuid(2))
+  source           String // "plex" | "jellyfin"
+  sourceUserId     String // Plex accountID or Jellyfin userId UUID
+  username         String
+  email            String?
+  thumbUrl         String?
+  userId           String? // FK to User — nullable for unlinked server users
+  user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  downloadsEnabled Boolean? // null = not yet synced; true = allowed; false = enforced-disabled
+  isServerAdmin    Boolean  @default(false) // cached from server — admins are never touched by bulk enforcement
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 
   playHistory    PlayHistory[]
   activeSessions ActiveSession[]

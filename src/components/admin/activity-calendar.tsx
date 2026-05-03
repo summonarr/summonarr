@@ -58,9 +58,18 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   });
 
   return (
-    <div className="overflow-x-auto">
-      <div className="min-w-[700px]">
-        <div className="flex ml-8 mb-1 gap-0.5">
+    <div>
+      {/* Mobile audit F-6.2: the 365-day heatmap is `min-w-[700px]` so cells stay
+          visually readable. On 440 px the calendar overflows by ~260 px. The
+          parent already wraps in overflow-x-auto, but with `ds-no-scrollbar`
+          patterns elsewhere users had no cue scrolling was possible. Add an
+          explicit "swipe →" caption visible only at < sm breakpoint. */}
+      <p className="sm:hidden text-xs text-zinc-500 italic mb-1.5 select-none">
+        ← swipe to see the full year →
+      </p>
+      <div className="overflow-x-auto">
+        <div className="min-w-[700px]">
+          <div className="flex ml-8 mb-1 gap-0.5">
           {weeks.map((_, wi) => {
             const ml = monthLabels.find((m) => m.weekIndex === wi);
             return (
@@ -108,21 +117,22 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
           </div>
         </div>
 
-        <div className="flex items-center gap-1 mt-2 ml-8">
-          <span className="text-[9px] text-zinc-600">Less</span>
-          {[0, 0.25, 0.5, 0.75, 1].map((level) => (
-            <div
-              key={level}
-              className="w-3 h-3 rounded-sm"
-              style={{
-                backgroundColor:
-                  level === 0
-                    ? "rgb(39, 39, 42)"
-                    : `rgba(99, 102, 241, ${0.25 + level * 0.75})`,
-              }}
-            />
-          ))}
-          <span className="text-[9px] text-zinc-600">More</span>
+          <div className="flex items-center gap-1 mt-2 ml-8">
+            <span className="text-[9px] text-zinc-600">Less</span>
+            {[0, 0.25, 0.5, 0.75, 1].map((level) => (
+              <div
+                key={level}
+                className="w-3 h-3 rounded-sm"
+                style={{
+                  backgroundColor:
+                    level === 0
+                      ? "rgb(39, 39, 42)"
+                      : `rgba(99, 102, 241, ${0.25 + level * 0.75})`,
+                }}
+              />
+            ))}
+            <span className="text-[9px] text-zinc-600">More</span>
+          </div>
         </div>
       </div>
     </div>

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { prisma } from "@/lib/prisma";
 import { checkBodySize } from "@/lib/body-size";
+import { sanitizeText } from "@/lib/sanitize";
+import { getClientIp } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -11,9 +12,17 @@ export const dynamic = "force-dynamic";
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
+// First-run-only restore. Refuses once any User row exists, so an attacker
+// can't post a crafted dump to a live server. The admin route at
+// /api/admin/backup/db-import handles every other case.
 export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
+  const userCount = await prisma.user.count();
+  if (userCount > 0) {
+    return NextResponse.json(
+      { error: "Setup import is only available on a fresh server with no users." },
+      { status: 409 },
+    );
+  }
 
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
@@ -49,27 +58,33 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: result.error }, { status: result.status });
   }
 
+  // Audit row is written outside the import transaction, so it survives the
+  // TRUNCATE inside processBackupImport. userId is null because no admin
+  // session exists yet — the imported users haven't logged in.
   try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "BACKUP_IMPORT",
-      target: "backup:full-db",
-      details: {
-        format: "sql",
-        encrypted: true,
-        after: {
-          totalStatements: result.summary.total,
-          executed: result.summary.executed,
-          skipped: result.summary.skipped,
-          errors: result.summary.errors,
-        },
+    await prisma.auditLog.create({
+      data: {
+        userId: null,
+        userName: "system (setup)",
+        action: "BACKUP_IMPORT",
+        target: "backup:full-db",
+        details: JSON.stringify({
+          format: "sql",
+          encrypted: true,
+          mode: "setup",
+          after: {
+            totalStatements: result.summary.total,
+            executed: result.summary.executed,
+            skipped: result.summary.skipped,
+            errors: result.summary.errors,
+          },
+        }),
+        ipAddress: getClientIp(req.headers),
+        userAgent: sanitizeText(req.headers.get("user-agent")?.slice(0, 512) ?? ""),
       },
-      ...auditContext(req, session),
     });
   } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
+    console.error("[audit] Setup-import audit log failed:", err);
   }
 
   return NextResponse.json({

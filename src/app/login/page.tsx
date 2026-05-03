@@ -33,7 +33,7 @@ export default async function LoginPage() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center px-4"
+      className="min-h-screen flex items-start md:items-center justify-center px-4 pt-16 md:pt-0"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
     >
       <div

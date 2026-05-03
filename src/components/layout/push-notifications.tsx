@@ -126,11 +126,15 @@ export function PushNotifications() {
   if (!mounted || state === "loading") return null;
 
   if (state === "unsupported") {
+    // Mobile audit F-1.9: chrome icon button — 32x32 hit area + aria-label so
+    // VoiceOver/TalkBack announce purpose (title alone is unreliable on mobile).
     return (
       <button
         disabled
+        aria-label="Push notifications not supported"
         title="Push notifications are not supported in this browser"
-        className="flex items-center gap-1.5 text-xs text-zinc-700 cursor-not-allowed"
+        className="ds-tap inline-flex items-center justify-center text-zinc-700 cursor-not-allowed shrink-0"
+        style={{ width: 32, height: 32, borderRadius: 6 }}
       >
         <BellOff className="w-4 h-4" />
       </button>
@@ -141,8 +145,10 @@ export function PushNotifications() {
     return (
       <button
         disabled
+        aria-label="Notifications blocked"
         title="Notifications blocked — enable them in your browser settings"
-        className="flex items-center gap-1.5 text-xs text-zinc-600 cursor-not-allowed"
+        className="ds-tap inline-flex items-center justify-center text-zinc-600 cursor-not-allowed shrink-0"
+        style={{ width: 32, height: 32, borderRadius: 6 }}
       >
         <BellOff className="w-4 h-4" />
       </button>
@@ -170,6 +176,7 @@ export function PushNotifications() {
         <button
           type="submit"
           disabled={busy}
+          aria-label="Enable push notifications for this device"
           className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50 transition-colors"
         >
           Enable
@@ -177,7 +184,9 @@ export function PushNotifications() {
         <button
           type="button"
           onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
-          className="text-zinc-500 hover:text-zinc-300 transition-colors"
+          aria-label="Cancel"
+          className="ds-tap inline-flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors shrink-0"
+          style={{ width: 28, height: 28 }}
         >
           <X className="w-3.5 h-3.5" />
         </button>
@@ -191,20 +200,24 @@ export function PushNotifications() {
         <button
           onClick={unsubscribe}
           disabled={busy}
+          aria-label="Disable desktop notifications"
           title="Disable desktop notifications"
-          className="flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-50"
+          className="ds-tap inline-flex items-center justify-center text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-50 shrink-0"
+          style={{ width: 32, height: 32, borderRadius: 6 }}
         >
           <Bell className="w-4 h-4" />
         </button>
         <button
           onClick={sendTest}
           disabled={testState === "sending"}
+          aria-label="Send a test notification"
           title="Send a test notification"
-          className={`flex items-center text-xs transition-colors disabled:opacity-50 ${
+          className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
             testState === "ok" ? "text-green-400" : testState === "error" ? "text-red-400" : "text-zinc-500 hover:text-zinc-300"
           }`}
+          style={{ width: 32, height: 32, borderRadius: 6 }}
         >
-          <Send className="w-3.5 h-3.5" />
+          <Send className="w-4 h-4" />
         </button>
       </div>
     );
@@ -214,8 +227,10 @@ export function PushNotifications() {
     <button
       onClick={() => setState("naming")}
       disabled={busy}
+      aria-label="Enable desktop notifications"
       title="Enable desktop notifications"
-      className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
+      className="ds-tap inline-flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50 shrink-0"
+      style={{ width: 32, height: 32, borderRadius: 6 }}
     >
       <BellOff className="w-4 h-4" />
     </button>

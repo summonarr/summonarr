@@ -116,6 +116,18 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+// GET /Users and POST /Users/{id}/Policy require RequiresElevation in Jellyfin.
+// X-MediaBrowser-Token alone does not satisfy the elevation check in newer versions;
+// the full Authorization: MediaBrowser ... header is required to establish admin context.
+function jellyfinAdminHeaders(apiKey: string): Record<string, string> {
+  return {
+    "Authorization": `MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0", Token="${apiKey}"`,
+    "X-MediaBrowser-Token": apiKey,
+    "Content-Type": "application/json",
+    "User-Agent": "Summonarr/1.0 (Node.js)",
+  };
+}
+
 interface JellyfinItem {
   Id?:              string;
   ProviderIds?:     Record<string, string>;
@@ -635,24 +647,74 @@ export interface JellyfinUserInfo {
   id: string;
   name: string;
   email?: string;
+  isAdmin: boolean;
+  downloadsEnabled: boolean;
 }
+
+type JellyfinRawUser = {
+  Id?: string;
+  Name?: string;
+  Email?: string;
+  Policy?: { IsDisabled?: boolean; IsAdministrator?: boolean; EnableContentDownloading?: boolean };
+};
 
 export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Promise<JellyfinUserInfo[]> {
   const url = `${baseUrl.replace(/\/$/, "")}/Users`;
   const res = await safeFetchAdminConfigured(url, {
-    headers: jellyfinHeaders(apiKey),
+    headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(`Jellyfin users: ${res.status}`);
 
-  const raw = (await res.json()) as Array<{ Id?: string; Name?: string; Email?: string; Policy?: { IsDisabled?: boolean } }>;
+  // Jellyfin 10.9+ may return a QueryResult wrapper { Items: [...] }
+  // rather than a plain array. Handle both.
+  const body = (await res.json()) as JellyfinRawUser[] | { Items?: JellyfinRawUser[] };
+  const raw: JellyfinRawUser[] = Array.isArray(body) ? body : (body.Items ?? []);
+
+  if (raw.length === 0) {
+    console.warn("[jellyfin] getJellyfinAllUsers returned 0 users — check API key permissions");
+  }
+
   const users: JellyfinUserInfo[] = [];
   for (const u of raw) {
     if (!u.Id || !u.Name) continue;
     const email = typeof u.Email === "string" && u.Email.includes("@") ? u.Email : undefined;
-    users.push({ id: u.Id, name: u.Name, email });
+    users.push({
+      id: u.Id,
+      name: u.Name,
+      email,
+      isAdmin: u.Policy?.IsAdministrator === true,
+      // Treat an absent Policy or absent EnableContentDownloading as enabled
+      // (Jellyfin's default). Only false is explicitly disabled.
+      downloadsEnabled: u.Policy?.EnableContentDownloading !== false,
+    });
   }
   return users;
+}
+
+export async function setJellyfinDownloadPolicy(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  enabled: boolean,
+): Promise<void> {
+  const base = baseUrl.replace(/\/$/, "");
+  const userRes = await safeFetchAdminConfigured(`${base}/Users/${userId}`, {
+    headers: jellyfinAdminHeaders(apiKey),
+    timeoutMs: 10_000,
+  });
+  if (!userRes.ok) throw new Error(`Jellyfin fetch user ${userId}: ${userRes.status}`);
+
+  const userData = (await userRes.json()) as { Policy?: Record<string, unknown> };
+  const policy = { ...(userData.Policy ?? {}), EnableContentDownloading: enabled };
+
+  const patchRes = await safeFetchAdminConfigured(`${base}/Users/${userId}/Policy`, {
+    method: "POST",
+    headers: jellyfinAdminHeaders(apiKey),
+    body: JSON.stringify(policy),
+    timeoutMs: 10_000,
+  });
+  if (!patchRes.ok) throw new Error(`Jellyfin set policy ${userId}: ${patchRes.status}`);
 }
 
 export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Promise<number> {
