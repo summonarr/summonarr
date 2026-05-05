@@ -25,11 +25,16 @@ export async function PATCH(
 
   const record = await prisma.mediaServerUser.findUnique({
     where: { id },
-    select: { isServerAdmin: true },
+    select: { isServerAdmin: true, source: true },
   });
   if (!record) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (record.isServerAdmin) {
     return NextResponse.json({ error: "Cannot change download policy for server admins" }, { status: 400 });
+  }
+  // Plex's sharing API does not expose a working remote toggle for allowSync,
+  // so download policy is Jellyfin-only. The UI hides the toggle for Plex rows.
+  if (record.source === "plex") {
+    return NextResponse.json({ error: "Plex download policy is not managed by Summonarr" }, { status: 400 });
   }
 
   await prisma.mediaServerUser.update({

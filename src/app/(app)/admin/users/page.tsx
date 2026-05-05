@@ -12,7 +12,7 @@ export default async function UsersPage() {
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const [users, localAuthRows, serverUsers, autoDisableRow, plexEnforceRow] = await Promise.all([
+  const [users, localAuthRows, serverUsers, autoDisableRow] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -59,14 +59,12 @@ export default async function UsersPage() {
       orderBy: [{ source: "asc" }, { username: "asc" }],
     }),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
-    prisma.setting.findUnique({ where: { key: "downloadPlexEnforceEnabled" } }),
   ]);
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
 
   const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
   const autoDisableNew = autoDisableRow?.value === "true";
-  const plexEnforceEnabled = plexEnforceRow?.value !== "false";
 
   return (
     <div className="ds-page-enter">
@@ -114,15 +112,13 @@ export default async function UsersPage() {
           <div className="mb-4">
             <h2 className="text-base font-semibold text-white">Media Server Users</h2>
             <p className="text-xs text-zinc-500 mt-0.5">
-              All Plex and Jellyfin accounts. Download permissions are synced and enforced each run.
+              All Plex and Jellyfin accounts. Jellyfin download permissions are synced and enforced each run; Plex permissions must be managed in Plex.
             </p>
           </div>
           <ServerUserTable
             users={serverUsers}
-            hasPlex={hasPlex}
             hasJellyfin={hasJellyfin}
             autoDisableNew={autoDisableNew}
-            plexEnforceEnabled={plexEnforceEnabled}
           />
         </div>
       )}

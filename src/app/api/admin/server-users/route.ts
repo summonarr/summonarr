@@ -29,7 +29,7 @@ export async function PATCH(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
-  let body: { autoDisableNew?: boolean; plexEnforceEnabled?: boolean };
+  let body: { autoDisableNew?: boolean };
   try {
     body = await req.json();
   } catch {
@@ -44,17 +44,6 @@ export async function PATCH(req: NextRequest) {
       where: { key: "downloadAutoDisableNew" },
       create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
       update: { value: body.autoDisableNew ? "true" : "false" },
-    });
-  }
-
-  if (body.plexEnforceEnabled !== undefined) {
-    if (typeof body.plexEnforceEnabled !== "boolean") {
-      return NextResponse.json({ error: "plexEnforceEnabled must be a boolean" }, { status: 400 });
-    }
-    await prisma.setting.upsert({
-      where: { key: "downloadPlexEnforceEnabled" },
-      create: { key: "downloadPlexEnforceEnabled", value: body.plexEnforceEnabled ? "true" : "false" },
-      update: { value: body.plexEnforceEnabled ? "true" : "false" },
     });
   }
 

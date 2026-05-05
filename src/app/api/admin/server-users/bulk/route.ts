@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
-import { getPlexAccounts, setPlexDownloadPolicy } from "@/lib/plex";
 
 export async function POST(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
@@ -17,66 +16,41 @@ export async function POST(req: NextRequest) {
 
   const { source, downloadsEnabled = false } = body;
 
-  if (source !== undefined && source !== "plex" && source !== "jellyfin") {
-    return NextResponse.json({ error: "source must be 'plex', 'jellyfin', or omitted for both" }, { status: 400 });
+  // Plex is intentionally not supported — its sharing API has no working remote toggle.
+  if (source !== "jellyfin") {
+    return NextResponse.json({ error: "source must be 'jellyfin'" }, { status: 400 });
   }
 
-  const where = {
-    isServerAdmin: false,
-    ...(source ? { source } : {}),
-  };
+  const where = { isServerAdmin: false, source: "jellyfin" };
 
   await prisma.mediaServerUser.updateMany({ where, data: { downloadsEnabled } });
 
   const targets = await prisma.mediaServerUser.findMany({
     where,
-    select: { source: true, sourceUserId: true, username: true },
+    select: { sourceUserId: true, username: true },
   });
 
-  const [jellyfinUrlRow, jellyfinKeyRow, plexServerUrlRow, plexTokenRow] = await Promise.all([
+  const [jellyfinUrlRow, jellyfinKeyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
   ]);
-
-  const needsPlex = targets.some((u) => u.source === "plex");
-  const plexSharingIds = new Map<string, string>();
-  if (needsPlex && plexServerUrlRow?.value && plexTokenRow?.value) {
-    try {
-      const accounts = await getPlexAccounts(plexServerUrlRow.value, plexTokenRow.value);
-      for (const a of accounts) {
-        if (a.sharingId) plexSharingIds.set(a.id, a.sharingId);
-      }
-    } catch (err) {
-      console.warn("[server-users/bulk] Failed to fetch Plex accounts:", err instanceof Error ? err.message : String(err));
-    }
-  }
 
   let pushed = 0;
   let errors = 0;
 
-  await Promise.allSettled(
-    targets.map(async (u) => {
-      try {
-        if (u.source === "jellyfin" && jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
+  if (jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
+    await Promise.allSettled(
+      targets.map(async (u) => {
+        try {
           await setJellyfinDownloadPolicy(jellyfinUrlRow.value, jellyfinKeyRow.value, u.sourceUserId, downloadsEnabled);
           pushed++;
-        } else if (u.source === "plex" && plexTokenRow?.value && plexServerUrlRow?.value) {
-          const sharingId = plexSharingIds.get(u.sourceUserId);
-          if (!sharingId) {
-            console.warn(`[server-users/bulk] No sharingId — skipping Plex user ${u.username}`);
-          } else {
-            await setPlexDownloadPolicy(plexTokenRow.value, sharingId, downloadsEnabled, plexServerUrlRow.value);
-            pushed++;
-          }
+        } catch (err) {
+          console.warn(`[server-users/bulk] Failed to push policy for jellyfin/${u.username}:`, err instanceof Error ? err.message : String(err));
+          errors++;
         }
-      } catch (err) {
-        console.warn(`[server-users/bulk] Failed to push policy for ${u.source}/${u.username}:`, err instanceof Error ? err.message : String(err));
-        errors++;
-      }
-    }),
-  );
+      }),
+    );
+  }
 
   return NextResponse.json({ ok: true, pushed, errors });
 }

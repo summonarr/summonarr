@@ -655,25 +655,18 @@ export interface PlexAccountInfo {
   email: string;
   thumb: string;
   isAdmin: boolean;
-  downloadsEnabled: boolean;
-  sharingId: string | null;
 }
 
 export async function getPlexAccounts(
   serverUrl: string,
   adminToken: string,
-  cachedMachineId?: string | null,
 ): Promise<PlexAccountInfo[]> {
   const accounts: PlexAccountInfo[] = [];
-
-  // Accept a pre-fetched machineId to avoid a second HTTP call when the caller
-  // already has it (e.g. syncPlexPolicies fetches it once and reuses here).
-  const machineId = cachedMachineId !== undefined ? cachedMachineId : await getPlexMachineId(serverUrl, adminToken);
 
   try {
     // The server owner doesn't appear in the shared-users list, so fetch separately and assign a synthetic id of "1"
     const owner = await getPlexUser(adminToken);
-    accounts.push({ id: "1", name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true, downloadsEnabled: true, sharingId: null });
+    accounts.push({ id: "1", name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true });
   } catch (err) {
     console.warn("[plex] Failed to fetch server owner info:", err instanceof Error ? err.message : String(err));
   }
@@ -694,33 +687,12 @@ export async function getPlexAccounts(
         const emailMatch = block.match(/\bemail="([^"]+)"/);
         const thumbMatch = block.match(/\bthumb="([^"]+)"/);
         if (idMatch && nameMatch) {
-          // Parse allowSync and sharing relationship ID from the <Server> child element.
-          // The sharing ID (Server/@id) is what POST /shared_servers/{id} requires —
-          // it is NOT the same as the user's Plex account ID.
-          // Use [^>]* not [^/]* — the accessToken attribute value contains "/" which
-          // would cut the match short before reaching machineIdentifier.
-          let downloadsEnabled = true;
-          let sharingId: string | null = null;
-          if (machineId) {
-            const serverTags = [...block.matchAll(/<Server\b([^>]*)>/g)];
-            for (const [, attrs] of serverTags) {
-              if (attrs.includes(`machineIdentifier="${machineId}"`)) {
-                const syncMatch = attrs.match(/\ballowSync="([01])"/);
-                if (syncMatch) downloadsEnabled = syncMatch[1] === "1";
-                const serverIdMatch = attrs.match(/\bid="(\d+)"/);
-                if (serverIdMatch) sharingId = serverIdMatch[1];
-                break;
-              }
-            }
-          }
           accounts.push({
             id: idMatch[1],
             name: nameMatch[1],
             email: emailMatch?.[1]?.toLowerCase() ?? "",
             thumb: thumbMatch?.[1] ?? "",
             isAdmin: false,
-            downloadsEnabled,
-            sharingId,
           });
         }
       }
@@ -740,29 +712,6 @@ export async function getPlexMachineId(serverUrl: string, adminToken: string): P
     return data.MediaContainer?.machineIdentifier ?? null;
   } catch {
     return null;
-  }
-}
-
-export async function setPlexDownloadPolicy(
-  adminToken: string,
-  sharingId: string,
-  enabled: boolean,
-  serverUrl: string,
-): Promise<void> {
-  const machineId = await getPlexMachineId(serverUrl, adminToken);
-  if (!machineId) throw new Error(`Plex set sharing policy ${sharingId}: could not resolve machineId`);
-
-  const url = `https://plex.tv/api/servers/${encodeURIComponent(machineId)}/shared_servers/${encodeURIComponent(sharingId)}`;
-  const res = await safeFetchTrusted(url, {
-    allowedHosts: PLEX_TV_HOSTS,
-    method: "PUT",
-    headers: { ...PLEX_HEADERS, "X-Plex-Token": adminToken, "Content-Type": "application/json" },
-    body: JSON.stringify({ server_id: machineId, shared_server: { allowSync: enabled ? 1 : 0 } }),
-    timeoutMs: 10_000,
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Plex set sharing policy ${sharingId}: ${res.status} — ${body.slice(0, 200)}`);
   }
 }
 
