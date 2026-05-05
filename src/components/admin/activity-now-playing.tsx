@@ -253,7 +253,16 @@ function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; moun
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-xs">
             <div className="flex items-center gap-1.5 text-zinc-300">
               <User className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-              <span className="font-medium truncate">{s.serverUsername}</span>
+              {s.mediaServerUserId ? (
+                <Link
+                  href={`/admin/activity/user/${s.mediaServerUserId}`}
+                  className="font-medium truncate hover:text-indigo-400 transition-colors"
+                >
+                  {s.serverUsername}
+                </Link>
+              ) : (
+                <span className="font-medium truncate">{s.serverUsername}</span>
+              )}
             </div>
 
             {(s.platform || s.player) && (

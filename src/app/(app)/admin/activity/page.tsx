@@ -327,6 +327,7 @@ export default async function ActivityPage({
     id: s.id,
     source: s.source,
     state: s.state,
+    mediaServerUserId: s.mediaServerUserId,
     serverUsername: s.serverUsername,
     title: s.title,
     tmdbId: s.effectiveTmdbId,

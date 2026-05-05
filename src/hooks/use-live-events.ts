@@ -18,6 +18,7 @@ export interface ActiveSessionLive {
   id: string;
   source: string;
   state: string;
+  mediaServerUserId: string;
   serverUsername: string;
   title: string;
   tmdbId: number | null;
