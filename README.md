@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.9.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.9.5 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,17 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.9.5
+
+**Added**
+
+- Live Watch on the admin Activity page — active sessions and recent plays refresh in real time via SSE.
+- Jellyfin play-history capture: a dedicated cron job (`sync-jellyfin-history`) backfills completed sessions into Summonarr's history.
+
+**Changed**
+
+- Plex user download-permission controls removed from the admin Users page. The Plex sharing API does not expose a working remote toggle for `allowSync`, so the previous toggle persisted to the DB but never reflected on Plex. Jellyfin download enforcement is unchanged. Manage Plex download permissions in Plex itself.
+
 ### v0.9.4
 
 **Added**
@@ -216,7 +227,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.9.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.9.5 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
