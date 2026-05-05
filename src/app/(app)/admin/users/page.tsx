@@ -112,12 +112,11 @@ export default async function UsersPage() {
           <div className="mb-4">
             <h2 className="text-base font-semibold text-white">Media Server Users</h2>
             <p className="text-xs text-zinc-500 mt-0.5">
-              All Plex and Jellyfin accounts. Download permissions are synced and enforced each run.
+              All Plex and Jellyfin accounts. Jellyfin download permissions are synced and enforced each run; Plex permissions must be managed in Plex.
             </p>
           </div>
           <ServerUserTable
             users={serverUsers}
-            hasPlex={hasPlex}
             hasJellyfin={hasJellyfin}
             autoDisableNew={autoDisableNew}
           />

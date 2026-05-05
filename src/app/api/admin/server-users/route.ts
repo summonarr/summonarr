@@ -36,15 +36,16 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  if (typeof body.autoDisableNew !== "boolean") {
-    return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
+  if (body.autoDisableNew !== undefined) {
+    if (typeof body.autoDisableNew !== "boolean") {
+      return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
+    }
+    await prisma.setting.upsert({
+      where: { key: "downloadAutoDisableNew" },
+      create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
+      update: { value: body.autoDisableNew ? "true" : "false" },
+    });
   }
-
-  await prisma.setting.upsert({
-    where: { key: "downloadAutoDisableNew" },
-    create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
-    update: { value: body.autoDisableNew ? "true" : "false" },
-  });
 
   return NextResponse.json({ ok: true });
 }

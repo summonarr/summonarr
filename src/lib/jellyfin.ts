@@ -226,6 +226,7 @@ async function fetchPage<T>(
   startIndex: number,
   limit: number,
   retries = PAGE_RETRY_ATTEMPTS,
+  headers?: Record<string, string>,
 ): Promise<{ items: T[]; total: number }> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -235,7 +236,7 @@ async function fetchPage<T>(
     }
     try {
       const res = await safeFetchAdminConfigured(`${baseQuery}&StartIndex=${startIndex}&Limit=${limit}`, {
-        headers: jellyfinHeaders(apiKey),
+        headers: headers ?? jellyfinHeaders(apiKey),
         timeoutMs: PAGE_TIMEOUT_MS,
       });
       if (!res.ok) throw new Error(`Jellyfin fetch failed: ${res.status} at StartIndex=${startIndex}`);
@@ -490,7 +491,7 @@ export async function getJellyfinEpisodeSeriesIds(
     const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
     try {
       const res = await safeFetchAdminConfigured(url, {
-        headers: jellyfinHeaders(apiKey),
+        headers: jellyfinAdminHeaders(apiKey),
         timeoutMs: FETCH_TIMEOUT_MS,
       });
       if (!res.ok) continue;
@@ -720,7 +721,7 @@ export async function setJellyfinDownloadPolicy(
 export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Promise<number> {
   const url = `${baseUrl.replace(/\/$/, "")}/Users`;
   const res = await safeFetchAdminConfigured(url, {
-    headers: jellyfinHeaders(apiKey),
+    headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: 10_000,
   });
   if (!res.ok) throw new Error(`Jellyfin users: ${res.status}`);
@@ -770,8 +771,10 @@ export async function getJellyfinUserPlayHistory(
   let totalRecords = Infinity;
   const pageSize = LIBRARY_PAGE_SIZE;
 
+  // /Users/{id}/Items with another user's ID requires admin context to read their play history.
+  const adminHeaders = jellyfinAdminHeaders(apiKey);
   while (startIndex < totalRecords) {
-    const page = await fetchPage<JellyfinPlayedItemRaw>(query, apiKey, startIndex, pageSize);
+    const page = await fetchPage<JellyfinPlayedItemRaw>(query, apiKey, startIndex, pageSize, PAGE_RETRY_ATTEMPTS, adminHeaders);
     if (startIndex === 0) totalRecords = page.total;
 
     const items: JellyfinPlayedItem[] = page.items
@@ -830,7 +833,7 @@ export async function getJellyfinPlaybackReporting(
       const res = await safeFetchAdminConfigured(
         `${base}/user_usage_stats/PlayActivity?Days=10000&EndDate=2099-01-01${dateFilter}&StartIndex=${page * 200}&Limit=200`,
         {
-          headers: jellyfinHeaders(apiKey),
+          headers: jellyfinAdminHeaders(apiKey),
           timeoutMs: FETCH_TIMEOUT_MS,
         },
       );

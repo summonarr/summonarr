@@ -20,7 +20,6 @@ interface ServerUser {
 
 interface ServerUserTableProps {
   users: ServerUser[];
-  hasPlex: boolean;
   hasJellyfin: boolean;
   autoDisableNew: boolean;
 }
@@ -135,7 +134,7 @@ function BulkBar({
   source,
   label,
 }: {
-  source: "plex" | "jellyfin";
+  source: "jellyfin";
   label: string;
 }) {
   const router = useRouter();
@@ -203,9 +202,9 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   return (
     <div className="flex items-center gap-2.5 py-2 px-3 rounded-lg border border-zinc-800 bg-zinc-900/60">
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-medium text-zinc-200">Auto-disable downloads for new users</p>
+        <p className="text-xs font-medium text-zinc-200">Auto-disable downloads for new Jellyfin users</p>
         <p className="text-[11px] text-zinc-500 mt-0.5">
-          New accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.
+          New Jellyfin accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.
         </p>
       </div>
       <button
@@ -225,7 +224,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   );
 }
 
-export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }: ServerUserTableProps) {
+export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUserTableProps) {
   const [search, setSearch] = useState("");
 
   const filtered = search.trim()
@@ -290,13 +289,17 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
             )}
           </td>
 
-          {/* Downloads toggle */}
+          {/* Downloads toggle (Jellyfin only — Plex sharing API does not support remote toggle) */}
           <td className="py-2.5 pl-3 pr-4 text-right">
-            <DownloadToggle
-              userId={u.id}
-              enabled={u.downloadsEnabled}
-              disabled={u.isServerAdmin}
-            />
+            {source === "jellyfin" ? (
+              <DownloadToggle
+                userId={u.id}
+                enabled={u.downloadsEnabled}
+                disabled={u.isServerAdmin}
+              />
+            ) : (
+              <span className="text-[11px] text-zinc-600">—</span>
+            )}
           </td>
         </tr>
       );
@@ -306,7 +309,7 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
   if (users.length === 0) {
     return (
       <div className="flex flex-col items-start gap-3 py-2">
-        <AutoDisableToggle initial={autoDisableNew} />
+        {hasJellyfin && <AutoDisableToggle initial={autoDisableNew} />}
         <p className="text-sm text-zinc-500">No media server users synced yet.</p>
         <SyncUsersButton />
       </div>
@@ -315,12 +318,11 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
 
   return (
     <div className="space-y-4">
-      <AutoDisableToggle initial={autoDisableNew} />
+      {hasJellyfin && <AutoDisableToggle initial={autoDisableNew} />}
 
       {/* Toolbar: bulk controls + sync button */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-4">
-          {hasPlex && <BulkBar source="plex" label="Plex" />}
           {hasJellyfin && <BulkBar source="jellyfin" label="Jellyfin" />}
         </div>
         <SyncUsersButton />
@@ -353,8 +355,13 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
       </div>
 
       <p className="text-[11px] text-zinc-600">
-        {users.length} server {users.length === 1 ? "user" : "users"} ·{" "}
-        {users.filter((u) => !u.isServerAdmin && u.downloadsEnabled === false).length} with downloads disabled
+        {users.length} server {users.length === 1 ? "user" : "users"}
+        {hasJellyfin && (
+          <>
+            {" · "}
+            {jellyfinUsers.filter((u) => !u.isServerAdmin && u.downloadsEnabled === false).length} Jellyfin user{jellyfinUsers.filter((u) => !u.isServerAdmin && u.downloadsEnabled === false).length === 1 ? "" : "s"} with downloads disabled
+          </>
+        )}
       </p>
     </div>
   );

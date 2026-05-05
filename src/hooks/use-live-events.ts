@@ -11,7 +11,8 @@ export type LiveEvent =
   | { type: "issue:updated"; issueId: string; status: string }
   | { type: "issue:deleted"; issueId: string }
   | { type: "issuemessage:created"; issueId: string }
-  | { type: "activity:sessions"; sessions: ActiveSessionLive[] };
+  | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
+  | { type: "activity:history-updated" };
 
 export interface ActiveSessionLive {
   id: string;

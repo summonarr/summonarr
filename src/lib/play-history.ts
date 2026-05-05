@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { emitSSE } from "./sse-emitter";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 const settingsCache = new Map<string, { value: string | null; expiresAt: number }>();
@@ -136,9 +137,9 @@ export function computePlaytimeIncrement(
 }
 
 // Build a finalized session to pass to recordCompletedSession. Callers that close a "live" session
-// (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt and
-// the close event is counted. cleanupStaleSessions skips this — a stale session has no signal it
-// was still playing.
+// (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt
+// and the close event is counted. cleanupStaleSessions does not use this — a stale session has no
+// signal it was still playing.
 export function applyFinalTick(
   session: ActiveSession,
   now: Date,
@@ -154,10 +155,13 @@ export function applyFinalTick(
 }
 
 export async function recordCompletedSession(session: ActiveSession): Promise<void> {
-  const playDurationMs = Number(session.playtimeMs);
+  // Jellyfin webhooks don't reliably accumulate playtimeMs (no Progress events for short watches,
+  // and pre-stop pauses leave state="paused" so applyFinalTick contributes 0). progressMs (playhead
+  // at stop) is always populated and is the v0.9.0 source of truth. Plex accumulates playtimeMs via
+  // its richer event stream, so the max of the two yields the right answer for both sources.
+  const playDurationMs = Math.max(Number(session.playtimeMs), Number(session.progressMs));
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
-  // recordCompletedSession must be called exactly once per session end — upsert on sourceSessionId enforces idempotency
   if (EXCLUDED_USERNAMES.has(session.serverUsername)) {
     await prisma.activeSession.delete({ where: { id: session.id } }).catch(() => {});
     return;
@@ -196,6 +200,12 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     }
   }
 
+  // Jellyfin (and some Plex clients) reuse PlaySessionId across distinct watches — DLNA, browser
+  // tabs, and per-device session caches all reproduce it. Combining sessionKey with the playback's
+  // own startedAt yields a key that's unique per watch instance while still being deterministic
+  // across webhook replays of the same Stop event.
+  const uniqueSourceSessionId = `${session.sessionKey}:${session.startedAt.toISOString()}`;
+
   const historyData = {
     source: session.source,
     startedAt: session.startedAt,
@@ -214,7 +224,7 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     seasonNumber: session.seasonNumber,
     episodeNumber: session.episodeNumber,
     episodeTitle: session.episodeTitle,
-    sourceSessionId: session.sessionKey,
+    sourceSessionId: uniqueSourceSessionId,
     sourceItemId: session.sourceItemId,
     platform: session.platform,
     player: session.player,
@@ -234,7 +244,7 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     // update:{} means a duplicate webhook replay is a no-op — the first write wins
     await tx.playHistory.upsert({
       where: {
-        source_sourceSessionId: { source: session.source, sourceSessionId: session.sessionKey },
+        source_sourceSessionId: { source: session.source, sourceSessionId: uniqueSourceSessionId },
       },
       create: historyData,
       update: {},
@@ -242,6 +252,10 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
 
     await tx.activeSession.delete({ where: { id: session.id } }).catch(() => {});
   });
+
+  // Invalidate cached stats so the next page load reflects the new record
+  clearActivityCache();
+  emitSSE({ type: "activity:history-updated" });
 }
 
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
@@ -250,6 +264,8 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
     where: { lastSeenAt: { lt: cutoff } },
   });
 
+  // No final tick: a stale session has no signal it was still playing — capping wall-clock from
+  // lastSeenAt would falsely inflate playtimeMs by up to MAX_PLAYTIME_DELTA_MS for an abandoned watch.
   for (const session of stale) {
     try {
       await recordCompletedSession(session);

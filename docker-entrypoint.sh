@@ -135,8 +135,10 @@ _cron_loop() {
   PURGE_SESSIONS_NEXT=$((NOW_INIT + 600))
   SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
+  # Stagger Jellyfin history import well after startup so the library sync runs first
+  JF_HISTORY_NEXT=$((NOW_INIT + 300))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  JFHistory: ${JF_HISTORY_SYNC_INTERVAL:-86400}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -179,6 +181,10 @@ _cron_loop() {
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
       _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000/api/cron/trash-sync}" "trash-sync"
       TRASH_SYNC_NEXT=$((NOW + ${TRASH_SYNC_INTERVAL:-86400}))
+    fi
+    if [ "$NOW" -ge "$JF_HISTORY_NEXT" ]; then
+      _cron_sync "${JF_HISTORY_SYNC_URL:-http://localhost:3000/api/cron/sync-jellyfin-history}" "jf-history"
+      JF_HISTORY_NEXT=$((NOW + ${JF_HISTORY_SYNC_INTERVAL:-86400}))
     fi
   done
 }
