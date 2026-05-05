@@ -4,6 +4,7 @@ import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopR
 import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
 const BATCH = 5;
@@ -37,6 +38,14 @@ async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped:
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const [mdblistKey, omdbKey] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "mdblistApiKey" } }),
+    prisma.setting.findUnique({ where: { key: "omdbApiKey" } }),
+  ]);
+  if (!mdblistKey?.value && !omdbKey?.value) {
+    return NextResponse.json({ skipped: true, reason: "no ratings API key configured" });
   }
 
   return withAdvisoryLock(

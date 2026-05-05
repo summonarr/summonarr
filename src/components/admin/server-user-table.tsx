@@ -23,6 +23,7 @@ interface ServerUserTableProps {
   hasPlex: boolean;
   hasJellyfin: boolean;
   autoDisableNew: boolean;
+  plexEnforceEnabled: boolean;
 }
 
 const sourceStyles: Record<string, string> = {
@@ -225,7 +226,54 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   );
 }
 
-export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }: ServerUserTableProps) {
+function PlexEnforceToggle({ initial }: { initial: boolean }) {
+  const router = useRouter();
+  const [on, setOn] = useState(initial);
+  const [loading, setLoading] = useState(false);
+
+  async function toggle() {
+    const next = !on;
+    setOn(next);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/admin/server-users", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plexEnforceEnabled: next }),
+      });
+      if (!res.ok) setOn(on);
+      else router.refresh();
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2.5 py-2 px-3 rounded-lg border border-zinc-800 bg-zinc-900/60">
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-medium text-zinc-200">Enforce Plex download policy on sync</p>
+        <p className="text-[11px] text-zinc-500 mt-0.5">
+          When enabled, the scheduled sync pushes download restrictions to Plex. Disable if Plex enforcement always fails.
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        disabled={loading}
+        onClick={toggle}
+        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-zinc-700"}`}
+      >
+        {loading
+          ? <Loader2 className="w-3 h-3 text-white absolute left-1 animate-spin" />
+          : <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
+        }
+      </button>
+    </div>
+  );
+}
+
+export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew, plexEnforceEnabled }: ServerUserTableProps) {
   const [search, setSearch] = useState("");
 
   const filtered = search.trim()
@@ -307,6 +355,7 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
     return (
       <div className="flex flex-col items-start gap-3 py-2">
         <AutoDisableToggle initial={autoDisableNew} />
+        {hasPlex && <PlexEnforceToggle initial={plexEnforceEnabled} />}
         <p className="text-sm text-zinc-500">No media server users synced yet.</p>
         <SyncUsersButton />
       </div>
@@ -316,6 +365,7 @@ export function ServerUserTable({ users, hasPlex, hasJellyfin, autoDisableNew }:
   return (
     <div className="space-y-4">
       <AutoDisableToggle initial={autoDisableNew} />
+      {hasPlex && <PlexEnforceToggle initial={plexEnforceEnabled} />}
 
       {/* Toolbar: bulk controls + sync button */}
       <div className="flex flex-wrap items-center justify-between gap-3">

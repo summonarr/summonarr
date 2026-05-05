@@ -21,18 +21,21 @@ interface PolicySyncResult {
 export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
 
-  const [jellyfinUrlRow, jellyfinKeyRow, plexServerUrlRow, plexTokenRow, autoDisableRow] = await Promise.all([
+  const [jellyfinUrlRow, jellyfinKeyRow, plexServerUrlRow, plexTokenRow, autoDisableRow, plexEnforceRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
     prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
     prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
+    prisma.setting.findUnique({ where: { key: "downloadPlexEnforceEnabled" } }),
   ]);
 
   // When true, new users that appear for the first time are seeded with
   // downloadsEnabled=false instead of inheriting the server's current value.
   // Users already in the DB with downloadsEnabled=true are never touched.
   const autoDisableNew = autoDisableRow?.value === "true";
+  // Defaults to true — enforcement is only skipped when explicitly set to "false".
+  const plexEnforceEnabled = plexEnforceRow?.value !== "false";
 
   const tasks: Promise<PolicySyncResult>[] = [];
 
@@ -41,7 +44,7 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   }
 
   if (plexServerUrlRow?.value && plexTokenRow?.value) {
-    tasks.push(syncPlexPolicies(plexServerUrlRow.value, plexTokenRow.value, autoDisableNew));
+    tasks.push(syncPlexPolicies(plexServerUrlRow.value, plexTokenRow.value, autoDisableNew, plexEnforceEnabled));
   }
 
   const settled = await Promise.allSettled(tasks);
@@ -150,7 +153,7 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   return result;
 }
 
-async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
+async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisableNew: boolean, enforceEnabled = true): Promise<PolicySyncResult> {
   const result: PolicySyncResult = { source: "plex", upserted: 0, enforced: 0, errors: 0 };
 
   let users;
@@ -217,9 +220,13 @@ async function syncPlexPolicies(serverUrl: string, adminToken: string, autoDisab
       });
       result.upserted++;
 
-      if (!u.isAdmin && downloadsEnabled === false && u.sharingId) {
+      // Enforce whenever DB intent differs from what Plex currently reports.
+      // This handles both disabling (downloadsEnabled=false) AND re-enabling
+      // (downloadsEnabled=true) users whose Plex state was changed externally.
+      // Skipped when enforceEnabled=false (admin toggle in the server users page).
+      if (enforceEnabled && !u.isAdmin && u.sharingId && downloadsEnabled !== u.downloadsEnabled) {
         try {
-          await setPlexDownloadPolicy(adminToken, u.sharingId, false);
+          await setPlexDownloadPolicy(adminToken, u.sharingId, downloadsEnabled, serverUrl);
           result.enforced++;
         } catch (err) {
           console.warn(`[download-policy] Plex enforce failed for ${u.name}:`, err instanceof Error ? err.message : String(err));
@@ -271,15 +278,12 @@ export async function enforceUserDownloadPolicy(mediaServerUserId: string): Prom
       prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
     ]);
     if (!tokenRow?.value || !serverUrlRow?.value) return;
-
-    // sharingId is not stored in the DB — look it up live from the XML.
-    // getPlexAccounts fetches machineId internally; accounts include sharingId per user.
     const accounts = await getPlexAccounts(serverUrlRow.value, tokenRow.value);
     const account = accounts.find((a) => a.id === record.sourceUserId);
     if (!account?.sharingId) {
       console.warn(`[download-policy] No sharingId for Plex user ${record.username} — skipping enforce`);
       return;
     }
-    await setPlexDownloadPolicy(tokenRow.value, account.sharingId, record.downloadsEnabled);
+    await setPlexDownloadPolicy(tokenRow.value, account.sharingId, record.downloadsEnabled, serverUrlRow.value);
   }
 }

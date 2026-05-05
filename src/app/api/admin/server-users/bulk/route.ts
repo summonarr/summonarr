@@ -40,18 +40,16 @@ export async function POST(req: NextRequest) {
     prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
   ]);
 
-  // One XML fetch builds accountId → sharingId for all Plex users.
-  // sharingId (<Server id> from /api/users) is required by PUT /api/v2/sharings/{id}.
-  const plexSharingMap = new Map<string, string>();
   const needsPlex = targets.some((u) => u.source === "plex");
+  const plexSharingIds = new Map<string, string>();
   if (needsPlex && plexServerUrlRow?.value && plexTokenRow?.value) {
     try {
       const accounts = await getPlexAccounts(plexServerUrlRow.value, plexTokenRow.value);
       for (const a of accounts) {
-        if (a.sharingId) plexSharingMap.set(a.id, a.sharingId);
+        if (a.sharingId) plexSharingIds.set(a.id, a.sharingId);
       }
     } catch (err) {
-      console.warn("[server-users/bulk] Failed to fetch Plex sharing IDs:", err instanceof Error ? err.message : String(err));
+      console.warn("[server-users/bulk] Failed to fetch Plex accounts:", err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -64,14 +62,14 @@ export async function POST(req: NextRequest) {
         if (u.source === "jellyfin" && jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
           await setJellyfinDownloadPolicy(jellyfinUrlRow.value, jellyfinKeyRow.value, u.sourceUserId, downloadsEnabled);
           pushed++;
-        } else if (u.source === "plex" && plexTokenRow?.value) {
-          const sharingId = plexSharingMap.get(u.sourceUserId);
+        } else if (u.source === "plex" && plexTokenRow?.value && plexServerUrlRow?.value) {
+          const sharingId = plexSharingIds.get(u.sourceUserId);
           if (!sharingId) {
-            console.warn(`[server-users/bulk] No sharingId for Plex user ${u.username} — skipping`);
-            return;
+            console.warn(`[server-users/bulk] No sharingId — skipping Plex user ${u.username}`);
+          } else {
+            await setPlexDownloadPolicy(plexTokenRow.value, sharingId, downloadsEnabled, plexServerUrlRow.value);
+            pushed++;
           }
-          await setPlexDownloadPolicy(plexTokenRow.value, sharingId, downloadsEnabled);
-          pushed++;
         }
       } catch (err) {
         console.warn(`[server-users/bulk] Failed to push policy for ${u.source}/${u.username}:`, err instanceof Error ? err.message : String(err));

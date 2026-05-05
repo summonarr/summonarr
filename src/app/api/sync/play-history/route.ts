@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { auth, isTokenExpired } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import {
@@ -13,28 +11,13 @@ import {
   resolveShowTmdbId,
   computePlaytimeIncrement,
   applyFinalTick,
+  MAX_PLAYTIME_DELTA_MS,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, type PlexSessionData } from "@/lib/plex";
 import { getJellyfinSessions, type JellyfinSessionData } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
 import { posterUrl } from "@/lib/tmdb-types";
-
-function safeCompareStrings(a: string, b: string): boolean {
-  const ha = createHash("sha256").update(a).digest();
-  const hb = createHash("sha256").update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
-
-async function isAuthorized(request: NextRequest): Promise<boolean> {
-  const session = await auth();
-  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) return true;
-  const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const authHeader = request.headers.get("authorization") ?? "";
-    if (authHeader.startsWith("Bearer ") && safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
-  }
-  return false;
-}
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 async function syncPlexSessions(): Promise<{ started: number; updated: number; ended: number }> {
   const [serverUrlRow, tokenRow] = await Promise.all([
@@ -163,7 +146,7 @@ async function syncPlexSessions(): Promise<{ started: number; updated: number; e
   for (const session of activePlexSessions) {
     if (!seenSessionKeys.has(session.sessionKey)) {
       try {
-        await recordCompletedSession(applyFinalTick(session, now));
+        await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
         ended++;
       } catch {
 
@@ -237,12 +220,28 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
       jfPosterPath = core?.posterPath ?? null;
     }
 
-    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    // The webhook creates sessions keyed by payload.PlaySessionId, which may not match the
+    // Sessions API's PlaySessionId or s.Id for the same playback. Fall back to (userId, itemId)
+    // so we update the existing webhook row instead of creating a duplicate. After a match,
+    // rewrite the row's sessionKey to the API's playSessionId so subsequent polls find it directly
+    // and finalization tracking (seenSessionKeys.has(sessionKey)) stays consistent.
+    const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+    const existing =
+      (await prisma.activeSession.findUnique({ where: { id: sessionId } })) ??
+      (altSessionId ? await prisma.activeSession.findUnique({ where: { id: altSessionId } }) : null) ??
+      (await prisma.activeSession.findFirst({
+        where: { source: "jellyfin", mediaServerUserId: msUserId, sourceItemId: s.itemId },
+      }));
     if (existing) {
-      const increment = computePlaytimeIncrement(existing, now);
+      const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
+      const posDelta = positionMs - Number(existing.progressMs);
+      const increment = (posDelta > 0 || s.state === "playing")
+        ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
+        : BigInt(0);
       await prisma.activeSession.update({
-        where: { id: sessionId },
+        where: { id: existing.id },
         data: {
+          sessionKey: s.playSessionId,
           lastSeenAt: now,
           state: s.state,
           progressPercent,
@@ -303,7 +302,7 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
   for (const session of activeJfSessions) {
     if (!seenSessionKeys.has(session.sessionKey)) {
       try {
-        await recordCompletedSession(applyFinalTick(session, now));
+        await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
         ended++;
       } catch (err) {
         console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
@@ -315,7 +314,7 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await isAuthorized(request))) {
+  if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -342,7 +341,9 @@ export async function POST(request: NextRequest) {
         syncPlexSessions()
           .then((r) => { results.plex = r; })
           .catch((err) => {
-            results.plex = { error: err instanceof Error ? err.message : String(err) };
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn("[play-history] Plex session sync failed:", msg);
+            results.plex = { error: msg };
           })
       );
     }
@@ -352,7 +353,9 @@ export async function POST(request: NextRequest) {
         syncJellyfinSessions()
           .then((r) => { results.jellyfin = r; })
           .catch((err) => {
-            results.jellyfin = { error: err instanceof Error ? err.message : String(err) };
+            const msg = err instanceof Error ? err.message : String(err);
+            console.warn("[play-history] Jellyfin session sync failed:", msg);
+            results.jellyfin = { error: msg };
           })
       );
     }

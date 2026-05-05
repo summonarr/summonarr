@@ -22,7 +22,8 @@ export type SSEEvent =
   | { type: "issue:deleted"; issueId: string; userId: string }
   | { type: "issuemessage:created"; issueId: string; userId: string }
 
-  | { type: "activity:sessions"; sessions: unknown[] };
+  | { type: "activity:sessions"; sessions: unknown[] }
+  | { type: "activity:history-updated" };
 
 export function emitSSE(event: SSEEvent) {
   emitter.emit("event", event);

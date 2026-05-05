@@ -29,22 +29,34 @@ export async function PATCH(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
-  let body: { autoDisableNew?: boolean };
+  let body: { autoDisableNew?: boolean; plexEnforceEnabled?: boolean };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  if (typeof body.autoDisableNew !== "boolean") {
-    return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
+  if (body.autoDisableNew !== undefined) {
+    if (typeof body.autoDisableNew !== "boolean") {
+      return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
+    }
+    await prisma.setting.upsert({
+      where: { key: "downloadAutoDisableNew" },
+      create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
+      update: { value: body.autoDisableNew ? "true" : "false" },
+    });
   }
 
-  await prisma.setting.upsert({
-    where: { key: "downloadAutoDisableNew" },
-    create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
-    update: { value: body.autoDisableNew ? "true" : "false" },
-  });
+  if (body.plexEnforceEnabled !== undefined) {
+    if (typeof body.plexEnforceEnabled !== "boolean") {
+      return NextResponse.json({ error: "plexEnforceEnabled must be a boolean" }, { status: 400 });
+    }
+    await prisma.setting.upsert({
+      where: { key: "downloadPlexEnforceEnabled" },
+      create: { key: "downloadPlexEnforceEnabled", value: body.plexEnforceEnabled ? "true" : "false" },
+      update: { value: body.plexEnforceEnabled ? "true" : "false" },
+    });
+  }
 
   return NextResponse.json({ ok: true });
 }

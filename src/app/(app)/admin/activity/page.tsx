@@ -12,6 +12,7 @@ import { ActivityHistoryTable } from "@/components/admin/activity-history-table"
 import { ActivityLeaderboard } from "@/components/admin/activity-leaderboard";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
+import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { posterUrl } from "@/lib/tmdb-types";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 
@@ -108,6 +109,7 @@ export default async function ActivityPage({
   if (isHistoryTab) {
     return (
       <div className="ds-page-enter">
+        <ActivityLiveRefresher />
         <PageHeader
           title="Activity"
           subtitle="Play history and server activity monitoring"
@@ -390,6 +392,7 @@ export default async function ActivityPage({
 
   return (
     <div className="ds-page-enter">
+      <ActivityLiveRefresher />
       <PageHeader
         title="Activity"
         subtitle="Play history and server activity monitoring"

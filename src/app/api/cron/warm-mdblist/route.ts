@@ -5,6 +5,7 @@ import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { recordCronRun } from "@/lib/cron-auth";
+import { prisma } from "@/lib/prisma";
 
 function safeCompareStrings(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -33,6 +34,11 @@ export async function POST(request: NextRequest) {
   const authCtx = await getAuthContext(request);
   if (!authCtx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const apiKey = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
+  if (!apiKey?.value) {
+    return NextResponse.json({ skipped: true, reason: "no MDBList API key configured" });
   }
 
   return withAdvisoryLock(

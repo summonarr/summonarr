@@ -69,8 +69,8 @@ export async function GET() {
 
       listener = (event: SSEEvent) => {
 
-        if (event.type === "activity:sessions") {
-          // Active session data is system-admin only; ISSUE_ADMIN does not see live session streams
+        if (event.type === "activity:sessions" || event.type === "activity:history-updated") {
+          // Activity data is system-admin only; ISSUE_ADMIN does not see live session/history streams
           if (!isSystemAdmin) return;
         } else {
           // Non-admin users only receive events for their own userId

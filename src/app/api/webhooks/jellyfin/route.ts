@@ -8,7 +8,7 @@ import {
   recordCompletedSession,
   resolveShowTmdbId,
   computePlaytimeIncrement,
-  applyFinalTick,
+  MAX_PLAYTIME_DELTA_MS,
 } from "@/lib/play-history";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
 
@@ -128,6 +128,15 @@ export async function POST(req: NextRequest) {
   const positionMs = Math.max(0, Math.floor(positionTicks / 10_000));
   const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
 
+  // The polling sync may create an ActiveSession for the same playback before this webhook arrives,
+  // keyed by the Sessions API's PlaySessionId rather than payload.PlaySessionId. Falling back to
+  // (mediaServerUserId, sourceItemId) finds that row instead of creating a duplicate.
+  const findExisting = async () =>
+    (await prisma.activeSession.findUnique({ where: { id: sessionId } })) ??
+    (await prisma.activeSession.findFirst({
+      where: { source: "jellyfin", mediaServerUserId: msUserId, sourceItemId: payload.ItemId },
+    }));
+
   if (event === "PlaybackStart") {
     const resolvedTmdbId = tmdbId !== null && !isNaN(tmdbId) ? tmdbId : null;
     let posterPath: string | null = null;
@@ -139,11 +148,11 @@ export async function POST(req: NextRequest) {
       posterPath = core?.posterPath ?? null;
     }
 
-    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    const existing = await findExisting();
     if (existing) {
       const increment = computePlaytimeIncrement(existing, now);
       await prisma.activeSession.update({
-        where: { id: sessionId },
+        where: { id: existing.id },
         data: {
           lastSeenAt: now,
           state: "playing",
@@ -187,12 +196,17 @@ export async function POST(req: NextRequest) {
   }
 
   if (event === "PlaybackProgress") {
-    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    const existing = await findExisting();
     if (existing) {
       const state = payload.IsPaused ? "paused" : "playing";
-      const increment = computePlaytimeIncrement(existing, now);
+      const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
+      const posDelta = positionMs - Number(existing.progressMs);
+      // Use current payload state, not existing.state (stale DB value from previous event).
+      const increment = (posDelta > 0 || state === "playing")
+        ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
+        : BigInt(0);
       await prisma.activeSession.update({
-        where: { id: sessionId },
+        where: { id: existing.id },
         data: {
           lastSeenAt: now,
           state,
@@ -206,12 +220,20 @@ export async function POST(req: NextRequest) {
   }
 
   if (event === "PlaybackStop") {
-    const session = await prisma.activeSession.findUnique({ where: { id: sessionId } });
+    const session = await findExisting();
     if (session) {
-      await recordCompletedSession(applyFinalTick(session, now, {
+      // A Stop event proves the user was watching during the wall-clock gap since lastSeenAt
+      // regardless of the DB state field (Jellyfin often sends Progress(IsPaused=true) immediately
+      // before Stop, leaving DB state="paused"). Cap by MAX_PLAYTIME_DELTA_MS for the same reasons
+      // as computePlaytimeIncrement.
+      const wallDelta = Math.max(0, now.getTime() - session.lastSeenAt.getTime());
+      const finalIncrement = BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, wallDelta));
+      await recordCompletedSession({
+        ...session,
+        playtimeMs: session.playtimeMs + finalIncrement,
         progressMs: BigInt(positionMs),
-        stoppedAt: now,
-      }));
+        lastSeenAt: now,
+      });
       return NextResponse.json({ message: "PlaybackStop recorded" });
     }
     return NextResponse.json({ message: "Session not found" });

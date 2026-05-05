@@ -656,16 +656,19 @@ export interface PlexAccountInfo {
   thumb: string;
   isAdmin: boolean;
   downloadsEnabled: boolean;
-  // Sharing-relationship ID from <Server id="..."> in GET /api/users XML.
-  // Required for PUT /api/v2/shared_servers/{sharingId} — different from the user's account ID.
   sharingId: string | null;
 }
 
-export async function getPlexAccounts(serverUrl: string, adminToken: string): Promise<PlexAccountInfo[]> {
+export async function getPlexAccounts(
+  serverUrl: string,
+  adminToken: string,
+  cachedMachineId?: string | null,
+): Promise<PlexAccountInfo[]> {
   const accounts: PlexAccountInfo[] = [];
 
-  // Fetch machineIdentifier so we can read the correct server's allowSync from the XML
-  const machineId = await getPlexMachineId(serverUrl, adminToken);
+  // Accept a pre-fetched machineId to avoid a second HTTP call when the caller
+  // already has it (e.g. syncPlexPolicies fetches it once and reuses here).
+  const machineId = cachedMachineId !== undefined ? cachedMachineId : await getPlexMachineId(serverUrl, adminToken);
 
   try {
     // The server owner doesn't appear in the shared-users list, so fetch separately and assign a synthetic id of "1"
@@ -744,25 +747,23 @@ export async function setPlexDownloadPolicy(
   adminToken: string,
   sharingId: string,
   enabled: boolean,
+  serverUrl: string,
 ): Promise<void> {
-  // sharingId = <Server id="..."> attribute from GET /api/users XML.
-  // This is the sharing-relationship ID, distinct from the user's Plex account ID.
-  // Endpoint: PUT /api/v2/sharings/{sharingId} (confirmed from python-plexapi updateFriend source).
-  // allowSync must be wrapped inside a JSON "settings" param — not a top-level param.
-  const settings = JSON.stringify({ allowSync: enabled ? 1 : 0 });
-  const url =
-    `https://plex.tv/api/v2/sharings/${encodeURIComponent(sharingId)}` +
-    `?settings=${encodeURIComponent(settings)}` +
-    `&X-Plex-Token=${encodeURIComponent(adminToken)}` +
-    `&X-Plex-Client-Identifier=${encodeURIComponent(PLEX_CLIENT_ID)}`;
+  const machineId = await getPlexMachineId(serverUrl, adminToken);
+  if (!machineId) throw new Error(`Plex set sharing policy ${sharingId}: could not resolve machineId`);
 
+  const url = `https://plex.tv/api/servers/${encodeURIComponent(machineId)}/shared_servers/${encodeURIComponent(sharingId)}`;
   const res = await safeFetchTrusted(url, {
     allowedHosts: PLEX_TV_HOSTS,
     method: "PUT",
-    headers: { ...PLEX_HEADERS, "X-Plex-Token": adminToken, Accept: "application/json" },
+    headers: { ...PLEX_HEADERS, "X-Plex-Token": adminToken, "Content-Type": "application/json" },
+    body: JSON.stringify({ server_id: machineId, shared_server: { allowSync: enabled ? 1 : 0 } }),
     timeoutMs: 10_000,
   });
-  if (!res.ok) throw new Error(`Plex set sharing policy ${sharingId}: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Plex set sharing policy ${sharingId}: ${res.status} — ${body.slice(0, 200)}`);
+  }
 }
 
 export async function getPlexFriendEmails(adminToken: string, serverUrl?: string): Promise<Set<string>> {
