@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { runTrashSync } from "@/lib/trash";
 
 function safeCompareStrings(a: string, b: string): boolean {
@@ -30,8 +30,6 @@ async function getAuthContext(request: NextRequest): Promise<
   return null;
 }
 
-const TRASH_SYNC_LOCK_ID = 2010;
-
 export async function POST(request: NextRequest) {
   const authCtx = await getAuthContext(request);
   if (!authCtx) {
@@ -45,6 +43,7 @@ export async function POST(request: NextRequest) {
       const result = await runTrashSync();
       const durationMs = Date.now() - startTime;
 
+      const recreated = result.applied.filter((r) => r.recreated).length;
       await logAudit({
         userId: authCtx.userId,
         userName: authCtx.userName,
@@ -52,7 +51,11 @@ export async function POST(request: NextRequest) {
         target: "trash-sync",
         details: {
           refreshed: result.refreshed,
-          applied: { count: result.applied.length, failures: result.applied.filter((r) => !r.ok).length },
+          applied: {
+            count: result.applied.length,
+            failures: result.applied.filter((r) => !r.ok).length,
+            ...(recreated > 0 ? { recreated } : {}),
+          },
           errors: result.errors,
           durationMs,
           trigger: authCtx.trigger,

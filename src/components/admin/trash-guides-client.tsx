@@ -38,6 +38,8 @@ interface ApplicationStatus {
   remoteId: number | null;
   appliedAt: string | null;
   lastError: string | null;
+  lastErrorAt: string | null;
+  errorCount: number;
 }
 
 interface SpecStatus {
@@ -65,6 +67,7 @@ interface ApplyResult {
   ok: boolean;
   remoteId?: number;
   error?: string;
+  recreated?: boolean;
 }
 
 type LoadState = "idle" | "loading" | "ready" | "error";
@@ -94,6 +97,9 @@ interface TrashGuidesClientProps {
   initialSettings: TrashSettings;
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
+  // Set by the server component when the last GitHub-tree fetch was truncated within the last 7 days.
+  // Staleness is computed server-side (guardrail 16: no Date.now() in client render path).
+  recentTruncation?: { at: string } | null;
 }
 
 function formatRelative(iso: string | null): string {
@@ -112,6 +118,7 @@ export function TrashGuidesClient({
   initialSettings,
   radarrConfigured,
   sonarrConfigured,
+  recentTruncation,
 }: TrashGuidesClientProps) {
   const [activeTab, setActiveTab] = useState<TrashService>(
     radarrConfigured ? "RADARR" : sonarrConfigured ? "SONARR" : "RADARR",
@@ -126,6 +133,7 @@ export function TrashGuidesClient({
   const [starterState, setStarterState] = useState<ActionState>("idle");
   const [refreshError, setRefreshError] = useState<{ errors: string[]; schemaDiagnostic?: string } | null>(null);
   const [schemaDiagnostic, setSchemaDiagnostic] = useState<string | null>(null);
+  const [truncationDismissed, setTruncationDismissed] = useState(false);
 
   const loadStarterPack = useCallback(async () => {
     try {
@@ -175,6 +183,14 @@ export function TrashGuidesClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+      // 409 = lock contention with cron / another admin action. Surface as a non-error advisory.
+      if (res.status === 409) {
+        setRefreshState("error");
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setRefreshError({ errors: [data.error ?? "Trash sync already running. Try again in 30 seconds."] });
+        setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
+        return;
+      }
       const data = (await res.json()) as {
         ok?: boolean;
         errors?: string[];
@@ -204,6 +220,13 @@ export function TrashGuidesClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ specIds }),
       });
+      if (res.status === 409) {
+        setStarterState("error");
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setRefreshError({ errors: [data.error ?? "Trash sync already running. Try again in 30 seconds."] });
+        setTimeout(() => setStarterState("idle"), 3000);
+        return;
+      }
       const data = (await res.json()) as { ok: boolean; results: ApplyResult[] };
       setStarterState(data.ok ? "ok" : "error");
       if (data.results) setApplyLog(data.results);
@@ -241,6 +264,10 @@ export function TrashGuidesClient({
   return (
     <div className="space-y-6 max-w-6xl">
       {schemaDiagnostic && <SchemaDiagnosticBanner message={schemaDiagnostic} onDismiss={() => setSchemaDiagnostic(null)} />}
+
+      {recentTruncation && !truncationDismissed && (
+        <TruncationBanner at={recentTruncation.at} onDismiss={() => setTruncationDismissed(true)} />
+      )}
 
       <StarterPackCard
         items={starterPack}
@@ -429,6 +456,31 @@ function RefreshErrorBanner({
           )}
         </div>
         <button onClick={onDismiss} className="text-xs text-red-400 hover:text-red-200">dismiss</button>
+      </div>
+    </Card>
+  );
+}
+
+function TruncationBanner({ at, onDismiss }: { at: string; onDismiss: () => void }) {
+  // The `at` timestamp is rendered as plain text (no relative-time math) — staleness is gated server-side
+  // in page.tsx, so the banner only appears when the truncation is recent enough to act on.
+  return (
+    <Card className="bg-amber-500/10 border-amber-500/40 p-4 text-sm">
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-amber-200">GitHub tree response was truncated</p>
+          <p className="mt-1 text-amber-100/90">
+            The TRaSH-Guides repo exceeded GitHub&apos;s recursive-tree response cap on the last refresh
+            ({new Date(at).toUTCString()}). Some specs may have been silently skipped.
+          </p>
+          <p className="mt-2 text-xs text-amber-300/80">
+            Configure a GitHub personal access token below to lift rate limits, then click
+            <span className="font-semibold"> Refresh Catalog</span>. If the issue persists, the upstream
+            repo has outgrown the API page size — file an issue.
+          </p>
+        </div>
+        <button onClick={onDismiss} className="text-xs text-amber-400 hover:text-amber-200">dismiss</button>
       </div>
     </Card>
   );
@@ -1197,6 +1249,13 @@ function SpecSection({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ specIds: [...selected] }),
       });
+      // 409 = lock contention with cron / another admin action — keep selection intact so the user
+      // can retry once the lock releases (Retry-After: 30s).
+      if (res.status === 409) {
+        setApplyState("error");
+        setTimeout(() => setApplyState("idle"), 3000);
+        return;
+      }
       const data = (await res.json()) as { ok: boolean; results: ApplyResult[] };
       setApplyState(data.ok ? "ok" : "error");
       setSelected(new Set());
@@ -1334,7 +1393,21 @@ function SpecSection({
                         <div className="text-xs text-zinc-500 font-mono">{spec.trashId.slice(0, 12)}…</div>
                       </td>
                       <td className="py-2.5 pr-4">
-                        <StatusBadge spec={spec} />
+                        <div className="flex items-center gap-1.5">
+                          <StatusBadge spec={spec} />
+                          {spec.application && spec.application.errorCount > 1 && (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 font-mono"
+                              title={
+                                spec.application.lastErrorAt
+                                  ? `${spec.application.errorCount} failures, last ${spec.application.lastErrorAt}`
+                                  : `${spec.application.errorCount} failures`
+                              }
+                            >
+                              ×{spec.application.errorCount}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-2.5 pr-4 text-zinc-400 text-xs">
                         {mounted ? formatRelative(spec.application?.appliedAt ?? null) : ""}

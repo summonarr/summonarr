@@ -17,7 +17,10 @@ const SETTING_KEYS = [
   "radarrApiKey",
   "sonarrUrl",
   "sonarrApiKey",
+  "trashLastRefreshTruncatedAt",
 ] as const;
+
+const TRUNCATION_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export default async function TrashGuidesPage() {
   const session = await auth();
@@ -39,6 +42,18 @@ export default async function TrashGuidesPage() {
 
   const radarrConfigured = !!(map.radarrUrl && map.radarrApiKey);
   const sonarrConfigured = !!(map.sonarrUrl && map.sonarrApiKey);
+
+  // Compute truncation staleness server-side — guardrail 16 forbids Date.now() in client render path.
+  // The banner only fires if the last truncation was within the last 7 days; older markers are stale signal.
+  const truncatedAtRaw = map.trashLastRefreshTruncatedAt ?? null;
+  let recentTruncation: { at: string } | null = null;
+  if (truncatedAtRaw) {
+    const t = Date.parse(truncatedAtRaw);
+    // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
+    if (!Number.isNaN(t) && Date.now() - t < TRUNCATION_STALE_MS) {
+      recentTruncation = { at: truncatedAtRaw };
+    }
+  }
 
   return (
     <div className="ds-page-enter">
@@ -65,6 +80,7 @@ export default async function TrashGuidesPage() {
         initialSettings={settings}
         radarrConfigured={radarrConfigured}
         sonarrConfigured={sonarrConfigured}
+        recentTruncation={recentTruncation}
       />
     </div>
   );

@@ -293,7 +293,7 @@ export default async function SettingsPage({
       { name: "Warm OMDB", description: "OMDB ratings fallback for entire library", endpoint: "/api/cron/warm-omdb", interval: `${process.env.WARM_OMDB_INTERVAL ?? "86400"}s`, ...lastRunInfo("omdb") },
       { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: `${process.env.PURGE_SESSIONS_INTERVAL ?? "86400"}s`, ...lastRunInfo("auth-sessions:purge-expired") },
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: `${process.env.SCRUB_AUDIT_PII_INTERVAL ?? "86400"}s`, ...lastRunInfo("audit-log:pii-scrub") },
-      { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog and re-apply managed specs", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
+      { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
       { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("download-policies") },
     ];
   }

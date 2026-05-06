@@ -4,6 +4,13 @@ import { prisma } from "./prisma";
 import { safeFetchTrusted } from "./safe-fetch";
 import { arrFetch, ArrResponseError, getArrCfg, type ArrCfg } from "./arr";
 import { BATCH_TX_TIMEOUT } from "./cron-auth";
+import {
+  isCustomFormatPayload,
+  isCustomFormatGroupPayload,
+  isNamingPayload,
+  isQualityProfilePayload,
+  isQualitySizePayload,
+} from "./trash-validators";
 import type { TrashService, TrashSpecKind } from "@/generated/prisma";
 
 export function describeSchemaError(err: unknown): string | null {
@@ -140,7 +147,11 @@ async function ghAuthHeaders(): Promise<HeadersInit> {
   };
 }
 
-async function ghTree(repo: string, branch: string): Promise<GhTreeEntry[]> {
+// Returns the tree entries plus a flag — callers persist truncation state via setRefreshTruncated()
+async function ghTree(
+  repo: string,
+  branch: string,
+): Promise<{ entries: GhTreeEntry[]; truncated: boolean }> {
   const url = `https://api.github.com/repos/${repo}/git/trees/${branch}?recursive=1`;
   const res = await safeFetchTrusted(url, {
     allowedHosts: ["api.github.com"],
@@ -156,7 +167,21 @@ async function ghTree(repo: string, branch: string): Promise<GhTreeEntry[]> {
     // GitHub caps recursive tree responses; truncation here means some specs will be silently skipped this run
     console.warn(`[trash] tree truncated for ${repo}@${branch} — upstream has exceeded GitHub's tree cap`);
   }
-  return data.tree ?? [];
+  return { entries: data.tree ?? [], truncated: Boolean(data.truncated) };
+}
+
+async function setRefreshTruncated(truncated: boolean): Promise<void> {
+  if (truncated) {
+    const value = new Date().toISOString();
+    await prisma.setting.upsert({
+      where: { key: "trashLastRefreshTruncatedAt" },
+      update: { value },
+      create: { key: "trashLastRefreshTruncatedAt", value },
+    });
+  } else {
+    // Best-effort clear; absence of the row means "never truncated" so a missing-row is fine
+    await prisma.setting.deleteMany({ where: { key: "trashLastRefreshTruncatedAt" } });
+  }
 }
 
 async function ghRawFile(repo: string, branch: string, path: string): Promise<string> {
@@ -181,13 +206,27 @@ export interface RefreshResult {
   qualityProfiles: { fetched: number; updated: number };
   qualitySizes: { fetched: number; updated: number };
   errors: string[];
+  // Count of upstream files rejected by hand-rolled type guards (see trash-validators.ts). Skipped
+  // specs keep their prior good upstreamSha so the next refresh re-attempts them. Surfaced in the
+  // diagnostic endpoint so silent rejections become visible.
+  validationSkipped?: number;
 }
+
+// Shared mutable counter so each refreshXxx can record validator rejections without changing
+// the existing { fetched, updated, unchanged } return shape consumers depend on.
+interface ValidationCounter { count: number }
 
 export async function refreshCatalog(service: TrashService): Promise<RefreshResult> {
   const errors: string[] = [];
+  const validationCounter: ValidationCounter = { count: 0 };
   const now = new Date();
 
-  const trashTree = await ghTree(TRASH_REPO, TRASH_BRANCH);
+  const { entries: trashTree, truncated } = await ghTree(TRASH_REPO, TRASH_BRANCH);
+  // Persist truncation state so the admin UI / diagnostic can surface it. Failure to persist must
+  // not block the refresh itself — the warn log is still emitted in ghTree.
+  await setRefreshTruncated(truncated).catch((err) => {
+    console.warn("[trash] failed to persist truncation state:", err instanceof Error ? err.message : err);
+  });
 
   const existing = await prisma.trashSpec.findMany({
     where: { service },
@@ -197,12 +236,12 @@ export async function refreshCatalog(service: TrashService): Promise<RefreshResu
     existing.map((s) => [`${s.kind}::${s.trashId}`, s.upstreamSha]),
   );
 
-  const cf = await refreshCustomFormats(service, trashTree, existingSha, now, errors);
+  const cf = await refreshCustomFormats(service, trashTree, existingSha, now, errors, validationCounter);
   // CF-Groups must refresh AFTER CFs so member trash_ids resolve against fresh spec rows
-  const cfg = await refreshCustomFormatGroups(service, trashTree, existingSha, now, errors);
-  const naming = await refreshNaming(service, trashTree, existingSha, now, errors);
-  const qp = await refreshQualityProfiles(service, trashTree, existingSha, now, errors);
-  const qs = await refreshQualitySizes(service, trashTree, existingSha, now, errors);
+  const cfg = await refreshCustomFormatGroups(service, trashTree, existingSha, now, errors, validationCounter);
+  const naming = await refreshNaming(service, trashTree, existingSha, now, errors, validationCounter);
+  const qp = await refreshQualityProfiles(service, trashTree, existingSha, now, errors, validationCounter);
+  const qs = await refreshQualitySizes(service, trashTree, existingSha, now, errors, validationCounter);
 
   return {
     service,
@@ -212,6 +251,7 @@ export async function refreshCatalog(service: TrashService): Promise<RefreshResu
     qualityProfiles: qp,
     qualitySizes: qs,
     errors,
+    ...(validationCounter.count > 0 ? { validationSkipped: validationCounter.count } : {}),
   };
 }
 
@@ -221,6 +261,7 @@ async function refreshCustomFormats(
   existingSha: Map<string, string | null>,
   now: Date,
   errors: string[],
+  validationCounter: ValidationCounter,
 ): Promise<{ fetched: number; updated: number; unchanged: number }> {
   const dir = TRASH_PATHS[service].cf;
   const files = trashTree.filter(
@@ -244,14 +285,20 @@ async function refreshCustomFormats(
     const results = await Promise.allSettled(
       batch.map(async (f) => {
         const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsed = JSON.parse(content) as TrashCustomFormat;
-        if (!parsed.trash_id) throw new Error(`cf missing trash_id: ${f.path}`);
-        return { parsed, file: f };
+        const parsedRaw = JSON.parse(content) as unknown;
+        // Validate shape against the apply-path's contract — malformed payloads are skipped so the
+        // prior good upstreamSha is preserved for the next refresh attempt.
+        if (!isCustomFormatPayload(parsedRaw)) {
+          throw new Error(`cf payload shape mismatch: ${f.path}`);
+        }
+        return { parsed: parsedRaw, file: f };
       }),
     );
     for (const r of results) {
       if (r.status !== "fulfilled") {
-        errors.push(`cf: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        if (message.includes("payload shape mismatch")) validationCounter.count++;
+        errors.push(`cf: ${message}`);
         continue;
       }
       fetched++;
@@ -308,6 +355,7 @@ async function refreshCustomFormatGroups(
   existingSha: Map<string, string | null>,
   now: Date,
   errors: string[],
+  validationCounter: ValidationCounter,
 ): Promise<{ fetched: number; updated: number; unchanged: number }> {
   const dir = TRASH_PATHS[service].cfGroups;
   const files = trashTree.filter(
@@ -332,14 +380,18 @@ async function refreshCustomFormatGroups(
     const results = await Promise.allSettled(
       batch.map(async (f) => {
         const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsed = JSON.parse(content) as TrashCustomFormatGroup;
-        if (!parsed.trash_id) throw new Error(`cf-group missing trash_id: ${f.path}`);
-        return { parsed, file: f };
+        const parsedRaw = JSON.parse(content) as unknown;
+        if (!isCustomFormatGroupPayload(parsedRaw)) {
+          throw new Error(`cf-group payload shape mismatch: ${f.path}`);
+        }
+        return { parsed: parsedRaw, file: f };
       }),
     );
     for (const r of results) {
       if (r.status !== "fulfilled") {
-        errors.push(`cf-group: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        if (message.includes("payload shape mismatch")) validationCounter.count++;
+        errors.push(`cf-group: ${message}`);
         continue;
       }
       fetched++;
@@ -399,6 +451,7 @@ async function refreshNaming(
   existingSha: Map<string, string | null>,
   now: Date,
   errors: string[],
+  validationCounter: ValidationCounter,
 ): Promise<{ fetched: number; updated: number }> {
   const path = TRASH_PATHS[service].naming;
   const file = trashTree.find((t) => t.type === "blob" && t.path === path);
@@ -416,7 +469,13 @@ async function refreshNaming(
   }
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(raw) as Record<string, unknown>;
+    const parsedRaw = JSON.parse(raw) as unknown;
+    if (!isNamingPayload(parsedRaw)) {
+      validationCounter.count++;
+      errors.push(`naming: payload shape mismatch (${file.path})`);
+      return { fetched: 1, updated: 0 };
+    }
+    parsed = parsedRaw;
   } catch (err) {
     errors.push(`naming: parse failed ${err instanceof Error ? err.message : String(err)}`);
     return { fetched: 0, updated: 0 };
@@ -455,6 +514,7 @@ async function refreshQualityProfiles(
   existingSha: Map<string, string | null>,
   now: Date,
   errors: string[],
+  validationCounter: ValidationCounter,
 ): Promise<{ fetched: number; updated: number }> {
   const dir = TRASH_PATHS[service].qualityProfiles;
   const files = trashTree.filter(
@@ -469,11 +529,14 @@ async function refreshQualityProfiles(
     const results = await Promise.allSettled(
       batch.map(async (f) => {
         const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsed = JSON.parse(content) as TrashQualityProfile;
+        const parsedRaw = JSON.parse(content) as unknown;
+        if (!isQualityProfilePayload(parsedRaw)) {
+          throw new Error(`profile payload shape mismatch: ${f.path}`);
+        }
         const slug = f.path.split("/").pop()!.replace(/\.json$/, "");
-        const trashId = parsed.trash_id ?? slug;
-        const name = parsed.name ?? slug;
-        return { trashId, name, payload: parsed, file: f };
+        const trashId = parsedRaw.trash_id ?? slug;
+        const name = parsedRaw.name ?? slug;
+        return { trashId, name, payload: parsedRaw, file: f };
       }),
     );
 
@@ -486,7 +549,9 @@ async function refreshQualityProfiles(
     }> = [];
     for (const r of results) {
       if (r.status !== "fulfilled") {
-        errors.push(`profile: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        if (message.includes("payload shape mismatch")) validationCounter.count++;
+        errors.push(`profile: ${message}`);
         continue;
       }
       fetched++;
@@ -533,6 +598,7 @@ async function refreshQualitySizes(
   existingSha: Map<string, string | null>,
   now: Date,
   errors: string[],
+  validationCounter: ValidationCounter,
 ): Promise<{ fetched: number; updated: number }> {
   const dir = TRASH_PATHS[service].qualitySizes;
   const files = trashTree.filter(
@@ -547,11 +613,14 @@ async function refreshQualitySizes(
     const results = await Promise.allSettled(
       batch.map(async (f) => {
         const content = await ghRawFile(TRASH_REPO, TRASH_BRANCH, f.path);
-        const parsed = JSON.parse(content) as TrashQualitySize;
+        const parsedRaw = JSON.parse(content) as unknown;
+        if (!isQualitySizePayload(parsedRaw)) {
+          throw new Error(`quality-size payload shape mismatch: ${f.path}`);
+        }
         const slug = f.path.split("/").pop()!.replace(/\.json$/, "");
-        const trashId = parsed.trash_id ?? slug;
-        const name = parsed.type ?? slug;
-        return { trashId, name, payload: parsed, file: f };
+        const trashId = parsedRaw.trash_id ?? slug;
+        const name = parsedRaw.type ?? slug;
+        return { trashId, name, payload: parsedRaw, file: f };
       }),
     );
 
@@ -564,7 +633,9 @@ async function refreshQualitySizes(
     }> = [];
     for (const r of results) {
       if (r.status !== "fulfilled") {
-        errors.push(`quality-size: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+        const message = r.reason instanceof Error ? r.reason.message : String(r.reason);
+        if (message.includes("payload shape mismatch")) validationCounter.count++;
+        errors.push(`quality-size: ${message}`);
         continue;
       }
       fetched++;
@@ -613,6 +684,9 @@ export interface ApplyResult {
   ok: boolean;
   remoteId?: number;
   error?: string;
+  // True when the apply landed via a POST after a PUT-404 (Arr resource was deleted out-of-band).
+  // Surfaced to the UI and audit log so admins can tell drift recovery from normal applies.
+  recreated?: boolean;
 }
 
 function formatArrError(err: unknown): string {
@@ -663,19 +737,114 @@ async function resolveCfg(service: TrashService): Promise<ArrCfg> {
   return cfg;
 }
 
+// Update an Arr resource by remoteId (PUT), recovering with a POST if Radarr/Sonarr returns 404.
+// Returns the resource and a flag so callers can audit the recreate. Does NOT clear the old remoteId
+// before the POST succeeds — losing the mapping mid-call would accumulate duplicate resources.
+async function arrPutOrRecreate<T extends { id: number }>(
+  cfg: ArrCfg,
+  putPath: string,
+  postPath: string,
+  putBody: object,
+  postBody: object,
+): Promise<{ resource: T; recreated: boolean }> {
+  try {
+    const resource = await arrFetch<T>(cfg, putPath, {
+      method: "PUT",
+      body: JSON.stringify(putBody),
+    });
+    return { resource, recreated: false };
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status === 404) {
+      // Resource was deleted in the Arr UI between Summonarr's last apply and now. Recreate it.
+      // The recreate POST is intentionally not wrapped in retry logic — a second 404 is a real failure.
+      const resource = await arrFetch<T>(cfg, postPath, {
+        method: "POST",
+        body: JSON.stringify(postBody),
+      });
+      return { resource, recreated: true };
+    }
+    throw err;
+  }
+}
+
+function isPrismaNotFound(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
+}
+
+function isPrismaUniqueViolation(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2002";
+}
+
 async function recordApply(
   spec: { id: string; kind: TrashSpecKind; trashId: string; name: string },
-  outcome: { ok: true; remoteId?: number } | { ok: false; error: string },
+  outcome:
+    | { ok: true; remoteId?: number; recreated?: boolean }
+    | { ok: false; error: string },
 ): Promise<ApplyResult> {
-  const appliedAt = outcome.ok ? new Date() : undefined;
-  const data = outcome.ok
-    ? { appliedAt, lastError: null, enabled: true, ...(outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}) }
-    : { lastError: outcome.error };
-  await prisma.trashApplication.upsert({
-    where: { trashSpecId: spec.id },
-    update: data,
-    create: { trashSpecId: spec.id, ...data },
-  });
+  // Race-safety: when two `applySpecs` runs interleave on the same spec (admin Apply during a cron
+  // run after lock contention is resolved), a read-modify-write on errorCount loses one of the
+  // increments. We use update-with-increment, falling back to create on P2025 — the upsert form
+  // doesn't support `{ increment: 1 }` inside `update.data`.
+  if (outcome.ok) {
+    const appliedAt = new Date();
+    const updateData = {
+      appliedAt,
+      lastError: null,
+      lastErrorAt: null,
+      errorCount: 0,
+      enabled: true,
+      ...(outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}),
+    };
+    try {
+      await prisma.trashApplication.update({ where: { trashSpecId: spec.id }, data: updateData });
+    } catch (err) {
+      if (!isPrismaNotFound(err)) throw err;
+      try {
+        await prisma.trashApplication.create({
+          data: { trashSpecId: spec.id, ...updateData },
+        });
+      } catch (createErr) {
+        // P2002 = a concurrent path created the row between our failed update and our create.
+        // The advisory lock at the route boundary normally prevents this, but defending here is
+        // cheap insurance against future code that forgets the lock invariant.
+        if (!isPrismaUniqueViolation(createErr)) throw createErr;
+        await prisma.trashApplication.update({ where: { trashSpecId: spec.id }, data: updateData });
+      }
+    }
+  } else {
+    const lastErrorAt = new Date();
+    const failureUpdate = {
+      lastError: outcome.error,
+      lastErrorAt,
+      errorCount: { increment: 1 },
+    };
+    try {
+      await prisma.trashApplication.update({
+        where: { trashSpecId: spec.id },
+        data: failureUpdate,
+      });
+    } catch (err) {
+      if (!isPrismaNotFound(err)) throw err;
+      try {
+        await prisma.trashApplication.create({
+          data: {
+            trashSpecId: spec.id,
+            lastError: outcome.error,
+            lastErrorAt,
+            errorCount: 1,
+          },
+        });
+      } catch (createErr) {
+        if (!isPrismaUniqueViolation(createErr)) throw createErr;
+        // Concurrent create from another path won the race — increment our count via update instead
+        // so the failure tally still reflects this attempt.
+        await prisma.trashApplication.update({
+          where: { trashSpecId: spec.id },
+          data: failureUpdate,
+        });
+      }
+    }
+  }
   return {
     specId: spec.id,
     kind: spec.kind,
@@ -683,6 +852,7 @@ async function recordApply(
     name: spec.name,
     ok: outcome.ok,
     ...(outcome.ok && outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}),
+    ...(outcome.ok && outcome.recreated ? { recreated: true } : {}),
     ...(!outcome.ok ? { error: outcome.error } : {}),
   };
 }
@@ -716,18 +886,29 @@ export async function applyCustomFormats(
     };
     try {
 
-      // PUT if remoteId is known (update existing); POST only for truly new CFs to avoid duplicate creation
+      // PUT if remoteId is known (update existing); POST only for truly new CFs to avoid duplicate creation.
+      // arrPutOrRecreate transparently recovers if the resource was deleted in the Arr UI between
+      // Summonarr's last apply and now (PUT → 404 → POST).
       const remoteId = spec.application?.remoteId ?? remoteByName.get(payload.name) ?? null;
-      const created = remoteId
-        ? await arrFetch<{ id: number }>(cfg, `/api/v3/customformat/${remoteId}`, {
-            method: "PUT",
-            body: JSON.stringify({ id: remoteId, ...body }),
-          })
-        : await arrFetch<{ id: number }>(cfg, `/api/v3/customformat`, {
-            method: "POST",
-            body: JSON.stringify(body),
-          });
-      results.push(await recordApply(spec, { ok: true, remoteId: created.id }));
+      let created: { id: number };
+      let recreated = false;
+      if (remoteId) {
+        const out = await arrPutOrRecreate<{ id: number }>(
+          cfg,
+          `/api/v3/customformat/${remoteId}`,
+          `/api/v3/customformat`,
+          { id: remoteId, ...body },
+          body,
+        );
+        created = out.resource;
+        recreated = out.recreated;
+      } else {
+        created = await arrFetch<{ id: number }>(cfg, `/api/v3/customformat`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      }
+      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }));
     } catch (err) {
       results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }));
     }
@@ -1109,16 +1290,25 @@ export async function applyQualityProfiles(
       const profile = spec.payload as unknown as TrashQualityProfile;
       const body = await buildProfileBody(cfg, service, profile);
       const remoteId = spec.application?.remoteId ?? remoteByName.get(profile.name) ?? null;
-      const created = remoteId
-        ? await arrFetch<{ id: number }>(cfg, `/api/v3/qualityprofile/${remoteId}`, {
-            method: "PUT",
-            body: JSON.stringify({ id: remoteId, ...body }),
-          })
-        : await arrFetch<{ id: number }>(cfg, `/api/v3/qualityprofile`, {
-            method: "POST",
-            body: JSON.stringify(body),
-          });
-      results.push(await recordApply(spec, { ok: true, remoteId: created.id }));
+      let created: { id: number };
+      let recreated = false;
+      if (remoteId) {
+        const out = await arrPutOrRecreate<{ id: number }>(
+          cfg,
+          `/api/v3/qualityprofile/${remoteId}`,
+          `/api/v3/qualityprofile`,
+          { id: remoteId, ...body },
+          body,
+        );
+        created = out.resource;
+        recreated = out.recreated;
+      } else {
+        created = await arrFetch<{ id: number }>(cfg, `/api/v3/qualityprofile`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+      }
+      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }));
     } catch (err) {
       results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }));
     }
@@ -1201,6 +1391,10 @@ export interface TrashSyncResult {
   errors: string[];
 }
 
+// Cap refresh frequency regardless of how often the cron fires. Admin "Refresh Catalog" button
+// bypasses this — it's an explicit user action that should always hit GitHub.
+const REFRESH_MIN_INTERVAL_MS = 60 * 60 * 1000;
+
 export async function runTrashSync(): Promise<TrashSyncResult> {
   const settings = await prisma.setting.findMany({
     where: {
@@ -1212,6 +1406,7 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
           "trashSyncQualityProfiles",
           "trashSyncNaming",
           "trashSyncQualitySizes",
+          "trashLastRefreshAt",
         ],
       },
     },
@@ -1223,15 +1418,35 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
     return { refreshed: [], applied: [], errors: ["trashGuidesEnabled is off"] };
   }
 
+  // Cadence gate: if a refresh ran within the last hour, skip the GitHub round-trip and run apply
+  // alone. Lets users set TRASH_SYNC_INTERVAL more aggressively (e.g. every 15 minutes) for faster
+  // apply-after-edit feedback without hammering GitHub.
+  const lastRefreshAt = map.trashLastRefreshAt ? Date.parse(map.trashLastRefreshAt) : NaN;
+  const shouldRefresh = Number.isNaN(lastRefreshAt) || Date.now() - lastRefreshAt > REFRESH_MIN_INTERVAL_MS;
+
   const services: TrashService[] = ["RADARR", "SONARR"];
   const refreshed: RefreshResult[] = [];
-  for (const service of services) {
-    try {
-      const r = await refreshCatalog(service);
-      refreshed.push(r);
-      errors.push(...r.errors.map((e) => `${service}: ${e}`));
-    } catch (err) {
-      errors.push(`${service} refresh: ${err instanceof Error ? err.message : String(err)}`);
+  if (shouldRefresh) {
+    for (const service of services) {
+      try {
+        const r = await refreshCatalog(service);
+        refreshed.push(r);
+        errors.push(...r.errors.map((e) => `${service}: ${e}`));
+      } catch (err) {
+        errors.push(`${service} refresh: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // Only stamp success if at least one service refreshed without throwing — partial-success here
+    // is intentional, the gate is "we recently tried", not "the catalog is exhaustively current".
+    if (refreshed.length > 0) {
+      const value = new Date().toISOString();
+      await prisma.setting.upsert({
+        where: { key: "trashLastRefreshAt" },
+        update: { value },
+        create: { key: "trashLastRefreshAt", value },
+      }).catch((err) => {
+        console.warn("[trash] failed to stamp last-refresh-at:", err instanceof Error ? err.message : err);
+      });
     }
   }
 
@@ -1271,6 +1486,8 @@ export interface SpecStatus {
     remoteId: number | null;
     appliedAt: string | null;
     lastError: string | null;
+    lastErrorAt: string | null;
+    errorCount: number;
   } | null;
 }
 
@@ -1295,6 +1512,8 @@ export async function listSpecs(service: TrashService): Promise<SpecStatus[]> {
           remoteId: r.application.remoteId,
           appliedAt: r.application.appliedAt?.toISOString() ?? null,
           lastError: r.application.lastError,
+          lastErrorAt: r.application.lastErrorAt?.toISOString() ?? null,
+          errorCount: r.application.errorCount,
         }
       : null,
   }));
@@ -1330,6 +1549,8 @@ export async function getSpecDetail(id: string): Promise<SpecDetail | null> {
           remoteId: row.application.remoteId,
           appliedAt: row.application.appliedAt?.toISOString() ?? null,
           lastError: row.application.lastError,
+          lastErrorAt: row.application.lastErrorAt?.toISOString() ?? null,
+          errorCount: row.application.errorCount,
         }
       : null,
   };

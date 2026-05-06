@@ -100,10 +100,13 @@ const SETTINGS_SCHEMA = [
   ["enableMachineSession",           false],
   ["trashGuidesEnabled",              false],
   ["trashSyncCustomFormats",          false],
+  ["trashSyncCustomFormatGroups",     false],
   ["trashSyncQualityProfiles",        false],
   ["trashSyncNaming",                 false],
   ["trashSyncQualitySizes",           false],
   ["trashGithubToken",                true ],
+  ["trashLastRefreshTruncatedAt",     false],
+  ["trashLastRefreshAt",              false],
   // Feature toggles — see src/lib/features.ts for the registry. All stored as "true"|"false".
   ["feature.page.top",                false],
   ["feature.page.popular",            false],

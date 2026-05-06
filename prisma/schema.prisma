@@ -723,6 +723,11 @@ model TrashApplication {
   remoteId    Int?
   appliedAt   DateTime?
   lastError   String?
+  // Set whenever lastError is written. Together with errorCount this lets the diagnostic endpoint
+  // surface "flapping" specs (errorCount >= 3 within the last 24h) and lets the UI show a
+  // "× N failures since 2h ago" badge. Reset to null on a successful apply.
+  lastErrorAt DateTime?
+  errorCount  Int       @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

@@ -2,6 +2,10 @@
 
 import { Client } from "pg";
 
+// Lock IDs assigned to long-running cron / admin operations. The same id is reused across the cron
+// route and admin routes that mutate the same external state, so admin actions cannot race a cron run.
+export const TRASH_SYNC_LOCK_ID = 2010;
+
 // Uses a raw pg Client (not Prisma) because advisory locks must be held on a single persistent connection;
 // Prisma's pool can transparently switch connections between awaits, which would release the lock early
 export async function withAdvisoryLock<T, U = T>(
