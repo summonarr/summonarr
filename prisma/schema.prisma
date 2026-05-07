@@ -116,6 +116,7 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expires])
 }
 
 model VerificationToken {
@@ -502,6 +503,8 @@ model AuditLog {
   @@index([userId])
   @@index([userName])
   @@index([target])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
 }
 
 enum AuditAction {

@@ -112,9 +112,11 @@ async function plexFetchAllPages<T>(
       token,
     );
     if (!res.ok) throw new Error(`Plex paginated fetch failed: ${res.status} at start=${start}`);
-    const data = await res.json() as { MediaContainer: { Metadata?: T[]; totalSize?: number; size?: number } };
-    const items = data.MediaContainer.Metadata ?? [];
-    if (start === 0) total = data.MediaContainer.totalSize ?? data.MediaContainer.size ?? items.length;
+    const data = await res.json() as { MediaContainer?: { Metadata?: T[]; totalSize?: number; size?: number } };
+    const container = data.MediaContainer;
+    if (!container) throw new Error(`Plex paginated fetch returned no MediaContainer at start=${start}`);
+    const items = container.Metadata ?? [];
+    if (start === 0) total = container.totalSize ?? container.size ?? items.length;
     processItems(items);
     start += items.length;
     if (items.length === 0) break;

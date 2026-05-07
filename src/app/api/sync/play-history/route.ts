@@ -376,8 +376,8 @@ export async function POST(request: NextRequest) {
         try {
           const parsed = JSON.parse(row.data) as { posterPath?: string | null };
           if (parsed.posterPath) {
-            const id = parseInt(row.key.split(":")[1], 10);
-            if (id && !sessionPosterMap[id]) sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
+            const id = parseInt(row.key.split(":")[1] ?? "", 10);
+            if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
           }
         } catch { }
       }

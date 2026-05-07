@@ -157,9 +157,15 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     const plexUrl = `https://app.plex.tv/auth/#!?${oauthParams.toString()}`;
 
     // PIN state is stashed in sessionStorage because the page navigates away; /auth/plex/done reads it on return
-    sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
-      flow: "login", pinId, clientId, rememberMe, callbackUrl, siteUrl, state, deviceMeta,
-    }));
+    try {
+      sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
+        flow: "login", pinId, clientId, rememberMe, callbackUrl, siteUrl, state, deviceMeta,
+      }));
+    } catch {
+      setError("Could not store sign-in state. Disable private browsing and try again.");
+      setLoading(false);
+      return;
+    }
     window.location.href = plexUrl;
   }
 

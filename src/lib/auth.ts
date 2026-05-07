@@ -62,7 +62,8 @@ async function findOrCreateJellyfinUser(jellyfinId: string, name: string): Promi
   const existing = await prisma.user.findUnique({ where: { email: syntheticEmail } });
   if (existing) {
     if (realEmail && existing.email !== realEmail) {
-      await prisma.user.update({ where: { id: existing.id }, data: { email: realEmail } });
+      // Use updateMany (no-throw on conflict) so a concurrent sign-in that already updated the email doesn't crash
+      await prisma.user.updateMany({ where: { id: existing.id, email: syntheticEmail }, data: { email: realEmail } }).catch(() => {});
       return { id: existing.id, email: realEmail, name: existing.name, role: existing.role };
     }
     return { id: existing.id, email: existing.email, name: existing.name, role: existing.role };

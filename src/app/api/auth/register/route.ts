@@ -12,7 +12,7 @@ let registrationInFlight = false;
 export async function POST(req: NextRequest) {
   const origin = req.headers.get("origin") ?? "";
   const allowedOrigin = (process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "").replace(/\/$/, "");
-  if (origin && allowedOrigin && origin !== allowedOrigin) {
+  if (!allowedOrigin || (origin && origin !== allowedOrigin)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 

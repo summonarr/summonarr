@@ -57,12 +57,17 @@ export async function GET(req: NextRequest) {
 
   if (dateFrom || dateTo) {
     where.createdAt = {};
-    if (dateFrom) where.createdAt.gte = new Date(dateFrom);
+    if (dateFrom) {
+      const d = new Date(dateFrom);
+      if (!isNaN(d.getTime())) where.createdAt.gte = d;
+    }
     if (dateTo) {
-      // Advance by one day to make the date range inclusive of the requested end date
       const end = new Date(dateTo);
-      end.setDate(end.getDate() + 1);
-      where.createdAt.lt = end;
+      if (!isNaN(end.getTime())) {
+        // Advance by one day to make the date range inclusive of the requested end date
+        end.setDate(end.getDate() + 1);
+        where.createdAt.lt = end;
+      }
     }
   }
 

@@ -192,6 +192,8 @@ export async function POST(request: NextRequest) {
   let plexTvIds    = new Map<number, PlexLibraryItemData>();
   let jfMovieIds   = new Map<number, JellyfinLibraryItemData>();
   let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
+  let plexSyncSucceeded = false;
+  let jellyfinSyncSucceeded = false;
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -221,6 +223,7 @@ export async function POST(request: NextRequest) {
           if (movieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
+        plexSyncSucceeded = true;
         try {
           const episodes = await getPlexTVEpisodes(serverUrl, token, undefined, sections);
           if (episodes.length > 0) {
@@ -254,6 +257,7 @@ export async function POST(request: NextRequest) {
           if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
+        jellyfinSyncSucceeded = true;
 
         const jfSeriesMap = new Map<string, number>();
         for (const [tmdbId, data] of jfTvIds) {
@@ -375,12 +379,15 @@ export async function POST(request: NextRequest) {
       const ms = userMediaServer.get(req.requestedBy) ?? null;
       const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
       const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
+      // Use sync success flags rather than configured flags so a failed sync doesn't trigger false notifications
+      const plexDataValid = plexSyncSucceeded || !plexConfigured;
+      const jellyfinDataValid = jellyfinSyncSucceeded || !jellyfinConfigured;
       const shouldNotify = !ms
-        ? inPlex || inJellyfin || (!plexConfigured && !jellyfinConfigured)
+        ? inPlex || inJellyfin || (plexDataValid && jellyfinDataValid && !plexConfigured && !jellyfinConfigured)
         : ms === "plex"
-        ? inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured))
+        ? inPlex || (plexDataValid && !plexConfigured && (inJellyfin || (jellyfinDataValid && !jellyfinConfigured)))
         : ms === "jellyfin"
-        ? inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured))
+        ? inJellyfin || (jellyfinDataValid && !jellyfinConfigured && (inPlex || (plexDataValid && !plexConfigured)))
         : false;
       if (!shouldNotify) continue;
       const cas = await prisma.mediaRequest.updateMany({

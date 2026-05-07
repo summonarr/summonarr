@@ -641,9 +641,15 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       `&forwardUrl=${forwardUrl}`;
 
     // PIN state stashed so /auth/plex/done can pick it up after Plex redirects back
-    sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
-      flow: "settings", pinId, state,
-    }));
+    try {
+      sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
+        flow: "settings", pinId, state,
+      }));
+    } catch {
+      setError("Could not store sign-in state. Disable private browsing and try again.");
+      setStatus("error");
+      return;
+    }
     window.location.href = plexUrl;
   }
 
