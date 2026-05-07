@@ -783,8 +783,10 @@ async function recordApply(
 ): Promise<ApplyResult> {
   // Race-safety: when two `applySpecs` runs interleave on the same spec (admin Apply during a cron
   // run after lock contention is resolved), a read-modify-write on errorCount loses one of the
-  // increments. We use update-with-increment, falling back to create on P2025 — the upsert form
-  // doesn't support `{ increment: 1 }` inside `update.data`.
+  // increments. The failure path uses update-with-increment + P2025 fallback for that reason.
+  // The success path doesn't increment, so a single `upsert` is atomic and avoids the noisy
+  // "No record was found for an update" Prisma error log that the previous update→create dance
+  // produced on first apply.
   if (outcome.ok) {
     const appliedAt = new Date();
     const updateData = {
@@ -795,22 +797,11 @@ async function recordApply(
       enabled: true,
       ...(outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}),
     };
-    try {
-      await prisma.trashApplication.update({ where: { trashSpecId: spec.id }, data: updateData });
-    } catch (err) {
-      if (!isPrismaNotFound(err)) throw err;
-      try {
-        await prisma.trashApplication.create({
-          data: { trashSpecId: spec.id, ...updateData },
-        });
-      } catch (createErr) {
-        // P2002 = a concurrent path created the row between our failed update and our create.
-        // The advisory lock at the route boundary normally prevents this, but defending here is
-        // cheap insurance against future code that forgets the lock invariant.
-        if (!isPrismaUniqueViolation(createErr)) throw createErr;
-        await prisma.trashApplication.update({ where: { trashSpecId: spec.id }, data: updateData });
-      }
-    }
+    await prisma.trashApplication.upsert({
+      where: { trashSpecId: spec.id },
+      update: updateData,
+      create: { trashSpecId: spec.id, ...updateData },
+    });
   } else {
     const lastErrorAt = new Date();
     const failureUpdate = {
