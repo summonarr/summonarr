@@ -66,8 +66,10 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
       <div
         className="lg:hidden flex items-center sticky top-0 z-30"
         style={{
-          height: 52,
-          padding: "0 10px",
+          minHeight: 52,
+          paddingTop: "env(safe-area-inset-top, 0px)",
+          paddingLeft: 10,
+          paddingRight: 10,
           gap: 8,
           background: "color-mix(in oklab, var(--ds-bg) 90%, transparent)",
           backdropFilter: "blur(14px)",
@@ -179,7 +181,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
           background: "color-mix(in oklab, var(--ds-bg-1) 92%, transparent)",
           backdropFilter: "blur(16px)",
           borderTop: "1px solid var(--ds-border)",
-          height: 64,
+          minHeight: 64,
         }}
       >
         <div

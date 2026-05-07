@@ -136,6 +136,19 @@
   }
 }
 
+/* Safe area top support — iOS notch/Dynamic Island + Android punch-hole cameras.
+   Requires viewport-fit=cover (already set in src/app/layout.tsx).
+   --mobile-top-bar-h tracks the true rendered height of the sticky top bar so
+   sub-navs can position themselves below it without hard-coding 52px. */
+:root {
+  --mobile-top-bar-h: 52px;
+}
+@supports (padding-top: env(safe-area-inset-top)) {
+  :root {
+    --mobile-top-bar-h: calc(52px + env(safe-area-inset-top, 0px));
+  }
+}
+
 /* ────────────────────────────────────────────────────────────────────
    DESIGN SYSTEM TOKENS (ds-* namespace)
    Ported from the Summonarr redesign bundle (Linear/Vercel utility-
