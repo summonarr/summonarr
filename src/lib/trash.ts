@@ -1008,9 +1008,22 @@ function buildNamingPatch(
   const season = payload.season;
   const episodes = payload.episodes;
   const patch: Record<string, unknown> = { renameEpisodes: true, replaceIllegalCharacters: true };
-  const std = pick(episodes, "standard") ?? pick(episodes, "default");
-  const daily = pick(episodes, "daily");
-  const anime = pick(episodes, "anime");
+  // Sonarr's episodes.{standard,daily,anime} are objects keyed by variant ({ default, original, p2p-scene, ... }).
+  // Older callers passed strings; tolerate both shapes by descending one level when we hit an object.
+  const pickEpisodeFormat = (key: string): string | undefined => {
+    const direct = pick(episodes, key);
+    if (direct) return direct;
+    if (episodes && typeof episodes === "object") {
+      const nested = (episodes as Record<string, unknown>)[key];
+      if (nested && typeof nested === "object") {
+        return pick(nested, "default");
+      }
+    }
+    return undefined;
+  };
+  const std = pickEpisodeFormat("standard");
+  const daily = pickEpisodeFormat("daily");
+  const anime = pickEpisodeFormat("anime");
   const seriesFolder = pick(series, "default");
   const seasonFolder = pick(season, "default");
   if (std) patch.standardEpisodeFormat = std;
