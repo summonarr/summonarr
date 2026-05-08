@@ -13,90 +13,124 @@ import {
   applyFinalTick,
   MAX_PLAYTIME_DELTA_MS,
 } from "@/lib/play-history";
-import { getPlexSessions, extractTmdbIdFromGuids, type PlexSessionData } from "@/lib/plex";
-import { getJellyfinSessions, type JellyfinSessionData } from "@/lib/jellyfin";
+import { getPlexSessions, extractTmdbIdFromGuids } from "@/lib/plex";
+import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
 import { posterUrl } from "@/lib/tmdb-types";
 import { isCronAuthorized } from "@/lib/cron-auth";
 
-async function syncPlexSessions(): Promise<{ started: number; updated: number; ended: number }> {
-  const [serverUrlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
+type SyncResult = { started: number; updated: number; ended: number };
 
-  if (!serverUrlRow?.value || !tokenRow?.value) return { started: 0, updated: 0, ended: 0 };
-
-  const serverUrl = serverUrlRow.value.replace(/\/$/, "");
-  const sessions = await getPlexSessions(serverUrl, tokenRow.value);
+async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
+  const sessions = await getPlexSessions(serverUrl, token);
   const now = new Date();
-  let started = 0;
-  let updated = 0;
+
+  // Filter sessions with required identifiers up front so prefetch sets are accurate.
+  const valid = sessions.filter((s) => s.sessionKey && s.accountId);
+  if (valid.length === 0) {
+    // Still need the cleanup sweep below to finalize any stale rows.
+  }
 
   const seenSessionKeys = new Set<string>();
+  for (const s of valid) seenSessionKeys.add(s.sessionKey);
 
-  for (const s of sessions) {
-    if (!s.sessionKey || !s.accountId) continue;
-    seenSessionKeys.add(s.sessionKey);
+  // Bulk prefetch: existing ActiveSession rows for these IDs in a single query.
+  const sessionIds = valid.map((s) => `plex:${s.sessionKey}`);
+  const existingRows = sessionIds.length > 0
+    ? await prisma.activeSession.findMany({ where: { id: { in: sessionIds } } })
+    : [];
+  const existingMap = new Map(existingRows.map((r) => [r.id, r]));
 
-    const msUserId = await resolveMediaServerUser({
-      source: "plex",
-      sourceUserId: s.accountId,
-      username: s.accountName,
-      thumbUrl: s.accountThumb || null,
-    });
+  // Bulk prefetch: PlexLibraryItem fallbacks for movies whose TMDB id isn't in Guid.
+  const ratingKeysNeedingLookup = valid
+    .filter((s) => s.type !== "episode" && extractTmdbIdFromGuids(s.Guid) == null && !!s.ratingKey)
+    .map((s) => s.ratingKey);
+  const libRows = ratingKeysNeedingLookup.length > 0
+    ? await prisma.plexLibraryItem.findMany({
+        where: { plexRatingKey: { in: ratingKeysNeedingLookup } },
+        select: { plexRatingKey: true, tmdbId: true, mediaType: true },
+      })
+    : [];
+  const libMap = new Map(libRows.map((r) => [r.plexRatingKey, r]));
 
-    const sessionId = `plex:${s.sessionKey}`;
-    let tmdbId: number | null = null;
-    let mediaType: string | null = s.type === "episode" ? "TV" : s.type === "movie" ? "MOVIE" : null;
+  // Resolve media server users in parallel — each upserts independently.
+  const userIds = await Promise.all(
+    valid.map((s) =>
+      resolveMediaServerUser({
+        source: "plex",
+        sourceUserId: s.accountId,
+        username: s.accountName,
+        thumbUrl: s.accountThumb || null,
+      }),
+    ),
+  );
 
-    if (s.type === "episode") {
-      // For episodes, resolve the TMDB ID from the show (grandparent), not the episode item itself
-      tmdbId = await resolveShowTmdbId("plex", s.grandparentRatingKey);
-    } else {
-      tmdbId = extractTmdbIdFromGuids(s.Guid);
-      if (tmdbId == null && s.ratingKey) {
-        const lib = await prisma.plexLibraryItem.findFirst({
-          where: { plexRatingKey: s.ratingKey },
-          select: { tmdbId: true, mediaType: true },
-        });
-        if (lib) {
-          tmdbId = lib.tmdbId;
-          mediaType = mediaType ?? lib.mediaType;
+  // Resolve TMDB ids per session (TV episodes hit DB, movies are mostly in-memory).
+  const resolved = await Promise.all(
+    valid.map(async (s, i) => {
+      const sessionId = `plex:${s.sessionKey}`;
+      let tmdbId: number | null = null;
+      let mediaType: string | null = s.type === "episode" ? "TV" : s.type === "movie" ? "MOVIE" : null;
+
+      if (s.type === "episode") {
+        // For episodes, resolve the TMDB ID from the show (grandparent), not the episode item itself
+        tmdbId = await resolveShowTmdbId("plex", s.grandparentRatingKey);
+      } else {
+        tmdbId = extractTmdbIdFromGuids(s.Guid);
+        if (tmdbId == null && s.ratingKey) {
+          const lib = libMap.get(s.ratingKey);
+          if (lib) {
+            tmdbId = lib.tmdbId;
+            mediaType = mediaType ?? lib.mediaType;
+          }
         }
       }
-    }
 
-    const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
+      return { s, sessionId, msUserId: userIds[i], tmdbId, mediaType };
+    }),
+  );
 
-    let posterPath: string | null = null;
-    if (tmdbId && mediaType) {
-      const core = await prisma.tmdbMediaCore.findUnique({
-        where: { tmdbId_mediaType: { tmdbId, mediaType: mediaType as "MOVIE" | "TV" } },
-        select: { posterPath: true },
-      }).catch(() => null);
-      posterPath = core?.posterPath ?? null;
-    }
+  // Bulk prefetch posters for every distinct (tmdbId, mediaType) pair we resolved.
+  const posterPairs = Array.from(
+    new Map(
+      resolved
+        .filter((r): r is typeof r & { tmdbId: number; mediaType: string } => r.tmdbId != null && !!r.mediaType)
+        .map((r) => [`${r.tmdbId}:${r.mediaType}`, { tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" }]),
+    ).values(),
+  );
+  const posterRows = posterPairs.length > 0
+    ? await prisma.tmdbMediaCore.findMany({
+        where: { OR: posterPairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
+        select: { tmdbId: true, mediaType: true, posterPath: true },
+      }).catch(() => [])
+    : [];
+  const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
 
-    const existing = await prisma.activeSession.findUnique({ where: { id: sessionId } });
-    if (existing) {
-      const increment = computePlaytimeIncrement(existing, now);
-      await prisma.activeSession.update({
-        where: { id: sessionId },
-        data: {
-          lastSeenAt: now,
-          state: s.state,
-          progressPercent,
-          progressMs: BigInt(s.viewOffset),
-          playMethod: s.playMethod,
-          resolution: s.resolution,
-          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-          ...(tmdbId != null ? { tmdbId, mediaType } : {}),
-          ...(posterPath ? { posterPath } : {}),
-        },
-      });
-      updated++;
-    } else {
+  // Run per-session writes in parallel.
+  const writeResults = await Promise.all(
+    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
+      const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
+      const posterPath = tmdbId != null && mediaType ? posterMap.get(`${tmdbId}:${mediaType}`) ?? null : null;
+
+      const existing = existingMap.get(sessionId);
+      if (existing) {
+        const increment = computePlaytimeIncrement(existing, now);
+        await prisma.activeSession.update({
+          where: { id: sessionId },
+          data: {
+            lastSeenAt: now,
+            state: s.state,
+            progressPercent,
+            progressMs: BigInt(s.viewOffset),
+            playMethod: s.playMethod,
+            resolution: s.resolution,
+            ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+            ...(tmdbId != null ? { tmdbId, mediaType } : {}),
+            ...(posterPath ? { posterPath } : {}),
+          },
+        });
+        return "updated";
+      }
       await prisma.activeSession.create({
         data: {
           id: sessionId,
@@ -134,127 +168,186 @@ async function syncPlexSessions(): Promise<{ started: number; updated: number; e
           container: s.container ?? null,
         },
       });
-      started++;
-    }
-  }
+      return "started";
+    }),
+  );
+
+  const started = writeResults.filter((r) => r === "started").length;
+  const updated = writeResults.filter((r) => r === "updated").length;
 
   const activePlexSessions = await prisma.activeSession.findMany({
     where: { source: "plex" },
   });
 
-  let ended = 0;
-  for (const session of activePlexSessions) {
-    if (!seenSessionKeys.has(session.sessionKey)) {
-      try {
-        await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
-        ended++;
-      } catch {
-
-      }
-    }
-  }
+  const stale = activePlexSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  const finalized = await Promise.all(
+    stale.map((session) =>
+      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }))
+        .then(() => true)
+        .catch(() => false),
+    ),
+  );
+  const ended = finalized.filter(Boolean).length;
 
   return { started, updated, ended };
 }
 
-async function syncJellyfinSessions(): Promise<{ started: number; updated: number; ended: number }> {
-  const [urlRow, keyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
-
-  if (!urlRow?.value || !keyRow?.value) return { started: 0, updated: 0, ended: 0 };
-
-  const baseUrl = urlRow.value.replace(/\/$/, "");
-  const sessions = await getJellyfinSessions(baseUrl, keyRow.value);
+async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<SyncResult> {
+  const sessions = await getJellyfinSessions(baseUrl, apiKey);
   const now = new Date();
-  let started = 0;
-  let updated = 0;
+
+  const valid = sessions.filter((s) => s.playSessionId && s.userId);
 
   const seenSessionKeys = new Set<string>();
+  for (const s of valid) seenSessionKeys.add(s.playSessionId);
 
-  for (const s of sessions) {
-    if (!s.playSessionId || !s.userId) continue;
-    seenSessionKeys.add(s.playSessionId);
+  // Resolve media server users in parallel so we have msUserId before the existing-row prefetch
+  // (the (source, mediaServerUserId, sourceItemId) fallback lookup needs it).
+  const userIds = await Promise.all(
+    valid.map((s) =>
+      resolveMediaServerUser({
+        source: "jellyfin",
+        sourceUserId: s.userId,
+        username: s.userName,
+      }),
+    ),
+  );
 
-    const msUserId = await resolveMediaServerUser({
-      source: "jellyfin",
-      sourceUserId: s.userId,
-      username: s.userName,
-    });
+  // Bulk prefetch: existing ActiveSession rows. Three lookup keys per session — primary id,
+  // alternate id (when sessionId !== playSessionId), and the (msUserId, sourceItemId) fallback
+  // that handles webhook-vs-polling PlaySessionId drift.
+  const primaryIds = valid.map((s) => `jellyfin:${s.playSessionId}`);
+  const altIds = valid
+    .filter((s) => s.sessionId && s.sessionId !== s.playSessionId)
+    .map((s) => `jellyfin:${s.sessionId}`);
+  const allIds = [...new Set([...primaryIds, ...altIds])];
+  const idRows = allIds.length > 0
+    ? await prisma.activeSession.findMany({ where: { id: { in: allIds } } })
+    : [];
+  const idRowMap = new Map(idRows.map((r) => [r.id, r]));
 
-    const sessionId = `jellyfin:${s.playSessionId}`;
-    let tmdbId: number | null = null;
-    let mediaType: string | null = s.itemType === "Episode" ? "TV" : s.itemType === "Movie" ? "MOVIE" : null;
+  // Fallback rows: only fetch for sessions that didn't match the primary or alternate id.
+  const fallbackPairs = valid
+    .map((s, i) => {
+      const sessionId = `jellyfin:${s.playSessionId}`;
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      if (idRowMap.has(sessionId) || (altSessionId && idRowMap.has(altSessionId))) return null;
+      return { msUserId: userIds[i], itemId: s.itemId };
+    })
+    .filter((p): p is { msUserId: string; itemId: string } => !!p && !!p.itemId);
+  const fallbackRows = fallbackPairs.length > 0
+    ? await prisma.activeSession.findMany({
+        where: {
+          source: "jellyfin",
+          OR: fallbackPairs.map((p) => ({ mediaServerUserId: p.msUserId, sourceItemId: p.itemId })),
+        },
+      })
+    : [];
+  const fallbackMap = new Map(fallbackRows.map((r) => [`${r.mediaServerUserId}:${r.sourceItemId ?? ""}`, r]));
 
-    if (s.itemType === "Episode") {
-      // For episodes, resolve TMDB ID from the series, not the episode item
-      tmdbId = await resolveShowTmdbId("jellyfin", s.seriesId);
-    } else {
+  // Bulk prefetch JellyfinLibraryItem for movies whose TMDB id isn't in providerIds.
+  const itemIdsNeedingLookup = valid
+    .filter((s) => {
+      if (s.itemType === "Episode") return false;
       const tmdbRaw = s.providerIds?.Tmdb ?? s.providerIds?.tmdb;
       const parsed = tmdbRaw ? parseInt(tmdbRaw, 10) : NaN;
-      tmdbId = Number.isFinite(parsed) ? parsed : null;
-      if (tmdbId == null && s.itemId) {
-        const lib = await prisma.jellyfinLibraryItem.findFirst({
-          where: { jellyfinItemId: s.itemId },
-          select: { tmdbId: true, mediaType: true },
-        });
-        if (lib) {
-          tmdbId = lib.tmdbId;
-          mediaType = mediaType ?? lib.mediaType;
+      return !Number.isFinite(parsed) && !!s.itemId;
+    })
+    .map((s) => s.itemId);
+  const libRows = itemIdsNeedingLookup.length > 0
+    ? await prisma.jellyfinLibraryItem.findMany({
+        where: { jellyfinItemId: { in: itemIdsNeedingLookup } },
+        select: { jellyfinItemId: true, tmdbId: true, mediaType: true },
+      })
+    : [];
+  const libMap = new Map(libRows.map((r) => [r.jellyfinItemId, r]));
+
+  // Resolve TMDB ids per session (TV episodes hit DB via resolveShowTmdbId).
+  const resolved = await Promise.all(
+    valid.map(async (s, i) => {
+      let tmdbId: number | null = null;
+      let mediaType: string | null = s.itemType === "Episode" ? "TV" : s.itemType === "Movie" ? "MOVIE" : null;
+
+      if (s.itemType === "Episode") {
+        tmdbId = await resolveShowTmdbId("jellyfin", s.seriesId);
+      } else {
+        const tmdbRaw = s.providerIds?.Tmdb ?? s.providerIds?.tmdb;
+        const parsed = tmdbRaw ? parseInt(tmdbRaw, 10) : NaN;
+        tmdbId = Number.isFinite(parsed) ? parsed : null;
+        if (tmdbId == null && s.itemId) {
+          const lib = libMap.get(s.itemId);
+          if (lib) {
+            tmdbId = lib.tmdbId;
+            mediaType = mediaType ?? lib.mediaType;
+          }
         }
       }
-    }
 
-    const positionMs = Math.floor(s.positionTicks / 10_000);
-    const durationMs = Math.floor(s.durationTicks / 10_000);
-    const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
+      return { s, msUserId: userIds[i], tmdbId, mediaType };
+    }),
+  );
 
-    let jfPosterPath: string | null = null;
-    const resolvedTmdbId = tmdbId && !isNaN(tmdbId) ? tmdbId : null;
-    if (resolvedTmdbId && mediaType) {
-      const core = await prisma.tmdbMediaCore.findUnique({
-        where: { tmdbId_mediaType: { tmdbId: resolvedTmdbId, mediaType: mediaType as "MOVIE" | "TV" } },
-        select: { posterPath: true },
-      }).catch(() => null);
-      jfPosterPath = core?.posterPath ?? null;
-    }
+  const posterPairs = Array.from(
+    new Map(
+      resolved
+        .filter((r): r is typeof r & { tmdbId: number; mediaType: string } => r.tmdbId != null && !!r.mediaType)
+        .map((r) => [`${r.tmdbId}:${r.mediaType}`, { tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" }]),
+    ).values(),
+  );
+  const posterRows = posterPairs.length > 0
+    ? await prisma.tmdbMediaCore.findMany({
+        where: { OR: posterPairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
+        select: { tmdbId: true, mediaType: true, posterPath: true },
+      }).catch(() => [])
+    : [];
+  const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
 
-    // The webhook creates sessions keyed by payload.PlaySessionId, which may not match the
-    // Sessions API's PlaySessionId or s.Id for the same playback. Fall back to (userId, itemId)
-    // so we update the existing webhook row instead of creating a duplicate. After a match,
-    // rewrite the row's sessionKey to the API's playSessionId so subsequent polls find it directly
-    // and finalization tracking (seenSessionKeys.has(sessionKey)) stays consistent.
-    const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
-    const existing =
-      (await prisma.activeSession.findUnique({ where: { id: sessionId } })) ??
-      (altSessionId ? await prisma.activeSession.findUnique({ where: { id: altSessionId } }) : null) ??
-      (await prisma.activeSession.findFirst({
-        where: { source: "jellyfin", mediaServerUserId: msUserId, sourceItemId: s.itemId },
-      }));
-    if (existing) {
-      const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
-      const posDelta = positionMs - Number(existing.progressMs);
-      const increment = (posDelta > 0 || s.state === "playing")
-        ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
-        : BigInt(0);
-      await prisma.activeSession.update({
-        where: { id: existing.id },
-        data: {
-          sessionKey: s.playSessionId,
-          lastSeenAt: now,
-          state: s.state,
-          progressPercent,
-          progressMs: BigInt(positionMs),
-          playMethod: s.playMethod,
-          resolution: s.resolution ?? null,
-          ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-          ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
-          ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
-        },
-      });
-      updated++;
-    } else {
+  const writeResults = await Promise.all(
+    resolved.map(async ({ s, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
+      const sessionId = `jellyfin:${s.playSessionId}`;
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      const positionMs = Math.floor(s.positionTicks / 10_000);
+      const durationMs = Math.floor(s.durationTicks / 10_000);
+      const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
+      const resolvedTmdbId = tmdbId && !isNaN(tmdbId) ? tmdbId : null;
+      const jfPosterPath = resolvedTmdbId != null && mediaType
+        ? posterMap.get(`${resolvedTmdbId}:${mediaType}`) ?? null
+        : null;
+
+      // The webhook creates sessions keyed by payload.PlaySessionId, which may not match the
+      // Sessions API's PlaySessionId or s.Id for the same playback. Fall back to (userId, itemId)
+      // so we update the existing webhook row instead of creating a duplicate. After a match,
+      // rewrite the row's sessionKey to the API's playSessionId so subsequent polls find it directly
+      // and finalization tracking (seenSessionKeys.has(sessionKey)) stays consistent.
+      const existing =
+        idRowMap.get(sessionId) ??
+        (altSessionId ? idRowMap.get(altSessionId) : undefined) ??
+        fallbackMap.get(`${msUserId}:${s.itemId ?? ""}`);
+
+      if (existing) {
+        const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
+        const posDelta = positionMs - Number(existing.progressMs);
+        const increment = (posDelta > 0 || s.state === "playing")
+          ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
+          : BigInt(0);
+        await prisma.activeSession.update({
+          where: { id: existing.id },
+          data: {
+            sessionKey: s.playSessionId,
+            lastSeenAt: now,
+            state: s.state,
+            progressPercent,
+            progressMs: BigInt(positionMs),
+            playMethod: s.playMethod,
+            resolution: s.resolution ?? null,
+            ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+            ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
+            ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
+          },
+        });
+        return "updated";
+      }
+
       await prisma.activeSession.create({
         data: {
           id: sessionId,
@@ -290,28 +383,34 @@ async function syncJellyfinSessions(): Promise<{ started: number; updated: numbe
           container: s.container ?? null,
         },
       });
-      started++;
-    }
-  }
+      return "started";
+    }),
+  );
+
+  const started = writeResults.filter((r) => r === "started").length;
+  const updated = writeResults.filter((r) => r === "updated").length;
 
   const activeJfSessions = await prisma.activeSession.findMany({
     where: { source: "jellyfin" },
   });
 
-  let ended = 0;
-  for (const session of activeJfSessions) {
-    if (!seenSessionKeys.has(session.sessionKey)) {
-      try {
-        await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
-        ended++;
-      } catch (err) {
-        console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
-      }
-    }
-  }
+  const stale = activeJfSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  const finalized = await Promise.all(
+    stale.map((session) =>
+      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }))
+        .then(() => true)
+        .catch((err) => {
+          console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
+          return false;
+        }),
+    ),
+  );
+  const ended = finalized.filter(Boolean).length;
 
   return { started, updated, ended };
 }
+
+const SYNC_SETTING_KEYS = ["plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey"] as const;
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -329,16 +428,26 @@ export async function POST(request: NextRequest) {
   const results: Record<string, unknown> = {};
 
   try {
-    const [plexEnabled, jellyfinEnabled] = await Promise.all([
+    const [plexEnabled, jellyfinEnabled, settingRows] = await Promise.all([
       isSourceEnabled("plex"),
       isSourceEnabled("jellyfin"),
+      prisma.setting.findMany({
+        where: { key: { in: SYNC_SETTING_KEYS as unknown as string[] } },
+        select: { key: true, value: true },
+      }),
     ]);
+
+    const settingMap = new Map(settingRows.map((r) => [r.key, r.value]));
+    const plexServerUrl = settingMap.get("plexServerUrl")?.replace(/\/$/, "") ?? null;
+    const plexAdminToken = settingMap.get("plexAdminToken") ?? null;
+    const jellyfinUrl = settingMap.get("jellyfinUrl")?.replace(/\/$/, "") ?? null;
+    const jellyfinApiKey = settingMap.get("jellyfinApiKey") ?? null;
 
     const syncPromises: Promise<void>[] = [];
 
-    if (plexEnabled) {
+    if (plexEnabled && plexServerUrl && plexAdminToken) {
       syncPromises.push(
-        syncPlexSessions()
+        syncPlexSessions(plexServerUrl, plexAdminToken)
           .then((r) => { results.plex = r; })
           .catch((err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -348,9 +457,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (jellyfinEnabled) {
+    if (jellyfinEnabled && jellyfinUrl && jellyfinApiKey) {
       syncPromises.push(
-        syncJellyfinSessions()
+        syncJellyfinSessions(jellyfinUrl, jellyfinApiKey)
           .then((r) => { results.jellyfin = r; })
           .catch((err) => {
             const msg = err instanceof Error ? err.message : String(err);
@@ -362,7 +471,39 @@ export async function POST(request: NextRequest) {
 
     await Promise.all(syncPromises);
 
-    const allSessions = await prisma.activeSession.findMany({ orderBy: { startedAt: "desc" } });
+    const allSessions = await prisma.activeSession.findMany({
+      orderBy: { startedAt: "desc" },
+      select: {
+        id: true,
+        source: true,
+        state: true,
+        mediaServerUserId: true,
+        serverUsername: true,
+        title: true,
+        tmdbId: true,
+        mediaType: true,
+        year: true,
+        seasonNumber: true,
+        episodeNumber: true,
+        episodeTitle: true,
+        progressPercent: true,
+        progressMs: true,
+        durationMs: true,
+        platform: true,
+        player: true,
+        device: true,
+        ipAddress: true,
+        startedAt: true,
+        playMethod: true,
+        videoCodec: true,
+        audioCodec: true,
+        resolution: true,
+        bitrate: true,
+        videoDecision: true,
+        audioDecision: true,
+        container: true,
+      },
+    });
 
     const sessionPosterMap: Record<number, string | null> = {};
     const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];

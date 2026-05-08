@@ -2,34 +2,62 @@ import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
-const settingsCache = new Map<string, { value: string | null; expiresAt: number }>();
+const SETTING_KEYS = [
+  "playHistoryEnabled",
+  "playHistoryPlexEnabled",
+  "playHistoryJellyfinEnabled",
+  "playHistoryWatchedThreshold",
+  "playHistoryCompletionThreshold",
+  "playHistoryArcGapDays",
+  "playHistoryRetentionDays",
+] as const;
+type SettingKey = (typeof SETTING_KEYS)[number];
+
 const SETTINGS_CACHE_TTL = 15_000;
+let settingsCache: { values: Record<SettingKey, string | null>; expiresAt: number } | null = null;
+let settingsInflight: Promise<Record<SettingKey, string | null>> | null = null;
+
+async function loadSettings(): Promise<Record<SettingKey, string | null>> {
+  if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.values;
+  if (settingsInflight) return settingsInflight;
+  settingsInflight = (async () => {
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: SETTING_KEYS as unknown as string[] } },
+      select: { key: true, value: true },
+    });
+    const values = Object.fromEntries(SETTING_KEYS.map((k) => [k, null])) as Record<SettingKey, string | null>;
+    for (const row of rows) {
+      if ((SETTING_KEYS as readonly string[]).includes(row.key)) {
+        values[row.key as SettingKey] = row.value ?? null;
+      }
+    }
+    settingsCache = { values, expiresAt: Date.now() + SETTINGS_CACHE_TTL };
+    return values;
+  })();
+  try {
+    return await settingsInflight;
+  } finally {
+    settingsInflight = null;
+  }
+}
 
 const activityCache = new Map<string, { data: unknown; expiresAt: number }>();
 const STATS_TTL = 5 * 60 * 1000;
 const CALENDAR_TTL = 30 * 60 * 1000;
 const REWATCHED_TTL = 10 * 60 * 1000;
 
-async function getSetting(key: string): Promise<string | null> {
-  const cached = settingsCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-  const row = await prisma.setting.findUnique({ where: { key } });
-  const value = row?.value ?? null;
-  settingsCache.set(key, { value, expiresAt: Date.now() + SETTINGS_CACHE_TTL });
-  return value;
-}
-
 export async function isPlayHistoryEnabled(): Promise<boolean> {
-  return (await getSetting("playHistoryEnabled")) === "true";
+  return (await loadSettings()).playHistoryEnabled === "true";
 }
 
 export async function isSourceEnabled(source: "plex" | "jellyfin"): Promise<boolean> {
-  const key = source === "plex" ? "playHistoryPlexEnabled" : "playHistoryJellyfinEnabled";
-  return (await getSetting(key)) === "true";
+  const settings = await loadSettings();
+  const val = source === "plex" ? settings.playHistoryPlexEnabled : settings.playHistoryJellyfinEnabled;
+  return val === "true";
 }
 
 export async function getWatchedThreshold(): Promise<number> {
-  const val = await getSetting("playHistoryWatchedThreshold");
+  const val = (await loadSettings()).playHistoryWatchedThreshold;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 80;
 }
@@ -37,7 +65,7 @@ export async function getWatchedThreshold(): Promise<number> {
 // Cumulative-watch threshold for an arc to count as a completion in getMostPopularOnServer.
 // Stricter than getWatchedThreshold (per-session) — a "completion" should mean they basically finished it.
 export async function getCompletionThreshold(): Promise<number> {
-  const val = await getSetting("playHistoryCompletionThreshold");
+  const val = (await loadSettings()).playHistoryCompletionThreshold;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 90;
 }
@@ -45,7 +73,7 @@ export async function getCompletionThreshold(): Promise<number> {
 // Gap (days) between consecutive sessions on the same media that splits one arc from the next.
 // A weekend chunked watch stays one arc; a months-later rewatch starts a new arc.
 export async function getArcGapDays(): Promise<number> {
-  const val = await getSetting("playHistoryArcGapDays");
+  const val = (await loadSettings()).playHistoryArcGapDays;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 1 && parsed <= 365 ? parsed : 14;
 }
@@ -276,7 +304,7 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 }
 
 export async function purgeOldHistory(): Promise<number> {
-  const val = await getSetting("playHistoryRetentionDays");
+  const val = (await loadSettings()).playHistoryRetentionDays;
   const days = val ? parseInt(val, 10) : 0;
   if (!days || days <= 0) return 0;
 

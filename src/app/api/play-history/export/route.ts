@@ -80,10 +80,33 @@ export async function GET(request: NextRequest) {
       where,
       orderBy: { startedAt: "desc" },
       take: MAX_EXPORT_ROWS,
-      include: {
-        mediaServerUser: {
-          select: { username: true, source: true },
-        },
+      select: {
+        id: true,
+        title: true,
+        mediaType: true,
+        year: true,
+        seasonNumber: true,
+        episodeNumber: true,
+        episodeTitle: true,
+        source: true,
+        startedAt: true,
+        stoppedAt: true,
+        duration: true,
+        playDuration: true,
+        pausedDuration: true,
+        watched: true,
+        platform: true,
+        player: true,
+        device: true,
+        playMethod: true,
+        videoCodec: true,
+        audioCodec: true,
+        resolution: true,
+        bitrate: true,
+        videoDecision: true,
+        audioDecision: true,
+        container: true,
+        mediaServerUser: { select: { username: true, source: true } },
       },
     });
     const data = rows.map((r) => ({
@@ -145,17 +168,49 @@ export async function GET(request: NextRequest) {
           const remaining = MAX_EXPORT_ROWS - emitted;
           const take = Math.min(PAGE_SIZE, remaining);
           type PlayHistoryRow = Prisma.PlayHistoryGetPayload<{
-            include: { mediaServerUser: { select: { username: true; source: true } } };
+            select: {
+              id: true; title: true; mediaType: true; year: true;
+              seasonNumber: true; episodeNumber: true; episodeTitle: true;
+              source: true; startedAt: true; stoppedAt: true;
+              duration: true; playDuration: true; pausedDuration: true; watched: true;
+              platform: true; player: true; device: true; playMethod: true;
+              videoCodec: true; audioCodec: true; resolution: true; bitrate: true;
+              videoDecision: true; audioDecision: true; container: true;
+              mediaServerUser: { select: { username: true; source: true } };
+            };
           }>;
           const page: PlayHistoryRow[] = await prisma.playHistory.findMany({
             where,
             orderBy: [{ startedAt: "desc" }, { id: "desc" }],
             take,
             ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-            include: {
-              mediaServerUser: {
-                select: { username: true, source: true },
-              },
+            select: {
+              id: true,
+              title: true,
+              mediaType: true,
+              year: true,
+              seasonNumber: true,
+              episodeNumber: true,
+              episodeTitle: true,
+              source: true,
+              startedAt: true,
+              stoppedAt: true,
+              duration: true,
+              playDuration: true,
+              pausedDuration: true,
+              watched: true,
+              platform: true,
+              player: true,
+              device: true,
+              playMethod: true,
+              videoCodec: true,
+              audioCodec: true,
+              resolution: true,
+              bitrate: true,
+              videoDecision: true,
+              audioDecision: true,
+              container: true,
+              mediaServerUser: { select: { username: true, source: true } },
             },
           });
 
