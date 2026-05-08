@@ -144,10 +144,10 @@ export default async function PlayDetailPage({
           <div className="shrink-0 w-16 sm:w-20 rounded-lg overflow-hidden shadow-lg">
             {mediaHref ? (
               <Link href={mediaHref}>
-                <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" unoptimized />
+                <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" sizes="(min-width: 640px) 80px, 64px" />
               </Link>
             ) : (
-              <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" unoptimized />
+              <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" sizes="(min-width: 640px) 80px, 64px" />
             )}
           </div>
         )}

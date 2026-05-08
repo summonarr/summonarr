@@ -141,7 +141,7 @@ export default async function RecentlyAddedPage() {
                         alt={item.title}
                         fill
                         className="object-cover group-hover:scale-105 transition-transform duration-200"
-                        unoptimized
+                        sizes="(min-width: 1280px) 16vw, (min-width: 768px) 25vw, 50vw"
                       />
                     </Link>
                   ) : (

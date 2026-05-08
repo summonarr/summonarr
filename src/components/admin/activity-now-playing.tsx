@@ -163,7 +163,7 @@ function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; moun
                   width={154}
                   height={231}
                   className="w-full h-full object-cover"
-                  unoptimized
+                  sizes="(min-width: 640px) 112px, 80px"
                 />
               </Link>
             ) : (
@@ -173,7 +173,7 @@ function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; moun
                 width={154}
                 height={231}
                 className="w-full h-full object-cover"
-                unoptimized
+                sizes="(min-width: 640px) 112px, 80px"
               />
             )
           ) : (
