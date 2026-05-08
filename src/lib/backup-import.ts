@@ -435,7 +435,15 @@ export async function processBackupImport(
     await prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(truncateStmt);
       for (const stmt of validatedStatements) {
-        await tx.$executeRawUnsafe(stmt);
+        // Older exports (pre-snapshot fix) could emit duplicate rows when a
+        // sync wrote between paginated SELECTs. Force-append ON CONFLICT DO
+        // NOTHING so the restore tolerates those dumps instead of aborting
+        // on the first collision. The TRUNCATE above guarantees the only
+        // duplicates possible are within the dump itself.
+        const safeStmt = stmt.startsWith("INSERT") && !/ON CONFLICT/i.test(stmt)
+          ? `${stmt} ON CONFLICT DO NOTHING`
+          : stmt;
+        await tx.$executeRawUnsafe(safeStmt);
         executed++;
       }
     }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });

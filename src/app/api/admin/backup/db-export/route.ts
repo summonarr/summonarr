@@ -18,7 +18,11 @@ function escapeSQL(value: unknown): string {
   }
   if (typeof value === "bigint") return String(value);
   if (value instanceof Date) return `'${value.toISOString()}'`;
-  const str = String(value).replace(/\0/g, "").replace(/'/g, "''");
+  // Prisma returns Json/Jsonb columns as parsed objects/arrays. String(value)
+  // would produce "[object Object]" — re-serialize with JSON.stringify so the
+  // dump contains a valid JSON literal that Postgres can re-parse on INSERT.
+  const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
+  const str = raw.replace(/\0/g, "").replace(/'/g, "''");
   return `'${str}'`;
 }
 
@@ -45,66 +49,87 @@ function buildSqlStream(
         write(`-- Exported at: ${new Date().toISOString()}\n`);
         write(`-- Exported by: admin (${exportedBy})\n\n`);
 
-        // Export enum CREATE statements idempotently so the import is safe on an existing schema
-        write("-- Enum types\n");
-        for (const name of BACKUP_ENUMS) {
-          const values = await prisma.$queryRawUnsafe<{ enumlabel: string }[]>(
-            `SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = $1 ORDER BY enumsortorder`,
-            name,
-          );
-          if (values.length > 0) {
-            const labels = values.map((v) => `'${v.enumlabel.replace(/'/g, "''")}'`).join(", ");
-            write(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '${name}') THEN CREATE TYPE "${name}" AS ENUM (${labels}); END IF; END $$;\n`);
-          }
-        }
-        write("\n");
+        await prisma.$transaction(
+          async (tx) => {
+            // REPEATABLE READ pins every paginated SELECT to the same MVCC
+            // snapshot so concurrent inserts can't shift rows across page
+            // boundaries and produce duplicate IDs in the dump.
+            await tx.$executeRawUnsafe("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
 
-        for (const table of BACKUP_TABLES) {
-          let totalRows = 0;
-          let offset = 0;
-          let columns: string[] | null = null;
-          let colList = "";
-          let tableExists = true;
-
-          while (true) {
-            let rows: Record<string, unknown>[];
-            try {
-              rows = await prisma.$queryRawUnsafe<Record<string, unknown>[]>(
-                `SELECT * FROM "public"."${table}" LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
+            write("-- Enum types\n");
+            for (const name of BACKUP_ENUMS) {
+              const values = await tx.$queryRawUnsafe<{ enumlabel: string }[]>(
+                `SELECT enumlabel FROM pg_enum JOIN pg_type ON pg_enum.enumtypid = pg_type.oid WHERE pg_type.typname = $1 ORDER BY enumsortorder`,
+                name,
               );
-            } catch {
-              tableExists = false;
-              break;
+              if (values.length > 0) {
+                const labels = values.map((v) => `'${v.enumlabel.replace(/'/g, "''")}'`).join(", ");
+                write(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '${name}') THEN CREATE TYPE "${name}" AS ENUM (${labels}); END IF; END $$;\n`);
+              }
             }
-            if (rows.length === 0) break;
+            write("\n");
 
-            if (columns === null) {
-              columns = Object.keys(rows[0]);
-              colList = columns.map((c) => `"${c}"`).join(", ");
+            for (const table of BACKUP_TABLES) {
+              let totalRows = 0;
+              let offset = 0;
+              let columns: string[] | null = null;
+              let colList = "";
+              let tableExists = true;
+              let orderClause: string | null = null;
+
+              while (true) {
+                let rows: Record<string, unknown>[];
+                try {
+                  if (orderClause === null) {
+                    const pkRows = await tx.$queryRawUnsafe<{ attname: string }[]>(
+                      `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY array_position(i.indkey, a.attnum)`,
+                      `"public"."${table}"`,
+                    );
+                    orderClause = pkRows.length > 0
+                      ? "ORDER BY " + pkRows.map((r) => `"${r.attname}"`).join(", ")
+                      : "";
+                  }
+                  rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+                    `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
+                  );
+                } catch {
+                  tableExists = false;
+                  break;
+                }
+                if (rows.length === 0) break;
+
+                if (columns === null) {
+                  columns = Object.keys(rows[0]);
+                  colList = columns.map((c) => `"${c}"`).join(", ");
+                }
+
+                for (const row of rows) {
+                  const values = columns!.map((c) => escapeSQL(row[c])).join(", ");
+                  // ON CONFLICT DO NOTHING is defence-in-depth: the snapshot
+                  // transaction above prevents duplicates in fresh dumps, but
+                  // older dumps (taken before the snapshot fix) may contain
+                  // them. Skipping a duplicate is strictly better than
+                  // aborting the entire restore.
+                  write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values}) ON CONFLICT DO NOTHING;\n`);
+                  totalRows++;
+                  counts.rows++;
+                }
+
+                if (rows.length < CHUNK_SIZE) break;
+                offset += CHUNK_SIZE;
+              }
+
+              if (!tableExists) {
+                write(`-- Skipped "${table}" (table does not exist)\n\n`);
+                continue;
+              }
+
+              write(`-- Table: ${table} (${totalRows} rows)\n\n`);
+              counts.tables++;
             }
-
-            for (const row of rows) {
-              const values = columns!.map((c) => escapeSQL(row[c])).join(", ");
-              // Plain INSERTs — the import truncates every listed table inside the
-              // restore transaction, so duplicate-key conflicts cannot occur and
-              // ON CONFLICT DO NOTHING would silently mask a real corruption.
-              write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values});\n`);
-              totalRows++;
-              counts.rows++;
-            }
-
-            if (rows.length < CHUNK_SIZE) break;
-            offset += CHUNK_SIZE;
-          }
-
-          if (!tableExists) {
-            write(`-- Skipped "${table}" (table does not exist)\n\n`);
-            continue;
-          }
-
-          write(`-- Table: ${table} (${totalRows} rows)\n\n`);
-          counts.tables++;
-        }
+          },
+          { timeout: EXPORT_TIMEOUT_MS, isolationLevel: "RepeatableRead" },
+        );
 
         controller.close();
       } catch (err) {
