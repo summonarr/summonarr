@@ -1,5 +1,5 @@
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { parseCronLastRun } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
@@ -119,6 +119,10 @@ export default async function SettingsPage({
 
   const rows = await prisma.setting.findMany({ where: { key: { in: [...ALL_KEYS] } } });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  // Read AFTER findMany so the set reflects this render's decrypt outcomes.
+  // safeDecryptSettingValue clears entries on successful read, so the banner
+  // disappears automatically on the next page load after the operator re-saves.
+  const decryptFailures = getSettingDecryptFailures();
 
   const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.NEXTAUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
 
@@ -304,6 +308,61 @@ export default async function SettingsPage({
         title="Settings"
         subtitle="Configure integrations and preferences"
       />
+
+      {decryptFailures.length > 0 && (
+        <div
+          role="alert"
+          style={{
+            padding: 16,
+            background: "rgba(239, 68, 68, 0.08)",
+            border: "1px solid rgba(239, 68, 68, 0.35)",
+            borderRadius: 10,
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+            <div
+              aria-hidden
+              style={{
+                flexShrink: 0,
+                width: 22,
+                height: 22,
+                borderRadius: 999,
+                background: "rgba(239, 68, 68, 0.18)",
+                color: "#fca5a5",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 13,
+                fontWeight: 700,
+                lineHeight: 1,
+              }}
+            >
+              !
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, color: "#fca5a5", margin: 0 }}>
+                {decryptFailures.length === 1
+                  ? "1 saved setting could not be decrypted"
+                  : `${decryptFailures.length} saved settings could not be decrypted`}
+              </h3>
+              <p style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: "4px 0 8px", lineHeight: 1.5 }}>
+                {decryptFailures.length === 1 ? "It is" : "They are"} being treated as empty. Re-save{" "}
+                {decryptFailures.length === 1 ? "it" : "them"} below to restore functionality. This usually happens
+                when <code style={{ fontFamily: "var(--font-mono, ui-monospace)" }}>TOKEN_ENCRYPTION_KEY</code> has
+                changed since the value was written.
+              </p>
+              <ul style={{ fontSize: 12, color: "var(--ds-fg)", margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
+                {decryptFailures.map((k) => (
+                  <li key={k}>
+                    <code style={{ fontFamily: "var(--font-mono, ui-monospace)" }}>{k}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
 
       <SettingsTabNav activeTab={tab} />
 

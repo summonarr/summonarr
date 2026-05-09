@@ -50,9 +50,50 @@ function decryptAccountTokensInPlace(row: Record<string, unknown> | null | undef
   if (!row) return;
   for (const field of ACCOUNT_TOKEN_FIELDS) {
     const v = row[field];
-    if (typeof v === "string" && v.length > 0) {
+    if (typeof v !== "string" || v.length === 0) continue;
+    try {
       row[field] = decryptToken(v);
+    } catch (err) {
+      // A single un-decryptable column shouldn't take down whoever called findMany.
+      // Surface enough context (account id + field) for an operator to re-link the account,
+      // then null the field so the rest of the row can be returned to the caller.
+      const id = typeof row.id === "string" ? row.id : "?";
+      console.error(
+        `[account-crypto] Decrypt failed for Account.${field} (id=${id}) — re-link this account to recover. Original error:`,
+        err instanceof Error ? err.message : err,
+      );
+      row[field] = null;
     }
+  }
+}
+
+// Process-level set of Setting keys that have failed to decrypt at least once and
+// haven't been successfully read since. The settings page reads this via
+// getSettingDecryptFailures() to render a banner. Entries are cleared on the next
+// successful read of the same key (which happens automatically on every findMany
+// that includes the key after the operator re-saves it).
+const settingDecryptFailures = new Set<string>();
+
+export function getSettingDecryptFailures(): string[] {
+  return [...settingDecryptFailures].sort();
+}
+
+// Per-row decrypt guard for Setting.value reads. A corrupt/wrong-key row would otherwise
+// throw inside findMany and 500 every page that reads settings (e.g. /settings, /admin/*,
+// the layout's feature-flag fetch). We log the affected key once per occurrence and substitute
+// an empty string so the rest of the result set still flows through.
+function safeDecryptSettingValue(key: string, value: string): string {
+  try {
+    const result = decryptToken(value);
+    settingDecryptFailures.delete(key);
+    return result;
+  } catch (err) {
+    settingDecryptFailures.add(key);
+    console.error(
+      `[setting-crypto] Decrypt failed for key="${key}" — re-save this setting to recover. Original error:`,
+      err instanceof Error ? err.message : err,
+    );
+    return "";
   }
 }
 
@@ -76,18 +117,18 @@ function createPrismaClient() {
       setting: {
         async findUnique({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = decryptToken(row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? "?", row.value);
           return row;
         },
         async findFirst({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = decryptToken(row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? "?", row.value);
           return row;
         },
         async findMany({ args, query }) {
           const rows = await query(args);
           for (const r of rows) {
-            if (typeof r.value === "string") r.value = decryptToken(r.value);
+            if (typeof r.value === "string") r.value = safeDecryptSettingValue(r.key ?? "?", r.value);
           }
           return rows;
         },
