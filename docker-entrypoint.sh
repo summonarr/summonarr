@@ -96,10 +96,20 @@ await client.end();
 BACKFILL_EOF
 
 echo "Syncing database schema..."
-# No --accept-data-loss: destructive migrations (dropped columns, narrowed
-# types) will fail fast at boot instead of silently clobbering data. Apply
-# those by hand with explicit intent when they come up.
-node node_modules/prisma/build/index.js db push
+# By default, --accept-data-loss is omitted: destructive migrations (dropped
+# columns, narrowed types) fail fast at boot instead of silently clobbering
+# data. Operators can set SUMMONARR_ACCEPT_DATA_LOSS=true for ONE boot when
+# they've reviewed the warnings and know the change is safe (e.g. adding a
+# unique constraint to a new nullable column — Prisma flags it as data-loss
+# even though Postgres treats NULLs as distinct under unique constraints).
+# Unset the env var after the migration applies.
+if [ "${SUMMONARR_ACCEPT_DATA_LOSS:-}" = "true" ]; then
+  echo "[entrypoint] WARNING: SUMMONARR_ACCEPT_DATA_LOSS=true — applying schema with --accept-data-loss."
+  echo "[entrypoint] Unset this env var after the boot succeeds; leaving it on hides destructive changes."
+  node node_modules/prisma/build/index.js db push --accept-data-loss
+else
+  node node_modules/prisma/build/index.js db push
+fi
 
 echo "Starting Summonarr..."
 

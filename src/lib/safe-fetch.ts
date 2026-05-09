@@ -1,8 +1,5 @@
 
 
-import { isIP } from "node:net";
-import { Agent } from "undici";
-
 import { resolveToSafeUrlWithAddrs } from "@/lib/ssrf";
 
 
@@ -55,7 +52,14 @@ async function doFetch(
   }
 
   let targetUrl = rawUrl;
-  let dispatcher: Agent | null = null;
+  // NOTE: previously we created an undici Agent dispatcher to pin the resolved
+  // IP and defeat DNS-rebind. That broke at runtime because the npm undici
+  // package and Node's bundled undici disagree on the Dispatcher handler shape
+  // (assertRequestHandler throws "invalid onRequestStart method"). The pin is
+  // deferred until we can adopt a Node-bundled-undici-compatible mechanism.
+  // Accepted residual risk: hostname-rebind window between SSRF resolve and
+  // the actual connect. Mitigated by short request lifetimes and the fact that
+  // user-supplied URLs (untrusted mode) have zero current callers.
 
   if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
@@ -88,18 +92,9 @@ async function doFetch(
       );
     }
     targetUrl = safe.url;
-    if (mode === "untrusted") {
-      // Pin the resolved IP in the dispatcher so a DNS rebind between resolve and connect can't
-      // bypass the SSRF check. Only worthwhile for end-user-supplied URLs — for admin-set URLs
-      // the rebind window is too narrow to matter and pinning breaks split-horizon resolvers.
-      const pinnedIp = safe.addrs[0];
-      const family = isIP(pinnedIp) === 6 ? 6 : 4;
-      dispatcher = new Agent({
-        connect: {
-          lookup: (_hostname, _opts, cb) => cb(null, pinnedIp, family),
-        },
-      });
-    }
+    // DNS-pin via dispatcher disabled — see note above. The SSRF policy still
+    // ran on the resolved address, so the immediate decision was sound; only
+    // the connect-time rebind window is unmitigated.
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -116,19 +111,17 @@ async function doFetch(
   const { timeoutMs: _t, maxResponseBytes: _m, ...rest } = opts;
   void _t; void _m;
 
-  const init: RequestInit & { dispatcher?: unknown } = {
+  const init: RequestInit = {
     ...rest,
     headers,
     redirect: "error",
     signal,
-    ...(dispatcher ? { dispatcher } : {}),
   };
 
   let res: Response;
   try {
-    try {
-      res = await fetch(targetUrl, init);
-    } catch (err) {
+    res = await fetch(targetUrl, init);
+  } catch (err) {
       if (err instanceof Error) {
 
         const name = err.name;
@@ -151,14 +144,14 @@ async function doFetch(
       const e = err as Error & { cause?: { code?: string; message?: string; errno?: number } };
       const causeMsg = e.cause?.message ?? e.cause?.code ?? "";
       const detail = causeMsg ? `${e.message} (${causeMsg})` : e.message;
-      throw new SafeFetchError(
-        "network",
-        targetUrl,
-        `fetch failed for ${targetUrl}: ${detail}`,
-      );
-    }
+    throw new SafeFetchError(
+      "network",
+      targetUrl,
+      `fetch failed for ${targetUrl}: ${detail}`,
+    );
+  }
 
-    const contentLength = res.headers.get("content-length");
+  const contentLength = res.headers.get("content-length");
     if (contentLength) {
       const size = parseInt(contentLength, 10);
       if (!isNaN(size) && size > maxResponseBytes) {
@@ -175,20 +168,16 @@ async function doFetch(
       }
     }
 
-    if (res.body) {
-      const limited = limitResponseBody(res.body, maxResponseBytes, targetUrl);
-      return new Response(limited, {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-      });
-    }
-
-    return res;
-  } finally {
-    // Always close the per-request dispatcher; undici sockets don't self-close otherwise
-    if (dispatcher) dispatcher.close().catch(() => {});
+  if (res.body) {
+    const limited = limitResponseBody(res.body, maxResponseBytes, targetUrl);
+    return new Response(limited, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   }
+
+  return res;
 }
 
 function limitResponseBody(

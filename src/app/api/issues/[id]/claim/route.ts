@@ -23,14 +23,29 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const isSelfClaim = issue.claimedBy === session.user.id;
+  const existingClaimedBy = issue.claimedBy;
+  const isSelfClaim = existingClaimedBy === session.user.id;
   const action = isSelfClaim ? "release" : "claim";
 
-  const updated = await prisma.issue.update({
-    where: { id },
+  // Compare-and-swap on claimedBy: only mutate if the current value still
+  // matches what we just read. Prevents two admins from racing to claim/take
+  // over the same issue and stomping each other's writes.
+  const result = await prisma.issue.updateMany({
+    where: { id, claimedBy: existingClaimedBy },
     data: isSelfClaim
       ? { claimedBy: null, claimedAt: null }
       : { claimedBy: session.user.id, claimedAt: new Date() },
+  });
+
+  if (result.count === 0) {
+    return NextResponse.json(
+      { error: "claim-conflict", message: "Another admin claimed this issue first." },
+      { status: 409 }
+    );
+  }
+
+  const updated = await prisma.issue.findUnique({
+    where: { id },
     select: {
       id: true,
       claimedBy: true,
@@ -46,7 +61,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
     userName: session.user.name ?? session.user.email,
     action: action === "claim" ? "ISSUE_CLAIM" : "ISSUE_UNCLAIM",
     target: `issue:${id}`,
-    details: { title: issue.title, before: { claimedBy: issue.claimedBy }, after: { claimedBy: updated.claimedBy } },
+    details: { title: issue.title, before: { claimedBy: existingClaimedBy }, after: { claimedBy: updated?.claimedBy ?? null } },
     ...auditContext(req, session),
   });
 

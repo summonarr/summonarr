@@ -9,7 +9,6 @@ import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
-import { sanitizeForLog } from "@/lib/sanitize";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 
@@ -799,8 +798,6 @@ export async function POST(req: NextRequest) {
   const signature = req.headers.get("x-signature-ed25519") ?? "";
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
   const body = await req.text();
-  const safeTs = String(parseInt(timestamp, 10) || 0);
-  console.log(`[interactions] POST sigLen=${signature.length} ts=${sanitizeForLog(safeTs)} bodyLen=${body.length}`);
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
@@ -808,18 +805,16 @@ export async function POST(req: NextRequest) {
   }
 
   if (!verifySignature(publicKey, signature, timestamp, body)) {
-    console.log(`[interactions] Signature verification FAILED pkLen=${Number(publicKey.length)} sigLen=${Number(signature.length)} bodyLen=${Number(body.length)}`);
+    console.warn(`[interactions] Signature verification failed sigLen=${signature.length} bodyLen=${body.length}`);
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 
   // Reject replayed requests: Discord requires servers to enforce a 5-second timestamp window
   const requestAge = Math.abs(Date.now() / 1000 - Number(timestamp));
   if (Number.isNaN(requestAge) || requestAge > 5) {
-    console.log(`[interactions] Stale timestamp rejected: age=${requestAge.toFixed(1)}s`);
+    console.warn(`[interactions] Stale timestamp rejected: age=${requestAge.toFixed(1)}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
-  const interactionType = Number(JSON.parse(body).type);
-  console.log(`[interactions] Signature OK, type=${Number(interactionType)} bodyLen=${Number(body.length)}`);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const interaction: any = JSON.parse(body);

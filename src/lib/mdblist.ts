@@ -92,7 +92,7 @@ export async function fetchAndCacheMdblistForTmdb(
     }
 
     if (!res.ok) {
-      console.log(`[mdblist] API returned ${res.status} for ${sanitizeForLog(mediaType)}:${tmdbId}`);
+      console.warn(`[mdblist] API returned ${res.status} for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
@@ -110,7 +110,7 @@ export async function fetchAndCacheMdblistForTmdb(
           tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
           return { found: false, keyConfigured: true, quotaExhausted: true };
         }
-        console.log(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(errMsg)}`);
+        console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(errMsg)}`);
         await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
         return { found: false, keyConfigured: true };
       }
@@ -223,7 +223,7 @@ export async function fetchMdblistBatch(
       }
 
       if (!res.ok) {
-        console.log(`[mdblist] batch ${mediaType} returned ${res.status}`);
+        console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
 
         continue;
       }
@@ -305,10 +305,7 @@ export async function getMdblistRatingsForTmdb(
   }
 
   const apiKey = await getApiKey();
-  if (!apiKey) {
-    console.log(`[mdblist] No API key configured — skipping for ${sanitizeForLog(mediaType)}:${tmdbId}`);
-    return { found: false, keyConfigured: false };
-  }
+  if (!apiKey) return { found: false, keyConfigured: false };
 
   return fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate);
 }

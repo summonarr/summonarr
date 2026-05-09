@@ -82,10 +82,31 @@ export async function PATCH(
   if (status) updateData.status = status as ValidStatus;
   if (sanitizedResolution != null) updateData.resolution = sanitizedResolution;
 
-  const updated = await prisma.issue.update({ where: { id }, data: updateData });
+  // Compare-and-swap on status when a status change is requested. The resolution-only
+  // update path is not gated — overwriting resolution text concurrently is a benign
+  // last-write-wins rather than a state-transition conflict.
+  const isStatusChange = status && status !== issue.status;
+  if (isStatusChange) {
+    const result = await prisma.issue.updateMany({
+      where: { id, status: issue.status },
+      data: updateData,
+    });
+    if (result.count === 0) {
+      return NextResponse.json(
+        { error: "status-conflict", message: "Issue was modified concurrently. Refresh and try again." },
+        { status: 409 }
+      );
+    }
+  } else if (Object.keys(updateData).length > 0) {
+    await prisma.issue.update({ where: { id }, data: updateData });
+  }
+
+  const updated = await prisma.issue.findUnique({ where: { id } });
+  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
   emitSSE({ type: "issue:updated", issueId: id, status: updated.status, userId: issue.reportedBy });
 
-  if (status && status !== issue.status) {
+  if (isStatusChange) {
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "ISSUE_STATUS_CHANGE", target: `issue:${id}`, details: { title: issue.title, before: { status: issue.status }, after: { status, resolution: sanitizedResolution ?? issue.resolution } }, ...auditContext(req, session) });
   }
 

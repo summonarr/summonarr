@@ -40,12 +40,29 @@ export async function GET() {
   if (maint) return maint;
 
   const userId = session.user.id;
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
-
   const isSystemAdmin = session.user.role === "ADMIN";
+  const isIssueAdmin = session.user.role === "ISSUE_ADMIN";
 
   if (!incrementConnection(userId)) {
     return new Response("Too many SSE connections", { status: 429 });
+  }
+
+  // Per-event-type delivery rules:
+  //   activity:* — system admin only (live session/history streams)
+  //   issue:* / issuemessage:* — system admin OR ISSUE_ADMIN bypasses per-user filter
+  //   everything else (request:*, votes:*, push:*, settings:*) — only system admin bypasses;
+  //     ISSUE_ADMIN goes through the same per-user filter as a normal USER.
+  // Without this split, ISSUE_ADMIN could observe every user's request/settings/push events.
+  function shouldDeliver(eventType: string, evtUserId: string | undefined): boolean {
+    if (eventType === "activity:sessions" || eventType === "activity:history-updated") {
+      return isSystemAdmin;
+    }
+    const bypassesUserFilter =
+      eventType.startsWith("issue:") || eventType.startsWith("issuemessage:")
+        ? isSystemAdmin || isIssueAdmin
+        : isSystemAdmin;
+    if (bypassesUserFilter) return true;
+    return evtUserId === userId;
   }
 
   const encoder = new TextEncoder();
@@ -68,15 +85,8 @@ export async function GET() {
     start(controller) {
 
       listener = (event: SSEEvent) => {
-
-        if (event.type === "activity:sessions" || event.type === "activity:history-updated") {
-          // Activity data is system-admin only; ISSUE_ADMIN does not see live session/history streams
-          if (!isSystemAdmin) return;
-        } else {
-          // Non-admin users only receive events for their own userId
-          const evtUserId = (event as { userId?: string }).userId;
-          if (!isAdmin && evtUserId !== userId) return;
-        }
+        const evtUserId = (event as { userId?: string }).userId;
+        if (!shouldDeliver(event.type, evtUserId)) return;
         try {
           // Back-pressure check: stop pushing if the consumer is not reading fast enough
           if (controller.desiredSize !== null && controller.desiredSize <= 0) {

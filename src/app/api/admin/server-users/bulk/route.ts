@@ -2,10 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 export async function POST(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
+
+  // Bulk policy push fans out to N Jellyfin admin calls per invocation; cap to 5/min per admin
+  if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
+    return NextResponse.json({ error: "Too many bulk operations — try again later" }, { status: 429 });
+  }
 
   let body: { source?: string; downloadsEnabled?: boolean };
   try {
@@ -23,7 +30,7 @@ export async function POST(req: NextRequest) {
 
   const where = { isServerAdmin: false, source: "jellyfin" };
 
-  await prisma.mediaServerUser.updateMany({ where, data: { downloadsEnabled } });
+  const updated = await prisma.mediaServerUser.updateMany({ where, data: { downloadsEnabled } });
 
   const targets = await prisma.mediaServerUser.findMany({
     where,
@@ -51,6 +58,15 @@ export async function POST(req: NextRequest) {
       }),
     );
   }
+
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "SERVER_USERS_BULK",
+    target: `server:${source}`,
+    details: { downloadsEnabled, targetCount: updated.count, pushed, errors },
+    ...auditContext(req, session),
+  });
 
   return NextResponse.json({ ok: true, pushed, errors });
 }

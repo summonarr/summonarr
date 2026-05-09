@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush } from "@/lib/push";
-import { checkAndRecordWebhook } from "@/lib/webhook-replay";
+import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
@@ -51,11 +51,6 @@ export async function POST(req: NextRequest) {
   }
   const rawBody = new TextDecoder().decode(rawBytes);
 
-  if (!await checkAndRecordWebhook("sonarr", secret, rawBody)) {
-    console.warn("[webhook/sonarr] 409 replayed webhook");
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
   let payload: SonarrWebhookPayload;
   try {
     payload = JSON.parse(rawBody);
@@ -64,18 +59,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
+  if (!await checkAndRecordWebhookJson("sonarr", secret, payload)) {
+    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
+  }
+
   if (payload.eventType === "Test") {
-    console.warn("[webhook/sonarr] 200 event=Test");
     return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
-    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
-    console.warn(`[webhook/sonarr] 200 skipped event=${loggedEvent}`);
     return NextResponse.json({ ok: true, skipped: true });
   }
 
-  const { tvdbId, tmdbId, title } = payload.series;
+  const { tvdbId, tmdbId } = payload.series;
 
   const safeVdbId = Number.isInteger(tvdbId) ? tvdbId : null;
   const safeMdbId = Number.isInteger(tmdbId) ? tmdbId : null;
@@ -90,10 +87,10 @@ export async function POST(req: NextRequest) {
     // Advisory lock 1001,2 prevents a concurrent Sonarr sync from overwriting the wanted table mid-transaction
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-      // Reset notifiedAvailable only on rows not yet marked available, to avoid clobbering the orchestrator's CAS
+      // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
       const resetNotify = await tx.mediaRequest.updateMany({
         where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: null },
-        data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
+        data: { status: "AVAILABLE", availableAt: new Date() },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
         where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
@@ -115,7 +112,7 @@ export async function POST(req: NextRequest) {
       });
       const resetNotify = await tx.mediaRequest.updateMany({
         where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: null },
-        data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
+        data: { status: "AVAILABLE", availableAt: new Date() },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
         where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
@@ -209,8 +206,5 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  console.warn(
-    `[webhook/sonarr] 200 event=Download tmdbId=${sanitizeForLog(safeMdbId ?? "none")} tvdbId=${sanitizeForLog(safeVdbId ?? "none")} title=${sanitizeForLog(JSON.stringify(title))} marked=${updated.count}`,
-  );
   return NextResponse.json({ ok: true, marked: updated.count });
 }

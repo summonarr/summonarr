@@ -20,7 +20,6 @@ export async function prewarmOmdbCache(): Promise<{
 }> {
   const apiKey = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
   if (!apiKey?.value) {
-    console.log("[omdb-prewarm] No OMDB API key configured — skipping");
     return { total: 0, fetched: 0, skipped: 0, failed: 0 };
   }
 
@@ -29,7 +28,6 @@ export async function prewarmOmdbCache(): Promise<{
     console.warn(`[omdb-prewarm] Reached MAX_PREWARM_ITEMS (${MAX_PREWARM_ITEMS}) — library scan truncated`);
   }
   if (items.length === 0) {
-    console.log("[omdb-prewarm] No library items found — skipping");
     return { total: 0, fetched: 0, skipped: 0, failed: 0 };
   }
 

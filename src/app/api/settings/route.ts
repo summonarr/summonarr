@@ -11,6 +11,7 @@ import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
 import { encryptToken } from "@/lib/token-crypto";
 import { FEATURE_KEYS } from "@/lib/features";
+import { safeFetchTrusted } from "@/lib/safe-fetch";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -210,6 +211,20 @@ export async function PATCH(req: NextRequest) {
     "discordInviteUrl",
   ]);
 
+  // Donation keys accept either a full http(s) URL or a plain handle (e.g. "@alice").
+  // We must reject dangerous schemes (javascript:, data:, vbscript:, ftp:) on the URL form
+  // so the donate page can render <a href={value}> safely. donationAmazon must be a URL
+  // (no username form), so it falls into the strict URL_KEYS check above conceptually,
+  // but for consistency we apply the same scheme guard here for any value containing ":".
+  const DONATION_URL_KEYS = new Set<string>([
+    "donationPaypal",
+    "donationVenmo",
+    "donationZelle",
+    "donationAmazon",
+    "donationPatreon",
+    "donationBuyMeACoffee",
+  ]);
+
   const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
   const isSecretShapedKey = (k: string) =>
     SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
@@ -234,6 +249,35 @@ export async function PATCH(req: NextRequest) {
           { error: `Setting "${key}" must be a valid URL` },
           { status: 400 },
         );
+      }
+    }
+
+    if (DONATION_URL_KEYS.has(key)) {
+      // donationAmazon must always be a full URL; the others may be a plain handle
+      // (e.g. "@alice"). Apply scheme guard when value looks URL-shaped (contains "://").
+      const looksLikeUrl = value.includes("://");
+      const requireUrl = key === "donationAmazon";
+      if (looksLikeUrl || requireUrl) {
+        try {
+          const parsed = new URL(value);
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+            return NextResponse.json(
+              {
+                error: "invalid-url",
+                message: "Donation URL must be http:// or https://",
+              },
+              { status: 400 },
+            );
+          }
+        } catch {
+          return NextResponse.json(
+            {
+              error: "invalid-url",
+              message: "Donation URL must be http:// or https://",
+            },
+            { status: 400 },
+          );
+        }
       }
     }
 
@@ -394,15 +438,14 @@ export async function PATCH(req: NextRequest) {
         const url = cfg.discordGuildId
           ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
           : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
-        const res = await fetch(url, {
+        const res = await safeFetchTrusted(url, {
           method: "PUT",
           headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
           body: JSON.stringify(SLASH_COMMANDS),
-          signal: AbortSignal.timeout(15_000),
+          allowedHosts: ["discord.com"],
+          timeoutMs: 15_000,
         });
-        if (res.ok) {
-          console.log(`[discord] Commands re-registered after settings update`);
-        } else {
+        if (!res.ok) {
           console.error(`[discord] Command re-registration failed: ${res.status} ${await res.text()}`);
         }
       } catch (err) {

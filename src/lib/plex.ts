@@ -16,6 +16,7 @@ const PLEX_HEADERS = {
 };
 
 export interface PlexUser {
+  id: string;
   email: string;
   username: string;
   thumb: string;
@@ -54,7 +55,14 @@ export async function getPlexUser(token: string, clientId?: string): Promise<Ple
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new Error("Plex user response missing valid email");
   }
+  // Plex /api/v2/user returns id as a number; coerce to string for stable provider-subject binding
+  const rawId = data.id;
+  const id = typeof rawId === "string" ? rawId : typeof rawId === "number" ? String(rawId) : "";
+  if (!id) {
+    throw new Error("Plex user response missing required id");
+  }
   return {
+    id,
     email,
     username: (typeof data.username === "string" ? data.username : typeof data.title === "string" ? data.title : typeof data.friendlyName === "string" ? data.friendlyName : "") as string,
     thumb: (typeof data.thumb === "string" ? data.thumb : "") as string,
@@ -718,7 +726,18 @@ export async function getPlexMachineId(serverUrl: string, adminToken: string): P
 }
 
 export async function getPlexFriendEmails(adminToken: string, serverUrl?: string): Promise<Set<string>> {
-  const machineId = serverUrl ? await getPlexMachineId(serverUrl, adminToken) : null;
+  // Defense-in-depth: caller (auth.ts) already gates on serverUrl, but if it ever
+  // slipped through we would silently fall back to "anyone the admin friended on
+  // any server", which is the C-2 vulnerability. Refuse loudly instead.
+  if (!serverUrl) {
+    console.warn("[plex] getPlexFriendEmails called without serverUrl; refusing to enumerate friends.");
+    return new Set<string>();
+  }
+  const machineId = await getPlexMachineId(serverUrl, adminToken);
+  if (!machineId) {
+    console.warn("[plex] getPlexFriendEmails: unable to resolve machineId for server; refusing.");
+    return new Set<string>();
+  }
 
   const res = await safeFetchTrusted("https://plex.tv/api/users", {
     allowedHosts: PLEX_TV_HOSTS,
@@ -734,10 +753,8 @@ export async function getPlexFriendEmails(adminToken: string, serverUrl?: string
     const emailMatch = block.match(/\bemail="([^"]+)"/);
     if (!emailMatch) continue;
 
-    if (machineId) {
-      const hasServer = block.includes(`machineIdentifier="${machineId}"`);
-      if (!hasServer) continue;
-    }
+    const hasServer = block.includes(`machineIdentifier="${machineId}"`);
+    if (!hasServer) continue;
 
     const email = emailMatch[1].toLowerCase();
     if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {

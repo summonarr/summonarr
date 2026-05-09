@@ -131,12 +131,14 @@ export async function POST(req: NextRequest) {
 
   const sanitizedReason = sanitizeOptional(reason);
 
+  // Bar any user who has ever requested this media (regardless of order). Earlier
+  // versions only checked the oldest requester via orderBy; a co-requester could
+  // then vote against a title they themselves had requested.
   const ownRequest = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType },
-    select: { requestedBy: true },
-    orderBy: { createdAt: "asc" },
+    where: { tmdbId, mediaType, requestedBy: session.user.id },
+    select: { id: true },
   });
-  if (ownRequest?.requestedBy === session.user.id) {
+  if (ownRequest) {
     return NextResponse.json({ error: "Cannot vote to delete your own request" }, { status: 403 });
   }
 

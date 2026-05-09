@@ -49,7 +49,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
-      console.log(`[omdb] OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
+      console.warn(`[omdb] OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
       return null;
     }
 
@@ -64,7 +64,6 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
     };
 
     if (data.Response !== "True") {
-      console.log(`[omdb] OMDB returned Response=False for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "unknown error")}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return null;
     }
@@ -133,7 +132,7 @@ export async function fetchAndCacheOmdbForTmdb(
       timeoutMs: OMDB_FETCH_TIMEOUT_MS,
     });
     if (!extRes.ok) {
-      console.log(`[omdb] TMDB external_ids fetch failed (${extRes.status}) for ${sanitizeForLog(mediaType)}:${tmdbId}`);
+      console.warn(`[omdb] TMDB external_ids fetch failed (${extRes.status}) for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       return { found: false, keyConfigured: true };
     }
 
@@ -142,8 +141,6 @@ export async function fetchAndCacheOmdbForTmdb(
     const omdbRatings = ext.imdb_id ? await getOmdbRatings(ext.imdb_id, releaseDate) : null;
 
     if (!omdbRatings) {
-      if (!ext.imdb_id) console.log(`[omdb] No IMDB ID from TMDB for ${sanitizeForLog(mediaType)}:${tmdbId}`);
-      else console.log(`[omdb] No ratings from OMDB for ${sanitizeForLog(mediaType)}:${tmdbId}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
@@ -155,7 +152,6 @@ export async function fetchAndCacheOmdbForTmdb(
       rottenTomatoes: omdbRatings.rottenTomatoes,
       metacritic:     omdbRatings.metacritic,
     };
-    console.log(`[omdb] Ratings for ${sanitizeForLog(mediaType)}:${tmdbId} — IMDb=${sanitizeForLog(ratings.imdbRating)} RT=${sanitizeForLog(ratings.rottenTomatoes)}`);
     await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate));
     return { found: true, data: ratings };
   } catch (err) {
@@ -191,10 +187,7 @@ export async function getOmdbRatingsForTmdb(
   }
 
   const apiKey = await getApiKey();
-  if (!apiKey) {
-    console.log(`[omdb] No API key configured — skipping for ${sanitizeForLog(mediaType)}:${tmdbId}`);
-    return { found: false, keyConfigured: false };
-  }
+  if (!apiKey) return { found: false, keyConfigured: false };
 
   return fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate);
 }

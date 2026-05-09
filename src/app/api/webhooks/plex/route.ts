@@ -10,6 +10,7 @@ import {
   resolveShowTmdbId,
   computePlaytimeIncrement,
   applyFinalTick,
+  MediaServerMismatchError,
 } from "@/lib/play-history";
 import { extractTmdbIdFromGuids } from "@/lib/plex";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
@@ -23,6 +24,7 @@ function safeCompare(a: string, b: string): boolean {
 interface PlexWebhookPayload {
   event: string;
   Account?: { id?: number; title?: string; thumb?: string };
+  Server?: { title?: string; uuid?: string };
   Player?: {
     title?: string;
     platform?: string;
@@ -78,15 +80,13 @@ export async function POST(req: NextRequest) {
   if (rawBytes.length > 1_048_576) {
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
-  if (!await checkAndRecordWebhook("plex", secret, rawBytes)) {
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
 
   if (!(await isPlayHistoryEnabled()) || !(await isSourceEnabled("plex"))) {
     return NextResponse.json({ message: "Play history tracking disabled for Plex" });
   }
 
   let payload: PlexWebhookPayload;
+  let payloadStr: string;
   try {
     // Plex sends webhooks as multipart/form-data with the JSON in the "payload" field, not raw JSON
     const contentType = req.headers.get("content-type") ?? "";
@@ -99,19 +99,42 @@ export async function POST(req: NextRequest) {
         headers: { "content-type": contentType },
       });
       const formData = await reparsed.formData();
-      const payloadStr = formData.get("payload");
-      if (typeof payloadStr !== "string") {
+      const rawPayloadStr = formData.get("payload");
+      if (typeof rawPayloadStr !== "string") {
         return NextResponse.json({ error: "Missing payload field" }, { status: 400 });
       }
-      if (payloadStr.length > 100_000) {
+      if (rawPayloadStr.length > 100_000) {
         return NextResponse.json({ error: "Payload field too large" }, { status: 413 });
       }
-      payload = JSON.parse(payloadStr);
+      payloadStr = rawPayloadStr;
+      payload = JSON.parse(rawPayloadStr);
     } else {
-      payload = JSON.parse(new TextDecoder().decode(rawBytes));
+      payloadStr = new TextDecoder().decode(rawBytes);
+      payload = JSON.parse(payloadStr);
     }
   } catch {
     return NextResponse.json({ error: "Invalid payload" }, { status: 400 });
+  }
+
+  // Replay-detect on the extracted JSON payload (multipart boundary varies per delivery, so
+  // hashing the raw multipart bytes would never match a true replay).
+  if (!await checkAndRecordWebhook("plex", secret, payloadStr)) {
+    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
+  }
+
+  // Defense-in-depth (H-3): verify the payload came from the configured Plex server.
+  // If we have a stored plexServerMachineId Setting, refuse mismatches; otherwise just warn.
+  const serverUuid = payload.Server?.uuid ?? null;
+  if (serverUuid) {
+    const expectedRow = await prisma.setting.findUnique({ where: { key: "plexServerMachineId" } });
+    const expected = expectedRow?.value ?? null;
+    if (expected && expected !== serverUuid) {
+      console.warn(`[webhook/plex] 403 server uuid mismatch expected=${expected} got=${serverUuid}`);
+      return NextResponse.json({ error: "Unrecognized Plex server" }, { status: 403 });
+    }
+    if (!expected) {
+      console.warn(`[webhook/plex] no plexServerMachineId Setting configured; accepting payload from server uuid=${serverUuid}`);
+    }
   }
 
   const event = payload.event;
@@ -136,12 +159,21 @@ export async function POST(req: NextRequest) {
   const sessionId = `plex:${sessionKey}`;
   const now = new Date();
 
-  const msUserId = await resolveMediaServerUser({
-    source: "plex",
-    sourceUserId: accountId,
-    username: account.title ?? "",
-    thumbUrl: account.thumb ?? null,
-  });
+  let msUserId: string;
+  try {
+    msUserId = await resolveMediaServerUser({
+      source: "plex",
+      sourceUserId: accountId,
+      username: account.title ?? "",
+      thumbUrl: account.thumb ?? null,
+      serverMachineId: serverUuid,
+    });
+  } catch (err) {
+    if (err instanceof MediaServerMismatchError) {
+      return NextResponse.json({ error: "User pinned to a different server" }, { status: 403 });
+    }
+    throw err;
+  }
 
   const mediaType = meta.type === "episode" ? "TV" : meta.type === "movie" ? "MOVIE" : null;
 

@@ -97,14 +97,26 @@ export async function resolveShowTmdbId(
   return item?.tmdbId ?? null;
 }
 
+// Thrown by resolveMediaServerUser when a webhook payload's serverMachineId doesn't match the
+// machineId previously bound to a (source, sourceUserId) row. Webhook handlers translate this
+// into a 403; other callers (sync, cron) don't pass serverMachineId so this path never fires
+// for them.
+export class MediaServerMismatchError extends Error {
+  constructor(public readonly source: string, public readonly sourceUserId: string) {
+    super(`MediaServerUser ${source}:${sourceUserId} bound to a different server`);
+    this.name = "MediaServerMismatchError";
+  }
+}
+
 export async function resolveMediaServerUser(params: {
   source: string;
   sourceUserId: string;
   username: string;
   email?: string | null;
   thumbUrl?: string | null;
+  serverMachineId?: string | null;
 }): Promise<string> {
-  const { source, sourceUserId, username, email, thumbUrl } = params;
+  const { source, sourceUserId, username, email, thumbUrl, serverMachineId } = params;
 
   let userId: string | null = null;
   if (email) {
@@ -112,6 +124,23 @@ export async function resolveMediaServerUser(params: {
 
     if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
       userId = user.id;
+    }
+  }
+
+  // Defense-in-depth (H-3): if a row already exists with a recorded serverMachineId, refuse a
+  // mismatched incoming machineId. This guards against an attacker who knows the webhook secret
+  // but is sending events from a different server, attempting to impersonate a (source, userId)
+  // we have already pinned to a specific server.
+  if (serverMachineId) {
+    const existing = await prisma.mediaServerUser.findUnique({
+      where: { source_sourceUserId: { source, sourceUserId } },
+      select: { id: true, serverMachineId: true },
+    });
+    if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
+      console.warn(
+        `[play-history] refusing MediaServerUser upsert: source=${source} sourceUserId=${sourceUserId} bound to a different server`,
+      );
+      throw new MediaServerMismatchError(source, sourceUserId);
     }
   }
 
@@ -124,12 +153,14 @@ export async function resolveMediaServerUser(params: {
       email: email ?? null,
       thumbUrl: thumbUrl ?? null,
       userId,
+      serverMachineId: serverMachineId ?? null,
     },
     update: {
       username,
       ...(email ? { email } : {}),
       ...(thumbUrl ? { thumbUrl } : {}),
       ...(userId ? { userId } : {}),
+      ...(serverMachineId ? { serverMachineId } : {}),
     },
     select: { id: true },
   });

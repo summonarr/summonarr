@@ -30,7 +30,6 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
 
   const apiKey = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
   if (!apiKey?.value) {
-    console.log("[mdblist-prewarm] No MDBList API key configured — skipping");
     return { total: 0, fetched: 0, skipped: 0, failed: 0, purged: 0 };
   }
 
@@ -39,7 +38,6 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
     console.warn(`[mdblist-prewarm] Reached MAX_PREWARM_ITEMS (${MAX_PREWARM_ITEMS}) — library scan truncated`);
   }
   if (items.length === 0) {
-    console.log("[mdblist-prewarm] No library items found — skipping");
     return { total: 0, fetched: 0, skipped: 0, failed: 0, purged: 0 };
   }
 
@@ -54,9 +52,6 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
       : { key: { in: slice }, data: NOT_FOUND_DATA };
     const { count } = await prisma.tmdbCache.deleteMany({ where });
     purged += count;
-  }
-  if (purged > 0) {
-    console.log(`[mdblist-prewarm] Purged ${purged} stale/sentinel cache entries`);
   }
 
   const freshKeys = new Set<string>();
@@ -79,7 +74,6 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
   });
 
   const skipped = items.length - toFetch.length;
-  console.log(`[mdblist-prewarm] ${items.length} total — ${skipped} already fresh, fetching ${toFetch.length}…`);
 
   const releaseDateByKey = new Map<string, string | null>();
   const detailKeys = toFetch.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
@@ -151,6 +145,5 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
     }
   }
 
-  console.log(`[mdblist-prewarm] Done — fetched ${fetched}, skipped ${skipped}, failed ${failed}, purged ${purged}${quotaHit ? " (quota exhausted)" : ""} / ${items.length} total`);
   return { total: items.length, fetched, skipped, failed, purged, quotaExhausted: quotaHit || undefined };
 }

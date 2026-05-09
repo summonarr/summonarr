@@ -1,9 +1,60 @@
 import { PrismaClient } from "@/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { decryptToken } from "@/lib/token-crypto";
+import { decryptToken, encryptToken } from "@/lib/token-crypto";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
+
+// Hardcoded mirror of the SENSITIVE_KEYS set in src/app/api/settings/route.ts. Kept inline because
+// that route doesn't export the constant and importing the route module here would pull NextAuth +
+// half the API surface into the prisma client module-load graph. Update both lists together —
+// any divergence means a sensitive key written through the API is encrypted but read raw, or vice
+// versa.
+const SENSITIVE_KEYS = new Set<string>([
+  "plexAdminToken",
+  "jellyfinApiKey",
+  "vapidPrivateKey",
+  "webhookSecret",
+  "discordBotToken",
+  "radarrApiKey",
+  "sonarrApiKey",
+  "tmdbApiKey",
+  "tmdbReadToken",
+  "omdbApiKey",
+  "mdblistApiKey",
+  "traktApiKey",
+  "traktClientId",
+  "traktClientSecret",
+  "ipinfoToken",
+  "resendApiKey",
+  "smtpPassword",
+  "discordClientSecret",
+  "oidcClientSecret",
+  "trashGithubToken",
+]);
+
+// Account columns whose contents are OAuth secrets and must never sit at rest in plaintext.
+const ACCOUNT_TOKEN_FIELDS = ["refresh_token", "access_token", "id_token"] as const;
+
+function encryptAccountTokensInPlace(data: Record<string, unknown> | undefined | null): void {
+  if (!data) return;
+  for (const field of ACCOUNT_TOKEN_FIELDS) {
+    const v = data[field];
+    if (typeof v === "string" && v.length > 0) {
+      data[field] = encryptToken(v);
+    }
+  }
+}
+
+function decryptAccountTokensInPlace(row: Record<string, unknown> | null | undefined): void {
+  if (!row) return;
+  for (const field of ACCOUNT_TOKEN_FIELDS) {
+    const v = row[field];
+    if (typeof v === "string" && v.length > 0) {
+      row[field] = decryptToken(v);
+    }
+  }
+}
 
 function createPrismaClient() {
   const adapter = new PrismaPg({
@@ -17,9 +68,10 @@ function createPrismaClient() {
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 
-  // Transparently decrypt Setting values on read so callers always see plaintext regardless of storage format
+  // Transparent at-rest crypto for both Setting rows (keyed by `key`) and Account rows
+  // (specific OAuth-token columns). Reads decrypt, writes encrypt — callers always work in plaintext.
   return base.$extends({
-    name: "setting-decryption",
+    name: "setting-and-account-crypto",
     query: {
       setting: {
         async findUnique({ args, query }) {
@@ -38,6 +90,114 @@ function createPrismaClient() {
             if (typeof r.value === "string") r.value = decryptToken(r.value);
           }
           return rows;
+        },
+        async create({ args, query }) {
+          // args.data may be a single object or (rare) Prisma's tuple shape — we only support the object form.
+          const data = args.data as { key?: string; value?: string } | undefined;
+          if (
+            data &&
+            typeof data.key === "string" &&
+            SENSITIVE_KEYS.has(data.key) &&
+            typeof data.value === "string" &&
+            data.value.length > 0
+          ) {
+            data.value = encryptToken(data.value);
+          }
+          return query(args);
+        },
+        async update({ args, query }) {
+          const where = args.where as { key?: string } | undefined;
+          const data = args.data as { value?: unknown } | undefined;
+          // Skip when the update doesn't touch `value` at all (e.g. metadata-only updates).
+          const newValue = data && typeof data.value === "string" ? data.value : undefined;
+          if (newValue !== undefined && newValue.length > 0) {
+            const key = where?.key;
+            if (typeof key === "string") {
+              if (SENSITIVE_KEYS.has(key)) {
+                (data as { value: string }).value = encryptToken(newValue);
+              }
+            } else {
+              // Rare path: where uses something other than `key` (e.g. `id`). Read the row to
+              // discover its key, then encrypt if needed. Best-effort — falls through on miss.
+              const existing = await base.setting.findFirst({ where: args.where });
+              if (existing && SENSITIVE_KEYS.has(existing.key)) {
+                (data as { value: string }).value = encryptToken(newValue);
+              }
+            }
+          }
+          return query(args);
+        },
+        async upsert({ args, query }) {
+          const where = args.where as { key?: string } | undefined;
+          const key = where?.key;
+          if (typeof key === "string" && SENSITIVE_KEYS.has(key)) {
+            const create = args.create as { value?: unknown } | undefined;
+            if (create && typeof create.value === "string" && create.value.length > 0) {
+              (create as { value: string }).value = encryptToken(create.value);
+            }
+            const update = args.update as { value?: unknown } | undefined;
+            if (update && typeof update.value === "string" && update.value.length > 0) {
+              (update as { value: string }).value = encryptToken(update.value);
+            }
+          }
+          return query(args);
+        },
+        async createMany({ args, query }) {
+          const data = args.data as unknown;
+          if (Array.isArray(data)) {
+            for (const row of data) {
+              if (
+                row &&
+                typeof row === "object" &&
+                typeof (row as { key?: unknown }).key === "string" &&
+                SENSITIVE_KEYS.has((row as { key: string }).key) &&
+                typeof (row as { value?: unknown }).value === "string" &&
+                ((row as { value: string }).value.length > 0)
+              ) {
+                (row as { value: string }).value = encryptToken((row as { value: string }).value);
+              }
+            }
+          } else if (
+            data &&
+            typeof data === "object" &&
+            typeof (data as { key?: unknown }).key === "string" &&
+            SENSITIVE_KEYS.has((data as { key: string }).key) &&
+            typeof (data as { value?: unknown }).value === "string" &&
+            ((data as { value: string }).value.length > 0)
+          ) {
+            (data as { value: string }).value = encryptToken((data as { value: string }).value);
+          }
+          return query(args);
+        },
+      },
+      account: {
+        async findUnique({ args, query }) {
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirst({ args, query }) {
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findMany({ args, query }) {
+          const rows = await query(args);
+          for (const r of rows) decryptAccountTokensInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async create({ args, query }) {
+          encryptAccountTokensInPlace(args.data as Record<string, unknown> | undefined);
+          return query(args);
+        },
+        async update({ args, query }) {
+          encryptAccountTokensInPlace(args.data as Record<string, unknown> | undefined);
+          return query(args);
+        },
+        async upsert({ args, query }) {
+          encryptAccountTokensInPlace(args.create as Record<string, unknown> | undefined);
+          encryptAccountTokensInPlace(args.update as Record<string, unknown> | undefined);
+          return query(args);
         },
       },
     },

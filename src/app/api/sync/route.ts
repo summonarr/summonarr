@@ -17,6 +17,13 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
+import { withAdvisoryLock } from "@/lib/advisory-lock";
+
+// Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
+// Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
+// the cron POST is mid-flight) returns immediately with skipped=true rather than racing the
+// shared-state writes (notifiedAvailable CAS, library tables, MediaRequest status updates).
+const SYNC_ORCHESTRATOR_LOCK_ID = 2000;
 
 const CONCURRENCY_LIMIT = 5;
 
@@ -34,6 +41,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  return withAdvisoryLock(
+    SYNC_ORCHESTRATOR_LOCK_ID,
+    () => runSyncOrchestrator(),
+    () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
+  );
+}
+
+async function runSyncOrchestrator(): Promise<NextResponse> {
   const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
@@ -49,7 +64,7 @@ export async function POST(request: NextRequest) {
 
   let marked = 0;
   let reverted = 0;
-  const arrNotify: Array<{ requestedBy: string; title: string; mediaType: string }> = [];
+  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -87,14 +102,14 @@ export async function POST(request: NextRequest) {
           data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
       } else {
-        arrNotify.push({ requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
+        arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
       }
       marked++;
     }
   }
 
   const now = new Date();
-  const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.requestedBy === r.requestedBy && n.title === r.title));
+  const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
   await runConcurrent(overdue, async (req) => {
     try {
       const downloading = req.mediaType === "MOVIE"
@@ -343,16 +358,20 @@ export async function POST(request: NextRequest) {
         }
       }
       if (toMarkOnly.length > 0) {
+        // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
+        // otherwise every cron tick rewrites availableAt for the same request.
         await prisma.mediaRequest.updateMany({
-          where: { id: { in: toMarkOnly.map((r) => r.id) } },
+          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
           data: { status: "AVAILABLE", availableAt: new Date() },
         });
       }
     }
     const alreadyNotified = toMark.filter((r) => alreadyNotifiedIds.has(r.id));
     if (alreadyNotified.length > 0) {
+      // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
+      // otherwise every cron tick rewrites availableAt for the same request.
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) } },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
     }

@@ -1,6 +1,21 @@
 // Runs once at server startup in the Node.js runtime only — safe to use Node APIs and import server-only modules here
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Fail-closed crypto check FIRST — before any other init. The token-crypto module
+    // itself defers validation to first call (so `next build` can evaluate server
+    // modules without an env var). Here we explicitly assert the key at boot so a
+    // running server refuses to serve traffic without encryption configured.
+    try {
+      const { assertTokenEncryptionKey } = await import("@/lib/token-crypto");
+      assertTokenEncryptionKey();
+    } catch (err) {
+      console.error(
+        "[boot] TOKEN_ENCRYPTION_KEY is required and must be a 64-character hex string. Refusing to start.",
+        err,
+      );
+      process.exit(1);
+    }
+
     const required: string[] = ["NEXTAUTH_SECRET", "DATABASE_URL"];
     const missing = required.filter((key) => !process.env[key]);
 
@@ -86,5 +101,12 @@ export async function register() {
     import("@/lib/tmdb-prewarm")
       .then(({ prewarmLibraryCache }) => prewarmLibraryCache())
       .catch((err) => console.error("[prewarm] Library cache pre-warm error:", err));
+
+    // Item 4 / C-1 self-heal: backfill User.plexUserId from plex.tv so
+    // existing Plex users aren't locked out by the new (provider, sub) binding.
+    // Fire-and-forget — must never block boot.
+    import("@/lib/plex-user-backfill")
+      .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
+      .catch((err) => console.error("[plex-backfill] startup error:", err));
   }
 }

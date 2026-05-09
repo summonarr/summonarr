@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { randomInt } from "crypto";
+import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -12,13 +12,6 @@ const SNOWFLAKE_RE = /^\d{17,20}$/;
 export async function POST(req: NextRequest) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
-
-  if (!checkRateLimit(`discord-merge-init:${session.user.id}`, 3, 15 * 60 * 1000)) {
-    return NextResponse.json(
-      { error: "Too many requests — please wait 15 minutes before trying again." },
-      { status: 429 }
-    );
-  }
 
   let discordId: string;
   try {
@@ -32,6 +25,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       { error: "Invalid Discord user ID — it must be a 17–20 digit number." },
       { status: 400 }
+    );
+  }
+
+  // Rate-limit per (user, target discord id): a single attacker iterating
+  // through victim discord IDs can't share the bucket with their own attempts
+  if (!checkRateLimit(`discord-merge-init:${session.user.id}:${discordId}`, 3, 15 * 60 * 1000)) {
+    return NextResponse.json(
+      { error: "Too many requests — please wait 15 minutes before trying again." },
+      { status: 429 }
     );
   }
 
@@ -52,7 +54,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Discord bot is not configured." }, { status: 503 });
   }
 
-  const code = String(randomInt(0, 100_000_000)).padStart(8, "0");
+  // 12 hex chars (~48 bits) — bumped from 8 decimal digits (~26 bits) to
+  // resist online guessing within the 10-min window
+  const code = randomBytes(6).toString("hex").toUpperCase();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   await prisma.discordMergeCode.upsert({
@@ -88,7 +92,7 @@ export async function POST(req: NextRequest) {
           "",
           `Your verification code is: **${code}**`,
           "",
-          "Enter this 8-digit code on your Profile page to link your Discord account. It expires in 10 minutes.",
+          "Enter this 12-character code on your Profile page to link your Discord account. It expires in 10 minutes.",
           "",
           "If you did not request this, ignore this message.",
         ].join("\n"),

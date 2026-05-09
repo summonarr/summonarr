@@ -57,7 +57,12 @@ export const authConfig: NextAuthConfig = {
           extractUaFingerprint(request.headers.get("user-agent") ?? "")
         );
 
-        if (storedFp) {
+        // Machine sessions (minted via /api/auth/machine-session) carry a
+        // synthetic fingerprint "machine:<hash-of-CRON_SECRET>". They run from
+        // arbitrary clients (curl, scripts, CI) whose UA never matches; skip
+        // the browser-style fingerprint check for these. Replay defense relies
+        // on the short lifetime (≤15 min) and CRON_SECRET to mint fresh tokens.
+        if (storedFp && !storedFp.startsWith("machine:")) {
           if (currentFp !== storedFp) {
             // UA fingerprint mismatch — redirect and clear both cookie variants (secure and non-secure)
             const response = Response.redirect(loginUrl);
