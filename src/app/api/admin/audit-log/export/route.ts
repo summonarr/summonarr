@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 
 const VALID_ACTIONS: AuditAction[] = [
@@ -57,6 +58,25 @@ export async function GET(req: NextRequest) {
 
   const date = new Date().toISOString().slice(0, 10);
 
+  // Audit-log export is itself an audit-relevant action — a malicious admin
+  // could otherwise exfiltrate the entire trail with no record. Filter
+  // values are captured pre-stream so the audit row reflects what was
+  // actually queried; the row count is filled in once the stream completes.
+  const filters = {
+    format,
+    action: action ?? null,
+    dateFrom: dateFrom ?? null,
+    dateTo: dateTo ?? null,
+    user: user ?? null,
+    target: target ?? null,
+    hideCron,
+  };
+  const ctx = auditContext(req, session);
+  const exporter = {
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+  };
+
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
@@ -111,6 +131,24 @@ export async function GET(req: NextRequest) {
       if (format === "json") {
         controller.enqueue(encoder.encode("\n]\n"));
       }
+
+      // No dedicated AUDIT_LOG_EXPORT enum value yet (schema-first Prisma —
+      // adding one needs a separate schema bump). Reusing BACKUP_EXPORT with
+      // a distinct target keeps the trail intact and queryable while staying
+      // within the existing AuditAction enum.
+      await logAudit({
+        userId: exporter.userId,
+        userName: exporter.userName,
+        action: "BACKUP_EXPORT",
+        target: "audit-log:export",
+        details: {
+          kind: "audit-log",
+          filters,
+          rowCount: totalExported,
+          truncated: totalExported >= MAX_EXPORT_RECORDS,
+        },
+        ...ctx,
+      });
 
       controller.close();
     },

@@ -252,7 +252,18 @@ function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: stri
   return { ok: true };
 }
 
-export type BackupImportSummary = { total: number; executed: number; skipped: number; errors: number };
+export type BackupImportSummary = {
+  total: number;
+  executed: number;
+  skipped: number;
+  errors: number;
+  // Rows the INSERT...ON CONFLICT DO NOTHING path silently dropped, grouped
+  // by table. Empty object on a clean restore (TRUNCATE-then-INSERT means
+  // every row should land); non-empty signals dump corruption — duplicate
+  // PKs, conflicting rows, or schema drift the importer didn't catch.
+  conflictSkippedByTable: Record<string, number>;
+  conflictSkippedTotal: number;
+};
 
 export type BackupImportResult =
   | { ok: true; status: 200; summary: BackupImportSummary; warning: string | null }
@@ -355,12 +366,25 @@ export async function processBackupImport(
     validatedStatements.push(stmt);
   }
 
+  // On early abort (validation errors hit the cap, or the size cap fires) we
+  // must still drain the plaintext stream to completion. wrapDecryptStream
+  // verifies the GCM auth tag inside its pull when the underlying reader
+  // signals done; bailing out before then leaves the tag unverified, which
+  // is a partial-tampering oracle. Drained bytes are discarded.
+  async function drainPlaintext(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+    while (true) {
+      const { done: drainDone } = await reader.read();
+      if (drainDone) return;
+    }
+  }
+
   function collectComment(comment: string): void {
     const m = FINGERPRINT_RE.exec(comment);
     if (m) receivedFingerprint = m[1].toLowerCase();
   }
 
   const ptReader = plaintextStream.getReader();
+  let cryptoVerifyError: BackupCryptoError | null = null;
   try {
     while (!aborted) {
       const { value, done } = await ptReader.read();
@@ -384,6 +408,19 @@ export async function processBackupImport(
       const pending: string[] = [];
       flushSqlChunk(splitter, (s) => pending.push(s), collectComment);
       for (const stmt of pending) collectStatement(stmt);
+    } else {
+      try {
+        await drainPlaintext(ptReader);
+      } catch (err) {
+        if (err instanceof BackupCryptoError) {
+          cryptoVerifyError = err;
+        } else if (err instanceof Error && err.message === CIPHERTEXT_OVERFLOW_TAG) {
+          return { ok: false, status: 413, error: `Encrypted body exceeds ${MAX_CIPHERTEXT_BYTES} bytes` };
+        } else {
+          console.error("[backup] db-import drain error:", err);
+          return { ok: false, status: 400, error: "Failed to read backup" };
+        }
+      }
     }
   } catch (err) {
     if (err instanceof BackupCryptoError) {
@@ -398,6 +435,12 @@ export async function processBackupImport(
     ptReader.releaseLock();
   }
 
+  // Auth-tag mismatch on the abort drain takes precedence over validation/size errors.
+  // A tampered ciphertext must surface as a crypto failure, not as "blocked statement".
+  if (cryptoVerifyError) {
+    return { ok: false, status: cryptoVerifyError.status, error: cryptoVerifyError.message };
+  }
+
   if (abortReason) {
     return { ok: false, status: abortReason.status, error: abortReason.error };
   }
@@ -408,7 +451,14 @@ export async function processBackupImport(
       status: 200,
       error: "Backup failed validation",
       errors,
-      summary: { total: totalStatements, executed: 0, skipped, errors: errors.length },
+      summary: {
+        total: totalStatements,
+        executed: 0,
+        skipped,
+        errors: errors.length,
+        conflictSkippedByTable: {},
+        conflictSkippedTotal: 0,
+      },
     };
   }
 
@@ -430,7 +480,13 @@ export async function processBackupImport(
   const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
   const truncateStmt = `TRUNCATE TABLE ${truncateList} RESTART IDENTITY`;
 
+  // INSERT INTO "public"."<Table>" (...) ...  — pull out the table name so we
+  // can attribute conflict-skipped rows for the response summary.
+  const INSERT_TABLE_RE = /^INSERT\s+INTO\s+"public"\."([A-Za-z]+)"/i;
+
   let executed = 0;
+  const conflictSkippedByTable: Record<string, number> = {};
+  let conflictSkippedTotal = 0;
   try {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRawUnsafe(truncateStmt);
@@ -443,8 +499,14 @@ export async function processBackupImport(
         const safeStmt = stmt.startsWith("INSERT") && !/ON CONFLICT/i.test(stmt)
           ? `${stmt} ON CONFLICT DO NOTHING`
           : stmt;
-        await tx.$executeRawUnsafe(safeStmt);
+        const affected = await tx.$executeRawUnsafe(safeStmt);
         executed++;
+        const m = INSERT_TABLE_RE.exec(stmt);
+        if (m && typeof affected === "number" && affected === 0) {
+          const table = m[1];
+          conflictSkippedByTable[table] = (conflictSkippedByTable[table] ?? 0) + 1;
+          conflictSkippedTotal++;
+        }
       }
     }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });
   } catch (err) {
@@ -460,7 +522,14 @@ export async function processBackupImport(
   return {
     ok: true,
     status: 200,
-    summary: { total: totalStatements, executed, skipped, errors: 0 },
+    summary: {
+      total: totalStatements,
+      executed,
+      skipped,
+      errors: 0,
+      conflictSkippedByTable,
+      conflictSkippedTotal,
+    },
     warning: fingerprintWarning,
   };
 }

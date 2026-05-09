@@ -29,6 +29,12 @@ type Session = {
 
 let active: Session | null = null;
 
+// Per-session chained promise so concurrent appendChunk calls for the same
+// session serialize their reads/writes. Without this, two first-chunk POSTs
+// can both pass the receivedChunks check and both open the file with "w",
+// interleaving writes and corrupting the upload.
+const appendQueue = new Map<string, Promise<unknown>>();
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isExpired(s: Session): boolean {
@@ -102,11 +108,15 @@ export type AppendError =
   | { kind: "out-of-order"; expected: number }
   | { kind: "size-overflow"; max: number };
 
-export async function appendChunk(
+type AppendResult =
+  | { ok: true; received: number; total: number; bytesWritten: number; complete: boolean }
+  | { ok: false; error: AppendError };
+
+async function appendChunkUnsafe(
   uploadId: string,
   chunkIndex: number,
   data: Uint8Array,
-): Promise<{ ok: true; received: number; total: number; bytesWritten: number; complete: boolean } | { ok: false; error: AppendError }> {
+): Promise<AppendResult> {
   if (!active) return { ok: false, error: { kind: "no-session" } };
   if (active.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
   if (isExpired(active)) {
@@ -138,6 +148,23 @@ export async function appendChunk(
     bytesWritten: active.bytesWritten,
     complete: active.receivedChunks === active.totalChunks,
   };
+}
+
+export async function appendChunk(
+  uploadId: string,
+  chunkIndex: number,
+  data: Uint8Array,
+): Promise<AppendResult> {
+  const prev = appendQueue.get(uploadId) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(() => appendChunkUnsafe(uploadId, chunkIndex, data));
+  appendQueue.set(uploadId, next);
+  try {
+    return await next;
+  } finally {
+    if (appendQueue.get(uploadId) === next) appendQueue.delete(uploadId);
+  }
 }
 
 export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> | null {
