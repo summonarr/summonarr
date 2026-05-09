@@ -83,15 +83,26 @@ export function getSettingDecryptFailures(): string[] {
 // throw inside findMany and 500 every page that reads settings (e.g. /settings, /admin/*,
 // the layout's feature-flag fetch). We log the affected key once per occurrence and substitute
 // an empty string so the rest of the result set still flows through.
-function safeDecryptSettingValue(key: string, value: string): string {
+//
+// Gated by SENSITIVE_KEYS to mirror the write side — non-sensitive keys (URLs, booleans,
+// feature flags, threshold numbers) are stored plaintext by design, so calling decryptToken
+// on them just emits a noisy "Legacy plaintext value" warning for values that never needed
+// encryption. When the key is unknown (caller used `select: { value: true }` and didn't
+// project `key`), we conservatively fall through to the decrypt path so a sensitive read
+// still works — at the cost of a possible false-positive warning, which is the prior behavior.
+function safeDecryptSettingValue(key: string | undefined, value: string): string {
+  if (typeof key === "string" && !SENSITIVE_KEYS.has(key)) {
+    return value;
+  }
+  const label = `Setting.${key ?? "?"}`;
   try {
-    const result = decryptToken(value, `Setting.${key}`);
-    settingDecryptFailures.delete(key);
+    const result = decryptToken(value, label);
+    if (typeof key === "string") settingDecryptFailures.delete(key);
     return result;
   } catch (err) {
-    settingDecryptFailures.add(key);
+    if (typeof key === "string") settingDecryptFailures.add(key);
     console.error(
-      `[setting-crypto] Decrypt failed for key="${key}" — re-save this setting to recover. Original error:`,
+      `[setting-crypto] Decrypt failed for key="${key ?? "?"}" — re-save this setting to recover. Original error:`,
       err instanceof Error ? err.message : err,
     );
     return "";
@@ -118,18 +129,18 @@ function createPrismaClient() {
       setting: {
         async findUnique({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? "?", row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
           return row;
         },
         async findFirst({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? "?", row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
           return row;
         },
         async findMany({ args, query }) {
           const rows = await query(args);
           for (const r of rows) {
-            if (typeof r.value === "string") r.value = safeDecryptSettingValue(r.key ?? "?", r.value);
+            if (typeof r.value === "string") r.value = safeDecryptSettingValue(r.key, r.value);
           }
           return rows;
         },
