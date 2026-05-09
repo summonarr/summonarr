@@ -37,14 +37,16 @@ export function assertTokenEncryptionKey(): void {
   resolveKey();
 }
 
-// One-shot warning bookkeeping for legacy plaintext values still on disk.
-// We intentionally cap the set at 1 entry — we want a single warning per process, not per row.
+// Per-label warning bookkeeping for legacy plaintext values still on disk.
+// We dedupe by label (e.g. `Setting.jellyfinApiKey`, `Account.access_token (id=…)`)
+// so an operator can see exactly which rows still need re-saving without the same
+// row spamming the log on every read.
 const legacyPlaintextWarned = new Set<string>();
-function warnLegacyPlaintextOnce(): void {
-  if (legacyPlaintextWarned.size > 0) return;
-  legacyPlaintextWarned.add("warned");
+function warnLegacyPlaintextOnce(label: string): void {
+  if (legacyPlaintextWarned.has(label)) return;
+  legacyPlaintextWarned.add(label);
   console.warn(
-    "[token-crypto] Legacy plaintext value observed — re-save the affected setting/account row to encrypt at rest."
+    `[token-crypto] Legacy plaintext value observed for ${label} — re-save this row to encrypt at rest.`
   );
 }
 
@@ -62,12 +64,12 @@ export function encryptToken(plaintext: string): string {
   return ENC_PREFIX + iv.toString("hex") + ":" + tag.toString("hex") + ":" + ciphertext.toString("hex");
 }
 
-export function decryptToken(value: string): string {
+export function decryptToken(value: string, label: string = "unknown row"): string {
   // Legacy plaintext passthrough: rows written before encryption was rolled out, and rows for
-  // keys not in the SENSITIVE_KEYS list, are stored verbatim. Surface a single warning so an
-  // operator knows there's something to migrate.
+  // keys not in the SENSITIVE_KEYS list, are stored verbatim. Surface a labelled warning so an
+  // operator can identify which row still needs re-saving.
   if (!value.startsWith(ENC_PREFIX)) {
-    warnLegacyPlaintextOnce();
+    warnLegacyPlaintextOnce(label);
     return value;
   }
   const parts = value.slice(ENC_PREFIX.length).split(":");

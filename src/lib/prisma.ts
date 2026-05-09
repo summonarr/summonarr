@@ -51,15 +51,16 @@ function decryptAccountTokensInPlace(row: Record<string, unknown> | null | undef
   for (const field of ACCOUNT_TOKEN_FIELDS) {
     const v = row[field];
     if (typeof v !== "string" || v.length === 0) continue;
+    const id = typeof row.id === "string" ? row.id : "?";
+    const label = `Account.${field} (id=${id})`;
     try {
-      row[field] = decryptToken(v);
+      row[field] = decryptToken(v, label);
     } catch (err) {
       // A single un-decryptable column shouldn't take down whoever called findMany.
       // Surface enough context (account id + field) for an operator to re-link the account,
       // then null the field so the rest of the row can be returned to the caller.
-      const id = typeof row.id === "string" ? row.id : "?";
       console.error(
-        `[account-crypto] Decrypt failed for Account.${field} (id=${id}) — re-link this account to recover. Original error:`,
+        `[account-crypto] Decrypt failed for ${label} — re-link this account to recover. Original error:`,
         err instanceof Error ? err.message : err,
       );
       row[field] = null;
@@ -84,7 +85,7 @@ export function getSettingDecryptFailures(): string[] {
 // an empty string so the rest of the result set still flows through.
 function safeDecryptSettingValue(key: string, value: string): string {
   try {
-    const result = decryptToken(value);
+    const result = decryptToken(value, `Setting.${key}`);
     settingDecryptFailures.delete(key);
     return result;
   } catch (err) {

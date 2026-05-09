@@ -85,7 +85,7 @@ async function sendPush(
   webpush.setVapidDetails(keys.contact, keys.publicKey, keys.privateKey);
   try {
     await webpush.sendNotification(
-      { endpoint: subscription.endpoint, keys: { p256dh: decryptToken(subscription.p256dh), auth: decryptToken(subscription.auth) } },
+      { endpoint: subscription.endpoint, keys: { p256dh: decryptToken(subscription.p256dh, "PushSubscription.p256dh"), auth: decryptToken(subscription.auth, "PushSubscription.auth") } },
       JSON.stringify(payload)
     );
     return true;
