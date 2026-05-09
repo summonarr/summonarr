@@ -3,8 +3,10 @@ import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { randomInt } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { safeFetchTrusted } from "@/lib/safe-fetch";
 
 const DISCORD_API = "https://discord.com/api/v10";
+const DISCORD_HOSTS = ["discord.com"];
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export async function POST(req: NextRequest) {
@@ -66,18 +68,20 @@ export async function POST(req: NextRequest) {
 
   const botToken = botTokenRow.value;
   try {
-    const dmRes = await fetch(`${DISCORD_API}/users/@me/channels`, {
+    const dmRes = await safeFetchTrusted(`${DISCORD_API}/users/@me/channels`, {
       method: "POST",
       headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({ recipient_id: discordId }),
+      allowedHosts: DISCORD_HOSTS,
     });
     if (!dmRes.ok) throw new Error(`Could not open DM channel (${dmRes.status}): ${await dmRes.text()}`);
 
     const { id: channelId } = (await dmRes.json()) as { id: string };
 
-    const msgRes = await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
+    const msgRes = await safeFetchTrusted(`${DISCORD_API}/channels/${channelId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
+      allowedHosts: DISCORD_HOSTS,
       body: JSON.stringify({
         content: [
           "🔗 **Summonarr account verification**",

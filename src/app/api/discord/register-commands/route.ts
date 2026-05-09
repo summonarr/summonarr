@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { safeFetchTrusted } from "@/lib/safe-fetch";
 
 const DISCORD_API = "https://discord.com/api/v10";
+const DISCORD_HOSTS = ["discord.com"];
 
 const SLASH_COMMANDS = [
   {
@@ -66,13 +68,14 @@ export async function POST() {
     ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
     : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
 
-  const res = await fetch(url, {
+  const res = await safeFetchTrusted(url, {
     method: "PUT",
     headers: {
       Authorization: `Bot ${cfg.discordBotToken}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(SLASH_COMMANDS),
+    allowedHosts: DISCORD_HOSTS,
   });
 
   if (!res.ok) {

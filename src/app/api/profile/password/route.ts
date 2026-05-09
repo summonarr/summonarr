@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
 import bcrypt from "bcryptjs";
 
 export async function PATCH(req: NextRequest) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+
+  if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
+    return NextResponse.json(
+      { error: "Too many attempts — please wait 15 minutes before trying again." },
+      { status: 429 },
+    );
+  }
 
   let body: { currentPassword?: string; newPassword?: string };
   try {

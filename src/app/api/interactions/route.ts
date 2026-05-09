@@ -723,7 +723,20 @@ async function handleComponent(interaction: any): Promise<void> {
       const adminName = adminUser.name ?? adminUser.email;
 
       if (action === "admin_approve") {
-        await prisma.mediaRequest.update({ where: { id: requestId }, data: { status: "APPROVED" } });
+        const claimed = await prisma.mediaRequest.updateMany({
+          where: { id: requestId, status: "PENDING" },
+          data: { status: "APPROVED" },
+        });
+        if (claimed.count === 0) {
+          const embed: Record<string, unknown> = {
+            color: 0x71767B,
+            title: request.title,
+            description: "This request has already been handled.",
+            timestamp: new Date().toISOString(),
+          };
+          await editOriginal(appId, token, { embeds: [embed], components: [] });
+          return;
+        }
         let arrFailed = false;
         try {
           if (request.mediaType === "MOVIE") {
@@ -749,7 +762,20 @@ async function handleComponent(interaction: any): Promise<void> {
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
         await editOriginal(appId, token, { embeds: [embed], components: [] });
       } else {
-        await prisma.mediaRequest.update({ where: { id: requestId }, data: { status: "DECLINED" } });
+        const claimed = await prisma.mediaRequest.updateMany({
+          where: { id: requestId, status: "PENDING" },
+          data: { status: "DECLINED" },
+        });
+        if (claimed.count === 0) {
+          const embed: Record<string, unknown> = {
+            color: 0x71767B,
+            title: request.title,
+            description: "This request has already been handled.",
+            timestamp: new Date().toISOString(),
+          };
+          await editOriginal(appId, token, { embeds: [embed], components: [] });
+          return;
+        }
         void notifyUserRequestDeclined(request.requestedBy, request.title, request.mediaType);
         const embed: Record<string, unknown> = {
           color: 0xED4245,
