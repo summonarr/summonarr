@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
+import { sanitizeForLog } from "./sanitize";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 const SETTING_KEYS = [
@@ -138,7 +139,7 @@ export async function resolveMediaServerUser(params: {
     });
     if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
       console.warn(
-        `[play-history] refusing MediaServerUser upsert: source=${source} sourceUserId=${sourceUserId} bound to a different server`,
+        `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
       );
       throw new MediaServerMismatchError(source, sourceUserId);
     }

@@ -92,7 +92,7 @@ export async function fetchAndCacheMdblistForTmdb(
     }
 
     if (!res.ok) {
-      console.warn(`[mdblist] API returned ${res.status} for ${sanitizeForLog(mediaType)}:${tmdbId}`);
+      console.warn(`[mdblist] API returned ${sanitizeForLog(res.status)} for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
       await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
       return { found: false, keyConfigured: true };
     }
@@ -110,7 +110,7 @@ export async function fetchAndCacheMdblistForTmdb(
           tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
           return { found: false, keyConfigured: true, quotaExhausted: true };
         }
-        console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(errMsg)}`);
+        console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
         await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
         return { found: false, keyConfigured: true };
       }

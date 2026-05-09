@@ -11,6 +11,7 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
@@ -805,7 +806,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (!verifySignature(publicKey, signature, timestamp, body)) {
-    console.warn(`[interactions] Signature verification failed sigLen=${signature.length} bodyLen=${body.length}`);
+    console.warn(`[interactions] Signature verification failed sigLen=${sanitizeForLog(signature.length)} bodyLen=${sanitizeForLog(body.length)}`);
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 

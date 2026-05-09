@@ -12,6 +12,7 @@ import {
   MediaServerMismatchError,
 } from "@/lib/play-history";
 import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -106,11 +107,11 @@ export async function POST(req: NextRequest) {
     const expectedRow = await prisma.setting.findUnique({ where: { key: "jellyfinServerMachineId" } });
     const expected = expectedRow?.value ?? null;
     if (expected && expected !== serverId) {
-      console.warn(`[webhook/jellyfin] 403 server id mismatch expected=${expected} got=${serverId}`);
+      console.warn(`[webhook/jellyfin] 403 server id mismatch expected=${sanitizeForLog(expected)} got=${sanitizeForLog(serverId)}`);
       return NextResponse.json({ error: "Unrecognized Jellyfin server" }, { status: 403 });
     }
     if (!expected) {
-      console.warn(`[webhook/jellyfin] no jellyfinServerMachineId Setting configured; accepting payload from ServerId=${serverId}`);
+      console.warn(`[webhook/jellyfin] no jellyfinServerMachineId Setting configured; accepting payload from ServerId=${sanitizeForLog(serverId)}`);
     }
   }
 

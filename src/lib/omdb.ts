@@ -132,7 +132,7 @@ export async function fetchAndCacheOmdbForTmdb(
       timeoutMs: OMDB_FETCH_TIMEOUT_MS,
     });
     if (!extRes.ok) {
-      console.warn(`[omdb] TMDB external_ids fetch failed (${extRes.status}) for ${sanitizeForLog(mediaType)}:${tmdbId}`);
+      console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
       return { found: false, keyConfigured: true };
     }
 

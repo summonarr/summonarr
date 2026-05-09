@@ -13,6 +13,7 @@ import {
   MediaServerMismatchError,
 } from "@/lib/play-history";
 import { extractTmdbIdFromGuids } from "@/lib/plex";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
 
 function safeCompare(a: string, b: string): boolean {
@@ -129,11 +130,11 @@ export async function POST(req: NextRequest) {
     const expectedRow = await prisma.setting.findUnique({ where: { key: "plexServerMachineId" } });
     const expected = expectedRow?.value ?? null;
     if (expected && expected !== serverUuid) {
-      console.warn(`[webhook/plex] 403 server uuid mismatch expected=${expected} got=${serverUuid}`);
+      console.warn(`[webhook/plex] 403 server uuid mismatch expected=${sanitizeForLog(expected)} got=${sanitizeForLog(serverUuid)}`);
       return NextResponse.json({ error: "Unrecognized Plex server" }, { status: 403 });
     }
     if (!expected) {
-      console.warn(`[webhook/plex] no plexServerMachineId Setting configured; accepting payload from server uuid=${serverUuid}`);
+      console.warn(`[webhook/plex] no plexServerMachineId Setting configured; accepting payload from server uuid=${sanitizeForLog(serverUuid)}`);
     }
   }
 
