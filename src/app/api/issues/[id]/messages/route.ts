@@ -39,7 +39,7 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 
-  const maint = await maintenanceGuard(session.user.role);
+  const maint = await maintenanceGuard();
   if (maint) return maint;
 
   if (!checkRateLimit(`issue-msg:${session.user.id}`, 10, 60 * 1000)) {

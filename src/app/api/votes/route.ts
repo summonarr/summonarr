@@ -80,7 +80,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
   }
 
-  const maint = await maintenanceGuard(session.user.role);
+  const maint = await maintenanceGuard();
   if (maint) return maint;
 
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });

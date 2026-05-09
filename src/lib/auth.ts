@@ -201,6 +201,17 @@ async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unk
     token.sessionId = crypto.randomUUID();
   }
 
+  if (!token.uaFingerprint && token.provider === "oidc") {
+    try {
+      const { headers: getHeaders } = await import("next/headers");
+      const h = await getHeaders();
+      const ua = h.get("user-agent") ?? "";
+      if (ua) token.uaFingerprint = serializeFingerprint(extractUaFingerprint(ua));
+    } catch {
+      // jwt() invoked outside request context — fingerprint stays unset, populated on next refresh
+    }
+  }
+
   const rememberMe = (user as { rememberMe?: string }).rememberMe === "true";
   const isMobile   = token.isMobile as boolean | undefined;
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();

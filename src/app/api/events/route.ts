@@ -36,7 +36,7 @@ export async function GET() {
   const session = await auth();
   if (!session || isTokenExpired(session)) return new Response("Unauthorized", { status: 401 });
 
-  const maint = await maintenanceGuard(session.user.role);
+  const maint = await maintenanceGuard();
   if (maint) return maint;
 
   const userId = session.user.id;
