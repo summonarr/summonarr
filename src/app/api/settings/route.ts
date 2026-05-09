@@ -201,6 +201,50 @@ export async function PATCH(req: NextRequest) {
 
   const USER_FACING_KEYS = new Set(["motdTitle", "motdBody", "siteTitle", "maintenanceMessage"]);
 
+  const URL_KEYS = new Set<string>([
+    "siteUrl",
+    "radarrUrl",
+    "sonarrUrl",
+    "plexServerUrl",
+    "jellyfinUrl",
+    "discordInviteUrl",
+  ]);
+
+  const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
+  const isSecretShapedKey = (k: string) =>
+    SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
+
+  const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
+  for (const [key, value] of Object.entries(body)) {
+    if (typeof value !== "string" || value === MASKED_VALUE || value.length === 0) continue;
+    if (!(ALLOWED_KEYS as readonly string[]).includes(key)) continue;
+
+    if (URL_KEYS.has(key)) {
+      try {
+        const parsed = new URL(value);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          return NextResponse.json(
+            { error: `Setting "${key}" must be an http(s) URL` },
+            { status: 400 },
+          );
+        }
+      } catch {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be a valid URL` },
+          { status: 400 },
+        );
+      }
+    }
+
+    if (isSecretShapedKey(key) && CONTROL_CHAR_RE.test(value)) {
+      return NextResponse.json(
+        { error: `Setting "${key}" contains invalid control characters` },
+        { status: 400 },
+      );
+    }
+  }
+
   const entries = Object.entries(body)
     .filter(([k, v]) => {
       if (!(ALLOWED_KEYS as readonly string[]).includes(k)) return false;

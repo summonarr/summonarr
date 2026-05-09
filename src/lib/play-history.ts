@@ -294,11 +294,14 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 
   // No final tick: a stale session has no signal it was still playing — capping wall-clock from
   // lastSeenAt would falsely inflate playtimeMs by up to MAX_PLAYTIME_DELTA_MS for an abandoned watch.
-  for (const session of stale) {
-    try {
-      await recordCompletedSession(session);
-    } catch {
-
+  // Parallelized with allSettled so one failure doesn't abort the rest, and previously-silent
+  // failures now surface as a single warn.
+  const results = await Promise.allSettled(
+    stale.map((session) => recordCompletedSession(session)),
+  );
+  for (const r of results) {
+    if (r.status === "rejected") {
+      console.warn("[play-history] cleanupStaleSessions: recordCompletedSession failed:", r.reason);
     }
   }
 }
@@ -810,7 +813,10 @@ export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, li
 
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
-  const limitIdx = params.length + 1;
+  // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index.
+  // Same shape as the bug fixed in commit 803cd11 — sibling builders (buildStatsFilters itself) already do this.
+  params.push(limit);
+  const limitIdx = params.length;
 
   const rows = await prisma.$queryRawUnsafe<
     { tmdbId: number; mediaType: string; title: string; plays: bigint; viewers: bigint }[]
@@ -825,7 +831,6 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
      ORDER BY plays DESC
      LIMIT $${limitIdx}`,
     ...params,
-    limit,
   );
 
   return rows.map((r) => ({
