@@ -96,19 +96,56 @@ await client.end();
 BACKFILL_EOF
 
 echo "Syncing database schema..."
-# By default, --accept-data-loss is omitted: destructive migrations (dropped
-# columns, narrowed types) fail fast at boot instead of silently clobbering
-# data. Operators can set SUMMONARR_ACCEPT_DATA_LOSS=true for ONE boot when
-# they've reviewed the warnings and know the change is safe (e.g. adding a
-# unique constraint to a new nullable column — Prisma flags it as data-loss
-# even though Postgres treats NULLs as distinct under unique constraints).
-# Unset the env var after the migration applies.
+# Schema migration policy:
+#   1. Try `prisma db push` first. If it succeeds, done.
+#   2. If it fails because Prisma flagged data-loss warnings, inspect them.
+#      - "unique constraint covering [...]" warnings are SAFE to auto-retry:
+#        the underlying ALTER TABLE ADD UNIQUE is atomic — it fails loudly
+#        at SQL execution time if duplicates actually exist, so retrying
+#        with --accept-data-loss can't silently destroy data here.
+#        (Prisma flags these warnings whenever ANY existing rows are present
+#        in the table, even when the column is brand-new and all-NULL.)
+#      - Anything else (column drop, type narrow, etc.) is genuinely
+#        destructive. Refuse and require SUMMONARR_ACCEPT_DATA_LOSS=true.
+#   3. If SUMMONARR_ACCEPT_DATA_LOSS=true is set, skip the inspection and
+#      apply with --accept-data-loss directly (operator-acknowledged override).
+
 if [ "${SUMMONARR_ACCEPT_DATA_LOSS:-}" = "true" ]; then
-  echo "[entrypoint] WARNING: SUMMONARR_ACCEPT_DATA_LOSS=true — applying schema with --accept-data-loss."
+  echo "[entrypoint] SUMMONARR_ACCEPT_DATA_LOSS=true — applying with --accept-data-loss."
   echo "[entrypoint] Unset this env var after the boot succeeds; leaving it on hides destructive changes."
   node node_modules/prisma/build/index.js db push --accept-data-loss
 else
-  node node_modules/prisma/build/index.js db push
+  # Disable set -e around the capture: under POSIX `sh -e`, $(...) failures
+  # propagate and exit before $? can be read.
+  set +e
+  push_output=$(node node_modules/prisma/build/index.js db push 2>&1)
+  push_exit=$?
+  set -e
+  echo "$push_output"
+
+  if [ "$push_exit" -ne 0 ] && echo "$push_output" | grep -q -- "--accept-data-loss"; then
+    # Extract every "•"-prefixed warning line.
+    warnings=$(echo "$push_output" | grep -E "^[[:space:]]*•")
+    # Are ANY warnings outside the safe "unique constraint covering" pattern?
+    unsafe=$(echo "$warnings" | grep -v "unique constraint covering the columns" || true)
+
+    if [ -n "$warnings" ] && [ -z "$unsafe" ]; then
+      echo ""
+      echo "[entrypoint] All data-loss warnings are unique-constraint additions on existing tables."
+      echo "[entrypoint] Postgres ADD UNIQUE is atomic — if real duplicates existed it would fail"
+      echo "[entrypoint] loudly at SQL execution. Auto-retrying with --accept-data-loss."
+      node node_modules/prisma/build/index.js db push --accept-data-loss
+    else
+      echo ""
+      echo "[entrypoint] Schema sync failed with destructive warnings that are NOT auto-safe."
+      echo "[entrypoint] Review the warnings above. To override for one boot, set"
+      echo "[entrypoint] SUMMONARR_ACCEPT_DATA_LOSS=true in your env and restart."
+      exit 1
+    fi
+  elif [ "$push_exit" -ne 0 ]; then
+    # prisma db push failed for a non-data-loss reason (DB unreachable, etc).
+    exit "$push_exit"
+  fi
 fi
 
 echo "Starting Summonarr..."
