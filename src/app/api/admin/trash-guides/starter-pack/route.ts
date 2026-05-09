@@ -3,6 +3,14 @@ import { requireAuth } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs, describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
+import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+
+function busyResponse() {
+  return NextResponse.json(
+    { ok: false, error: "Trash sync already running", retryAfter: 30 },
+    { status: 409, headers: { "Retry-After": "30" } },
+  );
+}
 
 export async function GET() {
   const session = await requireAuth({ role: "ADMIN" });
@@ -26,40 +34,48 @@ export async function POST() {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
-  try {
-    const items = await resolveStarterPack();
-    const specIds = items.filter((i) => i.spec).map((i) => i.spec!.id);
-    const missing = items.filter((i) => !i.spec).map((i) => i.item.label);
+  return withAdvisoryLock(
+    TRASH_SYNC_LOCK_ID,
+    async () => {
+      try {
+        const items = await resolveStarterPack();
+        const specIds = items.filter((i) => i.spec).map((i) => i.spec!.id);
+        const missing = items.filter((i) => !i.spec).map((i) => i.item.label);
 
-    const startTime = Date.now();
-    const results = specIds.length > 0 ? await applySpecs(specIds) : [];
-    const durationMs = Date.now() - startTime;
+        const startTime = Date.now();
+        const results = specIds.length > 0 ? await applySpecs(specIds) : [];
+        const durationMs = Date.now() - startTime;
 
-    await logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? "admin",
-      action: "SETTINGS_CHANGE",
-      target: "trash:starter-pack",
-      details: {
-        applied: results.length,
-        failures: results.filter((r) => !r.ok).length,
-        missing,
-        durationMs,
-      },
-    });
+        const recreated = results.filter((r) => r.recreated).length;
+        await logAudit({
+          userId: session.user.id,
+          userName: session.user.name ?? "admin",
+          action: "SETTINGS_CHANGE",
+          target: "trash:starter-pack",
+          details: {
+            applied: results.length,
+            failures: results.filter((r) => !r.ok).length,
+            ...(recreated > 0 ? { recreated } : {}),
+            missing,
+            durationMs,
+          },
+        });
 
-    return NextResponse.json({
-      ok: results.every((r) => r.ok) && missing.length === 0,
-      results,
-      missing,
-      durationMs,
-    });
-  } catch (err) {
-    const schemaDiagnostic = describeSchemaError(err);
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { ok: false, error: message, ...(schemaDiagnostic ? { schemaDiagnostic } : {}) },
-      { status: schemaDiagnostic ? 409 : 500 },
-    );
-  }
+        return NextResponse.json({
+          ok: results.every((r) => r.ok) && missing.length === 0,
+          results,
+          missing,
+          durationMs,
+        });
+      } catch (err) {
+        const schemaDiagnostic = describeSchemaError(err);
+        const message = err instanceof Error ? err.message : String(err);
+        return NextResponse.json(
+          { ok: false, error: message, ...(schemaDiagnostic ? { schemaDiagnostic } : {}) },
+          { status: schemaDiagnostic ? 409 : 500 },
+        );
+      }
+    },
+    busyResponse,
+  );
 }

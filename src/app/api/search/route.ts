@@ -9,7 +9,7 @@ export async function GET(req: NextRequest) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 
-  const maint = await maintenanceGuard(session.user.role);
+  const maint = await maintenanceGuard();
   if (maint) return maint;
 
   if (!checkRateLimit(`search:${session.user.id}`, 30, 60 * 1000)) {

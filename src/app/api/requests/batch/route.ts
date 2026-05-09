@@ -50,6 +50,15 @@ export async function PATCH(req: NextRequest) {
   const typedAdminNote = sanitizeOptional(adminNote as string | undefined);
   const typedPermanent = permanent === true && typedStatus === "DECLINED";
 
+  // Permanent declines are terminal (block re-requests); cap below the general 100 ceiling
+  // so an admin can't blast 100 users' requests into the permanent state in a single click.
+  if (typedPermanent && typedIds.length > 25) {
+    return NextResponse.json(
+      { error: "permanent-batch-too-large", message: "Permanent declines are limited to 25 at a time." },
+      { status: 400 },
+    );
+  }
+
   const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
 
   const pendingBefore = await prisma.mediaRequest.findMany({
@@ -113,12 +122,27 @@ export async function PATCH(req: NextRequest) {
     emitSSE({ type: "request:updated", requestId: id, status: typedStatus, userId });
   }
 
+  // Permanent declines get their own audit action so they're trivially queryable;
+  // the (capped) typedIds list is preserved in full so the trail is reproducible.
+  const auditAction =
+    typedStatus === "APPROVED"
+      ? "REQUEST_APPROVE"
+      : typedPermanent
+        ? "BATCH_REQUEST_DECLINE"
+        : "REQUEST_DECLINE";
+
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
-    action: typedStatus === "APPROVED" ? "REQUEST_APPROVE" : "REQUEST_DECLINE",
+    action: auditAction,
     target: `batch:${typedIds.length}`,
-    details: { batch: true, count: typedIds.length, ids: typedIds.slice(0, 20), adminNote: typedAdminNote ?? null },
+    details: {
+      batch: true,
+      count: typedIds.length,
+      ids: typedIds,
+      adminNote: typedAdminNote ?? null,
+      permanent: typedPermanent,
+    },
     ...auditContext(req, session),
   });
 

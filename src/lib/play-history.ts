@@ -1,35 +1,64 @@
 import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
+import { sanitizeForLog } from "./sanitize";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
-const settingsCache = new Map<string, { value: string | null; expiresAt: number }>();
+const SETTING_KEYS = [
+  "playHistoryEnabled",
+  "playHistoryPlexEnabled",
+  "playHistoryJellyfinEnabled",
+  "playHistoryWatchedThreshold",
+  "playHistoryCompletionThreshold",
+  "playHistoryArcGapDays",
+  "playHistoryRetentionDays",
+] as const;
+type SettingKey = (typeof SETTING_KEYS)[number];
+
 const SETTINGS_CACHE_TTL = 15_000;
+let settingsCache: { values: Record<SettingKey, string | null>; expiresAt: number } | null = null;
+let settingsInflight: Promise<Record<SettingKey, string | null>> | null = null;
+
+async function loadSettings(): Promise<Record<SettingKey, string | null>> {
+  if (settingsCache && settingsCache.expiresAt > Date.now()) return settingsCache.values;
+  if (settingsInflight) return settingsInflight;
+  settingsInflight = (async () => {
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: SETTING_KEYS as unknown as string[] } },
+      select: { key: true, value: true },
+    });
+    const values = Object.fromEntries(SETTING_KEYS.map((k) => [k, null])) as Record<SettingKey, string | null>;
+    for (const row of rows) {
+      if ((SETTING_KEYS as readonly string[]).includes(row.key)) {
+        values[row.key as SettingKey] = row.value ?? null;
+      }
+    }
+    settingsCache = { values, expiresAt: Date.now() + SETTINGS_CACHE_TTL };
+    return values;
+  })();
+  try {
+    return await settingsInflight;
+  } finally {
+    settingsInflight = null;
+  }
+}
 
 const activityCache = new Map<string, { data: unknown; expiresAt: number }>();
 const STATS_TTL = 5 * 60 * 1000;
 const CALENDAR_TTL = 30 * 60 * 1000;
 const REWATCHED_TTL = 10 * 60 * 1000;
 
-async function getSetting(key: string): Promise<string | null> {
-  const cached = settingsCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.value;
-  const row = await prisma.setting.findUnique({ where: { key } });
-  const value = row?.value ?? null;
-  settingsCache.set(key, { value, expiresAt: Date.now() + SETTINGS_CACHE_TTL });
-  return value;
-}
-
 export async function isPlayHistoryEnabled(): Promise<boolean> {
-  return (await getSetting("playHistoryEnabled")) === "true";
+  return (await loadSettings()).playHistoryEnabled === "true";
 }
 
 export async function isSourceEnabled(source: "plex" | "jellyfin"): Promise<boolean> {
-  const key = source === "plex" ? "playHistoryPlexEnabled" : "playHistoryJellyfinEnabled";
-  return (await getSetting(key)) === "true";
+  const settings = await loadSettings();
+  const val = source === "plex" ? settings.playHistoryPlexEnabled : settings.playHistoryJellyfinEnabled;
+  return val === "true";
 }
 
 export async function getWatchedThreshold(): Promise<number> {
-  const val = await getSetting("playHistoryWatchedThreshold");
+  const val = (await loadSettings()).playHistoryWatchedThreshold;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 80;
 }
@@ -37,7 +66,7 @@ export async function getWatchedThreshold(): Promise<number> {
 // Cumulative-watch threshold for an arc to count as a completion in getMostPopularOnServer.
 // Stricter than getWatchedThreshold (per-session) — a "completion" should mean they basically finished it.
 export async function getCompletionThreshold(): Promise<number> {
-  const val = await getSetting("playHistoryCompletionThreshold");
+  const val = (await loadSettings()).playHistoryCompletionThreshold;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : 90;
 }
@@ -45,7 +74,7 @@ export async function getCompletionThreshold(): Promise<number> {
 // Gap (days) between consecutive sessions on the same media that splits one arc from the next.
 // A weekend chunked watch stays one arc; a months-later rewatch starts a new arc.
 export async function getArcGapDays(): Promise<number> {
-  const val = await getSetting("playHistoryArcGapDays");
+  const val = (await loadSettings()).playHistoryArcGapDays;
   const parsed = val ? parseInt(val, 10) : NaN;
   return Number.isFinite(parsed) && parsed >= 1 && parsed <= 365 ? parsed : 14;
 }
@@ -69,14 +98,26 @@ export async function resolveShowTmdbId(
   return item?.tmdbId ?? null;
 }
 
+// Thrown by resolveMediaServerUser when a webhook payload's serverMachineId doesn't match the
+// machineId previously bound to a (source, sourceUserId) row. Webhook handlers translate this
+// into a 403; other callers (sync, cron) don't pass serverMachineId so this path never fires
+// for them.
+export class MediaServerMismatchError extends Error {
+  constructor(public readonly source: string, public readonly sourceUserId: string) {
+    super(`MediaServerUser ${source}:${sourceUserId} bound to a different server`);
+    this.name = "MediaServerMismatchError";
+  }
+}
+
 export async function resolveMediaServerUser(params: {
   source: string;
   sourceUserId: string;
   username: string;
   email?: string | null;
   thumbUrl?: string | null;
+  serverMachineId?: string | null;
 }): Promise<string> {
-  const { source, sourceUserId, username, email, thumbUrl } = params;
+  const { source, sourceUserId, username, email, thumbUrl, serverMachineId } = params;
 
   let userId: string | null = null;
   if (email) {
@@ -84,6 +125,23 @@ export async function resolveMediaServerUser(params: {
 
     if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
       userId = user.id;
+    }
+  }
+
+  // Defense-in-depth (H-3): if a row already exists with a recorded serverMachineId, refuse a
+  // mismatched incoming machineId. This guards against an attacker who knows the webhook secret
+  // but is sending events from a different server, attempting to impersonate a (source, userId)
+  // we have already pinned to a specific server.
+  if (serverMachineId) {
+    const existing = await prisma.mediaServerUser.findUnique({
+      where: { source_sourceUserId: { source, sourceUserId } },
+      select: { id: true, serverMachineId: true },
+    });
+    if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
+      console.warn(
+        `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
+      );
+      throw new MediaServerMismatchError(source, sourceUserId);
     }
   }
 
@@ -96,12 +154,14 @@ export async function resolveMediaServerUser(params: {
       email: email ?? null,
       thumbUrl: thumbUrl ?? null,
       userId,
+      serverMachineId: serverMachineId ?? null,
     },
     update: {
       username,
       ...(email ? { email } : {}),
       ...(thumbUrl ? { thumbUrl } : {}),
       ...(userId ? { userId } : {}),
+      ...(serverMachineId ? { serverMachineId } : {}),
     },
     select: { id: true },
   });
@@ -266,17 +326,20 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 
   // No final tick: a stale session has no signal it was still playing — capping wall-clock from
   // lastSeenAt would falsely inflate playtimeMs by up to MAX_PLAYTIME_DELTA_MS for an abandoned watch.
-  for (const session of stale) {
-    try {
-      await recordCompletedSession(session);
-    } catch {
-
+  // Parallelized with allSettled so one failure doesn't abort the rest, and previously-silent
+  // failures now surface as a single warn.
+  const results = await Promise.allSettled(
+    stale.map((session) => recordCompletedSession(session)),
+  );
+  for (const r of results) {
+    if (r.status === "rejected") {
+      console.warn("[play-history] cleanupStaleSessions: recordCompletedSession failed:", r.reason);
     }
   }
 }
 
 export async function purgeOldHistory(): Promise<number> {
-  const val = await getSetting("playHistoryRetentionDays");
+  const val = (await loadSettings()).playHistoryRetentionDays;
   const days = val ? parseInt(val, 10) : 0;
   if (!days || days <= 0) return 0;
 
@@ -782,7 +845,10 @@ export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, li
 
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
-  const limitIdx = params.length + 1;
+  // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index.
+  // Same shape as the bug fixed in commit 803cd11 — sibling builders (buildStatsFilters itself) already do this.
+  params.push(limit);
+  const limitIdx = params.length;
 
   const rows = await prisma.$queryRawUnsafe<
     { tmdbId: number; mediaType: string; title: string; plays: bigint; viewers: bigint }[]
@@ -797,7 +863,6 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
      ORDER BY plays DESC
      LIMIT $${limitIdx}`,
     ...params,
-    limit,
   );
 
   return rows.map((r) => ({

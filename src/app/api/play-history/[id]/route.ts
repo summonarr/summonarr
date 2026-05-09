@@ -46,7 +46,15 @@ export async function DELETE(
 
   const record = await prisma.playHistory.findUnique({
     where: { id },
-    select: { id: true, mediaServerUserId: true, title: true },
+    select: {
+      id: true,
+      mediaServerUserId: true,
+      title: true,
+      source: true,
+      tmdbId: true,
+      startedAt: true,
+      stoppedAt: true,
+    },
   });
   if (!record) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -57,9 +65,16 @@ export async function DELETE(
   await logAuditOrFail({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
-    action: "SETTINGS_CHANGE",
+    action: "PLAY_HISTORY_DELETE",
     target: `play-history:${id}`,
-    details: { title: record.title, mediaServerUserId: record.mediaServerUserId },
+    details: {
+      title: record.title,
+      mediaServerUserId: record.mediaServerUserId,
+      source: record.source,
+      tmdbId: record.tmdbId,
+      startedAt: record.startedAt.toISOString(),
+      stoppedAt: record.stoppedAt.toISOString(),
+    },
     ...auditContext(request, session),
   });
 

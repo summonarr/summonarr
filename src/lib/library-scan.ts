@@ -27,8 +27,17 @@ interface PendingScan {
 }
 
 const pending = new Map<ScanMediaType, PendingScan>();
+// Track in-flight triggerLibraryScan calls so a new schedule arriving mid-scan awaits the running one
+// instead of firing a parallel scan against the same backend.
+const inFlight = new Map<ScanMediaType, Promise<void>>();
 
 export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): Promise<void> {
+  const running = inFlight.get(mediaType);
+  if (running) {
+    console.warn(`[library-scan] ${mediaType} scan already in flight, awaiting`);
+    return running;
+  }
+
   const existing = pending.get(mediaType);
   if (existing) {
     clearTimeout(existing.timer);
@@ -94,9 +103,15 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
     );
   }
 
+  // Hold the pending entry until the scan finishes so a concurrent schedule sees inFlight and awaits;
+  // delete pending only after we've registered the in-flight promise.
+  const scanPromise = triggerLibraryScan(mediaType).finally(() => {
+    inFlight.delete(mediaType);
+  });
+  inFlight.set(mediaType, scanPromise);
   pending.delete(mediaType);
   try {
-    await triggerLibraryScan(mediaType);
+    await scanPromise;
   } finally {
     entry.resolve();
   }

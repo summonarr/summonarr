@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUpcomingMovies, getUpcomingTV } from "@/lib/tmdb";
-import { isCronAuthorized, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 
@@ -54,7 +54,7 @@ export async function POST(request: NextRequest) {
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 3)`;
           await tx.upcomingCacheItem.deleteMany();
-          await tx.upcomingCacheItem.createMany({ data: rows });
+          await batchCreateMany(tx.upcomingCacheItem, rows);
         }, { timeout: BATCH_TX_TIMEOUT });
       }
 

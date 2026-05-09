@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
+import { arrFetch } from "@/lib/arr";
 
 export type FileInfoResponse = {
   plexFilePath:      string | null;
@@ -52,21 +53,17 @@ export async function GET(request: NextRequest) {
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       try {
-        const res = await fetch(`${arrBaseUrl}/api/v3/${endpoint}`, {
-          redirect: "error",
-          headers: { "X-Api-Key": arrKeyRow.value, "Content-Type": "application/json" },
-          signal: AbortSignal.timeout(8_000),
-        });
-        if (res.ok) {
-          type ArrItem = { tmdbId?: number; path?: string };
-          const items = await res.json() as ArrItem[];
-          for (const item of items) {
-            if (!item.tmdbId || !item.path) continue;
-            const normPath = path.posix.normalize(item.path.replace(/\\/g, "/").replace(/\/$/, ""));
-            if (normPath === folderPath || folderPath.startsWith(normPath + "/")) {
-              arrTmdbId = item.tmdbId;
-              break;
-            }
+        type ArrItem = { tmdbId?: number; path?: string };
+        const items = await arrFetch<ArrItem[]>(
+          { url: arrBaseUrl, apiKey: arrKeyRow.value },
+          `/api/v3/${endpoint}`,
+        );
+        for (const item of items) {
+          if (!item.tmdbId || !item.path) continue;
+          const normPath = path.posix.normalize(item.path.replace(/\\/g, "/").replace(/\/$/, ""));
+          if (normPath === folderPath || folderPath.startsWith(normPath + "/")) {
+            arrTmdbId = item.tmdbId;
+            break;
           }
         }
       } catch { }

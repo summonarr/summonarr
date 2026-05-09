@@ -32,7 +32,9 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
     const rows = await tx.setting.findMany({
       where: { key: { in: ["vapidPublicKey", "vapidPrivateKey"] } },
     });
-    if (rows.length >= 2) return;
+    const hasPublic = rows.some((r) => r.key === "vapidPublicKey");
+    const hasPrivate = rows.some((r) => r.key === "vapidPrivateKey");
+    if (hasPublic && hasPrivate) return;
     await Promise.all([
       tx.setting.upsert({
         where: { key: "vapidPublicKey" },
@@ -83,7 +85,7 @@ async function sendPush(
   webpush.setVapidDetails(keys.contact, keys.publicKey, keys.privateKey);
   try {
     await webpush.sendNotification(
-      { endpoint: subscription.endpoint, keys: { p256dh: decryptToken(subscription.p256dh), auth: decryptToken(subscription.auth) } },
+      { endpoint: subscription.endpoint, keys: { p256dh: decryptToken(subscription.p256dh, "PushSubscription.p256dh"), auth: decryptToken(subscription.auth, "PushSubscription.auth") } },
       JSON.stringify(payload)
     );
     return true;

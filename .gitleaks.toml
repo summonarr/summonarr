@@ -1,0 +1,23 @@
+# Inherit the full default ruleset and add a narrow allowlist for two
+# intentional non-secret placeholder strings used in scripts/smoke-test.sh
+# to verify that the API rejects bad bearer tokens with 401/403.
+#
+# The flagged strings literally describe themselves as non-secrets:
+#   - "not-a-real-secret-not-even-close"
+#   - "wrong-secret-no-way-this-matches"
+# Gitleaks' curl-auth-header rule matches the structural shape of an
+# Authorization: Bearer header, not the value's actual entropy, so these
+# negative-test fixtures get flagged. The allowlist below matches only
+# those exact placeholder strings — it does not whitelist the file or
+# the rule, so any future real secret added to the same file would still
+# be caught.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Smoke-test bad-auth fixtures (intentional non-secret placeholders)"
+regexes = [
+  '''not-a-real-secret-not-even-close''',
+  '''wrong-secret-no-way-this-matches''',
+]

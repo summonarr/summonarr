@@ -161,6 +161,8 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 
+7a. **NEVER call `encryptToken` at the call site for `Setting.value` or `Account.{access_token,refresh_token,id_token}`.** The Prisma extension in [src/lib/prisma.ts](src/lib/prisma.ts) handles encryption on every write to those fields and decryption on every read. Pre-encrypting at the route, NextAuth-adapter, or library layer produces double-encrypted rows of the form `enc:v1:<enc:v1:…>` — on read the extension decrypts once and hands callers the inner ciphertext, which then gets sent as an API key/token to upstream services and fails auth. This bug shipped in `bc81802` (a route-level pre-encryption in `/api/settings` and an `encryptingAdapter` wrapper in `auth.ts`); both were removed afterward. The remaining legitimate `encryptToken` callers are: `PushSubscription` writes ([src/app/api/push/subscribe/route.ts](src/app/api/push/subscribe/route.ts), the extension does not cover that table) and the one-shot migration scripts under [scripts/](scripts/). Do not add a third.
+
 8. **No tests, no typecheck script.** Do not fabricate either. If you need verification, run `npm run lint` and `npx tsc --noEmit` explicitly and say what you ran.
 
 9. **Keep state management minimal.** Don't introduce Zustand/Jotai/Redux/TanStack Query to "clean up" components. URL search params + `useState` is the house style.

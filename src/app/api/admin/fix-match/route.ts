@@ -525,8 +525,17 @@ export async function POST(request: NextRequest) {
 
   const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
 
-  if (!server || !tmdbId || !mediaType || !correctTmdbId) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+  if (server !== "plex" && server !== "jellyfin") {
+    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
+  }
+  if (mediaType !== "MOVIE" && mediaType !== "TV") {
+    return NextResponse.json({ error: "mediaType must be 'MOVIE' or 'TV'" }, { status: 400 });
+  }
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+  }
+  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
+    return NextResponse.json({ error: "correctTmdbId must be a positive integer" }, { status: 400 });
   }
   if (tmdbId === correctTmdbId) {
     return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
@@ -557,7 +566,7 @@ export async function POST(request: NextRequest) {
         prisma.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } }),
       ]);
       flog(`[fix-match] plex DB updated: ${tmdbId} → ${correctTmdbId}`);
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "LIBRARY_SYNC", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
 
       if (mediaType === "TV") {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
@@ -604,7 +613,7 @@ export async function POST(request: NextRequest) {
         prisma.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } }),
       ]);
       flog(`[fix-match] jellyfin DB updated: ${tmdbId} → ${correctTmdbId} (itemId: ${resolvedItemId})`);
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "LIBRARY_SYNC", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
 
       if (mediaType === "TV") {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)

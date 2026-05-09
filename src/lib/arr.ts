@@ -173,7 +173,7 @@ async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Se
       cfg, "/api/v3/qualityprofile"
     );
     const profile = profiles.find((p) => p.id === profileId);
-    if (!profile) {
+    if (!profile || !Array.isArray(profile.items)) {
       qualityProfileCache.set(cacheKey, { ids: null, expiresAt: now + QUALITY_PROFILE_TTL_MS });
       return null;
     }

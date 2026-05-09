@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Playfair_Display } from "next/font/google";
+import { headers } from "next/headers";
 import "./globals.css";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/lib/auth";
@@ -42,6 +43,11 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const session = await auth();
+  // Reading headers() opts this layout into per-request rendering, which causes
+  // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
+  // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
+  const _nonce = (await headers()).get("x-nonce") ?? undefined;
+  void _nonce;
   return (
     <html
       lang="en"

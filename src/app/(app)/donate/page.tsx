@@ -7,6 +7,15 @@ import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
+function safeUrl(v: string): string | null {
+  try {
+    const u = new URL(v);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 export default async function DonatePage() {
   await requireFeature("feature.page.donate");
   const session = await auth();
@@ -33,7 +42,9 @@ export default async function DonatePage() {
       pillBg: "#ffc439",
       pillColor: "#003087",
       href: (v: string) =>
-        v.startsWith("http") ? v : `https://paypal.me/${v.replace(/^@/, "")}`,
+        v.startsWith("http")
+          ? safeUrl(v)
+          : safeUrl(`https://paypal.me/${v.replace(/^@/, "")}`),
       hint: "Click to donate via PayPal",
     },
     {
@@ -42,7 +53,8 @@ export default async function DonatePage() {
       value: cfg.donationVenmo ?? "",
       pillBg: "#3d95ce",
       pillColor: "#ffffff",
-      href: (v: string) => `https://venmo.com/${v.replace(/^@/, "")}`,
+      href: (v: string) =>
+        safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
       hint: "Click to pay via Venmo",
     },
     {
@@ -61,7 +73,7 @@ export default async function DonatePage() {
       value: cfg.donationAmazon ?? "",
       pillBg: "#ff9900",
       pillColor: "#ffffff",
-      href: (v: string) => v,
+      href: (v: string) => safeUrl(v),
       hint: "View my Amazon Wishlist",
     },
     {
@@ -71,7 +83,9 @@ export default async function DonatePage() {
       pillBg: "#f96854",
       pillColor: "#ffffff",
       href: (v: string) =>
-        v.startsWith("http") ? v : `https://www.patreon.com/${v.replace(/^@/, "")}`,
+        v.startsWith("http")
+          ? safeUrl(v)
+          : safeUrl(`https://www.patreon.com/${v.replace(/^@/, "")}`),
       hint: "Become a patron on Patreon",
     },
     {
@@ -81,7 +95,9 @@ export default async function DonatePage() {
       pillBg: "#ffdd00",
       pillColor: "#000000",
       href: (v: string) =>
-        v.startsWith("http") ? v : `https://www.buymeacoffee.com/${v.replace(/^@/, "")}`,
+        v.startsWith("http")
+          ? safeUrl(v)
+          : safeUrl(`https://www.buymeacoffee.com/${v.replace(/^@/, "")}`),
       hint: "Buy me a coffee",
     },
   ].filter((m) => m.value);
@@ -109,52 +125,56 @@ export default async function DonatePage() {
         </p>
       ) : (
         <div className="flex flex-col" style={{ gap: 10 }}>
-          {methods.map((m) =>
-            m.noLink ? (
-              <div
-                key={m.key}
-                style={{
-                  padding: 18,
-                  background: "var(--ds-bg-2)",
-                  border: "1px solid var(--ds-border)",
-                  borderRadius: 10,
-                }}
-              >
-                <div className="flex items-center" style={{ marginBottom: 10 }}>
-                  <span
-                    className="font-semibold inline-flex"
-                    style={{
-                      padding: "3px 12px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      background: m.pillBg,
-                      color: m.pillColor,
-                    }}
-                  >
-                    {m.label}
-                  </span>
-                </div>
-                <p
-                  className="ds-mono"
+          {methods.map((m) => {
+            const resolved = m.href(m.value);
+            if (m.noLink || !resolved) {
+              return (
+                <div
+                  key={m.key}
                   style={{
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                    margin: "0 0 4px",
+                    padding: 18,
+                    background: "var(--ds-bg-2)",
+                    border: "1px solid var(--ds-border)",
+                    borderRadius: 10,
                   }}
                 >
-                  {m.hint}
-                </p>
-                <p
-                  className="ds-mono"
-                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
-                >
-                  {m.value}
-                </p>
-              </div>
-            ) : (
+                  <div className="flex items-center" style={{ marginBottom: 10 }}>
+                    <span
+                      className="font-semibold inline-flex"
+                      style={{
+                        padding: "3px 12px",
+                        borderRadius: 999,
+                        fontSize: 12,
+                        background: m.pillBg,
+                        color: m.pillColor,
+                      }}
+                    >
+                      {m.label}
+                    </span>
+                  </div>
+                  <p
+                    className="ds-mono"
+                    style={{
+                      fontSize: 10.5,
+                      color: "var(--ds-fg-subtle)",
+                      margin: "0 0 4px",
+                    }}
+                  >
+                    {m.hint}
+                  </p>
+                  <p
+                    className="ds-mono"
+                    style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
+                  >
+                    {m.value}
+                  </p>
+                </div>
+              );
+            }
+            return (
               <a
                 key={m.key}
-                href={m.href(m.value)}
+                href={resolved}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="group flex items-center justify-between transition-colors bg-[var(--ds-bg-2)] border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] hover:border-[var(--ds-border-strong)]"
@@ -197,8 +217,8 @@ export default async function DonatePage() {
                   }}
                 />
               </a>
-            ),
-          )}
+            );
+          })}
         </div>
       )}
     </div>

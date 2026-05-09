@@ -44,7 +44,6 @@ export async function POST(request: NextRequest) {
         );
       }
       results.plex = episodes.length;
-      console.log(`[sync/tv-episodes] Plex: cached ${episodes.length} episodes`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[sync/tv-episodes] Plex episode sync failed:", msg);
@@ -74,7 +73,6 @@ export async function POST(request: NextRequest) {
         );
       }
       results.jellyfin = episodes.length;
-      console.log(`[sync/tv-episodes] Jellyfin: cached ${episodes.length} episodes`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[sync/tv-episodes] Jellyfin episode sync failed:", msg);

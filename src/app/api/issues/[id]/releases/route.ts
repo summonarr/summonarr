@@ -52,18 +52,10 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
 }
 
 export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth();
+  const session = await requireAuth({ role: "ISSUE_ADMIN" });
   if (session instanceof NextResponse) return session;
 
   const { id } = await params;
-  const issueRecord = await prisma.issue.findUnique({ where: { id }, select: { reportedBy: true } });
-  if (!issueRecord) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  const canGrab =
-    session.user.role === "ADMIN" ||
-    session.user.role === "ISSUE_ADMIN" ||
-    issueRecord.reportedBy === session.user.id;
-  if (!canGrab) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 

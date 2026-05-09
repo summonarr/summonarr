@@ -2,12 +2,11 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush } from "@/lib/push";
-import { checkAndRecordWebhook } from "@/lib/webhook-replay";
+import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
-import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -50,11 +49,6 @@ export async function POST(req: NextRequest) {
   }
   const rawBody = new TextDecoder().decode(rawBytes);
 
-  if (!await checkAndRecordWebhook("radarr", secret, rawBody)) {
-    console.warn("[webhook/radarr] 409 replayed webhook");
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
   let payload: RadarrWebhookPayload;
   try {
     payload = JSON.parse(rawBody);
@@ -63,21 +57,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
+  if (!await checkAndRecordWebhookJson("radarr", secret, payload)) {
+    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
+  }
+
   if (payload.eventType === "Test") {
-    console.warn("[webhook/radarr] 200 event=Test");
     return NextResponse.json({ ok: true, message: "Radarr webhook connected" });
   }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
-    const loggedEvent = payload.eventType === "Test" ? "Test" : payload.eventType === "Grab" ? "Grab" : "(other)";
-    const loggedTmdbId = Number.isInteger(payload.movie?.tmdbId) ? payload.movie!.tmdbId : 0;
-    console.warn(
-      `[webhook/radarr] 200 skipped event=${sanitizeForLog(loggedEvent)} tmdbId=${loggedTmdbId}`,
-    );
     return NextResponse.json({ ok: true, skipped: true });
   }
 
-  const { tmdbId, title } = payload.movie;
+  const { tmdbId } = payload.movie;
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     console.warn("[webhook/radarr] 400 invalid tmdbId");
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
@@ -87,10 +80,16 @@ export async function POST(req: NextRequest) {
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-    updated = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED" },
-      data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
+    // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
+    const resetNotify = await tx.mediaRequest.updateMany({
+      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: null },
+      data: { status: "AVAILABLE", availableAt: new Date() },
     });
+    const alreadyAvailable = await tx.mediaRequest.updateMany({
+      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: { not: null } },
+      data: { status: "AVAILABLE", availableAt: new Date() },
+    });
+    updated = { count: resetNotify.count + alreadyAvailable.count };
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId } });
   }, { timeout: 30_000 });
 
@@ -157,8 +156,5 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  console.warn(
-    `[webhook/radarr] 200 event=Download tmdbId=${tmdbId} title=${sanitizeForLog(JSON.stringify(title))} marked=${updated.count}`,
-  );
   return NextResponse.json({ ok: true, marked: updated.count });
 }

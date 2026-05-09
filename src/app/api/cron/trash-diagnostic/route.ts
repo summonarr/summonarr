@@ -119,6 +119,51 @@ async function handle(request: NextRequest) {
     report.config = { error: err instanceof Error ? err.message : String(err) };
   }
 
+  // Surface the persisted GitHub-tree truncation marker (set in trash.ts ghTree). Absence = never truncated.
+  try {
+    const truncRow = await prisma.setting.findUnique({
+      where: { key: "trashLastRefreshTruncatedAt" },
+      select: { value: true },
+    });
+    report.lastRefreshTruncatedAt = truncRow?.value ?? null;
+  } catch (err) {
+    report.lastRefreshTruncatedAt = null;
+    void err;
+  }
+
+  // Per-spec error stats — failingByKind = total apps with lastError set per kind;
+  // flapping = apps with errorCount >= 3 and lastErrorAt within the last 24h.
+  try {
+    const failingApps = await prisma.trashApplication.findMany({
+      where: { lastError: { not: null } },
+      select: {
+        trashSpec: { select: { kind: true, name: true, service: true } },
+        errorCount: true,
+        lastErrorAt: true,
+        lastError: true,
+      },
+    });
+    const failingByKind: Record<string, number> = {};
+    for (const a of failingApps) {
+      const k = a.trashSpec.kind;
+      failingByKind[k] = (failingByKind[k] ?? 0) + 1;
+    }
+    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+    const flapping = failingApps
+      .filter((a) => a.errorCount >= 3 && a.lastErrorAt && a.lastErrorAt.getTime() > dayAgo)
+      .map((a) => ({
+        service: a.trashSpec.service,
+        kind: a.trashSpec.kind,
+        name: a.trashSpec.name,
+        errorCount: a.errorCount,
+        lastErrorAt: a.lastErrorAt?.toISOString() ?? null,
+        lastError: a.lastError,
+      }));
+    report.errorStats = { failingByKind, flapping };
+  } catch (err) {
+    report.errorStats = { error: err instanceof Error ? err.message : String(err) };
+  }
+
   const schemaOk =
     typeof report.tables === "object" &&
     report.tables !== null &&

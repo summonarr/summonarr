@@ -201,7 +201,6 @@ async function processPrewarmPage(
 
 export async function prewarmLibraryCache(): Promise<{ total: number; fetched: number; backfilled: number; skipped: number; failed: number }> {
   if (!tmdbAuth()) {
-    console.log("[prewarm] No TMDB credentials set — skipping library cache pre-warm");
     return { total: 0, fetched: 0, backfilled: 0, skipped: 0, failed: 0 };
   }
 
@@ -241,10 +240,8 @@ export async function prewarmLibraryCache(): Promise<{ total: number; fetched: n
   await flushPage();
 
   if (total === 0) {
-    console.log("[prewarm] No library items found — skipping TMDB pre-warm");
     return { total: 0, ...stats };
   }
 
-  console.log(`[prewarm] Done — fetched ${stats.fetched}, backfilled ${stats.backfilled}, skipped ${stats.skipped}, failed ${stats.failed} / ${total} total`);
   return { total, ...stats };
 }

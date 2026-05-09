@@ -3,22 +3,42 @@
 import dns from "dns/promises";
 import { isIP } from "net";
 
+// Recognise an IPv4-mapped IPv6 address (`::ffff:…`) in either the dotted-quad form
+// (`::ffff:127.0.0.1`) or the all-hex form (`::ffff:7f00:1`). Returns the unwrapped
+// IPv4 dotted string so callers can apply IPv4 rules without having to special-case
+// every regex. Both forms are valid Node IPv6 representations and both must be blocked.
+function unwrapV4Mapped(addr: string): string | null {
+  if (!/^::ffff:/i.test(addr)) return null;
+  const tail = addr.slice("::ffff:".length);
+
+  // Dotted-quad form: trivially the IPv4 portion
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(tail)) return tail;
+
+  // Hex pair form: two 16-bit groups (each 1-4 hex digits) separated by a colon
+  const m = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(tail);
+  if (!m) return null;
+  const hi = parseInt(m[1], 16);
+  const lo = parseInt(m[2], 16);
+  if (Number.isNaN(hi) || Number.isNaN(lo) || hi > 0xffff || lo > 0xffff) return null;
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
 function isSafeAddr(addr: string): boolean {
+  // IPv4-mapped IPv6 — unwrap and recurse so IPv4 rules apply to both ::ffff:1.2.3.4 and ::ffff:0102:0304
+  const v4 = unwrapV4Mapped(addr);
+  if (v4 !== null) return isSafeAddr(v4);
+
   // Loopback
   if (/^127\./.test(addr)) return false;
   if (/^::1$/.test(addr)) return false;
-  if (/^::ffff:127\./i.test(addr)) return false;
-  // Unspecified / any-address
+  // Unspecified / any-address — match `::` and `::0` (parses to all-zero IPv6)
   if (/^0\./.test(addr)) return false;
-  if (addr === "::") return false;
-  if (/^::ffff:0\./i.test(addr)) return false;
+  if (/^::?0?$/.test(addr)) return false;
   // Link-local (APIPA)
   if (/^fe80:/i.test(addr)) return false;
   if (/^169\.254\./.test(addr)) return false;
-  if (/^::ffff:169\.254\./i.test(addr)) return false;
   // CGNAT shared address space (100.64/10) — also used for Docker internal ranges on some hosts
   if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) return false;
-  if (/^::ffff:100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./i.test(addr)) return false;
   // Multicast
   if (/^(22[4-9]|23[0-9])\./.test(addr)) return false;
   if (/^ff/i.test(addr)) return false;
@@ -30,7 +50,6 @@ function isSafeAddr(addr: string): boolean {
   if (/^64:ff9b::/i.test(addr)) return false;
   // ULA (fc00::/7) — private IPv6
   if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return false;
-  if (/^::ffff:f[cd][0-9a-f]{2}:/i.test(addr)) return false;
 
   return true;
 }
@@ -40,12 +59,13 @@ function isSafeAddr(addr: string): boolean {
 // blocking link-local and unspecified — the goal is to keep cloud metadata services and
 // 0.0.0.0 unreachable even when the admin has typo'd the URL.
 function isSafeAddrForAdmin(addr: string): boolean {
+  const v4 = unwrapV4Mapped(addr);
+  if (v4 !== null) return isSafeAddrForAdmin(v4);
+
   if (/^169\.254\./.test(addr)) return false;
-  if (/^::ffff:169\.254\./i.test(addr)) return false;
   if (/^fe80:/i.test(addr)) return false;
   if (/^0\./.test(addr)) return false;
-  if (addr === "::") return false;
-  if (/^::ffff:0\./i.test(addr)) return false;
+  if (/^::?0?$/.test(addr)) return false;
   return true;
 }
 

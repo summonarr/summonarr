@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 
 const VALID_ACTIONS: AuditAction[] = [
@@ -31,6 +33,11 @@ export async function GET(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
+  // Audit-log export streams up to MAX_EXPORT_RECORDS rows of PII; throttle to 3/hour per admin
+  if (!checkRateLimit(`audit-log-export:${session.user.id}`, 3, 3_600_000)) {
+    return NextResponse.json({ error: "Too many exports — try again later" }, { status: 429 });
+  }
+
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
   const action = url.searchParams.get("action") as AuditAction | null;
@@ -56,6 +63,25 @@ export async function GET(req: NextRequest) {
   if (hideCron) where.userId = { not: "system" };
 
   const date = new Date().toISOString().slice(0, 10);
+
+  // Audit-log export is itself an audit-relevant action — a malicious admin
+  // could otherwise exfiltrate the entire trail with no record. Filter
+  // values are captured pre-stream so the audit row reflects what was
+  // actually queried; the row count is filled in once the stream completes.
+  const filters = {
+    format,
+    action: action ?? null,
+    dateFrom: dateFrom ?? null,
+    dateTo: dateTo ?? null,
+    user: user ?? null,
+    target: target ?? null,
+    hideCron,
+  };
+  const ctx = auditContext(req, session);
+  const exporter = {
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+  };
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -111,6 +137,22 @@ export async function GET(req: NextRequest) {
       if (format === "json") {
         controller.enqueue(encoder.encode("\n]\n"));
       }
+
+      // Audit-log export is itself an audit-relevant action — without this row a
+      // malicious admin could exfiltrate the entire trail with no record.
+      await logAudit({
+        userId: exporter.userId,
+        userName: exporter.userName,
+        action: "AUDIT_LOG_EXPORT",
+        target: "audit-log:export",
+        details: {
+          kind: "audit-log",
+          filters,
+          rowCount: totalExported,
+          truncated: totalExported >= MAX_EXPORT_RECORDS,
+        },
+        ...ctx,
+      });
 
       controller.close();
     },

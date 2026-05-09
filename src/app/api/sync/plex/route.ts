@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
       const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
       if (fixed !== undefined) {
         if (r.tmdbId !== fixed) {
-          console.log(`[sync/plex] conflated ratingKey=${r.plexRatingKey}: dropping tmdb=${r.tmdbId}, keeping fixed tmdb=${fixed}`);
+          console.warn(`[sync/plex] conflated ratingKey=${r.plexRatingKey}: dropping tmdb=${r.tmdbId}, keeping fixed tmdb=${fixed}`);
           return false;
         }
       } else if (seenRatingKeys.has(r.plexRatingKey)) {
@@ -130,10 +130,10 @@ export async function POST(request: NextRequest) {
     finalMovieRows = finalMovieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
     finalTvRows    = finalTvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
 
-    await Promise.all([
-      finalMovieRows.length > 0 ? prisma.plexLibraryItem.createMany({ data: finalMovieRows }) : Promise.resolve(),
-      finalTvRows.length    > 0 ? prisma.plexLibraryItem.createMany({ data: finalTvRows })    : Promise.resolve(),
-    ]);
+    await prisma.$transaction(async (tx) => {
+      if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
+      if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
+    }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
     await prisma.$transaction(async (tx) => {

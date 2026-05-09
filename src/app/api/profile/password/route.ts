@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { logAudit } from "@/lib/audit";
 import bcrypt from "bcryptjs";
 
 export async function PATCH(req: NextRequest) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
+
+  if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
+    return NextResponse.json(
+      { error: "Too many attempts — please wait 15 minutes before trying again." },
+      { status: 429 },
+    );
+  }
 
   let body: { currentPassword?: string; newPassword?: string };
   try {
@@ -30,26 +39,50 @@ export async function PATCH(req: NextRequest) {
 
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
-    select: { passwordHash: true },
+    select: { passwordHash: true, name: true, email: true },
   });
 
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const DUMMY_HASH = "$2b$12$LkFEkPkDAMiJl3dLNcRLeezS3KD2OQ3z1bKKuXNi2b8f4yJBLO2G";
-  const hashToCheck = user.passwordHash ?? DUMMY_HASH;
-  const currentOk = await bcrypt.compare(currentPassword ?? "", hashToCheck);
-  if (user.passwordHash && !currentOk) {
+  // C-3: SSO accounts have no passwordHash. Hard-refuse password set so a
+  // shadow local password can't be created and used to bypass the IdP.
+  if (user.passwordHash === null) {
+    return NextResponse.json(
+      { error: "Local passwords are not available for SSO accounts. Sign in with your provider." },
+      { status: 403 },
+    );
+  }
+
+  const currentOk = await bcrypt.compare(currentPassword ?? "", user.passwordHash);
+  if (!currentOk) {
     return NextResponse.json({ error: "Invalid password" }, { status: 400 });
   }
 
   const newHash = await bcrypt.hash(newPassword, 12);
+  const now = new Date();
 
   await prisma.$transaction([
-    prisma.user.update({ where: { id: session.user.id }, data: { passwordHash: newHash } }),
+    // passwordChangedAt + sessionsRevokedAt: cross-replica JWT invalidation via auth.ts refreshToken()
+    prisma.user.update({
+      where: { id: session.user.id },
+      data: {
+        passwordHash: newHash,
+        passwordChangedAt: now,
+        sessionsRevokedAt: now,
+      },
+    }),
     prisma.authSession.deleteMany({
       where: { userId: session.user.id },
     }),
   ]);
+
+  void logAudit({
+    userId: session.user.id,
+    userName: user.name ?? user.email ?? "unknown",
+    action: "SETTINGS_CHANGE",
+    target: `user:${session.user.id}`,
+    details: { kind: "password-change" },
+  });
 
   return NextResponse.json({ ok: true, requiresRelogin: true });
 }

@@ -2,6 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
+import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+
+function busyResponse() {
+  return NextResponse.json(
+    { ok: false, error: "Trash sync already running", retryAfter: 30 },
+    { status: 409, headers: { "Retry-After": "30" } },
+  );
+}
 
 export async function POST(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
@@ -25,27 +33,35 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too many specs — apply in batches of 500" }, { status: 400 });
   }
 
-  const startTime = Date.now();
-  const results = await applySpecs(ids);
-  const durationMs = Date.now() - startTime;
+  return withAdvisoryLock(
+    TRASH_SYNC_LOCK_ID,
+    async () => {
+      const startTime = Date.now();
+      const results = await applySpecs(ids);
+      const durationMs = Date.now() - startTime;
 
-  const failures = results.filter((r) => !r.ok);
-  await logAudit({
-    userId: session.user.id,
-    userName: session.user.name ?? "admin",
-    action: "SETTINGS_CHANGE",
-    target: "trash:apply",
-    details: {
-      count: results.length,
-      failures: failures.length,
-      durationMs,
-      specIds: ids,
+      const failures = results.filter((r) => !r.ok);
+      const recreated = results.filter((r) => r.recreated).length;
+      await logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? "admin",
+        action: "SETTINGS_CHANGE",
+        target: "trash:apply",
+        details: {
+          count: results.length,
+          failures: failures.length,
+          ...(recreated > 0 ? { recreated } : {}),
+          durationMs,
+          specIds: ids,
+        },
+      });
+
+      return NextResponse.json({
+        ok: failures.length === 0,
+        results,
+        durationMs,
+      });
     },
-  });
-
-  return NextResponse.json({
-    ok: failures.length === 0,
-    results,
-    durationMs,
-  });
+    busyResponse,
+  );
 }

@@ -14,28 +14,16 @@ interface PlexSection {
 
 interface PlexLibraryPickerProps {
   initialSelected: string;
+  sections: PlexSection[];
+  loadStatus: LoadStatus;
+  errorMessage: string;
 }
 
-function PlexLibraryPicker({ initialSelected }: PlexLibraryPickerProps) {
-  const [sections, setSections] = useState<PlexSection[]>([]);
+function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage }: PlexLibraryPickerProps) {
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
-
-  useEffect(() => {
-    fetch("/api/settings/plex/libraries")
-      .then((r) => {
-        if (!r.ok) throw new Error();
-        return r.json() as Promise<PlexSection[]>;
-      })
-      .then((data) => {
-        setSections(data);
-        setLoadStatus("loaded");
-      })
-      .catch(() => setLoadStatus("error"));
-  }, []);
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -61,13 +49,16 @@ function PlexLibraryPicker({ initialSelected }: PlexLibraryPickerProps) {
   return (
     <div className="border-t border-zinc-800 pt-4 space-y-3">
       <p className="text-sm font-medium text-zinc-300">Library Selection</p>
+      {loadStatus === "idle" && (
+        <p className="text-xs text-zinc-500">Click &quot;Save &amp; Test&quot; to load libraries from your Plex server.</p>
+      )}
       {loadStatus === "loading" && (
         <p className="text-xs text-zinc-500 flex items-center gap-1.5">
           <Loader2 className="w-3 h-3 animate-spin" />Loading libraries…
         </p>
       )}
       {loadStatus === "error" && (
-        <p className="text-xs text-red-400">Could not load Plex libraries — check server URL above.</p>
+        <p className="text-xs text-red-400">{errorMessage || "Could not load Plex libraries — check server URL above."}</p>
       )}
       {loadStatus === "loaded" && (
         <>
@@ -122,28 +113,16 @@ interface JellyfinMediaFolder {
 
 interface JellyfinLibraryPickerProps {
   initialSelected: string;
+  folders: JellyfinMediaFolder[];
+  loadStatus: LoadStatus;
+  errorMessage: string;
 }
 
-function JellyfinLibraryPicker({ initialSelected }: JellyfinLibraryPickerProps) {
-  const [folders, setFolders] = useState<JellyfinMediaFolder[]>([]);
+function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMessage }: JellyfinLibraryPickerProps) {
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
-  const [loadStatus, setLoadStatus] = useState<LoadStatus>("loading");
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
-
-  useEffect(() => {
-    fetch("/api/settings/jellyfin/libraries")
-      .then((r) => {
-        if (!r.ok) throw new Error();
-        return r.json() as Promise<JellyfinMediaFolder[]>;
-      })
-      .then((data) => {
-        setFolders(data);
-        setLoadStatus("loaded");
-      })
-      .catch(() => setLoadStatus("error"));
-  }, []);
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -169,13 +148,16 @@ function JellyfinLibraryPicker({ initialSelected }: JellyfinLibraryPickerProps) 
   return (
     <div className="border-t border-zinc-800 pt-4 space-y-3">
       <p className="text-sm font-medium text-zinc-300">Library Selection</p>
+      {loadStatus === "idle" && (
+        <p className="text-xs text-zinc-500">Click &quot;Save &amp; Test&quot; to load libraries from your Jellyfin server.</p>
+      )}
       {loadStatus === "loading" && (
         <p className="text-xs text-zinc-500 flex items-center gap-1.5">
           <Loader2 className="w-3 h-3 animate-spin" />Loading libraries…
         </p>
       )}
       {loadStatus === "error" && (
-        <p className="text-xs text-red-400">Could not load Jellyfin libraries — check server URL and API key above.</p>
+        <p className="text-xs text-red-400">{errorMessage || "Could not load Jellyfin libraries — check server URL and API key above."}</p>
       )}
       {loadStatus === "loaded" && (
         <>
@@ -608,9 +590,47 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [error, setError] = useState("");
 
   const [serverUrl, setServerUrl] = useState(initialServerUrl);
-  const [serverStatus, setServerStatus] = useState<"idle" | "saving" | "ok" | "error">("idle");
+  const [serverStatus, setServerStatus] = useState<"idle" | "saving" | "testing" | "ok" | "error">("idle");
+  const [serverErrorMessage, setServerErrorMessage] = useState<string>("");
+  const [librariesCount, setLibrariesCount] = useState<number | null>(null);
   const [importStatus, setImportStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [importResult, setImportResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
+
+  const [sections, setSections] = useState<PlexSection[]>([]);
+  const [librariesStatus, setLibrariesStatus] = useState<LoadStatus>(
+    initialEmail && initialServerUrl ? "loading" : "idle",
+  );
+  const [librariesError, setLibrariesError] = useState<string>("");
+
+  const loadLibraries = useCallback(async (): Promise<{ ok: boolean; count: number; error?: string }> => {
+    setLibrariesStatus("loading");
+    setLibrariesError("");
+    try {
+      const res = await fetch("/api/settings/plex/libraries");
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const message = body?.error ?? "Could not connect to Plex server";
+        setLibrariesError(message);
+        setLibrariesStatus("error");
+        return { ok: false, count: 0, error: message };
+      }
+      const data = (await res.json()) as PlexSection[];
+      setSections(data);
+      setLibrariesStatus("loaded");
+      return { ok: true, count: data.length };
+    } catch {
+      const message = "Could not connect to Plex server";
+      setLibrariesError(message);
+      setLibrariesStatus("error");
+      return { ok: false, count: 0, error: message };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialEmail && initialServerUrl) {
+      void loadLibraries();
+    }
+  }, [initialEmail, initialServerUrl, loadLibraries]);
 
   async function handleConnect() {
     setStatus("waiting");
@@ -641,9 +661,15 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       `&forwardUrl=${forwardUrl}`;
 
     // PIN state stashed so /auth/plex/done can pick it up after Plex redirects back
-    sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
-      flow: "settings", pinId, state,
-    }));
+    try {
+      sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
+        flow: "settings", pinId, state,
+      }));
+    } catch {
+      setError("Could not store sign-in state. Disable private browsing and try again.");
+      setStatus("error");
+      return;
+    }
     window.location.href = plexUrl;
   }
 
@@ -663,14 +689,39 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   async function handleSaveServerUrl(e: React.FormEvent) {
     e.preventDefault();
     setServerStatus("saving");
-    const res = await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plexServerUrl: serverUrl }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setServerStatus(data.ok ? "ok" : "error");
-    setTimeout(() => setServerStatus("idle"), 3000);
+    setServerErrorMessage("");
+    setLibrariesCount(null);
+
+    let saveOk = false;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plexServerUrl: serverUrl }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      saveOk = res.ok && body.ok !== false;
+      if (!saveOk) {
+        setServerErrorMessage(body.error ?? "Failed to save server URL");
+      }
+    } catch {
+      setServerErrorMessage("Failed to save server URL");
+    }
+    if (!saveOk) {
+      setServerStatus("error");
+      return;
+    }
+
+    setServerStatus("testing");
+    const result = await loadLibraries();
+    if (result.ok) {
+      setLibrariesCount(result.count);
+      setServerStatus("ok");
+      setTimeout(() => setServerStatus("idle"), 4000);
+    } else {
+      setServerErrorMessage(result.error ?? "Could not connect to Plex server");
+      setServerStatus("error");
+    }
   }
 
   async function handleImport() {
@@ -754,16 +805,34 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 Local address of your Plex Media Server — used to sync library availability.
               </p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
               <Button
                 type="submit"
-                disabled={serverStatus === "saving" || !serverUrl}
+                disabled={serverStatus === "saving" || serverStatus === "testing" || !serverUrl}
                 className="bg-indigo-600 hover:bg-indigo-500"
               >
-                {serverStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save URL"}
+                {serverStatus === "saving" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</>
+                ) : serverStatus === "testing" ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Testing…</>
+                ) : (
+                  "Save & Test"
+                )}
               </Button>
-              {serverStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-              {serverStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed</span>}
+              {serverStatus === "ok" && (
+                <span className="flex items-center gap-1.5 text-sm text-green-400">
+                  <CheckCircle className="w-4 h-4" />
+                  Connected
+                  {librariesCount !== null && (
+                    <span className="text-zinc-500">({librariesCount} {librariesCount === 1 ? "library" : "libraries"} loaded)</span>
+                  )}
+                </span>
+              )}
+              {serverStatus === "error" && (
+                <span className="flex items-center gap-1.5 text-sm text-red-400">
+                  <XCircle className="w-4 h-4" />{serverErrorMessage || "Failed"}
+                </span>
+              )}
             </div>
           </form>
 
@@ -798,7 +867,12 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   </span>
                 )}
               </div>
-              <PlexLibraryPicker initialSelected={initialPlexLibraries} />
+              <PlexLibraryPicker
+                initialSelected={initialPlexLibraries}
+                sections={sections}
+                loadStatus={librariesStatus}
+                errorMessage={librariesError}
+              />
             </>
           )}
         </div>
@@ -818,21 +892,84 @@ interface JellyfinSyncFormProps {
 export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLibraries }: JellyfinSyncFormProps) {
   const [url,    setUrl]    = useState(initialUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "testing" | "ok" | "error">("idle");
+  const [saveErrorMessage, setSaveErrorMessage] = useState<string>("");
+  const [librariesCount, setLibrariesCount] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [syncResult, setSyncResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
+
+  const [folders, setFolders] = useState<JellyfinMediaFolder[]>([]);
+  const [librariesStatus, setLibrariesStatus] = useState<LoadStatus>(
+    initialUrl && initialApiKey ? "loading" : "idle",
+  );
+  const [librariesError, setLibrariesError] = useState<string>("");
+
+  const loadLibraries = useCallback(async (): Promise<{ ok: boolean; count: number; error?: string }> => {
+    setLibrariesStatus("loading");
+    setLibrariesError("");
+    try {
+      const res = await fetch("/api/settings/jellyfin/libraries");
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        const message = body?.error ?? "Could not connect to Jellyfin server";
+        setLibrariesError(message);
+        setLibrariesStatus("error");
+        return { ok: false, count: 0, error: message };
+      }
+      const data = (await res.json()) as JellyfinMediaFolder[];
+      setFolders(data);
+      setLibrariesStatus("loaded");
+      return { ok: true, count: data.length };
+    } catch {
+      const message = "Could not connect to Jellyfin server";
+      setLibrariesError(message);
+      setLibrariesStatus("error");
+      return { ok: false, count: 0, error: message };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialUrl && initialApiKey) {
+      void loadLibraries();
+    }
+  }, [initialUrl, initialApiKey, loadLibraries]);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveStatus("saving");
-    const res = await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jellyfinUrl: url, jellyfinApiKey: apiKey }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setSaveStatus(data.ok ? "ok" : "error");
-    setTimeout(() => setSaveStatus("idle"), 3000);
+    setSaveErrorMessage("");
+    setLibrariesCount(null);
+
+    let saveOk = false;
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jellyfinUrl: url, jellyfinApiKey: apiKey }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      saveOk = res.ok && body.ok !== false;
+      if (!saveOk) {
+        setSaveErrorMessage(body.error ?? "Failed to save");
+      }
+    } catch {
+      setSaveErrorMessage("Failed to save");
+    }
+    if (!saveOk) {
+      setSaveStatus("error");
+      return;
+    }
+
+    setSaveStatus("testing");
+    const result = await loadLibraries();
+    if (result.ok) {
+      setLibrariesCount(result.count);
+      setSaveStatus("ok");
+      setTimeout(() => setSaveStatus("idle"), 4000);
+    } else {
+      setSaveErrorMessage(result.error ?? "Could not connect to Jellyfin server");
+      setSaveStatus("error");
+    }
   }
 
   async function handleSync() {
@@ -882,13 +1019,31 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         <div className="flex items-center gap-3 flex-wrap">
           <Button
             type="submit"
-            disabled={saveStatus === "saving" || !url || !apiKey}
+            disabled={saveStatus === "saving" || saveStatus === "testing" || !url || !apiKey}
             className="bg-indigo-600 hover:bg-indigo-500"
           >
-            {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+            {saveStatus === "saving" ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</>
+            ) : saveStatus === "testing" ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Testing…</>
+            ) : (
+              "Save & Test"
+            )}
           </Button>
-          {saveStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-          {saveStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed</span>}
+          {saveStatus === "ok" && (
+            <span className="flex items-center gap-1.5 text-sm text-green-400">
+              <CheckCircle className="w-4 h-4" />
+              Connected
+              {librariesCount !== null && (
+                <span className="text-zinc-500">({librariesCount} {librariesCount === 1 ? "library" : "libraries"} loaded)</span>
+              )}
+            </span>
+          )}
+          {saveStatus === "error" && (
+            <span className="flex items-center gap-1.5 text-sm text-red-400">
+              <XCircle className="w-4 h-4" />{saveErrorMessage || "Failed"}
+            </span>
+          )}
 
           {url && apiKey && (
             <Button
@@ -924,7 +1079,12 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       </form>
 
       {url && apiKey && (
-        <JellyfinLibraryPicker initialSelected={initialJellyfinLibraries} />
+        <JellyfinLibraryPicker
+          initialSelected={initialJellyfinLibraries}
+          folders={folders}
+          loadStatus={librariesStatus}
+          errorMessage={librariesError}
+        />
       )}
     </div>
   );

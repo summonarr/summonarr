@@ -35,6 +35,7 @@ export const BACKUP_TABLES = [
   "TmdbCache",
   "TmdbMediaCore",
   "DiscordSearchCache",
+  "IpLookupCache",
   "PlexTokenCache",
   "Setting",
   "AuditLog",

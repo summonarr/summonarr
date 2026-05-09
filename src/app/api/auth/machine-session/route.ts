@@ -3,6 +3,7 @@ import { encode } from "next-auth/jwt";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { getClientIp } from "@/lib/rate-limit";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -10,8 +11,10 @@ function safeCompare(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-const MAX_EXPIRES_IN = 86_400;
-const DEFAULT_EXPIRES_IN = 3_600;
+// C-4: cap to 15 minutes. Machine sessions are short-lived by intent;
+// a leaked token shouldn't grant 24 hours of admin access.
+const MAX_EXPIRES_IN = 900;
+const DEFAULT_EXPIRES_IN = 900;
 
 export async function POST(req: NextRequest) {
   // Machine session is opt-in; disabled by default to prevent accidental programmatic access
@@ -32,34 +35,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  let targetUserId: string | undefined;
+  // C-4: do not let the caller pick a userId. Always issue for the first ADMIN.
   let expiresIn = DEFAULT_EXPIRES_IN;
   try {
     const body = await req.json().catch(() => ({}));
-    if (body.userId && typeof body.userId === "string") targetUserId = body.userId;
-    if (typeof body.expiresIn === "number") {
+    if (typeof body?.expiresIn === "number") {
       expiresIn = Math.min(Math.max(body.expiresIn, 60), MAX_EXPIRES_IN);
     }
   } catch {
-
+    // ignore — body is optional
   }
 
-  const user = targetUserId
-    ? await prisma.user.findUnique({
-        where: { id: targetUserId },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true },
-      })
-    : await prisma.user.findFirst({
-        where: { role: "ADMIN" },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true },
-        orderBy: { createdAt: "asc" },
-      });
+  const user = await prisma.user.findFirst({
+    where: { role: "ADMIN" },
+    select: { id: true, name: true, email: true, role: true, mediaServer: true },
+    orderBy: { createdAt: "asc" },
+  });
 
   if (!user) {
     return NextResponse.json({ error: "No admin user found" }, { status: 404 });
-  }
-  if (user.role !== "ADMIN") {
-    return NextResponse.json({ error: "Target user is not an admin" }, { status: 403 });
   }
 
   // Cookie name must match what NextAuth expects; the __Secure- prefix is mandatory for HTTPS deployments
@@ -72,6 +66,12 @@ export async function POST(req: NextRequest) {
   const sessionId = crypto.randomUUID();
   const nowSec = Math.floor(Date.now() / 1000);
   const expiresAt = nowSec + expiresIn;
+  const callerIp = getClientIp(req.headers);
+
+  // Bind the JWT to a stable fingerprint so a stolen cookie can't be replayed
+  // from a different caller; auth.config.ts:55-74 compares this on every request.
+  const uaFingerprint =
+    "machine:" + createHash("sha256").update(cronSecret).digest("hex").slice(0, 12);
 
   const jwtPayload = {
     sub: user.id,
@@ -86,6 +86,7 @@ export async function POST(req: NextRequest) {
     dbCheckedAt: nowSec,
     isMobile: false,
     deviceLabel: "Machine (API)",
+    uaFingerprint,
   };
 
   await prisma.authSession.create({
@@ -94,7 +95,7 @@ export async function POST(req: NextRequest) {
       userId: user.id,
       deviceType: "desktop",
       deviceLabel: "Machine (API)",
-      ipAddress: null,
+      ipAddress: callerIp,
       expiresAt: new Date(expiresAt * 1000),
     },
   });
@@ -108,13 +109,14 @@ export async function POST(req: NextRequest) {
 
   void logAudit({
     userId: user.id,
-    userName: user.name ?? user.email ?? "unknown",
+    userName: "machine",
     action: "AUTH_LOGIN",
-    target: "auth:machine-session",
-    ipAddress: null,
-    userAgent: null,
+    target: `user:${user.id}`,
+    ipAddress: callerIp,
+    userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
     provider: "machine",
-    details: { sessionId, expiresIn, expiresAt },
+    sessionId,
+    details: { kind: "machine-session", expiresIn, expiresAt },
   });
 
   const cookieAttribs = [
@@ -126,15 +128,8 @@ export async function POST(req: NextRequest) {
     ...(isSecure ? ["Secure"] : []),
   ].join("; ");
 
-  const response = NextResponse.json({
-    sessionId,
-    userId: user.id,
-    userName: user.name ?? user.email,
-    cookieName,
-    token,
-    expiresAt,
-    expiresIn,
-  });
+  // C-4: do NOT return the token in the JSON body. Cookie-only delivery.
+  const response = NextResponse.json({ ok: true, expiresAt });
   response.headers.set("Set-Cookie", cookieAttribs);
   return response;
 }

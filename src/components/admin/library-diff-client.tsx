@@ -103,7 +103,7 @@ function MediaCard({
             height={84}
             className="rounded object-cover"
             style={{ border: "1px solid var(--ds-border)" }}
-            unoptimized
+            sizes="56px"
           />
         ) : (
           <div
@@ -294,7 +294,7 @@ function BadMatchSide({
             height={72}
             className="rounded object-cover"
             style={{ border: "1px solid var(--ds-border)" }}
-            unoptimized
+            sizes="48px"
           />
         ) : (
           <div

@@ -16,6 +16,13 @@ model User {
   emailVerified DateTime?
   image         String?
   passwordHash  String?
+  // Set when the credentials password is changed. refreshToken() rejects any JWT
+  // whose iat predates this — replica-safe revocation without an in-memory Set.
+  passwordChangedAt DateTime?
+  // Set when revokeAllUserSessions runs. Same comparison as passwordChangedAt;
+  // gives admins a one-shot "log this user out everywhere" primitive that is
+  // honored on every replica's next refresh.
+  sessionsRevokedAt DateTime?
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -39,6 +46,14 @@ model User {
   // same clientId, avoiding the "Another device is attempting to sign in" warning on Plex's
   // OAuth approval page (Plex only warns on clientIds not yet registered to the user's account).
   plexClientId String?
+
+  // Provider subject identity. For Plex/Jellyfin (Credentials providers — NextAuth's
+  // Account table doesn't apply), we bind sign-in to (provider, sub) instead of email
+  // to defeat email-collision auto-link. Populated on first successful sign-in.
+  // If a sign-in arrives whose Plex/Jellyfin id collides with an existing user row's
+  // email but not its plexUserId/jellyfinUserId, sign-in is REFUSED.
+  plexUserId     String? @unique
+  jellyfinUserId String? @unique
 
   // Discord notification preferences (opt-in by default)
   notifyOnApproved  Boolean @default(true)
@@ -116,6 +131,7 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([expires])
 }
 
 model VerificationToken {
@@ -317,6 +333,8 @@ model TmdbCache {
   data      String // JSON
   cachedAt  DateTime @default(now())
   expiresAt DateTime
+
+  @@index([expiresAt])
 }
 
 // ─── TMDB Media Core ──────────────────────────────────────────────────────────
@@ -371,8 +389,14 @@ model PlexTokenCache {
   email      String
   verifiedAt DateTime @default(now())
   lastUsedAt DateTime @default(now()) @updatedAt
+  // Optional: legacy rows (pre-TTL migration) have null. Auth flow populates
+  // on every cache touch (lastUsedAt + 90 days). Sweeper in maintenance.ts
+  // purges both expired rows AND legacy nulls — the worst case for a null row
+  // is one extra Plex /api/v2/user call on next sign-in.
+  expiresAt  DateTime?
 
   @@index([email])
+  @@index([expiresAt])
 }
 
 // ─── Issues ──────────────────────────────────────────────────────────────────
@@ -502,6 +526,8 @@ model AuditLog {
   @@index([userId])
   @@index([userName])
   @@index([target])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
 }
 
 enum AuditAction {
@@ -526,6 +552,12 @@ enum AuditAction {
   RATINGS_CACHE_CLEAR
   ISSUE_DELETE
   PLAY_HISTORY_BACKFILL
+  PLAY_HISTORY_DELETE
+  AUDIT_LOG_EXPORT
+  FIX_MATCH
+  BATCH_REQUEST_DECLINE
+  VOTE_DISMISS_ALL
+  SERVER_USERS_BULK
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -535,6 +567,10 @@ model MediaServerUser {
   id               String   @id @default(cuid(2))
   source           String // "plex" | "jellyfin"
   sourceUserId     String // Plex accountID or Jellyfin userId UUID
+  // Server machineIdentifier (Plex) or System/Info Id (Jellyfin) the row was first
+  // observed on. Webhook handlers verify the inbound payload's server identifier
+  // matches this column before attributing playback or recording sessions.
+  serverMachineId  String?
   username         String
   email            String?
   thumbUrl         String?
@@ -723,6 +759,11 @@ model TrashApplication {
   remoteId    Int?
   appliedAt   DateTime?
   lastError   String?
+  // Set whenever lastError is written. Together with errorCount this lets the diagnostic endpoint
+  // surface "flapping" specs (errorCount >= 3 within the last 24h) and lets the UI show a
+  // "× N failures since 2h ago" badge. Reset to null on a successful apply.
+  lastErrorAt DateTime?
+  errorCount  Int       @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 }

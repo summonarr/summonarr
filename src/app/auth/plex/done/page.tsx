@@ -39,9 +39,11 @@ export default function PlexDonePage() {
     sessionStorage.removeItem("plex-redirect-auth");
     const auth: RedirectAuth = JSON.parse(stored);
 
-    // CSRF: state written to sessionStorage before redirect and compared after return
+    // CSRF: state written to sessionStorage before redirect and compared after return.
+    // Reject if state is missing from either side — an absent stored state means the
+    // session was tampered with; an absent URL state means the redirect was forged.
     const urlState = searchParams.get("state");
-    if (auth.state && (!urlState || urlState !== auth.state)) {
+    if (!auth.state || !urlState || urlState !== auth.state) {
       setMessage("Sign-in failed: state mismatch. Please try again.");
       return;
     }

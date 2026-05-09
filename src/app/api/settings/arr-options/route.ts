@@ -1,17 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
-
-async function arrFetch<T>(url: string, apiKey: string, path: string): Promise<T> {
-  const res = await safeFetchAdminConfigured(`${url.replace(/\/$/, "")}${path}`, {
-    headers: { "X-Api-Key": apiKey },
-    cache: "no-store",
-    timeoutMs: 15_000,
-  });
-  if (!res.ok) throw new Error(`${res.status}`);
-  return res.json() as Promise<T>;
-}
+import { arrFetch } from "@/lib/arr";
 
 export async function GET(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
@@ -31,10 +21,12 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: `${service} is not configured` }, { status: 422 });
   }
 
+  const cfg = { url: map[urlKey].replace(/\/$/, ""), apiKey: map[keyKey] };
+
   try {
     const [rootFolders, qualityProfiles] = await Promise.all([
-      arrFetch<{ path: string }[]>(map[urlKey], map[keyKey], "/api/v3/rootfolder"),
-      arrFetch<{ id: number; name: string }[]>(map[urlKey], map[keyKey], "/api/v3/qualityprofile"),
+      arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
+      arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile"),
     ]);
     return NextResponse.json({ rootFolders, qualityProfiles });
   } catch (err) {

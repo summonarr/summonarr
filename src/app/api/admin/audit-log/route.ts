@@ -57,12 +57,17 @@ export async function GET(req: NextRequest) {
 
   if (dateFrom || dateTo) {
     where.createdAt = {};
-    if (dateFrom) where.createdAt.gte = new Date(dateFrom);
+    if (dateFrom) {
+      const d = new Date(dateFrom);
+      if (!isNaN(d.getTime())) where.createdAt.gte = d;
+    }
     if (dateTo) {
-      // Advance by one day to make the date range inclusive of the requested end date
       const end = new Date(dateTo);
-      end.setDate(end.getDate() + 1);
-      where.createdAt.lt = end;
+      if (!isNaN(end.getTime())) {
+        // Advance by one day to make the date range inclusive of the requested end date
+        end.setDate(end.getDate() + 1);
+        where.createdAt.lt = end;
+      }
     }
   }
 
@@ -96,14 +101,32 @@ export async function DELETE(req: NextRequest) {
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
-  // Only null out fields that still hold PII; rows without IP/UA are already clean
+  // Beyond the retention cutoff, scrub all remaining PII:
+  //   - ipAddress / userAgent: nulled on every row
+  //   - userName: redacted on every row (still keyed by userId for joinability)
+  //   - details: nulled on auth events (free-form payload may contain identifiers);
+  //     preserved on USER_DELETE so the deletion record stays intact for audit purposes.
   const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const result = await prisma.auditLog.updateMany({
+
+  const piiResult = await prisma.auditLog.updateMany({
     where: {
       createdAt: { lt: cutoff },
-      OR: [{ ipAddress: { not: null } }, { userAgent: { not: null } }],
+      OR: [
+        { ipAddress: { not: null } },
+        { userAgent: { not: null } },
+        { userName: { not: "[redacted]" } },
+      ],
     },
-    data: { ipAddress: null, userAgent: null },
+    data: { ipAddress: null, userAgent: null, userName: "[redacted]" },
+  });
+
+  const detailsResult = await prisma.auditLog.updateMany({
+    where: {
+      createdAt: { lt: cutoff },
+      action: { in: ["AUTH_LOGIN_FAILED", "AUTH_LOGIN", "AUTH_LOGOUT"] },
+      details: { not: null },
+    },
+    data: { details: null },
   });
 
   void logAudit({
@@ -111,9 +134,18 @@ export async function DELETE(req: NextRequest) {
     userName: session.user.name ?? session.user.email,
     action: "SETTINGS_CHANGE",
     target: "audit-log:pii-scrub",
-    details: { type: "audit-pii-scrub", scrubbed: result.count, cutoff: cutoff.toISOString() },
+    details: {
+      type: "audit-pii-scrub",
+      scrubbed: piiResult.count,
+      detailsScrubbed: detailsResult.count,
+      cutoff: cutoff.toISOString(),
+    },
     ...auditContext(req, session),
   });
 
-  return NextResponse.json({ scrubbed: result.count, cutoff: cutoff.toISOString() });
+  return NextResponse.json({
+    scrubbed: piiResult.count,
+    detailsScrubbed: detailsResult.count,
+    cutoff: cutoff.toISOString(),
+  });
 }

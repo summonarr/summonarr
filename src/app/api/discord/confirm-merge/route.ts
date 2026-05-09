@@ -6,6 +6,9 @@ import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { timingSafeEqual } from "crypto";
 
+// Bot DM template lives in src/app/api/discord/initiate-merge/route.ts
+// (the 12-char code copy is updated there).
+
 export async function POST(req: NextRequest) {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
@@ -13,7 +16,7 @@ export async function POST(req: NextRequest) {
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
-      { error: "Too many attempts — please request a new code." },
+      { error: "rate_limit", message: "Too many attempts. Wait 10 minutes and try again." },
       { status: 429 }
     );
   }
@@ -21,7 +24,7 @@ export async function POST(req: NextRequest) {
   let code: string;
   try {
     const body = await req.json();
-    code = String(body.code ?? "").trim();
+    code = String(body.code ?? "").trim().toUpperCase();
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }

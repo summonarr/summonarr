@@ -22,7 +22,8 @@ export async function POST(req: NextRequest) {
     }
   } catch { }
 
-  const token = randomBytes(10).toString("hex").toUpperCase();
+  // 128-bit entropy (32 hex chars) — bumped from 80-bit to resist offline guessing
+  const token = randomBytes(16).toString("hex").toUpperCase();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
   await prisma.discordLinkToken.upsert({

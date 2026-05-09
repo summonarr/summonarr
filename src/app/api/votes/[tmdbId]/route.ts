@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 export async function DELETE(
   req: NextRequest,
@@ -36,6 +38,10 @@ export async function PATCH(
   const session = await requireAuth({ role: "ADMIN" });
   if (session instanceof NextResponse) return session;
 
+  if (!checkRateLimit(`votes-dismiss:${session.user.id}`, 10, 60_000)) {
+    return NextResponse.json({ error: "Too many dismiss operations — try again later" }, { status: 429 });
+  }
+
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
   if (isNaN(tmdbId)) return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
@@ -45,8 +51,22 @@ export async function PATCH(
     return NextResponse.json({ error: "mediaType query param must be MOVIE or TV" }, { status: 400 });
   }
 
-  const deleted = await prisma.deletionVote.deleteMany({
-    where: { tmdbId, mediaType },
+  // Wrap delete + Setting cleanup in a single transaction so a "notified" flag never
+  // outlives the votes it referenced. The Setting key may not exist (notification
+  // never fired), so the delete uses deleteMany — which is null-safe by design.
+  const settingKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
+  const [deleted] = await prisma.$transaction([
+    prisma.deletionVote.deleteMany({ where: { tmdbId, mediaType } }),
+    prisma.setting.deleteMany({ where: { key: settingKey } }),
+  ]);
+
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "VOTE_DISMISS_ALL",
+    target: `tmdb:${tmdbId}:${mediaType}`,
+    details: { dismissedCount: deleted.count, mediaType, tmdbId },
+    ...auditContext(req, session),
   });
 
   return NextResponse.json({ ok: true, dismissed: deleted.count });

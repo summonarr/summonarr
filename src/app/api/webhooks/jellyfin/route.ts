@@ -9,8 +9,10 @@ import {
   resolveShowTmdbId,
   computePlaytimeIncrement,
   MAX_PLAYTIME_DELTA_MS,
+  MediaServerMismatchError,
 } from "@/lib/play-history";
-import { checkAndRecordWebhook } from "@/lib/webhook-replay";
+import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -20,6 +22,7 @@ function safeCompare(a: string, b: string): boolean {
 
 interface JellyfinWebhookPayload {
   NotificationType?: string;
+  ServerId?: string;
   UserId?: string;
   UserName?: string;
   ItemId?: string;
@@ -72,10 +75,6 @@ export async function POST(req: NextRequest) {
   }
   const rawBody = new TextDecoder().decode(rawBytes);
 
-  if (!await checkAndRecordWebhook("jellyfin", secret, rawBody)) {
-    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
   if (!(await isPlayHistoryEnabled()) || !(await isSourceEnabled("jellyfin"))) {
     return NextResponse.json({ message: "Play history tracking disabled for Jellyfin" });
   }
@@ -87,6 +86,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
+  if (!await checkAndRecordWebhookJson("jellyfin", secret, payload)) {
+    return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
+  }
+
   const event = payload.NotificationType;
   if (!event) {
     return NextResponse.json({ error: "Missing NotificationType" }, { status: 400 });
@@ -96,15 +100,39 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ message: "Ignoring event — missing user or item" });
   }
 
+  // Defense-in-depth (H-3): verify the payload came from the configured Jellyfin server.
+  // If we have a stored jellyfinServerMachineId Setting, refuse mismatches; otherwise just warn.
+  const serverId = payload.ServerId ?? null;
+  if (serverId) {
+    const expectedRow = await prisma.setting.findUnique({ where: { key: "jellyfinServerMachineId" } });
+    const expected = expectedRow?.value ?? null;
+    if (expected && expected !== serverId) {
+      console.warn(`[webhook/jellyfin] 403 server id mismatch expected=${sanitizeForLog(expected)} got=${sanitizeForLog(serverId)}`);
+      return NextResponse.json({ error: "Unrecognized Jellyfin server" }, { status: 403 });
+    }
+    if (!expected) {
+      console.warn(`[webhook/jellyfin] no jellyfinServerMachineId Setting configured; accepting payload from ServerId=${sanitizeForLog(serverId)}`);
+    }
+  }
+
   const sessionKey = payload.PlaySessionId ?? `${payload.UserId}:${payload.ItemId}`;
   const sessionId = `jellyfin:${sessionKey}`;
   const now = new Date();
 
-  const msUserId = await resolveMediaServerUser({
-    source: "jellyfin",
-    sourceUserId: payload.UserId,
-    username: payload.UserName ?? "",
-  });
+  let msUserId: string;
+  try {
+    msUserId = await resolveMediaServerUser({
+      source: "jellyfin",
+      sourceUserId: payload.UserId,
+      username: payload.UserName ?? "",
+      serverMachineId: serverId,
+    });
+  } catch (err) {
+    if (err instanceof MediaServerMismatchError) {
+      return NextResponse.json({ error: "User pinned to a different server" }, { status: 403 });
+    }
+    throw err;
+  }
 
   const mediaType = payload.ItemType === "Episode" ? "TV" : payload.ItemType === "Movie" ? "MOVIE" : null;
 

@@ -17,6 +17,13 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
+import { withAdvisoryLock } from "@/lib/advisory-lock";
+
+// Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
+// Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
+// the cron POST is mid-flight) returns immediately with skipped=true rather than racing the
+// shared-state writes (notifiedAvailable CAS, library tables, MediaRequest status updates).
+const SYNC_ORCHESTRATOR_LOCK_ID = 2000;
 
 const CONCURRENCY_LIMIT = 5;
 
@@ -34,6 +41,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  return withAdvisoryLock(
+    SYNC_ORCHESTRATOR_LOCK_ID,
+    () => runSyncOrchestrator(),
+    () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
+  );
+}
+
+async function runSyncOrchestrator(): Promise<NextResponse> {
   const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
@@ -49,7 +64,7 @@ export async function POST(request: NextRequest) {
 
   let marked = 0;
   let reverted = 0;
-  const arrNotify: Array<{ requestedBy: string; title: string; mediaType: string }> = [];
+  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -87,14 +102,14 @@ export async function POST(request: NextRequest) {
           data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
       } else {
-        arrNotify.push({ requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
+        arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
       }
       marked++;
     }
   }
 
   const now = new Date();
-  const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.requestedBy === r.requestedBy && n.title === r.title));
+  const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
   await runConcurrent(overdue, async (req) => {
     try {
       const downloading = req.mediaType === "MOVIE"
@@ -192,6 +207,8 @@ export async function POST(request: NextRequest) {
   let plexTvIds    = new Map<number, PlexLibraryItemData>();
   let jfMovieIds   = new Map<number, JellyfinLibraryItemData>();
   let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
+  let plexSyncSucceeded = false;
+  let jellyfinSyncSucceeded = false;
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -221,6 +238,7 @@ export async function POST(request: NextRequest) {
           if (movieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
+        plexSyncSucceeded = true;
         try {
           const episodes = await getPlexTVEpisodes(serverUrl, token, undefined, sections);
           if (episodes.length > 0) {
@@ -254,6 +272,7 @@ export async function POST(request: NextRequest) {
           if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
+        jellyfinSyncSucceeded = true;
 
         const jfSeriesMap = new Map<string, number>();
         for (const [tmdbId, data] of jfTvIds) {
@@ -339,16 +358,20 @@ export async function POST(request: NextRequest) {
         }
       }
       if (toMarkOnly.length > 0) {
+        // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
+        // otherwise every cron tick rewrites availableAt for the same request.
         await prisma.mediaRequest.updateMany({
-          where: { id: { in: toMarkOnly.map((r) => r.id) } },
+          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
           data: { status: "AVAILABLE", availableAt: new Date() },
         });
       }
     }
     const alreadyNotified = toMark.filter((r) => alreadyNotifiedIds.has(r.id));
     if (alreadyNotified.length > 0) {
+      // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
+      // otherwise every cron tick rewrites availableAt for the same request.
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) } },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
     }
@@ -375,12 +398,15 @@ export async function POST(request: NextRequest) {
       const ms = userMediaServer.get(req.requestedBy) ?? null;
       const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
       const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
+      // Use sync success flags rather than configured flags so a failed sync doesn't trigger false notifications
+      const plexDataValid = plexSyncSucceeded || !plexConfigured;
+      const jellyfinDataValid = jellyfinSyncSucceeded || !jellyfinConfigured;
       const shouldNotify = !ms
-        ? inPlex || inJellyfin || (!plexConfigured && !jellyfinConfigured)
+        ? inPlex || inJellyfin || (plexDataValid && jellyfinDataValid && !plexConfigured && !jellyfinConfigured)
         : ms === "plex"
-        ? inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured))
+        ? inPlex || (plexDataValid && !plexConfigured && (inJellyfin || (jellyfinDataValid && !jellyfinConfigured)))
         : ms === "jellyfin"
-        ? inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured))
+        ? inJellyfin || (jellyfinDataValid && !jellyfinConfigured && (inPlex || (plexDataValid && !plexConfigured)))
         : false;
       if (!shouldNotify) continue;
       const cas = await prisma.mediaRequest.updateMany({
@@ -407,9 +433,9 @@ export async function POST(request: NextRequest) {
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
           await tx.radarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await tx.radarrWantedItem.createMany({ data: wantedRows });
+          if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
           await tx.radarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await tx.radarrAvailableItem.createMany({ data: availableRows });
+          if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         radarrWanted = wantedRows.length;
       }
@@ -431,9 +457,9 @@ export async function POST(request: NextRequest) {
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
           await tx.sonarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await tx.sonarrWantedItem.createMany({ data: wantedRows });
+          if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
           await tx.sonarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await tx.sonarrAvailableItem.createMany({ data: availableRows });
+          if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         sonarrWanted = wantedRows.length;
       }
