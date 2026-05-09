@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.9.5 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.10.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,33 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.10.0
+
+**Added**
+
+- Plex and Jellyfin **Save & Test** under Settings → Media — saving the connection now verifies it by loading libraries from the upstream server in one click, with the picker auto-populated on success.
+- Settings page surfaces a banner listing any saved Setting that fails to decrypt (e.g. after `TOKEN_ENCRYPTION_KEY` rotation), with the affected key names so operators know which rows to re-save.
+- Now Playing usernames in the admin Activity dashboard link directly to the per-user activity page.
+- TRaSH Guides admin page split into tabbed sub-routes; apply/refresh hardened with lock symmetry, per-spec error tracking, and stricter input validation.
+
+**Changed**
+
+- TMDB poster grids use `next/image` optimisation — faster page loads and lower bandwidth.
+- Play-history sync batches Setting reads, prefetches lookup maps, and parallelises writes — noticeably faster on large libraries.
+- `[token-crypto]` legacy-plaintext warnings now name the affected row (e.g. `Setting.jellyfinApiKey`, `Account.access_token (id=…)`); non-sensitive Setting rows (URLs, booleans, feature flags, thresholds) are stored plaintext by design and no longer trigger the warning.
+
+**Fixed**
+
+- Settings page no longer 500s when one Setting row can't be decrypted — affected rows return as empty and are surfaced in the on-page banner instead of crashing the render path.
+- Plex/Jellyfin/Radarr/Sonarr integrations rejecting credentials with HTTP 401 after the security rollout — collapsed double-encryption of Setting + Account tokens introduced by route-level pre-encryption layered on top of the Prisma extension. Recovery: `scripts/fix-double-encrypted.mjs`.
+- **Comprehensive security audit pass.** `TOKEN_ENCRYPTION_KEY` is now mandatory at boot; Plex/Jellyfin sign-in bound to `(provider, sub)` instead of email; SSO users can no longer set local passwords; sync orchestrator wrapped in an advisory lock; webhooks scoped by `serverMachineId`; SSE allowlist split per-role so `ISSUE_ADMIN` no longer sees other users' request/vote/push events; donation URLs gated to `http(s)://`; tighter SSRF detection (incl. v4-mapped IPv6); statement_timeout on the advisory-lock client; new audit actions (FIX_MATCH, AUDIT_LOG_EXPORT, PLAY_HISTORY_DELETE, BATCH_REQUEST_DECLINE, VOTE_DISMISS_ALL, SERVER_USERS_BULK); session and machine-session hardening with UA fingerprint pinning. Operator action: set `TOKEN_ENCRYPTION_KEY=<64 hex chars>` and run `prisma db push` once on first start.
+- Closed IDOR, SSRF, rate-limit, and compare-and-swap gaps across issues, Discord, profile, and Discord-interactions routes.
+- Backup integrity: snapshot-isolated exports, proper JSON column escaping, duplicate-row tolerance during restore.
+- Sync orchestrator and webhook handlers — race-condition and idempotency fixes.
+- Admin egress tightened; play-history query inputs validated; admin audit trail expanded.
+- TRaSH: Sonarr episode naming applied; first-apply error log quieted.
+- Mobile: respect `safe-area-inset-top` on notched iOS and Android devices.
+
 ### v0.9.5
 
 **Added**
@@ -227,7 +254,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.9.5 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.10.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
