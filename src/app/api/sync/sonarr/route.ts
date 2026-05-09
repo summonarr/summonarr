@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { auth, isTokenExpired } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getSonarrWantedTmdbIds } from "@/lib/arr";
-import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
 
 function safeCompareStrings(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -44,8 +44,8 @@ export async function POST(request: NextRequest) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
       await tx.sonarrWantedItem.deleteMany();
       await tx.sonarrAvailableItem.deleteMany();
-      if (wantedRows.length > 0) await tx.sonarrWantedItem.createMany({ data: wantedRows });
-      if (availableRows.length > 0) await tx.sonarrAvailableItem.createMany({ data: availableRows });
+      if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
+      if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
     }, { timeout: BATCH_TX_TIMEOUT });
     wanted = wantedRows.length;
     available = availableRows.length;

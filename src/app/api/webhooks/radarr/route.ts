@@ -87,10 +87,16 @@ export async function POST(req: NextRequest) {
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-    updated = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED" },
+    // Reset notifiedAvailable only on rows not yet marked available, to avoid clobbering the orchestrator's CAS
+    const resetNotify = await tx.mediaRequest.updateMany({
+      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: null },
       data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
     });
+    const alreadyAvailable = await tx.mediaRequest.updateMany({
+      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: { not: null } },
+      data: { status: "AVAILABLE", availableAt: new Date() },
+    });
+    updated = { count: resetNotify.count + alreadyAvailable.count };
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId } });
   }, { timeout: 30_000 });
 

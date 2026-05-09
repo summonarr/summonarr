@@ -90,10 +90,16 @@ export async function POST(req: NextRequest) {
     // Advisory lock 1001,2 prevents a concurrent Sonarr sync from overwriting the wanted table mid-transaction
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-      updated = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED" },
+      // Reset notifiedAvailable only on rows not yet marked available, to avoid clobbering the orchestrator's CAS
+      const resetNotify = await tx.mediaRequest.updateMany({
+        where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: null },
         data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
       });
+      const alreadyAvailable = await tx.mediaRequest.updateMany({
+        where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
+        data: { status: "AVAILABLE", availableAt: new Date() },
+      });
+      updated = { count: resetNotify.count + alreadyAvailable.count };
       await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId } });
     }, { timeout: 30_000 });
     if (updated.count > 0) effectiveMdbId = safeMdbId;
@@ -107,10 +113,15 @@ export async function POST(req: NextRequest) {
         where: { tvdbId: safeVdbId!, mediaType: "TV" },
         select: { tmdbId: true },
       });
-      updated = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED" },
+      const resetNotify = await tx.mediaRequest.updateMany({
+        where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: null },
         data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: false },
       });
+      const alreadyAvailable = await tx.mediaRequest.updateMany({
+        where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
+        data: { status: "AVAILABLE", availableAt: new Date() },
+      });
+      updated = { count: resetNotify.count + alreadyAvailable.count };
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId } });
       } else if (!req) {

@@ -24,7 +24,8 @@ export async function getCache<T>(key: string): Promise<T | null> {
   const row = await prisma.tmdbCache.findUnique({ where: { key } });
   if (!row) return null;
   if (new Date() > row.expiresAt) {
-    prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
+    // deleteMany with the expiresAt guard so a concurrent setCache upsert isn't clobbered by stale-read cleanup
+    prisma.tmdbCache.deleteMany({ where: { key, expiresAt: { lt: new Date() } } }).catch(() => {});
     return null;
   }
   try {

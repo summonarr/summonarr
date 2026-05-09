@@ -92,10 +92,10 @@ export async function POST(request: NextRequest) {
     const existingTvSet    = new Set(existingTv.map((r) => r.tmdbId));
     const newMovieRows = movieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
     const newTvRows    = tvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
-    await Promise.all([
-      newMovieRows.length > 0 ? prisma.jellyfinLibraryItem.createMany({ data: newMovieRows }) : Promise.resolve(),
-      newTvRows.length    > 0 ? prisma.jellyfinLibraryItem.createMany({ data: newTvRows })    : Promise.resolve(),
-    ]);
+    await prisma.$transaction(async (tx) => {
+      if (newMovieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, newMovieRows);
+      if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
+    }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
     await prisma.$transaction(async (tx) => {

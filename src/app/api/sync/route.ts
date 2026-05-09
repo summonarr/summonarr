@@ -414,9 +414,9 @@ export async function POST(request: NextRequest) {
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
           await tx.radarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await tx.radarrWantedItem.createMany({ data: wantedRows });
+          if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
           await tx.radarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await tx.radarrAvailableItem.createMany({ data: availableRows });
+          if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         radarrWanted = wantedRows.length;
       }
@@ -438,9 +438,9 @@ export async function POST(request: NextRequest) {
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
           await tx.sonarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await tx.sonarrWantedItem.createMany({ data: wantedRows });
+          if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
           await tx.sonarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await tx.sonarrAvailableItem.createMany({ data: availableRows });
+          if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         sonarrWanted = wantedRows.length;
       }
