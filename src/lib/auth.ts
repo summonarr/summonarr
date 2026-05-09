@@ -10,8 +10,6 @@ import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJell
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
-import { encryptToken, decryptToken } from "@/lib/token-crypto";
-import type { Adapter, AdapterAccount } from "next-auth/adapters";
 
 // Always run bcrypt even on missing accounts to prevent timing-based user enumeration
 const DUMMY_HASH = "$2a$12$K4v7Dp0.fiN0EKr9lUDBTeVrQBH1/6Mo3hVRfVIGdFJZQ6XH2GKGK";
@@ -271,39 +269,6 @@ function buildDeviceMeta(headers: Headers): DeviceMeta {
   };
 }
 
-function encryptAccountTokens(account: AdapterAccount): AdapterAccount {
-  return {
-    ...account,
-    access_token:  account.access_token  ? encryptToken(account.access_token)  : account.access_token,
-    refresh_token: account.refresh_token ? encryptToken(account.refresh_token) : account.refresh_token,
-    id_token:      account.id_token      ? encryptToken(account.id_token)      : account.id_token,
-  };
-}
-
-function decryptAccountTokens(account: AdapterAccount): AdapterAccount {
-  return {
-    ...account,
-    access_token:  account.access_token  ? decryptToken(account.access_token)  : account.access_token,
-    refresh_token: account.refresh_token ? decryptToken(account.refresh_token) : account.refresh_token,
-    id_token:      account.id_token      ? decryptToken(account.id_token)      : account.id_token,
-  };
-}
-
-function encryptingAdapter(base: Adapter): Adapter {
-  return {
-    ...base,
-    linkAccount: base.linkAccount
-      ? (account: AdapterAccount) => base.linkAccount!(encryptAccountTokens(account))
-      : undefined,
-    getAccount: base.getAccount
-      ? async (providerAccountId: string, provider: string) => {
-          const account = await base.getAccount!(providerAccountId, provider);
-          return account ? decryptAccountTokens(account) : null;
-        }
-      : undefined,
-  };
-}
-
 type JwtToken = Record<string, unknown>;
 
 async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
@@ -469,7 +434,11 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   trustHost: !!(process.env.AUTH_URL || process.env.NEXTAUTH_URL || process.env.AUTH_TRUST_HOST === "true"),
-  adapter: encryptingAdapter(PrismaAdapter(prisma)),
+  // Account OAuth tokens are encrypted/decrypted by the Prisma extension in src/lib/prisma.ts
+  // (account.create/update/upsert encrypt; findUnique/findFirst/findMany decrypt). Wrapping the
+  // adapter with a second encrypt-on-linkAccount layer produced double-encrypted rows — see
+  // guardrail #7a in CLAUDE.md.
+  adapter: PrismaAdapter(prisma),
   callbacks: {
     ...authConfig.callbacks,
     async jwt(params) {

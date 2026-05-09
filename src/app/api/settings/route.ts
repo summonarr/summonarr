@@ -9,7 +9,6 @@ import { sendTestEmail } from "@/lib/email";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
-import { encryptToken } from "@/lib/token-crypto";
 import { FEATURE_KEYS } from "@/lib/features";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -318,15 +317,16 @@ export async function PATCH(req: NextRequest) {
   try {
     await prisma.$transaction(async (tx) => {
       await Promise.all(
-        entries.map(([key, value]) => {
-          // Sensitive keys are encrypted at rest; plaintext is never written to the Setting table
-          const stored = SENSITIVE_KEYS.has(key) ? encryptToken(value) : value;
-          return tx.setting.upsert({
+        entries.map(([key, value]) =>
+          // Sensitive keys are encrypted at rest by the Prisma extension in src/lib/prisma.ts.
+          // Do NOT pre-encrypt here — that produced double-encrypted rows (enc:v1:<enc:v1:…>)
+          // which decrypted on read into the inner ciphertext, breaking Jellyfin/Radarr/etc auth.
+          tx.setting.upsert({
             where: { key },
-            update: { value: stored },
-            create: { key, value: stored },
-          });
-        })
+            update: { value },
+            create: { key, value },
+          })
+        )
       );
       await tx.auditLog.create({
         data: {
