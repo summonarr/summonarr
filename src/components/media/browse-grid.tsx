@@ -6,7 +6,9 @@ import type { TmdbMedia, Genre, WatchProvider } from "@/lib/tmdb-types";
 import { MediaCard } from "./media-card";
 import { FilterBar } from "./filter-bar";
 import { PaginationBar } from "./pagination-bar";
-import { Loader2 } from "lucide-react";
+import { Loader2, Filter, AlertTriangle } from "lucide-react";
+import { EmptyState } from "@/components/ui/design";
+import { usePathname } from "next/navigation";
 
 interface BrowseGridProps {
   mediaType: "movie" | "tv";
@@ -40,6 +42,7 @@ export function BrowseGrid({
   maxYear,
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
+  const pathname = usePathname();
 
   const [items, setItems] = useState<TmdbMedia[]>(initialItems);
   const [totalPages, setTotalPages] = useState(initialTotalPages);
@@ -147,14 +150,20 @@ export function BrowseGrid({
           </div>
         )}
         {items.length === 0 && !loading ? (
-          <div
-            className="ds-mono"
-            style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-          >
-            {hasFilters
-              ? `No ${mediaType === "tv" ? "TV shows" : "movies"} match these filters.`
-              : "No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local."}
-          </div>
+          hasFilters ? (
+            <EmptyState
+              icon={Filter}
+              title="No results match these filters"
+              description="Try removing one or two filters to see more."
+              cta={{ href: pathname, label: "Clear filters" }}
+            />
+          ) : (
+            <EmptyState
+              icon={AlertTriangle}
+              title="TMDB token not configured"
+              description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+            />
+          )
         ) : (
           <div className="ds-media-grid">
             {items.map((media) => (

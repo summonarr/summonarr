@@ -154,7 +154,12 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
             <Bell className="w-4 h-4 text-zinc-400" />
             Notification Settings
           </h3>
-          <button onClick={onClose} className="text-zinc-500 hover:text-white transition-colors">
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="text-zinc-500 hover:text-white transition-colors"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -238,6 +243,9 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [loading, setLoading]         = useState(true);
   const [revoking, setRevoking]       = useState<string | null>(null);
   const [revokingAll, setRevokingAll] = useState(false);
+  const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
+  // Guardrail 16: timeAgo uses Date.now() and toLocaleDateString varies by locale
+  const mounted = useHasMounted();
 
   useEffect(() => {
     fetch(`/api/admin/users/${u.id}/sessions`)
@@ -266,7 +274,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   }
 
   async function revokeAll() {
-    if (!confirm(`Revoke all sessions for ${u.name ?? u.email}? They will be signed out immediately.`)) return;
+    setConfirmingRevokeAll(false);
     setRevokingAll(true);
     try {
       const res = await fetch(`/api/admin/users/${u.id}/sessions`, {
@@ -301,7 +309,12 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
             <KeyRound className="w-4 h-4 text-zinc-400" />
             Active Sessions
           </h3>
-          <button onClick={onClose} className="text-zinc-500 hover:text-white transition-colors">
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="text-zinc-500 hover:text-white transition-colors"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -338,11 +351,11 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
                       </span>
                     )}
                     <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-                      <Clock className="w-2.5 h-2.5" />Active {timeAgo(s.lastSeenAt)}
+                      <Clock className="w-2.5 h-2.5" />Active {mounted ? timeAgo(s.lastSeenAt) : ""}
                     </span>
                   </div>
                   <p className="text-[10px] text-zinc-600">
-                    Expires {new Date(s.expiresAt).toLocaleDateString()}
+                    Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
                   </p>
                 </div>
               </div>
@@ -365,16 +378,42 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
         {}
         {!loading && sessions.length > 0 && (
           <div className="mt-4 pt-3 border-t border-zinc-800">
-            <button
-              type="button"
-              disabled={revokingAll}
-              onClick={revokeAll}
-              className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-            >
-              {revokingAll
-                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
-                : <><Trash2  className="w-3.5 h-3.5" />Revoke all sessions</>}
-            </button>
+            {!confirmingRevokeAll ? (
+              <button
+                type="button"
+                disabled={revokingAll}
+                onClick={() => setConfirmingRevokeAll(true)}
+                className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
+              >
+                {revokingAll
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
+                  : <><Trash2  className="w-3.5 h-3.5" />Revoke all sessions</>}
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-label={`Confirm revoke all sessions for ${u.name ?? u.email}`}
+                  disabled={revokingAll}
+                  onClick={revokeAll}
+                  autoFocus
+                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                >
+                  {revokingAll
+                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
+                    : <><Trash2  className="w-3.5 h-3.5" />Revoke all — they will be signed out</>}
+                </button>
+                <button
+                  type="button"
+                  aria-label="Cancel revoke all"
+                  disabled={revokingAll}
+                  onClick={() => setConfirmingRevokeAll(false)}
+                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -530,6 +569,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const mounted = useHasMounted();
 
   async function patch(id: string, key: string, body: object) {
@@ -550,7 +590,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
   }
 
   async function deleteUser(id: string) {
-    if (!confirm("Delete this user and all their requests?")) return;
+    setConfirmingDelete(null);
     setBusy(id + "del");
     setError(null);
     try {
@@ -584,7 +624,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
               padding: "12px 16px",
               background: "var(--ds-bg-2)",
               border: "1px solid var(--ds-border)",
-              borderRadius: 10,
+              borderRadius: 8,
             }}
           >
             <div
@@ -707,11 +747,32 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
               />
             ) : isSelf ? (
               <div className="w-7 shrink-0" />
+            ) : confirmingDelete === u.id ? (
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  aria-label={`Confirm delete ${displayName} and all their requests`}
+                  onClick={() => deleteUser(u.id)}
+                  autoFocus
+                  className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete user
+                </button>
+                <button
+                  type="button"
+                  aria-label="Cancel delete"
+                  onClick={() => setConfirmingDelete(null)}
+                  className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             ) : (
               <ActionsMenu
                 u={u}
                 onPatch={(key, body) => patch(u.id, key, body)}
-                onDelete={() => deleteUser(u.id)}
+                onDelete={() => setConfirmingDelete(u.id)}
               />
             )}
           </div>

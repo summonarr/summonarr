@@ -245,6 +245,8 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
       <button
         type="button"
         onClick={onRemove}
+        aria-label={`Remove filter: ${label}`}
+        title={`Remove filter: ${label}`}
         className="inline-flex items-center transition-colors ml-0.5"
         style={{
           background: "transparent",

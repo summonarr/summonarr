@@ -20,7 +20,7 @@ const STATUS_TONE: Record<string, ChipTone> = {
   PENDING: "pending",
   APPROVED: "approved",
   DECLINED: "declined",
-  AVAILABLE: "accent",
+  AVAILABLE: "approved",
 };
 
 const STATUS_LABEL: Record<string, string> = {

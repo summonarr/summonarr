@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { BATCH_TX_TIMEOUT } from "./cron-auth";
 import { libraryDetailsTtl } from "./tmdb-cache";
 import type { TmdbMedia } from "./tmdb-types";
 
@@ -42,7 +43,8 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
           lastSyncedAt:  new Date(),
         },
       })
-    )
+    ),
+    { timeout: BATCH_TX_TIMEOUT }
   ).catch((err) => {
     console.error("[tmdb-core-sync] batch upsert failed for", items.length, "items:", err);
     throw err;

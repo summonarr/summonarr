@@ -52,6 +52,7 @@ export function SpecSection({
   const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
   const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
   const [search, setSearch] = useState("");
+  const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -166,7 +167,7 @@ export function SpecSection({
   }
 
   async function deleteApplication(appId: string) {
-    if (!confirm("Unmanage this spec entirely? The remote CF/profile in Radarr/Sonarr is not deleted.")) return;
+    setConfirmingForget(null);
     await fetch(`/api/admin/trash-guides/applications/${appId}`, {
       method: "DELETE",
     });
@@ -313,23 +314,45 @@ export function SpecSection({
                         </td>
                         <td className="py-2.5 pr-6 text-right">
                           {spec.application ? (
-                            <div className="flex items-center gap-2 justify-end">
-                              <button
-                                onClick={() => toggleManagement(spec.application!.id, !spec.application!.enabled)}
-                                className="text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1"
-                                title={spec.application.enabled ? "Pause sync for this spec" : "Resume sync"}
-                              >
-                                {spec.application.enabled
-                                  ? <><Shield className="w-3.5 h-3.5" />Managed</>
-                                  : <><ShieldOff className="w-3.5 h-3.5" />Paused</>}
-                              </button>
-                              <button
-                                onClick={() => deleteApplication(spec.application!.id)}
-                                className="text-xs text-zinc-500 hover:text-red-400"
-                              >
-                                Forget
-                              </button>
-                            </div>
+                            confirmingForget === spec.application.id ? (
+                              <div className="flex items-center gap-2 justify-end">
+                                <button
+                                  type="button"
+                                  aria-label="Confirm forget spec"
+                                  onClick={() => deleteApplication(spec.application!.id)}
+                                  className="text-xs px-2 py-0.5 rounded bg-red-600 text-white hover:bg-red-500 inline-flex items-center gap-1"
+                                  autoFocus
+                                >
+                                  Confirm forget
+                                </button>
+                                <button
+                                  type="button"
+                                  aria-label="Cancel forget"
+                                  onClick={() => setConfirmingForget(null)}
+                                  className="text-xs px-2 py-0.5 text-zinc-400 hover:text-white"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 justify-end">
+                                <button
+                                  onClick={() => toggleManagement(spec.application!.id, !spec.application!.enabled)}
+                                  className="text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1"
+                                  title={spec.application.enabled ? "Pause sync for this spec" : "Resume sync"}
+                                >
+                                  {spec.application.enabled
+                                    ? <><Shield className="w-3.5 h-3.5" />Managed</>
+                                    : <><ShieldOff className="w-3.5 h-3.5" />Paused</>}
+                                </button>
+                                <button
+                                  onClick={() => setConfirmingForget(spec.application!.id)}
+                                  className="text-xs text-zinc-500 hover:text-red-400"
+                                >
+                                  Forget
+                                </button>
+                              </div>
+                            )
                           ) : (
                             <span className="text-xs text-zinc-600">—</span>
                           )}

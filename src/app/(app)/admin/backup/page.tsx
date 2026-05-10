@@ -167,7 +167,7 @@ function BackupCard({
         padding: 20,
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",
-        borderRadius: 10,
+        borderRadius: 8,
         display: "flex",
         flexDirection: "column",
         gap: 14,

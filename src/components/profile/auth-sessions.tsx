@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock } from "lucide-react";
+import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock, Check, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 
@@ -39,12 +39,14 @@ function timeAgo(date: Date): string {
 export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
+  const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   // `timeAgo` and `toLocaleDateString` both diverge between SSR and CSR
   // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
   async function revoke(sessionId: string) {
     setRevoking(sessionId);
+    setConfirmingRevoke(null);
     try {
       await fetch("/api/sessions", {
         method:  "DELETE",
@@ -84,8 +86,9 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   {s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`}
                 </p>
                 {s.isCurrent && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-medium shrink-0">
-                    This session
+                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-white font-semibold shrink-0">
+                    <Check className="w-3 h-3" />
+                    This device
                   </span>
                 )}
               </div>
@@ -105,7 +108,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
             </div>
           </div>
 
-          {!s.isCurrent && (
+          {!s.isCurrent && confirmingRevoke !== s.sessionId && (
             <Button
               type="button"
               size="sm"
@@ -118,12 +121,37 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               title="Revoke session"
               className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
               disabled={revoking === s.sessionId}
-              onClick={() => revoke(s.sessionId)}
+              onClick={() => setConfirmingRevoke(s.sessionId)}
             >
               {revoking === s.sessionId
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <Trash2  className="w-3.5 h-3.5" />}
             </Button>
+          )}
+          {!s.isCurrent && confirmingRevoke === s.sessionId && (
+            <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
+              <Button
+                type="button"
+                size="sm"
+                aria-label="Confirm revoke session"
+                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                onClick={() => revoke(s.sessionId)}
+                autoFocus
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Revoke
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label="Cancel revoke"
+                className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
+                onClick={() => setConfirmingRevoke(null)}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </div>
           )}
         </div>
       ))}

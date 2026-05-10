@@ -235,7 +235,7 @@ function StatsSection({
         padding: 20,
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",
-        borderRadius: 10,
+        borderRadius: 8,
         marginBottom: 24,
       }}
     >

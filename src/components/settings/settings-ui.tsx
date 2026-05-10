@@ -2421,8 +2421,6 @@ export function RatingsCacheClearButton() {
     setStatus("clearing");
     const res = await fetch("/api/admin/clear-ratings-cache", { method: "DELETE" });
     if (res.ok) {
-      const data = await res.json() as { cleared: number };
-      console.log(`Cleared ${data.cleared} ratings cache entries`);
       setStatus("cleared");
     } else {
       setStatus("error");
@@ -2444,7 +2442,7 @@ export function RatingsCacheClearButton() {
             type="button"
             size="sm"
             onClick={handleClear}
-            className="bg-red-600 hover:bg-red-500 h-7 px-3 text-xs"
+            className="bg-red-600 hover:bg-red-500 h-9 px-3 text-xs"
           >
             Clear
           </Button>
@@ -2453,7 +2451,7 @@ export function RatingsCacheClearButton() {
             size="sm"
             variant="outline"
             onClick={() => setStatus("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-white h-9 px-3 text-xs"
           >
             Cancel
           </Button>

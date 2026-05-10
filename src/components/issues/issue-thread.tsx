@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Loader2, Send, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface IssueMessageData {
   id: string;
@@ -27,6 +28,9 @@ export function IssueThread({ issueId, initialCount, variant = "inline" }: Issue
   const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Guardrail 16: toLocaleString output diverges between SSR and CSR
+  // (locale + timezone resolution). Empty string on the server, fill on mount.
+  const mounted = useHasMounted();
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -134,7 +138,7 @@ export function IssueThread({ issueId, initialCount, variant = "inline" }: Issue
                   {msg.body}
                 </div>
                 <p className="text-[10px] text-zinc-600 px-1">
-                  {isAdmin ? "Admin" : authorName} · {new Date(msg.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                  {isAdmin ? "Admin" : authorName} · {mounted ? new Date(msg.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                 </p>
               </div>
             </div>

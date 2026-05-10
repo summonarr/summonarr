@@ -105,8 +105,8 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
                       style={{
                         backgroundColor:
                           day.count === 0
-                            ? "rgb(39, 39, 42)"
-                            : `rgba(99, 102, 241, ${0.25 + intensity * 0.75})`,
+                            ? "var(--ds-bg-3)"
+                            : `rgba(99, 102, 241, ${0.45 + intensity * 0.55})`,
                       }}
                       title={`${day.date}: ${day.count} plays`}
                     />
@@ -126,8 +126,8 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
                 style={{
                   backgroundColor:
                     level === 0
-                      ? "rgb(39, 39, 42)"
-                      : `rgba(99, 102, 241, ${0.25 + level * 0.75})`,
+                      ? "var(--ds-bg-3)"
+                      : `rgba(99, 102, 241, ${0.45 + level * 0.55})`,
                 }}
               />
             ))}

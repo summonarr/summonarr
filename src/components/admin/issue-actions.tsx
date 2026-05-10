@@ -306,6 +306,8 @@ export function IssueActions({
             variant="outline"
             onClick={() => setPanel("delete")}
             disabled={loading !== null}
+            aria-label="Delete issue"
+            title="Delete issue"
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-600 hover:text-red-400 hover:border-red-500/50"
           >
             <Trash2 className="w-3 h-3" />
@@ -365,6 +367,8 @@ export function IssueActions({
               <button
                 onClick={() => setPanel(null)}
                 disabled={loading === "grab"}
+                aria-label="Close"
+                title="Close"
                 className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
               >
                 <X className="w-5 h-5" />
@@ -407,6 +411,8 @@ export function IssueActions({
                     {releaseFilter && (
                       <button
                         onClick={() => setReleaseFilter("")}
+                        aria-label="Clear filter"
+                        title="Clear filter"
                         className="absolute right-3 text-zinc-500 hover:text-zinc-300"
                       >
                         <X className="w-4 h-4" />
