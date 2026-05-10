@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface PushDevice {
   id: string;
@@ -19,6 +20,7 @@ interface PushDevicesProps {
 
 export function PushDevices({ devices, cap }: PushDevicesProps) {
   const router = useRouter();
+  const mounted = useHasMounted();
   const [removing, setRemoving] = useState<string | null>(null);
 
   async function remove(endpoint: string) {
@@ -56,7 +58,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
             <div className="min-w-0">
               <p className="text-sm text-zinc-200">{device.label || `Device ${i + 1}`}</p>
               <p className="text-xs text-zinc-500">
-                Added {new Date(device.createdAt).toLocaleDateString()}
+                {mounted ? `Added ${new Date(device.createdAt).toLocaleDateString()}` : ""}
               </p>
             </div>
           </div>

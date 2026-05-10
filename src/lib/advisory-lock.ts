@@ -21,15 +21,23 @@ export interface AdvisoryLockOptions {
   timeoutMs?: number;
 }
 
+// Me-4: callers may opt into signal-aware work by accepting an AbortSignal argument. The signal
+// fires on timeout (before pg_advisory_unlock releases the lock) so callers can stop hitting the
+// DB rather than letting the racing work() continue in the background. Abortion is best-effort —
+// the underlying work must explicitly observe the signal (e.g. pass it to fetch() / forward to
+// Prisma where supported) for it to have any effect.
+export type AdvisoryLockWork<T> = (() => Promise<T>) | ((signal: AbortSignal) => Promise<T>);
+
 // Uses a raw pg Client (not Prisma) because advisory locks must be held on a single persistent connection;
 // Prisma's pool can transparently switch connections between awaits, which would release the lock early
 export async function withAdvisoryLock<T, U = T>(
   lockId: number,
-  work: () => Promise<T>,
+  work: AdvisoryLockWork<T>,
   onBusy: () => U | Promise<U>,
   opts: AdvisoryLockOptions = {},
 ): Promise<T | U> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WORK_TIMEOUT_MS;
+  const controller = new AbortController();
   const client = new Client({ connectionString: process.env.DATABASE_URL });
   await client.connect();
   try {
@@ -50,10 +58,19 @@ export async function withAdvisoryLock<T, U = T>(
     try {
       let timer: NodeJS.Timeout | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new AdvisoryLockTimeoutError(lockId, timeoutMs)), timeoutMs);
+        timer = setTimeout(() => {
+          const err = new AdvisoryLockTimeoutError(lockId, timeoutMs);
+          // Signal the work BEFORE the finally releases pg_advisory_unlock so the
+          // inner work() can observe the abort and stop issuing DB statements.
+          controller.abort(err);
+          reject(err);
+        }, timeoutMs);
       });
       try {
-        return await Promise.race([work(), timeoutPromise]);
+        return await Promise.race([
+          (work as (signal: AbortSignal) => Promise<T>)(controller.signal),
+          timeoutPromise,
+        ]);
       } finally {
         if (timer) clearTimeout(timer);
       }

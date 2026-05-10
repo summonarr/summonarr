@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import Image from "next/image";
 import { Film, Tv2, Loader2, Check, X, ExternalLink } from "lucide-react";
 import Link from "next/link";
@@ -79,6 +80,7 @@ function formatUserLabel(r: Requester) {
 
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, sort }: AdminRequestListProps) {
   const router = useRouter();
+  const mounted = useHasMounted();
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
   useLiveEvents((event) => {
@@ -468,7 +470,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                         </span>
                       )}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {new Date(r.createdAt).toLocaleDateString()}
+                        {mounted ? `· ${new Date(r.createdAt).toLocaleDateString()}` : ""}
                       </span>
                       {group.requesters.length > 1 && r.status !== group.aggregateStatus && (
                         <span

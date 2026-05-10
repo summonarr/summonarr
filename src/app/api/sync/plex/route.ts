@@ -170,8 +170,8 @@ export async function POST(request: NextRequest) {
     const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
     if (alreadyNotified.length > 0) {
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) } },
-        data: { status: "AVAILABLE", availableAt: new Date() },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+        data: { status: "AVAILABLE" },
       });
     }
   }

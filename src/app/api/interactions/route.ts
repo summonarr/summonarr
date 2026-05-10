@@ -12,6 +12,7 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 import { sanitizeForLog } from "@/lib/sanitize";
+import { checkBodySize } from "@/lib/body-size";
 
 export const dynamic = "force-dynamic";
 
@@ -149,8 +150,9 @@ interface PendingSearch {
   discordUsername: string;
 }
 
-async function cachedSearchTmdb(query: string, type: "movie" | "tv"): Promise<TmdbResult[]> {
-  const key = `q:${type}:${query.toLowerCase().trim()}`;
+async function cachedSearchTmdb(query: string, type: "movie" | "tv", discordUserId: string): Promise<TmdbResult[]> {
+  // Per-user cache scope prevents one Discord user's stale/poisoned results from leaking to others
+  const key = `q:${discordUserId}:${type}:${query.toLowerCase().trim()}`;
   const cached = await prisma.discordSearchCache.findUnique({ where: { queryKey: key } }).catch(() => null);
   if (cached && new Date() < cached.expiresAt) {
     try { return JSON.parse(cached.data) as TmdbResult[]; } catch { }
@@ -320,7 +322,7 @@ async function handleCommand(interaction: any): Promise<void> {
 
       let results: TmdbResult[];
       try {
-        const raw = await cachedSearchTmdb(query, type);
+        const raw = await cachedSearchTmdb(query, type, discordUserId);
         results = await attachAvailability(raw);
       } catch (err) {
         console.error("[interactions] TMDB search error:", err);
@@ -798,6 +800,10 @@ async function handleComponent(interaction: any): Promise<void> {
 export async function POST(req: NextRequest) {
   const signature = req.headers.get("x-signature-ed25519") ?? "";
   const timestamp = req.headers.get("x-signature-timestamp") ?? "";
+
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
+
   const body = await req.text();
 
   const publicKey = await getPublicKey();

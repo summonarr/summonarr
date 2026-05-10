@@ -10,10 +10,53 @@ function safeCompareStrings(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
+// Cron/sync routes are excluded from the proxy.ts CSRF guard (cron containers POST
+// without an Origin header). The Bearer-token path is unconditional because callers
+// hold a strong server-side secret; the admin-session path must enforce its own
+// same-origin check, otherwise a malicious site can drive a logged-in admin's
+// browser to POST /api/sync via cookie auth.
+const sessionOriginCache = new Map<string, ReadonlySet<string>>();
+
+function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
+  const cached = sessionOriginCache.get(selfOrigin);
+  if (cached) return cached;
+  const trusted = new Set<string>();
+  for (const raw of [
+    process.env.AUTH_URL,
+    process.env.NEXTAUTH_URL,
+    ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
+  ]) {
+    const trimmed = raw?.trim();
+    if (!trimmed) continue;
+    try { trusted.add(new URL(trimmed).origin); } catch { }
+  }
+  if (trusted.size === 0) trusted.add(selfOrigin);
+  const frozen: ReadonlySet<string> = trusted;
+  sessionOriginCache.set(selfOrigin, frozen);
+  return frozen;
+}
+
+function isSameOriginRequest(request: NextRequest): boolean {
+  const origin = request.headers.get("origin");
+  let effectiveOrigin = origin;
+  if (!effectiveOrigin) {
+    const referer = request.headers.get("referer");
+    if (referer) {
+      try { effectiveOrigin = new URL(referer).origin; } catch { }
+    }
+  }
+  if (!effectiveOrigin) return false;
+  const trusted = buildSessionTrustedOrigins(request.nextUrl.origin);
+  return trusted.has(effectiveOrigin);
+}
+
 // Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   const session = await auth();
-  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) return true;
+  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) {
+    if (!isSameOriginRequest(request)) return false;
+    return true;
+  }
 
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {

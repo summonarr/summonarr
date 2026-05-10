@@ -242,18 +242,23 @@ export async function PATCH(
     return NextResponse.json({ ...updated, arrError });
   }
 
-  if (status === "AVAILABLE" && existing.status !== "AVAILABLE" && !existing.notifiedAvailable) {
+  if (status === "AVAILABLE" && existing.status !== "AVAILABLE") {
+    let casCount = 0;
     try {
-      await prisma.mediaRequest.update({ where: { id }, data: { notifiedAvailable: true } });
+      const cas = await prisma.mediaRequest.updateMany({
+        where: { id, notifiedAvailable: false },
+        data: { notifiedAvailable: true },
+      });
+      casCount = cas.count;
     } catch (err) {
-      console.error("[requests] Failed to set notifiedAvailable:", err);
+      console.error("[requests] Failed to CAS notifiedAvailable:", err);
     }
-
-    // Clear any pending deletion votes when a request becomes available — they're no longer meaningful
-    void prisma.deletionVote.deleteMany({
-      where: { tmdbId: updated.tmdbId, mediaType: updated.mediaType },
-    }).catch(() => {});
-    notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+    if (casCount === 1) {
+      void prisma.deletionVote.deleteMany({
+        where: { tmdbId: updated.tmdbId, mediaType: updated.mediaType },
+      }).catch(() => {});
+      notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+    }
   }
 
   if (status === "DECLINED" && existing.status !== "DECLINED") {

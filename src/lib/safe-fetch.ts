@@ -30,7 +30,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const USER_AGENT = "Summonarr/0.1";
 
-type FetchMode = "hardcoded" | "admin" | "untrusted";
+type FetchMode = "hardcoded" | "admin";
 
 async function doFetch(
   rawUrl: string,
@@ -58,8 +58,8 @@ async function doFetch(
   // (assertRequestHandler throws "invalid onRequestStart method"). The pin is
   // deferred until we can adopt a Node-bundled-undici-compatible mechanism.
   // Accepted residual risk: hostname-rebind window between SSRF resolve and
-  // the actual connect. Mitigated by short request lifetimes and the fact that
-  // user-supplied URLs (untrusted mode) have zero current callers.
+  // the actual connect on admin-configured URLs. Mitigated by short request
+  // lifetimes.
 
   if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
@@ -82,8 +82,9 @@ async function doFetch(
     // checked against `allowedHosts` — that breaks CodeQL's request-forgery
     // taint flow (CodeQL js/request-forgery, alert #4).
     targetUrl = parsedUrl.toString();
-  } else if (mode === "untrusted" || mode === "admin") {
-    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: mode === "admin" });
+  } else {
+    // mode === "admin"
+    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true });
     if (!safe) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -218,14 +219,6 @@ function limitResponseBody(
       reader.cancel(reason).catch(() => {});
     },
   });
-}
-
-// safeFetch validates the URL against the SSRF policy — use for user-supplied URLs
-export function safeFetch(
-  url: string,
-  opts: SafeFetchOptions = {},
-): Promise<Response> {
-  return doFetch(url, opts, "untrusted");
 }
 
 export interface TrustedFetchOptions extends SafeFetchOptions {

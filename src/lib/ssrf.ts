@@ -58,7 +58,7 @@ function isSafeAddr(addr: string): boolean {
 // CGNAT, and loopback (admins legitimately point at LAN or same-host servers) while still
 // blocking link-local and unspecified — the goal is to keep cloud metadata services and
 // 0.0.0.0 unreachable even when the admin has typo'd the URL.
-function isSafeAddrForAdmin(addr: string): boolean {
+export function isSafeAddrForAdmin(addr: string): boolean {
   const v4 = unwrapV4Mapped(addr);
   if (v4 !== null) return isSafeAddrForAdmin(v4);
 

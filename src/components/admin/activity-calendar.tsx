@@ -22,10 +22,10 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   const days: { date: string; dow: number }[] = [];
   for (let i = 364; i >= 0; i--) {
     const d = new Date(today);
-    d.setDate(d.getDate() - i);
+    d.setUTCDate(d.getUTCDate() - i);
     days.push({
       date: d.toISOString().split("T")[0],
-      dow: d.getDay(),
+      dow: d.getUTCDay(),
     });
   }
 
@@ -46,10 +46,10 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   weeks.forEach((week, wi) => {
     const firstDay = week[0];
     if (firstDay) {
-      const month = new Date(firstDay.date).getMonth();
+      const month = new Date(firstDay.date).getUTCMonth();
       if (month !== lastMonth) {
         monthLabels.push({
-          label: new Date(firstDay.date).toLocaleString("en-US", { month: "short" }),
+          label: new Date(firstDay.date).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
           weekIndex: wi,
         });
         lastMonth = month;
