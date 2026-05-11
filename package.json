@@ -44,7 +44,7 @@
     "svix": "^1.92.2"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.2.4",
+    "@tailwindcss/postcss": "^4.3.0",
     "@types/node": "^25",
     "@types/nodemailer": "^8.0.0",
     "@types/pg": "^8.11.14",
@@ -52,9 +52,9 @@
     "@types/react-dom": "^19",
     "@types/swagger-ui-react": "^5.18.0",
     "@types/web-push": "^3.6.4",
-    "eslint": "^9.39.4",
-    "eslint-config-next": "16.2.4",
-    "shadcn": "^4.5.0",
+    "eslint": "^10.3.0",
+    "eslint-config-next": "16.2.6",
+    "shadcn": "^4.7.0",
     "tailwindcss": "^4.2.4",
     "tsx": "^4.21.0",
     "typescript": "^6"
