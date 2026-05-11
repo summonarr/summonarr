@@ -48,13 +48,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  if (token === queryToken && queryToken) {
-    console.warn(
-      "[webhook/sonarr] Authenticated via ?token= query parameter. " +
-      "This exposes the webhook secret in server/proxy logs. " +
-      "Configure the Authorization header instead if your webhook source supports it."
-    );
-  }
+  // Sonarr's webhook UI has no Authorization header field — ?token= is the only
+  // option upstream supports. Don't warn about it; nothing the user can do.
 
   const tooLarge = checkBodySize(req, 1_048_576);
   if (tooLarge) return tooLarge;

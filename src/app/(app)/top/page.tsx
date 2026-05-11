@@ -13,7 +13,8 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, EmptyState } from "@/components/ui/design";
+import { Filter, Film, Tv } from "lucide-react";
 
 const PER_PAGE = 36;
 
@@ -152,6 +153,7 @@ export default async function TopRatedPage({
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
+  const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
 
   const [
     rawTmdbMovies, rawTmdbTV,
@@ -235,14 +237,23 @@ export default async function TopRatedPage({
             }
           />
           {movies.length === 0 ? (
-            <p
-              className="ds-mono"
-              style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-            >
-              {page > 1
-                ? "No more results on this page."
-                : "No movies match these filters."}
-            </p>
+            page > 1 ? (
+              <EmptyState
+                icon={Film}
+                title="No more results on this page"
+                description="Try going back to the first page."
+                cta={{ href: "/top", label: "Back to page 1" }}
+              />
+            ) : (
+              <EmptyState
+                icon={Filter}
+                title="No results match these filters"
+                description="Try removing one or two filters to see more."
+                {...(hasFilters
+                  ? { cta: { href: "/top", label: "Clear filters" } }
+                  : {})}
+              />
+            )
           ) : (
             <div className="ds-media-grid">
               {movies.map((media) => (
@@ -270,14 +281,23 @@ export default async function TopRatedPage({
             }
           />
           {tv.length === 0 ? (
-            <p
-              className="ds-mono"
-              style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-            >
-              {page > 1
-                ? "No more results on this page."
-                : "No TV shows match these filters."}
-            </p>
+            page > 1 ? (
+              <EmptyState
+                icon={Tv}
+                title="No more results on this page"
+                description="Try going back to the first page."
+                cta={{ href: "/top", label: "Back to page 1" }}
+              />
+            ) : (
+              <EmptyState
+                icon={Filter}
+                title="No results match these filters"
+                description="Try removing one or two filters to see more."
+                {...(hasFilters
+                  ? { cta: { href: "/top", label: "Clear filters" } }
+                  : {})}
+              />
+            )
           ) : (
             <div className="ds-media-grid">
               {tv.map((media) => (

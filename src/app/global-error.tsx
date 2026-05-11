@@ -1,8 +1,12 @@
 "use client";
 
 import { useEffect } from "react";
+import "./globals.css";
 
-// Replaces the entire document on unrecoverable errors; must render its own <html>/<body> shell
+// Replaces the entire document on unrecoverable errors; must render its own <html>/<body> shell.
+// globals.css is imported here directly because global-error.tsx bypasses the root layout,
+// which is where globals.css is normally loaded — without this import, the --ds-* tokens
+// below would be undefined and the page would render unstyled.
 export default function GlobalError({
   error,
   unstable_retry,
@@ -27,13 +31,13 @@ export default function GlobalError({
             gap: "1rem",
             textAlign: "center",
             padding: "2rem",
-            background: "#09090b",
-            color: "#fff",
+            background: "var(--ds-bg)",
+            color: "var(--ds-fg)",
             fontFamily: "sans-serif",
           }}
         >
           <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>Something went wrong</h2>
-          <p style={{ color: "#a1a1aa", fontSize: "0.875rem", maxWidth: "24rem" }}>
+          <p style={{ color: "var(--ds-fg-muted)", fontSize: "0.875rem", maxWidth: "24rem" }}>
             A critical error occurred. Please reload the page.
           </p>
           <button
@@ -41,8 +45,8 @@ export default function GlobalError({
             style={{
               padding: "0.5rem 1rem",
               borderRadius: "0.375rem",
-              background: "#4f46e5",
-              color: "#fff",
+              background: "var(--ds-accent)",
+              color: "var(--ds-accent-fg)",
               fontSize: "0.875rem",
               fontWeight: 500,
               border: "none",

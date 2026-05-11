@@ -17,6 +17,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
 
   const [voted, setVoted] = useState(userVoted);
   const [dismissed, setDismissed] = useState(false);
+  const [confirmingDismiss, setConfirmingDismiss] = useState(false);
 
   async function handleUnvote() {
     if (loading) return;
@@ -35,9 +36,9 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
 
   async function handleDismiss() {
     if (loading) return;
-    if (!confirm("Dismiss all votes for this item?")) return;
     setLoading(true);
     setDismissed(true);
+    setConfirmingDismiss(false);
     try {
       const res = await fetch(`/api/votes/${tmdbId}?mediaType=${mediaType}`, { method: "PATCH" });
       if (res.ok) router.refresh();
@@ -63,15 +64,35 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           Voted
         </button>
       )}
-      {isAdmin && (
+      {isAdmin && !confirmingDismiss && (
         <button
-          onClick={handleDismiss}
+          onClick={() => setConfirmingDismiss(true)}
           disabled={loading}
           className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
           {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
           Dismiss
         </button>
+      )}
+      {isAdmin && confirmingDismiss && (
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={handleDismiss}
+            disabled={loading}
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50"
+            autoFocus
+          >
+            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+            Confirm dismiss
+          </button>
+          <button
+            onClick={() => setConfirmingDismiss(false)}
+            disabled={loading}
+            className="text-xs px-2 py-1.5 text-zinc-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
       )}
     </div>
   );

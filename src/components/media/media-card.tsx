@@ -321,7 +321,7 @@ function MediaCardImpl({
           </span>
         )}
 
-        {/* Top-right: score chip (IMDb-style) */}
+        {/* Top-right: TMDB community score (at-a-glance). Detailed ratings live in the RatingsBar below. */}
         {media.voteAverage > 0 && (
           <div
             className="ds-mono absolute top-1.5 right-1.5 inline-flex items-center gap-1"
@@ -338,23 +338,16 @@ function MediaCardImpl({
             }}
           >
             <span
-              className="ds-mono"
+              aria-hidden="true"
               style={{
-                fontSize: 7.5,
-                fontWeight: 800,
-                letterSpacing: "-0.02em",
-                background: "#f5c518",
-                color: "#000",
-                padding: "1px 2.5px",
-                borderRadius: 2,
+                fontSize: 9,
                 lineHeight: 1,
+                color: "var(--ds-warning)",
               }}
             >
-              IMDb
+              ★
             </span>
-            {media.imdbRating
-              ? Number.parseFloat(media.imdbRating).toFixed(1)
-              : media.voteAverage.toFixed(1)}
+            {media.voteAverage.toFixed(1)}
           </div>
         )}
       </div>

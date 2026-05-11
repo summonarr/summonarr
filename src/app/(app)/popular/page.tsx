@@ -14,7 +14,8 @@ import { requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Suspense } from "react";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, EmptyState } from "@/components/ui/design";
+import { TrendingUp, Film } from "lucide-react";
 
 type EnrichedMedia = TmdbMedia & {
   plays: number;
@@ -223,16 +224,27 @@ export default async function PopularOnServerPage({
       </div>
 
       {!hasAny ? (
-        <div
-          className="ds-mono"
-          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-        >
-          {sort === "trending"
-            ? "No plays in the last 30 days — try switching to Most Played for all-time data."
-            : page > 1
-              ? "No more results on this page."
-              : "No play history yet — data will appear once media is played on your servers."}
-        </div>
+        sort === "trending" ? (
+          <EmptyState
+            icon={TrendingUp}
+            title="No plays in the last 30 days"
+            description="Try switching to Most Played for all-time data."
+            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
+          />
+        ) : page > 1 ? (
+          <EmptyState
+            icon={Film}
+            title="No more results on this page"
+            description="Try going back to the first page."
+            cta={{ href: buildHref({}), label: "Back to page 1" }}
+          />
+        ) : (
+          <EmptyState
+            icon={Film}
+            title="No play history yet"
+            description="Data will appear once media is played on your servers."
+          />
+        )
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
           {showMovies && movies.length > 0 && (

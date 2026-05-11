@@ -316,6 +316,8 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                       else { setPhase("search"); setSelected(null); }
                     }}
                     disabled={busy}
+                    aria-label="Back"
+                    title="Back"
                     className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
                   >
                     <ChevronLeft className="w-5 h-5" />
@@ -327,7 +329,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                   {phase === "plex-candidates" && "Select Plex item"}
                 </p>
               </div>
-              <button onClick={close} disabled={busy} className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
+              <button onClick={close} disabled={busy} aria-label="Close" title="Close" className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
