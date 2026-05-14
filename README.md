@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.10.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.10.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,32 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.10.1
+
+**Added**
+
+- Three new GitHub Actions security workflows: **Dependency Review** (PR-time block on new vulnerable deps or restricted licenses), **OSSF Scorecard** (weekly supply-chain hygiene score, published to the public OpenSSF registry), and **Zizmor** (static analyzer for the workflow files themselves).
+- Per-source webhook secrets (`plexWebhookSecret`, `jellyfinWebhookSecret`, `radarrWebhookSecret`, `sonarrWebhookSecret`) with a legacy `webhookSecret` fallback. `scripts/migrate-webhook-secrets.mjs` copies the legacy value into the four new keys on first run.
+- New `EmptyState` component used across browse, upcoming, top, and popular grids. Distinguishes TMDB config errors from filtered-empty cases and offers contextual CTAs ("Clear filters", "Switch to Most Played").
+
+**Changed**
+
+- a11y / mobile: aria-labels on 11 icon-only buttons (issue actions, activity history, filter bars, user-list filters, fix-match, user-table close); touch targets bumped to h-9 on push-device revoke, settings cron run, and settings clear-cache / cancel buttons; "This device" badge in auth-sessions made solid indigo + checkmark.
+- Native `window.confirm` replaced with inline confirmations for admin vote dismiss, session revoke, push-device removal, user delete + revoke-all-sessions, issue take-over, and TRaSH spec "Forget".
+- Visual contrast: activity-calendar empty cells use `--ds-bg-3`, active cells alpha range bumped to 0.45–1.0 for dark-mode legibility (legend included). `requests` AVAILABLE chip retoned to match the admin list. media-card corner badge drops the duplicate IMDb chip and shows the TMDB community score with a star icon instead. admin section card border radius normalized.
+
+**Fixed**
+
+- **Concurrency / correctness pass.** Jellyfin sync no longer wipes `TVEpisodeCache` on each `recentOnly` pass — delete is now scoped to recent `tmdbId`s. Admin PATCH to AVAILABLE uses an atomic `notifiedAvailable` CAS so users can't get two "now available" notifications when the sync orchestrator races the admin button. Radarr/Sonarr cache refresh hoisted ahead of the revert pass and gated on per-source success flags — a transient ARR outage no longer mass-demotes AVAILABLE → APPROVED. Plex and Jellyfin sync stop re-stamping `availableAt` on already-notified rows every tick.
+- **Security audit batch** (31 findings). Webhook + interactions handlers reject oversized bodies via `Content-Length` pre-check; async `pbkdf2` and per-IP rate limit on the unauthenticated `setup/import` path; same-origin check on the admin-session branch of `isCronAuthorized` so cookie-based cron triggers can't be CSRF'd; Prisma extension forbids `setting.updateMany` with `value`; Jellyfin history cron pins `MediaServerUser.serverMachineId`; advisory lock gains optional `AbortSignal`; per-IP rate limit on the Plex login provider; SSRF-policy check on admin-configured SMTP host before constructing the nodemailer transport. Plus hydration fixes (guardrail 16) in three components and the activity calendar, BIGINT-cast regex guards on three admin warm routes, HMAC of the Plex token cache key, consistent Discord markdown escaping, and per-user scoping of the Discord search cache.
+- **Dependency advisories cleared.** Next.js → 16.2.6 (resolves 13 GHSAs incl. proxy bypass, RSC cache poisoning, image-optimization DoS), react/react-dom → 19.2.6, resend → 6.12.3, tailwind-merge → 3.6.0, `github/codeql-action` → 4.35.4.
+- **Docker base image.** Pin to `node:25.9.0-alpine3.23`, clearing 15 advisories including CVE-2026-21636 (critical) and CVE-2025-55130 (critical) that the previous floating `node:25-alpine3.21` tag was resolving to.
+- `global-error.tsx` imports `globals.css` and uses `--ds-*` tokens so unrecoverable error pages adapt to light mode.
+- `activity-history-table` surfaces fetch errors with a red error row + Retry button instead of silently swallowing them; `AbortError` is still ignored.
+- `tmdb-core-sync` `$transaction` now passes `{ timeout: BATCH_TX_TIMEOUT }`.
+- `fix-match` route: 50 success-progress logs deleted; 14 wrapper logs converted to direct `console.warn/error` with `[fix-match]` prefix per guardrail 7.
+- Sonarr + Radarr webhook routes no longer log the "configure Authorization header instead" warning. Per guardrail 2, those services' webhook UIs have no header field — `?token=` is the only upstream-supported option, so the warning was pure noise.
+
 ### v0.10.0
 
 **Added**
@@ -254,7 +280,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.10.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.10.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
