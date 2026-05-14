@@ -1,0 +1,42 @@
+name: Dependency Review
+
+# Blocks PRs that introduce new vulnerable dependencies or restricted
+# licenses before they merge. Dependabot reacts after a CVE is published
+# against an installed version; this acts at PR time on the diff itself,
+# so a brand-new dep with an existing advisory can't slip in.
+#
+# PR-only — the action diffs base..head and has no meaning on push.
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Posts a summary comment on the PR with the findings table.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Block on high+ severity advisories; lower noise is handled
+          # by the weekly Trivy fs scan and Dependabot.
+          fail-on-severity: high
+          # Comment a summary on the PR. The job still fails on findings
+          # regardless of the comment, so this is purely informational.
+          comment-summary-in-pr: on-failure
