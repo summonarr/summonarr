@@ -2,9 +2,16 @@
 
 import { Fragment, useState } from "react";
 import Link from "next/link";
-import { Card } from "@/components/ui/card";
-import { Film, Tv2, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import {
+  ActivityCard,
+  Avatar,
+  MethodPill,
+  ProgressTrack,
+  methodLabel,
+  sourceDotColor,
+} from "@/components/admin/activity-ui";
 
 export interface RecentPlay {
   id: string;
@@ -60,7 +67,6 @@ function formatRelativeTime(dateStr: string): string {
 
 function formatBitrate(raw: number | null): string {
   if (!raw || raw <= 0) return "—";
-
   const kbps = raw > 100000 ? raw / 1000 : raw;
   if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
   return `${Math.round(kbps)} kbps`;
@@ -71,97 +77,73 @@ function formatTimestamp(dateStr: string | null): string {
   return new Date(dateStr).toLocaleString();
 }
 
-function MediaLink({
-  tmdbId,
-  mediaType,
-  title,
-}: {
-  tmdbId: number | null;
-  mediaType: string | null;
-  title: string;
-}) {
-  if (tmdbId && mediaType) {
-    const href = mediaType === "TV" ? `/tv/${tmdbId}` : `/movie/${tmdbId}`;
-    return (
-      <Link
-        href={href}
-        className="text-white hover:text-indigo-400 transition-colors truncate max-w-[250px] block"
-      >
-        {title}
-      </Link>
-    );
-  }
-  return <span className="text-white truncate max-w-[250px] block">{title}</span>;
-}
-
-function StreamBadge({ method }: { method: string | null }) {
-  if (!method) return <span className="text-zinc-600">—</span>;
-  const color =
-    method === "Transcode"
-      ? "text-orange-400"
-      : method === "DirectPlay"
-        ? "text-green-500"
-        : "text-blue-400";
-  return (
-    <span className={color}>
-      {method === "DirectPlay" ? "Direct" : method === "DirectStream" ? "Remux" : method}
-    </span>
-  );
-}
+const TH: React.CSSProperties = {
+  textAlign: "left",
+  padding: "9px 14px",
+  fontSize: 9.5,
+  fontWeight: 500,
+  color: "var(--ds-fg-disabled)",
+  letterSpacing: "0.08em",
+  borderBottom: "1px solid var(--ds-border)",
+  whiteSpace: "nowrap",
+};
+const TD: React.CSSProperties = {
+  padding: "10px 14px",
+  color: "var(--ds-fg-muted)",
+  verticalAlign: "middle",
+};
 
 function DetailRow({ play }: { play: RecentPlay }) {
+  const cells: [string, string][] = [
+    ["Device", play.device ?? "—"],
+    ["IP Address", play.ipAddress ?? "—"],
+    ["Container", play.container?.toUpperCase() ?? "—"],
+    ["Bitrate", formatBitrate(play.bitrate)],
+    ["Video Decision", play.videoDecision ?? "—"],
+    ["Audio Decision", play.audioDecision ?? "—"],
+    ["Audio Codec", play.audioCodec?.toUpperCase() ?? "—"],
+    [
+      "Paused",
+      play.pausedDuration ? formatDuration(play.pausedDuration) : "—",
+    ],
+    ["Started", formatTimestamp(play.startedAt)],
+    ["Stopped", formatTimestamp(play.stoppedAt)],
+    ["Total Duration", formatDuration(play.duration)],
+    ["Actual Watch Time", formatDuration(play.playDuration)],
+  ];
   return (
-    <tr className="bg-zinc-800/30">
-      <td colSpan={7} className="px-4 py-3">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-2 text-xs">
-          <div>
-            <span className="text-zinc-500">Device</span>
-            <p className="text-zinc-300">{play.device ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">IP Address</span>
-            <p className="text-zinc-300 tabular-nums">{play.ipAddress ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Container</span>
-            <p className="text-zinc-300">{play.container ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Bitrate</span>
-            <p className="text-zinc-300">{formatBitrate(play.bitrate)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Video Decision</span>
-            <p className="text-zinc-300">{play.videoDecision ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Audio Decision</span>
-            <p className="text-zinc-300">{play.audioDecision ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Audio Codec</span>
-            <p className="text-zinc-300">{play.audioCodec?.toUpperCase() ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Paused Duration</span>
-            <p className="text-zinc-300">{play.pausedDuration ? formatDuration(play.pausedDuration) : "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Started</span>
-            <p className="text-zinc-300">{formatTimestamp(play.startedAt)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Stopped</span>
-            <p className="text-zinc-300">{formatTimestamp(play.stoppedAt)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Total Duration</span>
-            <p className="text-zinc-300">{formatDuration(play.duration)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Actual Watch Time</span>
-            <p className="text-zinc-300">{formatDuration(play.playDuration)}</p>
-          </div>
+    <tr style={{ background: "var(--ds-bg-1)" }}>
+      <td colSpan={8} style={{ padding: "14px 18px" }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+            gap: "10px 24px",
+          }}
+        >
+          {cells.map(([k, v]) => (
+            <div key={k}>
+              <span
+                className="ds-mono uppercase"
+                style={{
+                  fontSize: 9,
+                  color: "var(--ds-fg-disabled)",
+                  letterSpacing: "0.08em",
+                }}
+              >
+                {k}
+              </span>
+              <p
+                style={{
+                  margin: "2px 0 0",
+                  fontSize: 12,
+                  color: "var(--ds-fg-muted)",
+                }}
+              >
+                {v}
+              </p>
+            </div>
+          ))}
         </div>
       </td>
     </tr>
@@ -196,44 +178,52 @@ export function ActivityRecentPlays({
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
       if (days) {
-        const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+        const startDate = new Date(
+          Date.now() - days * 24 * 60 * 60 * 1000,
+        ).toISOString();
         filterParams.set("startDate", startDate);
       }
       const res = await fetch(`/api/play-history?${filterParams.toString()}`);
       if (!res.ok) return;
       const data = await res.json();
-      const items: RecentPlay[] = data.items.map((p: Record<string, unknown>) => ({
-        id: p.id,
-        source: p.source,
-        title: p.title,
-        tmdbId: p.tmdbId,
-        mediaType: p.mediaType,
-        startedAt: p.startedAt,
-        stoppedAt: p.stoppedAt,
-        duration: p.duration,
-        playDuration: p.playDuration,
-        pausedDuration: p.pausedDuration,
-        watched: p.watched,
-        platform: p.platform,
-        player: p.player,
-        device: p.device,
-        ipAddress: p.ipAddress,
-        playMethod: p.playMethod,
-        resolution: p.resolution,
-        videoCodec: p.videoCodec,
-        audioCodec: p.audioCodec,
-        bitrate: p.bitrate,
-        container: p.container,
-        videoDecision: p.videoDecision,
-        audioDecision: p.audioDecision,
-        seasonNumber: p.seasonNumber,
-        episodeNumber: p.episodeNumber,
-        episodeTitle: p.episodeTitle,
-        mediaServerUserId: p.mediaServerUserId,
-        username: (p.mediaServerUser as Record<string, unknown>)?.username ?? "Unknown",
-        userSource: (p.mediaServerUser as Record<string, unknown>)?.source ?? "",
-        userThumb: (p.mediaServerUser as Record<string, unknown>)?.thumbUrl ?? null,
-      }));
+      const items: RecentPlay[] = data.items.map(
+        (p: Record<string, unknown>) => ({
+          id: p.id,
+          source: p.source,
+          title: p.title,
+          tmdbId: p.tmdbId,
+          mediaType: p.mediaType,
+          startedAt: p.startedAt,
+          stoppedAt: p.stoppedAt,
+          duration: p.duration,
+          playDuration: p.playDuration,
+          pausedDuration: p.pausedDuration,
+          watched: p.watched,
+          platform: p.platform,
+          player: p.player,
+          device: p.device,
+          ipAddress: p.ipAddress,
+          playMethod: p.playMethod,
+          resolution: p.resolution,
+          videoCodec: p.videoCodec,
+          audioCodec: p.audioCodec,
+          bitrate: p.bitrate,
+          container: p.container,
+          videoDecision: p.videoDecision,
+          audioDecision: p.audioDecision,
+          seasonNumber: p.seasonNumber,
+          episodeNumber: p.episodeNumber,
+          episodeTitle: p.episodeTitle,
+          mediaServerUserId: p.mediaServerUserId,
+          username:
+            (p.mediaServerUser as Record<string, unknown>)?.username ??
+            "Unknown",
+          userSource:
+            (p.mediaServerUser as Record<string, unknown>)?.source ?? "",
+          userThumb:
+            (p.mediaServerUser as Record<string, unknown>)?.thumbUrl ?? null,
+        }),
+      );
       setPlays((prev) => [...prev, ...items]);
       setPage(nextPage);
       setHasMore(items.length >= 20);
@@ -242,134 +232,349 @@ export function ActivityRecentPlays({
     }
   };
 
-  if (plays.length === 0) {
-    return (
-      <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-        <h2 className="font-semibold text-white mb-4">Recent Plays</h2>
-        <p className="text-zinc-500 text-sm">No play history recorded yet</p>
-      </Card>
-    );
-  }
-
   return (
-    <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-      <h2 className="font-semibold text-white mb-4">Recent Plays</h2>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800">
-              <th className="text-left py-2 pr-2 w-6"></th>
-              <th className="text-left py-2 pr-4">Media</th>
-              <th className="text-left py-2 pr-4">User</th>
-              <th className="text-left py-2 pr-4">Source</th>
-              <th className="text-left py-2 pr-4">Quality</th>
-              <th className="text-right py-2 pr-4">Duration</th>
-              <th className="text-right py-2">When</th>
-            </tr>
-          </thead>
-          <tbody>
-            {plays.map((p) => {
-              const isExpanded = expandedId === p.id;
-              const qualityParts: string[] = [];
-              if (p.resolution) qualityParts.push(p.resolution);
-              if (p.videoCodec) qualityParts.push(p.videoCodec.toUpperCase());
-              const qualityStr = qualityParts.length > 0 ? qualityParts.join(" · ") : null;
-
-              return (
-                <Fragment key={p.id}>
-                  <tr
-                    className="border-b border-zinc-800/50 hover:bg-zinc-800/30 cursor-pointer"
-                    onClick={() => setExpandedId(isExpanded ? null : p.id)}
-                  >
-                    <td className="py-2.5 pr-2 text-zinc-500">
-                      {isExpanded ? (
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5" />
-                      )}
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <div className="flex items-center gap-2">
-                        {p.mediaType === "TV" ? (
-                          <Tv2 className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                        ) : (
-                          <Film className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                        )}
-                        <MediaLink tmdbId={p.tmdbId} mediaType={p.mediaType} title={p.title} />
-                        {p.mediaType === "TV" && p.seasonNumber != null && (
-                          <span className="text-zinc-500 text-xs shrink-0">
-                            S{String(p.seasonNumber).padStart(2, "0")}
-                            E{String(p.episodeNumber ?? 0).padStart(2, "0")}
-                          </span>
-                        )}
-                        {p.watched && (
-                          <span className="text-[10px] bg-green-600/20 text-green-400 px-1.5 py-0.5 rounded shrink-0">
-                            watched
-                          </span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <Link
-                        href={`/admin/activity/user/${p.mediaServerUserId}`}
-                        className="text-zinc-300 hover:text-indigo-400 transition-colors"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {p.username}
-                      </Link>
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <span
-                        className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                          p.source === "plex"
-                            ? "bg-amber-500/15 text-amber-400"
-                            : "bg-purple-500/15 text-purple-400"
-                        }`}
-                      >
-                        {p.source === "plex" ? "Plex" : "Jellyfin"}
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <div className="flex items-center gap-2">
-                        <StreamBadge method={p.playMethod} />
-                        {qualityStr && (
-                          <span className="text-zinc-600 text-xs">{qualityStr}</span>
-                        )}
-                      </div>
-                    </td>
-                    <td className="py-2.5 pr-4 text-right text-zinc-400 tabular-nums">
-                      {formatDuration(p.playDuration)}
-                    </td>
-                    <td className="py-2.5 text-right text-zinc-500">
-                      {mounted ? formatRelativeTime(p.startedAt) : ""}
-                    </td>
-                  </tr>
-                  {isExpanded && <DetailRow play={p} />}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {hasMore && (
-        <div className="flex justify-center mt-4">
-          <button
-            onClick={loadMore}
-            disabled={loading}
-            className="flex items-center gap-2 px-4 py-2 text-sm text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors disabled:opacity-50"
+    <section style={{ marginBottom: 22 }}>
+      <ActivityCard style={{ padding: 0, overflow: "hidden" }}>
+        <div
+          style={{
+            padding: "16px 18px 12px",
+            display: "flex",
+            alignItems: "baseline",
+            justifyContent: "space-between",
+            borderBottom: "1px solid var(--ds-border)",
+            gap: 12,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 12,
+              minWidth: 0,
+            }}
           >
-            {loading ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Loading...
-              </>
-            ) : (
-              "Load More"
-            )}
-          </button>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: 13,
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                color: "var(--ds-fg)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Recent plays
+            </h2>
+            <span
+              className="ds-mono"
+              style={{
+                fontSize: 11,
+                color: "var(--ds-fg-subtle)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              last {plays.length} sessions
+            </span>
+          </div>
+          <Link
+            href="/admin/activity?tab=history"
+            className="ds-mono"
+            style={{
+              fontSize: 11,
+              color: "var(--ds-fg-muted)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            View history →
+          </Link>
         </div>
-      )}
-    </Card>
+
+        {plays.length === 0 ? (
+          <p
+            style={{
+              padding: "28px 18px",
+              margin: 0,
+              color: "var(--ds-fg-subtle)",
+              fontSize: 13,
+              textAlign: "center",
+            }}
+          >
+            No play history recorded yet
+          </p>
+        ) : (
+          <div className="resp-table-scroll">
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: 12.5,
+              }}
+            >
+              <thead>
+                <tr style={{ background: "var(--ds-bg-1)" }}>
+                  <th
+                    className="ds-mono uppercase"
+                    style={{ ...TH, width: 26 }}
+                  />
+                  {["User", "Title", "Started", "Duration", "Stream", "Quality", ""].map(
+                    (h, i) => (
+                      <th
+                        key={i}
+                        className="ds-mono uppercase"
+                        style={{
+                          ...TH,
+                          textAlign: h === "" ? "right" : "left",
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ),
+                  )}
+                </tr>
+              </thead>
+              <tbody>
+                {plays.map((p, i) => {
+                  const isExpanded = expandedId === p.id;
+                  const m = methodLabel(
+                    p.playMethod,
+                    p.videoDecision,
+                    p.audioDecision,
+                  );
+                  const pct =
+                    p.duration > 0
+                      ? Math.min(
+                          100,
+                          Math.round((p.playDuration / p.duration) * 100),
+                        )
+                      : p.watched
+                        ? 100
+                        : 0;
+                  const isTV = p.mediaType === "TV";
+                  const mediaHref =
+                    p.tmdbId && p.mediaType
+                      ? isTV
+                        ? `/tv/${p.tmdbId}`
+                        : `/movie/${p.tmdbId}`
+                      : null;
+                  const sub = isTV
+                    ? [
+                        p.seasonNumber != null
+                          ? `S${String(p.seasonNumber).padStart(2, "0")}`
+                          : null,
+                        p.episodeNumber != null
+                          ? `E${String(p.episodeNumber).padStart(2, "0")}`
+                          : null,
+                        p.episodeTitle,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")
+                    : "Movie";
+                  return (
+                    <Fragment key={p.id}>
+                      <tr
+                        className="recent-row"
+                        onClick={() =>
+                          setExpandedId(isExpanded ? null : p.id)
+                        }
+                        style={{
+                          borderBottom:
+                            i < plays.length - 1
+                              ? "1px solid var(--ds-border)"
+                              : "none",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <td style={{ ...TD, color: "var(--ds-fg-disabled)" }}>
+                          {isExpanded ? (
+                            <ChevronDown style={{ width: 14, height: 14 }} />
+                          ) : (
+                            <ChevronRight style={{ width: 14, height: 14 }} />
+                          )}
+                        </td>
+                        <td style={TD}>
+                          <Link
+                            href={`/admin/activity/user/${p.mediaServerUserId}`}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 8,
+                              color: "var(--ds-fg)",
+                              textDecoration: "none",
+                            }}
+                          >
+                            <Avatar
+                              letter={(p.username[0] ?? "?").toUpperCase()}
+                              size={20}
+                            />
+                            <span>{p.username}</span>
+                            <span
+                              style={{
+                                width: 4,
+                                height: 4,
+                                borderRadius: 999,
+                                background: sourceDotColor(p.source),
+                              }}
+                            />
+                          </Link>
+                        </td>
+                        <td style={{ ...TD, maxWidth: 320 }}>
+                          <div
+                            style={{
+                              color: "var(--ds-fg)",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {mediaHref ? (
+                              <Link
+                                href={mediaHref}
+                                onClick={(e) => e.stopPropagation()}
+                                style={{
+                                  color: "inherit",
+                                  textDecoration: "none",
+                                }}
+                              >
+                                {p.title}
+                              </Link>
+                            ) : (
+                              p.title
+                            )}
+                          </div>
+                          <div
+                            className="ds-mono"
+                            style={{
+                              fontSize: 10.5,
+                              color: "var(--ds-fg-disabled)",
+                              marginTop: 1,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {sub}
+                          </div>
+                        </td>
+                        <td
+                          className="ds-mono"
+                          style={{
+                            ...TD,
+                            fontVariantNumeric: "tabular-nums",
+                          }}
+                        >
+                          {mounted ? formatRelativeTime(p.startedAt) : ""}
+                        </td>
+                        <td
+                          className="ds-mono"
+                          style={{
+                            ...TD,
+                            fontVariantNumeric: "tabular-nums",
+                          }}
+                        >
+                          {formatDuration(p.playDuration)}
+                        </td>
+                        <td style={TD}>
+                          <MethodPill method={m.label} methodClass={m.cls} />
+                        </td>
+                        <td className="ds-mono" style={TD}>
+                          {[p.resolution, p.videoCodec?.toUpperCase()]
+                            .filter(Boolean)
+                            .join(" · ") || "—"}
+                        </td>
+                        <td
+                          style={{
+                            ...TD,
+                            textAlign: "right",
+                            width: 140,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 6,
+                            }}
+                          >
+                            <div style={{ width: 60 }}>
+                              <ProgressTrack
+                                pct={pct / 100}
+                                height={3}
+                                color={
+                                  p.watched
+                                    ? "var(--ds-success)"
+                                    : "var(--ds-accent)"
+                                }
+                              />
+                            </div>
+                            <span
+                              className="ds-mono"
+                              style={{
+                                fontSize: 10.5,
+                                color: p.watched
+                                  ? "var(--ds-success)"
+                                  : "var(--ds-fg-subtle)",
+                                width: 32,
+                                textAlign: "right",
+                                fontVariantNumeric: "tabular-nums",
+                              }}
+                            >
+                              {pct}%
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && <DetailRow play={p} />}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {hasMore && (
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              padding: "14px 0 18px",
+            }}
+          >
+            <button
+              onClick={loadMore}
+              disabled={loading}
+              className="ds-mono"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 11.5,
+                padding: "6px 14px",
+                borderRadius: 6,
+                background: "var(--ds-bg-3)",
+                border: "1px solid var(--ds-border)",
+                color: "var(--ds-fg-muted)",
+                cursor: loading ? "default" : "pointer",
+                opacity: loading ? 0.5 : 1,
+              }}
+            >
+              {loading ? (
+                <>
+                  <Loader2
+                    style={{ width: 14, height: 14 }}
+                    className="animate-spin"
+                  />
+                  Loading…
+                </>
+              ) : (
+                "Load more"
+              )}
+            </button>
+          </div>
+        )}
+      </ActivityCard>
+    </section>
   );
 }

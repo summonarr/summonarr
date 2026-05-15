@@ -1,15 +1,19 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import Link from "next/link";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar } from "@/lib/play-history";
-import { PageHeader, BarChart } from "@/components/ui/design";
+import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
-import { ActivityCharts } from "@/components/admin/activity-charts";
+import {
+  KpiStrip,
+  AnalyticsRow,
+  Leaderboards,
+  CalendarSection,
+  type Kpi,
+} from "@/components/admin/activity-sections";
 import { ActivityRecentPlays } from "@/components/admin/activity-recent-plays";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ActivityHistoryTable } from "@/components/admin/activity-history-table";
-import { ActivityLeaderboard } from "@/components/admin/activity-leaderboard";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
@@ -18,56 +22,29 @@ import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
-function TrendBadge({ current, previous }: { current: number; previous: number }) {
+// Period-over-period delta for a KPI cell. Mirrors the old TrendBadge logic
+// so the redesigned strip keeps the same up/down/new semantics.
+function kpiDelta(
+  current: number,
+  previous: number,
+): Kpi["delta"] {
   if (previous === 0 && current === 0) return null;
-  if (previous === 0)
-    return (
-      <span
-        className="ds-mono"
-        style={{ fontSize: 11, color: "var(--ds-success)", marginLeft: 4 }}
-      >
-        new
-      </span>
-    );
+  if (previous === 0) return { text: "new", dir: "up" };
   const pct = Math.round(((current - previous) / previous) * 100);
-  if (pct === 0) return null;
-  return (
-    <span
-      className="ds-mono"
-      style={{
-        fontSize: 11,
-        marginLeft: 4,
-        color: pct > 0 ? "var(--ds-success)" : "var(--ds-danger)",
-      }}
-    >
-      {pct > 0 ? "↑" : "↓"}
-      {Math.abs(pct)}%
-    </span>
-  );
+  if (pct === 0) return { text: "0%", dir: "flat" };
+  return { text: `${Math.abs(pct)}%`, dir: pct > 0 ? "up" : "down" };
 }
 
-const activityCardStyle: React.CSSProperties = {
-  padding: 14,
-  background: "var(--ds-bg-2)",
-  border: "1px solid var(--ds-border)",
-  borderRadius: 8,
-};
-const activityCardLabel =
-  "ds-mono uppercase";
-const activityCardLabelStyle: React.CSSProperties = {
-  fontSize: 10.5,
-  color: "var(--ds-fg-subtle)",
-  letterSpacing: "0.08em",
-  margin: "0 0 4px",
-};
-const activityCardValueStyle: React.CSSProperties = {
-  fontSize: 22,
-  fontWeight: 600,
-  letterSpacing: "-0.02em",
-  color: "var(--ds-fg)",
-  fontVariantNumeric: "tabular-nums",
-  margin: 0,
-};
+// Deterministic from a fixed YYYY-MM-DD string — not Date.now()/new Date()
+// in a client render path, so this is safe in the server component.
+function shortDay(day: string): string {
+  return new Date(`${day}T00:00:00`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+const HEATMAP_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export default async function ActivityPage({
   searchParams,
@@ -391,6 +368,153 @@ export default async function ActivityPage({
   const prevPlaysNum = Number(prevPlays[0]?.count ?? 0);
   const prevWatchTimeNum = Math.round(Number(prevWatchTime[0]?.hours ?? 0) * 10) / 10;
 
+  /* ── Derived props for the refined overview sections ──────────── */
+
+  const watchHoursNd = Math.round(Number(totalWatchTimeNd[0]?.hours ?? 0));
+  const activeUsersNd = Number(uniqueUsersNd[0]?.count ?? 0);
+  const busiestDay = mostActiveDay[0];
+
+  const kpis: Kpi[] = [
+    {
+      label: `${days}-day plays`,
+      value: stats.totalPlays.toLocaleString(),
+      delta: kpiDelta(stats.totalPlays, prevPlaysNum),
+      spark: stats.playsByDay.map((d) => d.count),
+    },
+    {
+      label: "Watch time",
+      value: `${watchHoursNd.toLocaleString()}h`,
+      delta: kpiDelta(watchHoursNd, Math.round(prevWatchTimeNum)),
+      spark: stats.watchTimeByDay.map((d) => d.hours),
+    },
+    {
+      label: "Active users",
+      value: activeUsersNd.toLocaleString(),
+      delta: kpiDelta(activeUsersNd, stats.prevPeriod?.uniqueViewers ?? 0),
+    },
+    {
+      label: "Completion rate",
+      value: `${stats.completionRate}%`,
+    },
+    {
+      label: "Busiest day",
+      value: busiestDay?.day ? shortDay(busiestDay.day) : "—",
+      sub: busiestDay?.day
+        ? `${Number(busiestDay.count).toLocaleString()} plays`
+        : undefined,
+    },
+    {
+      label: "Bandwidth",
+      value: stats.avgBitrateMbps > 0 ? `${stats.avgBitrateMbps} Mbps` : "—",
+      sub:
+        stats.totalBandwidthGB >= 1000
+          ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB total`
+          : `${stats.totalBandwidthGB} GB total`,
+    },
+  ];
+
+  // Postgres EXTRACT(DOW) is 0=Sun..6=Sat; the design heatmap rows are
+  // Mon-first, so dow d maps to row (d + 6) % 7.
+  const heatmapMatrix = Array.from({ length: 7 }, () =>
+    new Array<number>(24).fill(0),
+  );
+  for (const cell of stats.heatmap) {
+    if (cell.dow >= 0 && cell.dow < 7 && cell.hour >= 0 && cell.hour < 24) {
+      heatmapMatrix[(cell.dow + 6) % 7][cell.hour] = cell.count;
+    }
+  }
+  let peakRow = -1;
+  let peakHour = -1;
+  let peakVal = 0;
+  heatmapMatrix.forEach((row, ri) =>
+    row.forEach((v, hi) => {
+      if (v > peakVal) {
+        peakVal = v;
+        peakRow = ri;
+        peakHour = hi;
+      }
+    }),
+  );
+  const heatmapInsight =
+    peakVal > 0
+      ? `${HEATMAP_DAYS[peakRow]} ${peakHour}:00 is the busiest hour — ${peakVal.toLocaleString()} plays.`
+      : "Not enough play history yet to surface a peak hour.";
+
+  const STREAM_LABELS: Record<string, { label: string; color: string }> = {
+    DirectPlay: { label: "Direct Play", color: "var(--ds-success)" },
+    DirectStream: { label: "Remux", color: "var(--ds-info)" },
+    Transcode: { label: "Transcode", color: "var(--ds-warning)" },
+  };
+  const streamTotal = stats.transcodeRatio.reduce((a, r) => a + r.count, 0);
+  const streamMix = [...stats.transcodeRatio]
+    .sort((a, b) => b.count - a.count)
+    .map((r) => ({
+      label: STREAM_LABELS[r.method]?.label ?? r.method,
+      color: STREAM_LABELS[r.method]?.color ?? "var(--ds-fg-subtle)",
+      value: r.count.toLocaleString(),
+      pct: streamTotal > 0 ? Math.round((r.count / streamTotal) * 100) : 0,
+    }));
+
+  const mediaTotal = stats.mediaTypeBreakdown.reduce((a, r) => a + r.count, 0);
+  const mediaMix = [...stats.mediaTypeBreakdown]
+    .sort((a, b) => b.count - a.count)
+    .map((r) => ({
+      label:
+        r.type === "TV"
+          ? "TV episodes"
+          : r.type === "MOVIE"
+            ? "Movies"
+            : r.type,
+      color: r.type === "TV" ? "var(--ds-accent)" : "oklch(0.72 0.10 275)",
+      value: r.count.toLocaleString(),
+      pct: mediaTotal > 0 ? Math.round((r.count / mediaTotal) * 100) : 0,
+    }));
+
+  const axisLabels: string[] = [];
+  if (stats.playsByDay.length > 1) {
+    const n = stats.playsByDay.length;
+    for (let i = 0; i < 5; i++) {
+      const idx = Math.round((i / 4) * (n - 1));
+      axisLabels.push(shortDay(stats.playsByDay[idx].day));
+    }
+  }
+  const peakSub = busiestDay?.day
+    ? `peak ${Number(busiestDay.count).toLocaleString()} on ${shortDay(busiestDay.day)}`
+    : "";
+
+  let totalCalPlays = 0;
+  let activeDays = 0;
+  let longestStreak = 0;
+  let curStreak = 0;
+  for (const d of calendarData) {
+    totalCalPlays += d.count;
+    if (d.count > 0) {
+      activeDays++;
+      curStreak++;
+      if (curStreak > longestStreak) longestStreak = curStreak;
+    } else {
+      curStreak = 0;
+    }
+  }
+
+  const playsById = new Map(stats.topUsers.map((u) => [u.id, u.count]));
+  const leaderUsers = watchTimeLeaderboard.slice(0, 8).map((u, i) => ({
+    id: u.id,
+    username: u.username,
+    source: u.source,
+    hours: u.hours ?? 0,
+    plays: playsById.get(u.id) ?? 0,
+    rank: i + 1,
+  }));
+  const leaderRewatched = mostRewatched.slice(0, 6).map((m, i) => ({
+    tmdbId: m.tmdbId,
+    mediaType: m.mediaType,
+    title: m.title,
+    plays: m.plays,
+    viewers: m.viewers,
+    rank: i + 1,
+  }));
+
   return (
     <div className="ds-page-enter">
       <ActivityLiveRefresher />
@@ -411,255 +535,36 @@ export default async function ActivityPage({
         />
       )}
 
-      <div
-        className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6"
-        style={{ gap: 10, marginBottom: 24 }}
-      >
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            {days}-Day Plays
-          </p>
-          <div className="flex items-baseline gap-1">
-            <p style={activityCardValueStyle}>{stats.totalPlays}</p>
-            <TrendBadge current={stats.totalPlays} previous={prevPlaysNum} />
-          </div>
-          <div style={{ marginTop: 4 }}>
-            <BarChart
-              data={stats.playsByDay.map(
-                (d: (typeof stats.playsByDay)[0]) => d.count,
-              )}
-              height={24}
-            />
-          </div>
-        </div>
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            {days}-Day Watch Time
-          </p>
-          <div className="flex items-baseline gap-1">
-            <p style={activityCardValueStyle}>
-              {Math.round(Number(totalWatchTimeNd[0]?.hours ?? 0))}h
-            </p>
-            <TrendBadge
-              current={Math.round(Number(totalWatchTimeNd[0]?.hours ?? 0))}
-              previous={Math.round(prevWatchTimeNum)}
-            />
-          </div>
-          <div style={{ marginTop: 4 }}>
-            <BarChart
-              data={stats.watchTimeByDay.map(
-                (d: (typeof stats.watchTimeByDay)[0]) => d.hours,
-              )}
-              height={24}
-            />
-          </div>
-        </div>
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            Active Users
-          </p>
-          <p style={activityCardValueStyle}>
-            {Number(uniqueUsersNd[0]?.count ?? 0)}
-          </p>
-        </div>
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            Completion Rate
-          </p>
-          <p style={activityCardValueStyle}>{stats.completionRate}%</p>
-        </div>
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            Busiest Day
-          </p>
-          <p
-            style={{
-              ...activityCardValueStyle,
-              fontSize: 16,
-            }}
-          >
-            {mostActiveDay[0]?.day
-              ? `${new Date(mostActiveDay[0].day + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })} (${Number(mostActiveDay[0].count)})`
-              : "—"}
-          </p>
-        </div>
-        <div style={activityCardStyle}>
-          <p className={activityCardLabel} style={activityCardLabelStyle}>
-            Avg Bandwidth ({days}d)
-          </p>
-          <p style={activityCardValueStyle}>
-            {stats.avgBitrateMbps > 0 ? `${stats.avgBitrateMbps} Mbps` : "—"}
-          </p>
-          <p
-            className="ds-mono"
-            style={{
-              fontSize: 10.5,
-              color: "var(--ds-fg-subtle)",
-              marginTop: 4,
-            }}
-          >
-            {stats.totalBandwidthGB >= 1000
-              ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB total`
-              : `${stats.totalBandwidthGB} GB total`}
-          </p>
-        </div>
-      </div>
+      <KpiStrip kpis={kpis} />
 
-      <ActivityCharts stats={stats} days={days} />
+      <AnalyticsRow
+        playsByDay={stats.playsByDay.map((d) => d.count)}
+        heatmapMatrix={heatmapMatrix}
+        streamMix={streamMix}
+        mediaMix={mediaMix}
+        days={days}
+        peakSub={peakSub}
+        axisLabels={axisLabels}
+        heatmapInsight={heatmapInsight}
+      />
 
-      <div
-        className="grid grid-cols-1 lg:grid-cols-2"
-        style={{ gap: 14, marginBottom: 24 }}
-      >
-        <ActivityLeaderboard
-          byHours={watchTimeLeaderboard.map((u) => ({
-            ...u,
-            hours: u.hours ?? 0,
-          }))}
-          byPlays={stats.topUsers}
-          days={days}
-        />
-        {mostRewatched.length > 0 && (
-          <section
-            style={{
-              padding: 20,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 8,
-            }}
-          >
-            <h3
-              className="font-semibold"
-              style={{
-                fontSize: 14,
-                letterSpacing: "-0.01em",
-                color: "var(--ds-fg)",
-                margin: "0 0 12px",
-              }}
-            >
-              Most Rewatched
-            </h3>
-            <div className="flex flex-col" style={{ gap: 8 }}>
-              {mostRewatched.map((m: (typeof mostRewatched)[0], i: number) => {
-                const maxPlays = mostRewatched[0]?.plays ?? 1;
-                const href =
-                  m.mediaType === "TV"
-                    ? `/tv/${m.tmdbId}`
-                    : `/movie/${m.tmdbId}`;
-                const activityHref = `/admin/activity/media/${m.tmdbId}`;
-                return (
-                  <div
-                    key={`${m.tmdbId}-${i}`}
-                    className="flex items-center"
-                    style={{ gap: 12 }}
-                  >
-                    <span
-                      className="ds-mono text-right"
-                      style={{
-                        width: 20,
-                        fontSize: 11,
-                        color: "var(--ds-fg-disabled)",
-                      }}
-                    >
-                      {i + 1}.
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className="flex items-center justify-between"
-                        style={{ fontSize: 13, marginBottom: 2 }}
-                      >
-                        <div
-                          className="flex items-center min-w-0"
-                          style={{ gap: 8 }}
-                        >
-                          <Link
-                            href={href}
-                            className="truncate transition-colors"
-                            style={{ color: "var(--ds-fg)" }}
-                          >
-                            {m.title}
-                          </Link>
-                          <Link
-                            href={activityHref}
-                            className="ds-mono shrink-0 transition-colors"
-                            style={{
-                              fontSize: 10,
-                              color: "var(--ds-fg-subtle)",
-                            }}
-                          >
-                            activity
-                          </Link>
-                        </div>
-                        <span
-                          className="ds-mono shrink-0"
-                          style={{
-                            fontSize: 11,
-                            marginLeft: 8,
-                            color: "var(--ds-fg-muted)",
-                            fontVariantNumeric: "tabular-nums",
-                          }}
-                        >
-                          {m.plays} plays · {m.viewers} viewers
-                        </span>
-                      </div>
-                      <div
-                        className="overflow-hidden"
-                        style={{
-                          height: 5,
-                          background: "var(--ds-bg-3)",
-                          borderRadius: 999,
-                        }}
-                      >
-                        <div
-                          className="h-full"
-                          style={{
-                            width: `${maxPlays > 0 ? (m.plays / maxPlays) * 100 : 0}%`,
-                            background: "var(--ds-accent)",
-                            borderRadius: 999,
-                          }}
-                        />
-                      </div>
-                      <span
-                        className="ds-mono"
-                        style={{
-                          fontSize: 10,
-                          color: "var(--ds-fg-disabled)",
-                        }}
-                      >
-                        {m.mediaType}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-      </div>
+      <Leaderboards
+        users={leaderUsers}
+        rewatched={leaderRewatched}
+        days={days}
+      />
 
       {showActivityCalendar && calendarData.length > 0 && (
-        <section
-          style={{
-            padding: 20,
-            background: "var(--ds-bg-2)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-            marginBottom: 24,
-          }}
+        <CalendarSection
+          activeDays={activeDays}
+          longestStreak={longestStreak}
+          totalPlays={totalCalPlays}
         >
-          <h2
-            className="font-semibold"
-            style={{
-              fontSize: 14,
-              letterSpacing: "-0.01em",
-              color: "var(--ds-fg)",
-              margin: "0 0 14px",
-            }}
-          >
-            365-Day Activity
-          </h2>
-          <ActivityCalendar data={calendarData} today={new Date().toISOString()} />
-        </section>
+          <ActivityCalendar
+            data={calendarData}
+            today={new Date().toISOString()}
+          />
+        </CalendarSection>
       )}
 
       <ActivityRecentPlays

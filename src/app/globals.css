@@ -372,6 +372,48 @@
 @media (min-width: 1100px) { .ds-media-grid { grid-template-columns: repeat(5, 1fr); } }
 @media (min-width: 1400px) { .ds-media-grid { grid-template-columns: repeat(6, 1fr); } }
 
+/* Discover hero: poster column + content. Narrow poster on phones. */
+.ds-discover-hero {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 16px;
+}
+@media (min-width: 640px) {
+  .ds-discover-hero { grid-template-columns: 180px 1fr; gap: 20px; }
+}
+
+/* Activity overview — responsive grid overrides. Ported verbatim from the
+   "Activity Page" design host styles: the desktop column counts live as
+   inline `style` on the grids; these classes win via `!important` in the
+   media queries so the design's tablet/phone reflow takes over. Breakpoints
+   (1180 / 899 / 639) and the KPI-strip border bookkeeping match the design. */
+@media (max-width: 1180px) {
+  .resp-grid-3    { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .resp-analytics { grid-template-columns: 1fr !important; }
+  .resp-kpi       { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+  .resp-kpi > div:nth-child(3) { border-right: none !important; }
+  .resp-kpi > div:nth-child(-n+3) { border-bottom: 1px solid var(--ds-border) !important; }
+}
+@media (max-width: 899px) {
+  .resp-grid-2 { grid-template-columns: 1fr !important; }
+  .resp-kpi    { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .resp-kpi > div { border-right: none !important; }
+  .resp-kpi > div:nth-child(odd) { border-right: 1px solid var(--ds-border) !important; }
+  .resp-kpi > div:nth-last-child(-n+2) { border-bottom: none !important; }
+}
+@media (max-width: 639px) {
+  .resp-grid-3 { grid-template-columns: 1fr !important; }
+}
+.resp-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.resp-table-scroll > table { min-width: 760px; }
+
+/* Hover affordance for clickable leaderboard / recent-plays rows
+   (ported from the Activity Page design host styles). */
+.lb-row { transition: background 120ms var(--ds-ease); }
+.lb-row:hover { background: oklch(1 0 0 / 0.03); }
+.recent-row { transition: background 120ms var(--ds-ease); }
+.recent-row:hover { background: oklch(1 0 0 / 0.02); }
+
 .ds-stat-row {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
