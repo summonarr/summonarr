@@ -107,7 +107,7 @@ export async function PATCH(
   const VALID_TRANSITIONS: Record<string, string[]> = {
     PENDING:   ["APPROVED", "DECLINED"],
     APPROVED:  ["AVAILABLE", "DECLINED"],
-    DECLINED:  ["PENDING"],
+    DECLINED:  ["PENDING", "APPROVED"],
     AVAILABLE: [],
   };
 
@@ -126,6 +126,9 @@ export async function PATCH(
       where: { id, status: existing.status },
       data: {
         status: "APPROVED",
+        // Approving clears a prior decline; otherwise an APPROVED row keeps
+        // permanentlyDeclined=true and re-requests stay blocked (route.ts:197).
+        permanentlyDeclined: false,
         ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
         // pendingNotifyAt triggers a 90s download-check notification if the item still isn't in the queue
         pendingNotifyAt: new Date(Date.now() + 90_000),
