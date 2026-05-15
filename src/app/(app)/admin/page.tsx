@@ -1,10 +1,10 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { type RequestStatus, Prisma } from "@/generated/prisma";
-import { posterUrl } from "@/lib/tmdb";
+import { posterUrl, getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
 import { SyncButton } from "@/components/admin/request-actions";
-import { AdminRequestList, type GroupedRequestRow, type Requester } from "@/components/admin/admin-request-list";
+import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
 import { PageHeader, StatCard } from "@/components/ui/design";
 
@@ -60,7 +60,7 @@ export default async function AdminPage({
   const total = allGroups.length;
 
   const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
-  const [requests, plexItems, jellyfinItems] = pairs.length
+  const [requests, plexItems, jellyfinItems, coreItems] = pairs.length
     ? await Promise.all([
         prisma.mediaRequest.findMany({
           where: { OR: pairs, ...(statusFilter ? { status: statusFilter } : {}) },
@@ -69,11 +69,74 @@ export default async function AdminPage({
         }),
         prisma.plexLibraryItem.findMany({ where: { OR: pairs } }),
         prisma.jellyfinLibraryItem.findMany({ where: { OR: pairs } }),
+        prisma.tmdbMediaCore.findMany({ where: { OR: pairs } }),
       ])
-    : [[], [], []];
+    : [[], [], [], []];
 
   const plexSet = new Set(plexItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
+
+  const ratingsMap = new Map<string, MediaRatings>();
+
+  // 1. Serve what the database already knows (TmdbMediaCore) — no external calls.
+  const inDb = new Set<string>();
+  for (const c of coreItems) {
+    const key = `${c.tmdbId}:${c.mediaType}`;
+    inDb.add(key);
+    ratingsMap.set(key, {
+      certification: c.certification ?? null,
+      imdbId: null,
+      imdbRating: null,
+      imdbVotes: null,
+      rottenTomatoes: null,
+      rtAudienceScore: null,
+      metacritic: null,
+      traktRating: null,
+      letterboxdRating: null,
+      mdblistScore: null,
+      malRating: null,
+      rogerEbertRating: null,
+      voteAverage: c.voteAverage || null,
+    });
+  }
+
+  // 2. Not in the database and the request is pending → fetch live from TMDB
+  //    to keep the information fresh. getMovie/TVDetails caches the response
+  //    and upserts TmdbMediaCore, so the next load is served from the database.
+  const pendingKeys = new Set(
+    requests.filter((r) => r.status === "PENDING").map((r) => `${r.tmdbId}:${r.mediaType}`),
+  );
+  const staleP = pairs.filter((p) => {
+    const key = `${p.tmdbId}:${p.mediaType}`;
+    return pendingKeys.has(key) && !inDb.has(key);
+  });
+  if (staleP.length) {
+    const detailResults = await Promise.allSettled(
+      staleP.map((p) =>
+        p.mediaType === "MOVIE" ? getMovieDetails(p.tmdbId) : getTVDetails(p.tmdbId),
+      ),
+    );
+    staleP.forEach((p, i) => {
+      const res = detailResults[i];
+      if (res?.status !== "fulfilled") return;
+      const m = res.value;
+      ratingsMap.set(`${p.tmdbId}:${p.mediaType}`, {
+        certification: m.certification ?? null,
+        imdbId: m.imdbId ?? null,
+        imdbRating: m.imdbRating ?? null,
+        imdbVotes: m.imdbVotes ?? null,
+        rottenTomatoes: m.rottenTomatoes ?? null,
+        rtAudienceScore: m.rtAudienceScore ?? null,
+        metacritic: m.metacritic ?? null,
+        traktRating: m.traktRating ?? null,
+        letterboxdRating: m.letterboxdRating ?? null,
+        mdblistScore: m.mdblistScore ?? null,
+        malRating: m.malRating ?? null,
+        rogerEbertRating: m.rogerEbertRating ?? null,
+        voteAverage: m.voteAverage ?? null,
+      });
+    });
+  }
   const userCountMap = new Map(userRequestCounts.map((u) => [u.requestedBy, u._count.id]));
 
   const countFor = (status: string) =>
@@ -130,6 +193,7 @@ export default async function AdminPage({
         mediaType: primary.mediaType,
         posterUrl: posterUrl(primary.posterPath, "w342"),
         releaseYear: primary.releaseYear,
+        ratings: ratingsMap.get(`${primary.tmdbId}:${primary.mediaType}`) ?? null,
         onPlex: plexSet.has(`${primary.tmdbId}:${primary.mediaType}`),
         onJellyfin: jellyfinSet.has(`${primary.tmdbId}:${primary.mediaType}`),
         aggregateStatus,

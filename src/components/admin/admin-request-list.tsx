@@ -10,6 +10,7 @@ import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { Chip } from "@/components/ui/design";
 import type { ChipTone } from "@/components/ui/design";
+import { RatingsBar } from "@/components/media/ratings-bar";
 
 const STATUS_TONE: Record<string, ChipTone> = {
   PENDING: "pending",
@@ -30,6 +31,22 @@ export interface Requester {
   userRequestCount: number;
 }
 
+export interface MediaRatings {
+  certification: string | null;
+  imdbId: string | null;
+  imdbRating: string | null;
+  imdbVotes: string | null;
+  rottenTomatoes: string | null;
+  rtAudienceScore: string | null;
+  metacritic: string | null;
+  traktRating: string | null;
+  letterboxdRating: string | null;
+  mdblistScore: string | null;
+  malRating: string | null;
+  rogerEbertRating: string | null;
+  voteAverage: number | null;
+}
+
 export interface GroupedRequestRow {
   groupKey: string;
   tmdbId: number;
@@ -37,6 +54,7 @@ export interface GroupedRequestRow {
   mediaType: string;
   posterUrl: string | null;
   releaseYear: string | null;
+  ratings: MediaRatings | null;
   onPlex: boolean;
   onJellyfin: boolean;
   aggregateStatus: string;
@@ -430,6 +448,26 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 >
                   {group.mediaType === "MOVIE" ? "MOVIE" : "TV"}
                   {group.releaseYear ? ` · ${group.releaseYear}` : ""}
+                  {group.ratings?.certification && (
+                    <>
+                      {" · "}
+                      <span
+                        className="inline-flex items-center font-medium"
+                        style={{
+                          padding: "0 5px",
+                          borderRadius: 3,
+                          fontSize: 9.5,
+                          letterSpacing: 0.4,
+                          background: "var(--ds-bg-3)",
+                          color: "var(--ds-fg-muted)",
+                          border: "1px solid var(--ds-border)",
+                        }}
+                        title="Content rating"
+                      >
+                        {group.ratings.certification}
+                      </span>
+                    </>
+                  )}
                   {group.requesters.length > 1 && (
                     <>
                       {" · "}
@@ -439,6 +477,27 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     </>
                   )}
                 </p>
+
+                {group.ratings && (
+                  <div style={{ marginTop: 6 }}>
+                    <RatingsBar
+                      size="sm"
+                      compact
+                      imdbId={group.ratings.imdbId}
+                      imdbRating={group.ratings.imdbRating}
+                      imdbVotes={group.ratings.imdbVotes}
+                      rottenTomatoes={group.ratings.rottenTomatoes}
+                      rtAudienceScore={group.ratings.rtAudienceScore}
+                      metacritic={group.ratings.metacritic}
+                      traktRating={group.ratings.traktRating}
+                      letterboxdRating={group.ratings.letterboxdRating}
+                      mdblistScore={group.ratings.mdblistScore}
+                      malRating={group.ratings.malRating}
+                      rogerEbertRating={group.ratings.rogerEbertRating}
+                      voteAverage={group.ratings.voteAverage ?? undefined}
+                    />
+                  </div>
+                )}
 
                 <div
                   className="flex flex-col"
