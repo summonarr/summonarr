@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.10.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.10.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,17 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.10.2
+
+**Changed**
+
+- CI security hardening to clear findings raised by the v0.10.1 scan suite against `main`:
+  - `docker-publish.yml` now declares a top-level least-privilege `permissions: contents: read`; the publish job keeps its wider opt-in scopes (Scorecard `TokenPermissionsID`, HIGH).
+  - `persist-credentials: false` on the `actions/checkout` step in all seven workflows that don't push back to the repo, so a compromised later step can't exfiltrate the cached `GITHUB_TOKEN` (Zizmor `artipacked`).
+  - Dependabot now applies per-ecosystem cooldown windows (npm patch 2d / minor 5d / major 14d; github-actions 5/7/14; docker 3/5/14) so a freshly-published malicious or broken version has time to be retracted upstream before it lands in a PR. Patch windows kept short so CVE fixes still flow fast (Zizmor `dependabot-cooldown`).
+
+No runtime or application code changed in this release.
+
 ### v0.10.1
 
 **Added**
@@ -280,7 +291,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.10.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.10.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
