@@ -11,6 +11,16 @@ updates:
     labels:
       - "dependencies"
       - "npm"
+    # Delay PRs for very fresh releases so an attacker-published or
+    # accidentally-broken version has time to be yanked upstream
+    # before it lands in a PR here. Patch updates wait the least
+    # (we want CVE fixes fast); majors wait longest.
+    # (zizmor:dependabot-cooldown)
+    cooldown:
+      default-days: 5
+      semver-major-days: 14
+      semver-minor-days: 5
+      semver-patch-days: 2
     groups:
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
@@ -29,6 +39,14 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    # Action bumps are pinned-by-SHA so we re-verify each release.
+    # 7 days catches "tag was rewritten" attacks.
+    # (zizmor:dependabot-cooldown)
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 5
 
   # Docker base image bumps (node:22-alpine, postgres:17-alpine)
   - package-ecosystem: "docker"
@@ -39,3 +57,11 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    # Base-image tags occasionally regress (e.g. a node-25 minor that
+    # ships a new alpine variant). 5 days gives the community time to
+    # surface breakage. (zizmor:dependabot-cooldown)
+    cooldown:
+      default-days: 5
+      semver-major-days: 14
+      semver-minor-days: 5
+      semver-patch-days: 3

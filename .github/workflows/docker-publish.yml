@@ -24,6 +24,14 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Workflow-level default. Jobs override with the wider scopes they need
+# (packages: write, id-token: write, attestations: write for the publish
+# job). Scorecard's TokenPermissionsID flagged the missing top-level
+# block; this gives every future job that doesn't opt-in least-privilege
+# by default.
+permissions:
+  contents: read
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -50,6 +58,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Don't leave the GITHUB_TOKEN persisted in .git/config —
+          # build-push-action doesn't push back to the repo. (zizmor:artipacked)
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
