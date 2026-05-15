@@ -4,6 +4,13 @@ import { headers } from "next/headers";
 import "./globals.css";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/lib/auth";
+import { ThemeProvider } from "@/components/theme/theme-provider";
+
+// Runs before first paint: applies the user's persisted theme/accent so there
+// is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
+// Kept tiny and dependency-free; carries the CSP nonce so `strict-dynamic`
+// allows it.
+const THEME_INIT_SCRIPT = `(function(){try{var d=document.documentElement,t=localStorage.getItem("summonarr-theme"),a=localStorage.getItem("summonarr-accent");if(t==="light"||t==="dark"){d.setAttribute("data-theme",t);d.classList.toggle("dark",t==="dark");}if(a&&["indigo","amber","emerald","cyan","rose","mono"].indexOf(a)!==-1){d.setAttribute("data-accent",a);}}catch(e){}})();`;
 
 const geist = Geist({
   variable: "--font-geist-sans",
@@ -46,17 +53,32 @@ export default async function RootLayout({
   // Reading headers() opts this layout into per-request rendering, which causes
   // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
   // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
-  const _nonce = (await headers()).get("x-nonce") ?? undefined;
-  void _nonce;
+  // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
     <html
       lang="en"
       className={`${geist.variable} ${geistMono.variable} ${playfair.variable} h-full antialiased dark`}
       data-theme="dark"
       data-accent="indigo"
+      suppressHydrationWarning
     >
-      <body className="min-h-full bg-zinc-950 text-zinc-100">
-        <SessionProvider session={session}>{children}</SessionProvider>
+      <head>
+        <script
+          nonce={nonce}
+          // Sets data-theme / .dark / data-accent from localStorage before
+          // paint. suppressHydrationWarning above absorbs the resulting
+          // server/client attribute divergence on <html>.
+          dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }}
+        />
+      </head>
+      <body
+        className="min-h-full"
+        style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
+      >
+        <SessionProvider session={session}>
+          <ThemeProvider>{children}</ThemeProvider>
+        </SessionProvider>
       </body>
     </html>
   );

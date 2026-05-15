@@ -10,8 +10,8 @@ import {
   getTopRatedTV,
   type TmdbMedia,
 } from "@/lib/tmdb";
-import { MediaCard } from "@/components/media/media-card";
 import { DiscoverRow } from "@/components/media/discover-row";
+import { DiscoverHero } from "@/components/media/discover-hero";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
@@ -137,19 +137,20 @@ export default async function DiscoverPage({
           No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local to see trending content.
         </div>
       ) : (
-        <section style={{ marginBottom: 40 }}>
-          <div className="ds-media-grid">
-            {trendingItems.map((media) => (
-              <MediaCard
-                key={`${media.mediaType}-${media.id}`}
-                media={media}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                size="md"
-              />
-            ))}
-          </div>
-        </section>
+        <>
+          <DiscoverHero
+            media={trendingItems[0]}
+            showPlex={showPlex}
+            showJellyfin={showJellyfin}
+          />
+          <DiscoverRow
+            title="Trending this week"
+            subtitle={`${trendingItems.length} results`}
+            items={trendingItems.slice(1)}
+            showPlex={showPlex}
+            showJellyfin={showJellyfin}
+          />
+        </>
       )}
 
       {rails.map((rail) => (

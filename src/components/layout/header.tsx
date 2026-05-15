@@ -15,6 +15,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { signOut, useSession } from "next-auth/react";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
+import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 
@@ -449,7 +450,7 @@ export function Header() {
               </AvatarFallback>
             </Avatar>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuContent align="end" className="w-56">
             <div
               style={{
                 padding: "6px 8px",
@@ -467,6 +468,8 @@ export function Header() {
             <DropdownMenuItem onClick={() => router.push("/settings")}>
               Settings
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <AppearanceMenu />
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="text-red-400"

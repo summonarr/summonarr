@@ -13,6 +13,7 @@ import {
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
+import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import {
   Drawer,
   DrawerPortal,
@@ -140,6 +141,7 @@ export function MobileNavDrawer({
                 </span>
                 <PushNotifications />
               </div>
+              <AppearanceMenu />
               <button
                 type="button"
                 onClick={() => signOut({ callbackUrl: "/login" })}
