@@ -134,7 +134,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     variant="outline"
                     disabled={isRunning}
                     onClick={() => triggerJob(job.endpoint, job.name)}
-                    className="h-7 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1.5"
+                    className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1.5"
                   >
                     {isRunning ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Running</>

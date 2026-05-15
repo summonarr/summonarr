@@ -22,10 +22,10 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   const days: { date: string; dow: number }[] = [];
   for (let i = 364; i >= 0; i--) {
     const d = new Date(today);
-    d.setDate(d.getDate() - i);
+    d.setUTCDate(d.getUTCDate() - i);
     days.push({
       date: d.toISOString().split("T")[0],
-      dow: d.getDay(),
+      dow: d.getUTCDay(),
     });
   }
 
@@ -46,10 +46,10 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   weeks.forEach((week, wi) => {
     const firstDay = week[0];
     if (firstDay) {
-      const month = new Date(firstDay.date).getMonth();
+      const month = new Date(firstDay.date).getUTCMonth();
       if (month !== lastMonth) {
         monthLabels.push({
-          label: new Date(firstDay.date).toLocaleString("en-US", { month: "short" }),
+          label: new Date(firstDay.date).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
           weekIndex: wi,
         });
         lastMonth = month;
@@ -105,8 +105,8 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
                       style={{
                         backgroundColor:
                           day.count === 0
-                            ? "rgb(39, 39, 42)"
-                            : `rgba(99, 102, 241, ${0.25 + intensity * 0.75})`,
+                            ? "var(--ds-bg-3)"
+                            : `rgba(99, 102, 241, ${0.45 + intensity * 0.55})`,
                       }}
                       title={`${day.date}: ${day.count} plays`}
                     />
@@ -126,8 +126,8 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
                 style={{
                   backgroundColor:
                     level === 0
-                      ? "rgb(39, 39, 42)"
-                      : `rgba(99, 102, 241, ${0.25 + level * 0.75})`,
+                      ? "var(--ds-bg-3)"
+                      : `rgba(99, 102, 241, ${0.45 + level * 0.55})`,
                 }}
               />
             ))}

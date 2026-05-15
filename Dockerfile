@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:25-alpine3.21 AS deps
+FROM node:25.9.0-alpine3.23 AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.npm \
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
-FROM --platform=$BUILDPLATFORM node:25-alpine3.21 AS prisma-gen
+FROM --platform=$BUILDPLATFORM node:25.9.0-alpine3.23 AS prisma-gen
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -53,7 +53,7 @@ ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:25-alpine3.21 AS builder
+FROM node:25.9.0-alpine3.23 AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -72,7 +72,7 @@ RUN npm run build
 # Install ONLY prisma + dotenv using exact versions from the lockfile.
 # npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:25-alpine3.21 AS migrate-deps
+FROM node:25.9.0-alpine3.23 AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -99,7 +99,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm install --legacy-peer-deps --no-audit --no-fund --prefer-offline
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:25-alpine3.21 AS runner
+FROM node:25.9.0-alpine3.23 AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).

@@ -15,6 +15,7 @@ import {
 import { extractTmdbIdFromGuids } from "@/lib/plex";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
+import { checkBodySize } from "@/lib/body-size";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -55,8 +56,11 @@ interface PlexWebhookPayload {
 }
 
 export async function POST(req: NextRequest) {
-  const secretRow = await prisma.setting.findUnique({ where: { key: "webhookSecret" } });
-  const secret = secretRow?.value ?? "";
+  const [sourceRow, legacyRow] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "plexWebhookSecret" } }),
+    prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
+  ]);
+  const secret = sourceRow?.value || legacyRow?.value || "";
   if (secret.length === 0) {
     return NextResponse.json({ error: "Webhook secret not configured" }, { status: 401 });
   }
@@ -75,6 +79,9 @@ export async function POST(req: NextRequest) {
       "Configure the Authorization header instead if your webhook source supports it."
     );
   }
+
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
 

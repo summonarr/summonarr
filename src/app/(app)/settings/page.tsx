@@ -80,7 +80,8 @@ function StatusBadge({ connected, label = "Connected" }: { connected: boolean; l
 const ALL_KEYS = [
   "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId",
   "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
-  "webhookSecret", "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
+  "webhookSecret", "plexWebhookSecret", "jellyfinWebhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
+  "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
   "motdEnabled", "motdTitle", "motdBody",
@@ -719,7 +720,13 @@ export default async function SettingsPage({
                 </p>
               </div>
               <div className="space-y-6">
-                <WebhookSecretForm initialSecret={cfg.webhookSecret ? "••••••••" : ""} />
+                <WebhookSecretForm
+                  initialSecret={cfg.webhookSecret ? "••••••••" : ""}
+                  initialPlexSecret={cfg.plexWebhookSecret ? "••••••••" : ""}
+                  initialJellyfinSecret={cfg.jellyfinWebhookSecret ? "••••••••" : ""}
+                  initialSonarrSecret={cfg.sonarrWebhookSecret ? "••••••••" : ""}
+                  initialRadarrSecret={cfg.radarrWebhookSecret ? "••••••••" : ""}
+                />
                 <div className="border-t border-zinc-800 pt-5">
                   <WebhookUrls baseUrl={baseUrl} secret={cfg.webhookSecret ?? ""} />
                 </div>

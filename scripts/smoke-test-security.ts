@@ -10,7 +10,7 @@
 // framework in this project. Exits non-zero on the first failure.
 
 import { resolveToSafeUrl } from "../src/lib/ssrf";
-import { safeFetch, safeFetchTrusted, SafeFetchError } from "../src/lib/safe-fetch";
+import { safeFetchTrusted, SafeFetchError } from "../src/lib/safe-fetch";
 import { checkAndRecordWebhook, __resetWebhookReplayCacheForTests } from "../src/lib/webhook-replay";
 
 let failures = 0;
@@ -42,18 +42,18 @@ async function main() {
   await expect("rejects file:// scheme",           async () => (await resolveToSafeUrl("file:///etc/passwd")) === null);
   await expect("allows public IP literal",         async () => (await resolveToSafeUrl("http://1.1.1.1/")) !== null);
 
-  console.log("\n[smoke] safeFetch / safeFetchTrusted error reasons");
+  console.log("\n[smoke] safeFetchTrusted error reasons");
 
-  await expect("safeFetch blocks SSRF (loopback)", async () => {
+  await expect("safeFetchTrusted blocks non-allowlisted host", async () => {
     try {
-      await safeFetch("http://127.0.0.1/");
+      await safeFetchTrusted("http://127.0.0.1/", { allowedHosts: ["example.com"] });
       return false;
     } catch (err) {
       return err instanceof SafeFetchError && err.reason === "ssrf-blocked";
     }
   });
 
-  await expect("safeFetch timeout fires fast", async () => {
+  await expect("safeFetchTrusted timeout fires fast", async () => {
     // example.com:81 — closed port; should timeout via the safeFetch wrapper.
     // Use a 100ms timeout to keep the test snappy.
     const start = Date.now();

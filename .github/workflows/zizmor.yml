@@ -1,0 +1,67 @@
+name: Zizmor
+
+# Static analyzer for GitHub Actions workflow files. Catches issues
+# that CodeQL's `actions` query and Scorecard's "Dangerous-Workflow"
+# check miss in practice:
+#   - Template injection via ${{ github.event.* }} interpolation into
+#     `run:` blocks.
+#   - Missing `persist-credentials: false` on checkout in security-
+#     sensitive jobs (Scorecard, releases).
+#   - Over-broad `permissions:` defaults at the workflow or job level.
+#   - Unpinned third-party actions (we pin by SHA already; this is the
+#     enforcer).
+#
+# SARIF lands in the Security tab. Findings are advisory — Dependabot
+# bumps the actions weekly and any fix lands in a normal PR; we don't
+# want a random Zizmor rule update to red-X main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/dependabot.yml'
+  schedule:
+    # Monday 16:03 UTC — last slot in the security window so new
+    # Zizmor rule releases get picked up weekly even without workflow
+    # edits. Offset from scorecard (15:51) and codeql (15:39).
+    - cron: '3 16 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  zizmor:
+    name: Zizmor analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run Zizmor
+        uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
+        with:
+          # `regular` persona = production-ready rules only. `pedantic`
+          # and `auditor` add stylistic / theoretical findings that
+          # generate noise without buying real security.
+          persona: regular
+          # Upload SARIF to the Security tab. The action handles the
+          # upload internally when this is true (no separate step).
+          advanced-security: 'true'

@@ -113,7 +113,7 @@ export default async function DonatePage() {
             Support Us
           </span>
         }
-        subtitle="If you enjoy using this service, consider leaving a donation. Every contribution is appreciated."
+        subtitle="If you enjoy using this service, consider leaving a donation. Contributions help cover ongoing hosting costs and development time."
       />
 
       {methods.length === 0 ? (

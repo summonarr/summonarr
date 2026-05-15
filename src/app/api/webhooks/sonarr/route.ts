@@ -8,6 +8,7 @@ import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { sanitizeForLog } from "@/lib/sanitize";
+import { checkBodySize } from "@/lib/body-size";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -25,8 +26,11 @@ interface SonarrWebhookPayload {
 }
 
 export async function POST(req: NextRequest) {
-  const secretRow = await prisma.setting.findUnique({ where: { key: "webhookSecret" } });
-  const secret = secretRow?.value ?? "";
+  const [sourceRow, legacyRow] = await Promise.all([
+    prisma.setting.findUnique({ where: { key: "sonarrWebhookSecret" } }),
+    prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
+  ]);
+  const secret = sourceRow?.value || legacyRow?.value || "";
 
   if (secret.length === 0) {
     console.warn("[webhook/sonarr] 401 secret not configured");
@@ -43,6 +47,12 @@ export async function POST(req: NextRequest) {
     console.warn("[webhook/sonarr] 401 unauthorized");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  // Sonarr's webhook UI has no Authorization header field — ?token= is the only
+  // option upstream supports. Don't warn about it; nothing the user can do.
+
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {
@@ -74,8 +84,8 @@ export async function POST(req: NextRequest) {
 
   const { tvdbId, tmdbId } = payload.series;
 
-  const safeVdbId = Number.isInteger(tvdbId) ? tvdbId : null;
-  const safeMdbId = Number.isInteger(tmdbId) ? tmdbId : null;
+  const safeVdbId = Number.isInteger(tvdbId) && tvdbId > 0 ? tvdbId : null;
+  const safeMdbId = typeof tmdbId === "number" && Number.isInteger(tmdbId) && tmdbId > 0 ? tmdbId : null;
 
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
 

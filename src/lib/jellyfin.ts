@@ -700,7 +700,7 @@ export async function setJellyfinDownloadPolicy(
   enabled: boolean,
 ): Promise<void> {
   const base = baseUrl.replace(/\/$/, "");
-  const userRes = await safeFetchAdminConfigured(`${base}/Users/${userId}`, {
+  const userRes = await safeFetchAdminConfigured(`${base}/Users/${encodeURIComponent(userId)}`, {
     headers: jellyfinAdminHeaders(apiKey),
     timeoutMs: 10_000,
   });
@@ -709,7 +709,7 @@ export async function setJellyfinDownloadPolicy(
   const userData = (await userRes.json()) as { Policy?: Record<string, unknown> };
   const policy = { ...(userData.Policy ?? {}), EnableContentDownloading: enabled };
 
-  const patchRes = await safeFetchAdminConfigured(`${base}/Users/${userId}/Policy`, {
+  const patchRes = await safeFetchAdminConfigured(`${base}/Users/${encodeURIComponent(userId)}/Policy`, {
     method: "POST",
     headers: jellyfinAdminHeaders(apiKey),
     body: JSON.stringify(policy),

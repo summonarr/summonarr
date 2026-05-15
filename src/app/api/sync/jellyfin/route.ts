@@ -57,12 +57,22 @@ export async function POST(request: NextRequest) {
     if (data.itemId) seriesItemIdToTmdbId.set(data.itemId, tmdbId);
   }
 
-  // Fire-and-forget: episode cache is best-effort and must not block the main library write
+  // Fire-and-forget: episode cache is best-effort and must not block the main library write.
+  // On recentOnly, scope deletes to the series we're about to repopulate so unrelated cached
+  // episodes survive (the recentOnly tv filter is a 2h window, not the whole library).
+  const episodeRecentOnly = recentOnly;
+  const tmdbIdsBeingReplaced = Array.from(seriesItemIdToTmdbId.values());
   getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, seriesItemIdToTmdbId)
     .then(async (episodes) => {
       if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
-        await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
+        if (episodeRecentOnly) {
+          if (tmdbIdsBeingReplaced.length > 0) {
+            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: { in: tmdbIdsBeingReplaced } } });
+          }
+        } else {
+          await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
+        }
         await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
       }, { timeout: BATCH_TX_TIMEOUT });
     })
@@ -131,8 +141,8 @@ export async function POST(request: NextRequest) {
     const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
     if (alreadyNotified.length > 0) {
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) } },
-        data: { status: "AVAILABLE", availableAt: new Date() },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+        data: { status: "AVAILABLE" },
       });
     }
   }

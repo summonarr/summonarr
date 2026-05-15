@@ -19,7 +19,8 @@ export async function POST() {
     VALUES (${COOLDOWN_KEY}, ${String(now)}, NOW())
     ON CONFLICT (key) DO UPDATE
       SET value = EXCLUDED.value, "updatedAt" = NOW()
-    WHERE CAST("Setting".value AS BIGINT) + ${COOLDOWN_MS}::bigint <= ${now}::bigint
+    WHERE "Setting".value !~ '^[0-9]+$'
+       OR CAST("Setting".value AS BIGINT) + ${COOLDOWN_MS}::bigint <= ${now}::bigint
   `;
   if (claimed === 0) {
     const row = await prisma.setting.findUnique({ where: { key: COOLDOWN_KEY } });

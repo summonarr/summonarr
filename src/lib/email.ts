@@ -1,8 +1,11 @@
 import nodemailer from "nodemailer";
 import { Resend } from "resend";
+import { promises as dns } from "dns";
+import { isIP } from "net";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
+import { isSafeAddrForAdmin } from "@/lib/ssrf";
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
 //   - "resend" → Resend HTTP API (`resend` npm package)
@@ -66,7 +69,24 @@ function resolveFromAddress(cfg: EmailConfig): string {
   return safeHeader(cfg.smtpFrom || cfg.smtpUser || "summonarr@localhost");
 }
 
-function createTransport(cfg: EmailConfig) {
+async function assertSafeSmtpHost(host: string): Promise<void> {
+  if (isIP(host)) {
+    if (!isSafeAddrForAdmin(host)) {
+      throw new Error(`Refusing SMTP host ${host} — address is not allowed`);
+    }
+    return;
+  }
+  const addrs = await dns.lookup(host, { all: true });
+  for (const a of addrs) {
+    if (!isSafeAddrForAdmin(a.address)) {
+      throw new Error(`Refusing SMTP host ${host} — resolves to ${a.address} which is not allowed`);
+    }
+  }
+}
+
+async function createTransport(cfg: EmailConfig) {
+  if (!cfg.smtpHost) throw new Error("SMTP host not configured");
+  await assertSafeSmtpHost(cfg.smtpHost);
   const port = parseInt(cfg.smtpPort ?? "587", 10);
   return nodemailer.createTransport({
     host: cfg.smtpHost,
@@ -95,7 +115,8 @@ async function sendOne(cfg: EmailConfig, to: string, subject: string, html: stri
   }
 
   if (!cfg.smtpHost) throw new Error("SMTP host not configured");
-  await createTransport(cfg).sendMail({ from, to: safeTo, subject: safeSubjectText, html });
+  const transport = await createTransport(cfg);
+  await transport.sendMail({ from, to: safeTo, subject: safeSubjectText, html });
 }
 
 async function sendMany(cfg: EmailConfig, recipients: string[], subject: string, html: string): Promise<void> {

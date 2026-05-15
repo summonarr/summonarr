@@ -208,7 +208,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         }}
                       >
                         <Calendar style={{ width: 10, height: 10 }} />
-                        {new Date(season.airDate).getFullYear()}
+                        {new Date(season.airDate).getUTCFullYear()}
                       </span>
                     )}
                   </div>

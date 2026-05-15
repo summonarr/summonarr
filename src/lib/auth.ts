@@ -3,7 +3,7 @@ import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
-import { createHash } from "crypto";
+import { createHash, createHmac } from "crypto";
 import { authConfig } from "@/lib/auth.config";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
@@ -14,11 +14,10 @@ import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "
 // Always run bcrypt even on missing accounts to prevent timing-based user enumeration
 const DUMMY_HASH = "$2a$12$K4v7Dp0.fiN0EKr9lUDBTeVrQBH1/6Mo3hVRfVIGdFJZQ6XH2GKGK";
 
-// TODO(security): wherever User.passwordHash is updated (e.g.
-// src/app/api/profile/password/route.ts and any admin password-set endpoints
-// owned by W2/W3), the same update must also write
-// `passwordChangedAt: new Date()` so refreshToken() rejects pre-existing JWTs
-// across all replicas. This file does not write passwordHash directly.
+// Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
+// and admin password-set endpoints), the same code path must also call
+// revokeAllUserSessions(userId) so the AuthSession rows are deleted and stale
+// JWTs cannot refresh on any replica. This file does not write passwordHash directly.
 
 export function normalizeEmail(email: string): string {
   return email.toLowerCase().trim();
@@ -198,10 +197,10 @@ export function isTokenExpired(session: Session | null): boolean {
   return !!session.tokenExpiresAt && Math.floor(Date.now() / 1000) > session.tokenExpiresAt;
 }
 
-// In-memory revoke sets are a single-replica fast path — the DB columns
-// `User.sessionsRevokedAt` / `User.passwordChangedAt` are the cross-replica
-// source of truth (consulted in refreshToken). Capped to bound memory growth on
-// long-lived processes (auth#34).
+// In-memory revoke sets are a single-replica fast path — the AuthSession row
+// (deleted by revokeAllUserSessions / revokeSessionById / signOut) is the
+// cross-replica source of truth, consulted on every refreshToken() call.
+// Capped to bound memory growth on long-lived processes (auth#34).
 const FORCE_REVOKE_MAX = 1024;
 
 function addBounded(set: Set<string>, key: string, max: number): void {
@@ -375,22 +374,15 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
   const [dbUser, authSessionRow] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true, mediaServer: true, passwordChangedAt: true, sessionsRevokedAt: true },
+      select: { role: true, mediaServer: true },
     }),
     prisma.authSession.findUnique({ where: { sessionId } }),
   ]);
 
   if (!dbUser) return null;
+  // Cross-replica revocation: revokeAllUserSessions / revokeSessionById delete the
+  // AuthSession row, and the next refreshToken() call on any replica fails here.
   if (!authSessionRow) return null;
-
-  // Replica-safe revocation. The token's iat is set by NextAuth on creation and
-  // re-stamped on each jwt() invocation; we compare against the stable creation
-  // time stored as `expiresAt - ttl` is not reliable, so we rely on iat directly.
-  const tokIatMs = ((token.iat as number | undefined) ?? 0) * 1000;
-  if (tokIatMs > 0) {
-    if (dbUser.passwordChangedAt && dbUser.passwordChangedAt.getTime() > tokIatMs) return null;
-    if (dbUser.sessionsRevokedAt && dbUser.sessionsRevokedAt.getTime() > tokIatMs) return null;
-  }
 
   void prisma.authSession.update({
     where: { sessionId },
@@ -476,13 +468,16 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
           const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
           if (setupRow) return false;
-          const totalUsers = await tx.user.count();
-          if (totalUsers === 1) {
-            await tx.user.update({ where: { id: u.id }, data: { role: "ADMIN" } });
-            await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
-            return true;
-          }
-          return false;
+          // Failsafe: promote whenever no ADMIN exists yet. Two concurrent first-time
+          // sign-ins create their User rows before entering this lock; a `totalUsers === 1`
+          // check would see 2 and promote neither, leaving the instance admin-less.
+          const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
+          if (existingAdmin) return false;
+          const firstUser = await tx.user.findFirst({ orderBy: { createdAt: "asc" }, select: { id: true } });
+          if (!firstUser) return false;
+          await tx.user.update({ where: { id: firstUser.id }, data: { role: "ADMIN" } });
+          await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
+          return firstUser.id === u.id;
         });
         if (promoted) u.role = "ADMIN";
       }
@@ -585,6 +580,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const ip = getClientIp(headers);
         const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
 
+        if (!checkRateLimit(`plex-ip:${ip}`, 20, 5 * 60 * 1000)) {
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
+          return null;
+        }
         const tokenKey = (credentials.plexToken as string).slice(0, 16);
         if (!checkRateLimit(`plex:${tokenKey}`, 10, 5 * 60 * 1000)) {
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
@@ -599,7 +598,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             : undefined;
 
           const plexToken = credentials.plexToken as string;
-          const tokenHash = createHash("sha256").update(plexToken).digest("hex");
+          const plexTokenHashSecret = process.env.NEXTAUTH_SECRET;
+          if (!plexTokenHashSecret) throw new Error("[auth] NEXTAUTH_SECRET required for plex token hashing");
+          const tokenHash = createHmac("sha256", plexTokenHashSecret).update(plexToken).digest("hex");
 
           const CACHE_TTL_DAYS = 30;
           const cacheCutoff = new Date(Date.now() - CACHE_TTL_DAYS * 24 * 60 * 60 * 1000);
@@ -661,8 +662,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             plexUserSub   = plexUser.id;
             plexName = plexUser.username;
             plexThumb = plexUser.thumb;
-            // 90-day TTL — sweeper in src/lib/maintenance.ts:purgeExpiredPlexTokens
-            // purges expired rows. Bumped on every cache hit + on this re-verify path.
+            // 90-day TTL — bumped on every cache hit + on this re-verify path.
             const plexCacheExpiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
             await prisma.plexTokenCache.upsert({
               where: { tokenHash },

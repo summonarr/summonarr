@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sanitizeText } from "@/lib/sanitize";
-import { getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkBodySize } from "@/lib/body-size";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -17,6 +18,8 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
+// Client uploader defaults to 16 MiB chunks; cap at 32 MiB to leave headroom while still bounding memory.
+const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
 async function gate(): Promise<NextResponse | { password: string }> {
   const userCount = await prisma.user.count();
@@ -51,6 +54,13 @@ async function gate(): Promise<NextResponse | { password: string }> {
 //   X-File-Size     total file size in bytes
 // Body: raw chunk bytes (application/octet-stream)
 export async function POST(req: NextRequest) {
+  if (!checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
+  }
+
+  const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
+  if (sizeCheck) return sizeCheck;
+
   const g = await gate();
   if (g instanceof NextResponse) return g;
   const { password } = g;

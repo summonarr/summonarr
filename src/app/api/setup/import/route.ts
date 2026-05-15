@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { checkBodySize } from "@/lib/body-size";
 import { sanitizeText } from "@/lib/sanitize";
-import { getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -16,8 +16,20 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 // can't post a crafted dump to a live server. The admin route at
 // /api/admin/backup/db-import handles every other case.
 export async function POST(req: NextRequest) {
-  const userCount = await prisma.user.count();
-  if (userCount > 0) {
+  if (!checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
+  }
+
+  // Advisory lock 43 is shared with /api/auth/register — initial registration and setup-import
+  // are mutually exclusive. Re-check both user count and setup_completed_at inside the txn so a
+  // racing register can't sneak in between the SELECT and the import.
+  const gate = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+    const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
+    const userCount = await tx.user.count();
+    return { closed: setupCompleted !== null || userCount > 0 };
+  });
+  if (gate.closed) {
     return NextResponse.json(
       { error: "Setup import is only available on a fresh server with no users." },
       { status: 409 },

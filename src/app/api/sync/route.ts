@@ -43,12 +43,17 @@ export async function POST(request: NextRequest) {
 
   return withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
-    () => runSyncOrchestrator(),
+    (signal: AbortSignal) => runSyncOrchestrator(signal),
     () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
   );
 }
 
-async function runSyncOrchestrator(): Promise<NextResponse> {
+// Me-4: signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
+// Prisma 7's $transaction(fn, opts) does not accept an AbortSignal, so abortion is best-effort —
+// long-running outbound HTTP (Plex/Jellyfin/ARR fetches) can observe it; Prisma queries cannot.
+async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> {
+  // signal is wired through so callers (e.g. arrFetch) can opt in later; currently unobserved.
+  void signal;
   const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
@@ -152,6 +157,69 @@ async function runSyncOrchestrator(): Promise<NextResponse> {
   notifyUsersRequestsAvailable(arrNotify).catch(() => {});
   notifyUsersRequestsAvailablePush(arrNotify).catch(() => {});
 
+  const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    isFeatureEnabled("feature.integration.radarr"),
+    isFeatureEnabled("feature.integration.sonarr"),
+  ]);
+
+  // Refresh Radarr/Sonarr caches BEFORE the AVAILABLE→APPROVED revert below. The revert reads
+  // radarr/sonarr {Available,Wanted}Item — if those tables are stale from a prior failed run,
+  // a fresh tick that also fails would mass-demote everything. We only consult the cache for
+  // the revert decision when the current run successfully refreshed it.
+  let radarrWanted = 0;
+  let radarrSyncSucceeded = false;
+  if (radarrEnabled) {
+    try {
+      const radarrResult = await getRadarrWantedTmdbIds();
+      if (radarrResult === null) {
+        console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
+      } else {
+        const wantedRows    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId }));
+        const availableRows = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId }));
+        // Advisory lock 1001,1 coordinates with the Radarr webhook handler to prevent partial reads
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
+          await tx.radarrWantedItem.deleteMany();
+          if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
+          await tx.radarrAvailableItem.deleteMany();
+          if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
+        }, { timeout: BATCH_TX_TIMEOUT });
+        radarrWanted = wantedRows.length;
+        radarrSyncSucceeded = true;
+      }
+    } catch (err) {
+      console.error("[sync] Radarr wanted sync failed:", err);
+    }
+  }
+
+  let sonarrWanted = 0;
+  let sonarrSyncSucceeded = false;
+  if (sonarrEnabled) {
+    try {
+      const sonarrResult = await getSonarrWantedTmdbIds();
+      if (sonarrResult === null) {
+        console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
+      } else {
+        const wantedRows    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId }));
+        const availableRows = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId }));
+        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler to prevent partial reads
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+          await tx.sonarrWantedItem.deleteMany();
+          if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
+          await tx.sonarrAvailableItem.deleteMany();
+          if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
+        }, { timeout: BATCH_TX_TIMEOUT });
+        sonarrWanted = wantedRows.length;
+        sonarrSyncSucceeded = true;
+      }
+    } catch (err) {
+      console.error("[sync] Sonarr wanted sync failed:", err);
+    }
+  }
+
   const availableMovieTmdbIds = available.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const availableTvTmdbIds    = available.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
   let inRadarrSet = new Set<number>();
@@ -176,6 +244,11 @@ async function runSyncOrchestrator(): Promise<NextResponse> {
   }
 
   for (const req of available) {
+    // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
+    // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) continue;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) continue;
+
     const stillInLibrary = req.mediaType === "MOVIE"
       ? inRadarrSet.has(req.tmdbId)
       : inSonarrSet.has(req.tmdbId);
@@ -209,13 +282,6 @@ async function runSyncOrchestrator(): Promise<NextResponse> {
   let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
   let plexSyncSucceeded = false;
   let jellyfinSyncSucceeded = false;
-
-  const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
-    isFeatureEnabled("feature.integration.radarr"),
-    isFeatureEnabled("feature.integration.sonarr"),
-  ]);
 
   // Plex and Jellyfin library writes + download-policy enforcement run concurrently
   const syncResults = await Promise.allSettled([
@@ -417,54 +483,6 @@ async function runSyncOrchestrator(): Promise<NextResponse> {
         notifyUsersRequestsAvailable([req]).catch(() => {});
         notifyUsersRequestsAvailablePush([req]).catch(() => {});
       }
-    }
-  }
-
-  let radarrWanted = 0;
-  if (radarrEnabled) {
-    try {
-      const radarrResult = await getRadarrWantedTmdbIds();
-      if (radarrResult === null) {
-        console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
-      } else {
-        const wantedRows    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-        const availableRows = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId }));
-        // Advisory lock 1001,1 coordinates with the Radarr webhook handler to prevent partial reads
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-          await tx.radarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
-          await tx.radarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        radarrWanted = wantedRows.length;
-      }
-    } catch (err) {
-      console.error("[sync] Radarr wanted sync failed:", err);
-    }
-  }
-
-  let sonarrWanted = 0;
-  if (sonarrEnabled) {
-    try {
-      const sonarrResult = await getSonarrWantedTmdbIds();
-      if (sonarrResult === null) {
-        console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
-      } else {
-        const wantedRows    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-        const availableRows = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId }));
-        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler to prevent partial reads
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-          await tx.sonarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
-          await tx.sonarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        sonarrWanted = wantedRows.length;
-      }
-    } catch (err) {
-      console.error("[sync] Sonarr wanted sync failed:", err);
     }
   }
 

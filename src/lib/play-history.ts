@@ -311,7 +311,7 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     });
 
     await tx.activeSession.delete({ where: { id: session.id } }).catch(() => {});
-  });
+  }, { timeout: 15_000 });
 
   // Invalidate cached stats so the next page load reflects the new record
   clearActivityCache();

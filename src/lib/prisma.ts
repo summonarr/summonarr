@@ -15,6 +15,10 @@ const SENSITIVE_KEYS = new Set<string>([
   "jellyfinApiKey",
   "vapidPrivateKey",
   "webhookSecret",
+  "plexWebhookSecret",
+  "jellyfinWebhookSecret",
+  "sonarrWebhookSecret",
+  "radarrWebhookSecret",
   "discordBotToken",
   "radarrApiKey",
   "sonarrApiKey",
@@ -220,6 +224,21 @@ function createPrismaClient() {
           ) {
             (data as { value: string }).value = encryptToken((data as { value: string }).value);
           }
+          return query(args);
+        },
+        async updateMany({ args, query }) {
+          // updateMany sets the same `data` on every matching row, so we can't know the
+          // per-row `key` to consult SENSITIVE_KEYS. Forbid writes that touch `value` and
+          // funnel callers to setting.update / setting.upsert where the extension runs.
+          const data = (args as { data?: { value?: unknown } }).data;
+          if (data && data.value !== undefined) {
+            throw new Error(
+              "[prisma] setting.updateMany with `value` is forbidden — use setting.update or setting.upsert so the encryption extension runs",
+            );
+          }
+          return query(args);
+        },
+        async deleteMany({ args, query }) {
           return query(args);
         },
       },

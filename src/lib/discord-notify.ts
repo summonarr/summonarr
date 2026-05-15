@@ -101,10 +101,10 @@ export async function notifyAdminsNewRequestDiscord(data: {
     const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
     const embed: Record<string, unknown> = {
       color: COLORS.pending,
-      title: `📥 New Request — ${data.title}`,
+      title: `📥 New Request — ${escMd(data.title)}`,
       description: [
-        `**${label}** · requested by **${data.requestedBy}**`,
-        data.note ? `\n> ${data.note}` : "",
+        `**${label}** · requested by **${escMd(data.requestedBy)}**`,
+        data.note ? `\n> ${escMd(data.note)}` : "",
       ].filter(Boolean).join(""),
       timestamp: new Date().toISOString(),
     };
@@ -252,7 +252,7 @@ function mediaLabel(mediaType: string): string {
 export async function notifyUserRequestApproved(userId: string, title: string, mediaType: string): Promise<void> {
   await notifyUser(userId, {
     color: COLORS.approved,
-    title: `✅ Request Approved — ${title}`,
+    title: `✅ Request Approved — ${escMd(title)}`,
     description: `Your **${mediaLabel(mediaType)}** request has been approved and is being downloaded. We'll let you know when it's ready!`,
     timestamp: new Date().toISOString(),
   }, "notifyOnApproved");
@@ -261,7 +261,7 @@ export async function notifyUserRequestApproved(userId: string, title: string, m
 export async function notifyUserDownloadPending(userId: string, title: string, mediaType: string): Promise<void> {
   await notifyUser(userId, {
     color: COLORS.pending,
-    title: `⏳ Download Pending — ${title}`,
+    title: `⏳ Download Pending — ${escMd(title)}`,
     description: `Your **${mediaLabel(mediaType)}** request is approved but hasn't started downloading yet — it may be pending a release or indexer search. We'll notify you when it's ready.`,
     timestamp: new Date().toISOString(),
   }, "notifyOnApproved");
@@ -270,7 +270,7 @@ export async function notifyUserDownloadPending(userId: string, title: string, m
 export async function notifyUserRequestAvailable(userId: string, title: string, mediaType: string): Promise<void> {
   await notifyUser(userId, {
     color: COLORS.available,
-    title: `🎉 Now Available — ${title}`,
+    title: `🎉 Now Available — ${escMd(title)}`,
     description: `Your **${mediaLabel(mediaType)}** request has finished downloading and should be available to watch shortly!`,
     timestamp: new Date().toISOString(),
   }, "notifyOnAvailable");
@@ -283,7 +283,7 @@ export async function notifyUserAwaitingRelease(userId: string, title: string, m
     : "";
   await notifyUser(userId, {
     color: COLORS.pending,
-    title: `⏰ Awaiting Release — ${title}`,
+    title: `⏰ Awaiting Release — ${escMd(title)}`,
     description: `Your **${label}** request is approved and queued — it will be downloaded automatically once it's available on home media.${releasePart}`,
     timestamp: new Date().toISOString(),
   }, "notifyOnApproved");
@@ -360,10 +360,10 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
 
 export async function notifyUserIssueResolved(userId: string, title: string, mediaType: string, resolution?: string | null): Promise<void> {
   const label = mediaLabel(mediaType);
-  const resolutionPart = resolution ? `\n\n**Resolution:** ${resolution}` : "";
+  const resolutionPart = resolution ? `\n\n**Resolution:** ${escMd(resolution)}` : "";
   await notifyUser(userId, {
     color: COLORS.available,
-    title: `✅ Issue Resolved — ${title}`,
+    title: `✅ Issue Resolved — ${escMd(title)}`,
     description: `The issue you reported with **${label}** has been resolved.${resolutionPart}`,
     timestamp: new Date().toISOString(),
   });
@@ -389,7 +389,7 @@ export async function notifyUsersRequestsApproved(
       if (!discordId) return Promise.resolve();
       const embed: Embed = {
         color: COLORS.approved,
-        title: `✅ Request Approved — ${r.title}`,
+        title: `✅ Request Approved — ${escMd(r.title)}`,
         description: `Your **${mediaLabel(r.mediaType)}** request has been approved and is being downloaded. We'll let you know when it's ready!`,
         timestamp: new Date().toISOString(),
       };
@@ -428,7 +428,7 @@ export async function notifyUsersRequestsAvailable(
       if (!discordId) return Promise.resolve();
       const embed: Embed = {
         color: COLORS.available,
-        title: `🎉 Now Available — ${r.title}`,
+        title: `🎉 Now Available — ${escMd(r.title)}`,
         description: `Your **${mediaLabel(r.mediaType)}** request has finished downloading and should be available to watch shortly!`,
         timestamp: new Date().toISOString(),
       };
@@ -471,7 +471,7 @@ export async function notifyUsersRequestsDeclined(
         : `Your **${mediaLabel(r.mediaType)}** request was not approved.`;
       const embed: Embed = {
         color: COLORS.declined,
-        title: `❌ Request Declined — ${r.title}`,
+        title: `❌ Request Declined — ${escMd(r.title)}`,
         description,
         timestamp: new Date().toISOString(),
       };

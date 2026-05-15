@@ -1,10 +1,14 @@
 import {
   randomBytes,
-  pbkdf2Sync,
+  pbkdf2,
   createCipheriv,
   createDecipheriv,
+  type CipherGCM,
   type DecipherGCM,
 } from "node:crypto";
+import { promisify } from "node:util";
+
+const pbkdf2P = promisify(pbkdf2);
 
 const MAGIC = Buffer.from("RBKBKP01", "ascii");
 const VERSION = 1;
@@ -26,12 +30,12 @@ export class BackupCryptoError extends Error {
   }
 }
 
-function deriveKey(password: string, salt: Buffer): Buffer {
+async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
   if (typeof password !== "string" || password.length === 0) {
     throw new BackupCryptoError("Password is required for encrypted backups");
   }
   // NFKC normalisation ensures identical passphrases with different Unicode forms produce the same key
-  return pbkdf2Sync(password.normalize("NFKC"), salt, KDF_ITERATIONS, KEY_LEN, "sha256");
+  return pbkdf2P(password.normalize("NFKC"), salt, KDF_ITERATIONS, KEY_LEN, "sha256");
 }
 
 function buildHeader(salt: Buffer, iv: Buffer): Buffer {
@@ -59,16 +63,19 @@ export function wrapEncryptStream(
 ): ReadableStream<Uint8Array> {
   const salt = randomBytes(SALT_LEN);
   const iv = randomBytes(IV_LEN);
-  const key = deriveKey(password, salt);
-  const cipher = createCipheriv("aes-256-gcm", key, iv);
   const header = buildHeader(salt, iv);
 
   const reader = source.getReader();
   let headerSent = false;
+  let cipher: CipherGCM | null = null;
 
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
+        if (!cipher) {
+          const key = await deriveKey(password, salt);
+          cipher = createCipheriv("aes-256-gcm", key, iv) as CipherGCM;
+        }
         if (!headerSent) {
           controller.enqueue(new Uint8Array(header));
           headerSent = true;
@@ -129,7 +136,7 @@ export function wrapDecryptStream(
     }
     const salt = headerBuf.subarray(12, 28);
     const iv = headerBuf.subarray(28, 40);
-    const key = deriveKey(password, Buffer.from(salt));
+    const key = await deriveKey(password, Buffer.from(salt));
     decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv)) as DecipherGCM;
 
     const leftover = headerBuf.subarray(HEADER_LEN);

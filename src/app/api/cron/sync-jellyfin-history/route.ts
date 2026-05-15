@@ -240,9 +240,10 @@ export async function POST(request: NextRequest) {
     async () => {
       const startTime = Date.now();
 
-      const [urlRow, keyRow] = await Promise.all([
+      const [urlRow, keyRow, machineIdRow] = await Promise.all([
         prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
         prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+        prisma.setting.findUnique({ where: { key: "jellyfinServerMachineId" } }),
       ]);
 
       if (!urlRow?.value || !keyRow?.value) {
@@ -251,6 +252,10 @@ export async function POST(request: NextRequest) {
 
       const baseUrl = urlRow.value.replace(/\/$/, "");
       const apiKey = keyRow.value;
+      const serverMachineId = machineIdRow?.value ?? null;
+      if (!serverMachineId) {
+        console.warn("[cron/sync-jellyfin-history] jellyfinServerMachineId not configured — pin will not be set");
+      }
 
       // Always fetch the server user list so new Jellyfin users are discovered every run.
       // resolveMediaServerUser is idempotent — existing users get a no-op upsert.
@@ -261,6 +266,7 @@ export async function POST(request: NextRequest) {
           sourceUserId: u.id,
           username: u.name,
           email: u.email,
+          ...(serverMachineId ? { serverMachineId } : {}),
         }).catch(() => null);
       }
 

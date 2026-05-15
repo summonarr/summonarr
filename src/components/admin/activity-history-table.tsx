@@ -318,6 +318,9 @@ export function ActivityHistoryTable({
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const [error, setError] = useState<string | null>(null);
+  const [refetchKey, setRefetchKey] = useState(0);
+
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -369,6 +372,7 @@ export function ActivityHistoryTable({
     abortRef.current = controller;
 
     setLoading(true);
+    setError(null);
     const params = buildFilterParams();
     params.set("page", String(page));
     params.set("limit", String(limit));
@@ -385,11 +389,14 @@ export function ActivityHistoryTable({
         setLoading(false);
       })
       .catch((err) => {
-        if (err.name !== "AbortError") setLoading(false);
+        if (err.name === "AbortError") return;
+        console.error("[activity-history]", err);
+        setError(err instanceof Error ? err.message : "Failed to load activity");
+        setLoading(false);
       });
 
     return () => controller.abort();
-  }, [page, limit, buildFilterParams]);
+  }, [page, limit, buildFilterParams, refetchKey]);
 
   function handleSort(field: SortField) {
     if (sortBy === field) {
@@ -441,6 +448,8 @@ export function ActivityHistoryTable({
             {search && (
               <button
                 onClick={() => setSearch("")}
+                aria-label="Clear search"
+                title="Clear search"
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
               >
                 <X className="w-3.5 h-3.5" />
@@ -545,6 +554,7 @@ export function ActivityHistoryTable({
             {(fromDate || toDate) && (
               <button
                 onClick={() => { setFromDate(""); setToDate(""); }}
+                aria-label="Clear date range"
                 className="text-zinc-500 hover:text-red-400 transition-colors"
                 title="Clear date range"
               >
@@ -595,6 +605,23 @@ export function ActivityHistoryTable({
                 <td colSpan={11} className="py-12 text-center">
                   <Loader2 className="w-5 h-5 animate-spin text-zinc-500 mx-auto mb-2" />
                   <p className="text-zinc-500 text-xs">Loading history...</p>
+                </td>
+              </tr>
+            ) : error ? (
+              <tr>
+                <td colSpan={11} className="py-12 text-center">
+                  <p className="text-red-400 text-sm mb-3">
+                    Failed to load activity: {error}
+                  </p>
+                  <button
+                    onClick={() => {
+                      setError(null);
+                      setRefetchKey((k) => k + 1);
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 text-red-400 hover:text-red-300 hover:bg-zinc-700 transition-colors"
+                  >
+                    Retry
+                  </button>
                 </td>
               </tr>
             ) : rows.length === 0 ? (
@@ -712,6 +739,7 @@ export function ActivityHistoryTable({
                           <Link
                             href={`/admin/activity/play/${p.id}`}
                             onClick={(e) => e.stopPropagation()}
+                            aria-label="View details"
                             className="text-zinc-600 hover:text-indigo-400 transition-colors"
                             title="View details"
                           >
@@ -722,6 +750,7 @@ export function ActivityHistoryTable({
                               e.stopPropagation();
                               setDeleteId(p.id);
                             }}
+                            aria-label="Delete record"
                             className="text-zinc-700 hover:text-red-400 transition-colors"
                             title="Delete record"
                           >

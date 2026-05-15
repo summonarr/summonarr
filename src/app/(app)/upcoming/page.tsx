@@ -10,7 +10,8 @@ import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, EmptyState } from "@/components/ui/design";
+import { AlertTriangle, Calendar } from "lucide-react";
 
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
   const today = new Date().toISOString().slice(0, 10);
@@ -97,12 +98,20 @@ export default async function UpcomingPage({
       />
 
       {items.length === 0 ? (
-        <div
-          className="ds-mono"
-          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-        >
-          No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local to see upcoming content.
-        </div>
+        raw.length === 0 ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="TMDB token not configured"
+            description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+          />
+        ) : (
+          <EmptyState
+            icon={Calendar}
+            title="No upcoming titles to show"
+            description="Everything upcoming is already available on your servers."
+            cta={{ href: "/upcoming", label: "Clear filters" }}
+          />
+        )
       ) : (
         <div className="ds-media-grid">
           {items.map((media) => (

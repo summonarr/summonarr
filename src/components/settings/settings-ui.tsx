@@ -475,8 +475,19 @@ function generateSecret(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Webhook secret is stored encrypted in the Setting table; changing it invalidates all existing webhook URLs
-export function WebhookSecretForm({ initialSecret }: { initialSecret: string }) {
+function WebhookSecretField({
+  id,
+  label,
+  helpText,
+  payloadKey,
+  initialSecret,
+}: {
+  id: string;
+  label: string;
+  helpText: React.ReactNode;
+  payloadKey: string;
+  initialSecret: string;
+}) {
   const [secret, setSecret] = useState(initialSecret);
   const [status, setStatus] = useState<SaveStatus>("idle");
 
@@ -486,7 +497,7 @@ export function WebhookSecretForm({ initialSecret }: { initialSecret: string }) 
     const res = await fetch("/api/settings", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ webhookSecret: secret }),
+      body: JSON.stringify({ [payloadKey]: secret }),
     });
     const data: { ok: boolean } = await res.json();
     setStatus(data.ok ? "ok" : "error");
@@ -494,12 +505,12 @@ export function WebhookSecretForm({ initialSecret }: { initialSecret: string }) 
   }
 
   return (
-    <form onSubmit={handleSave} className="space-y-4">
+    <form onSubmit={handleSave} className="space-y-3">
       <div className="space-y-1.5">
-        <Label htmlFor="webhook-secret">Secret Token</Label>
+        <Label htmlFor={id}>{label}</Label>
         <div className="flex gap-2">
           <Input
-            id="webhook-secret"
+            id={id}
             type="password"
             value={secret}
             onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
@@ -515,11 +526,7 @@ export function WebhookSecretForm({ initialSecret }: { initialSecret: string }) 
             Generate
           </Button>
         </div>
-        <p className="text-xs text-zinc-500">
-          Add this as an <code className="text-zinc-400">Authorization</code> header (value:{" "}
-          <code className="text-zinc-400">Bearer &lt;token&gt;</code>) in your Radarr/Sonarr webhook config.
-          If set, requests without a matching token are rejected.
-        </p>
+        <p className="text-xs text-zinc-500">{helpText}</p>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
@@ -529,6 +536,83 @@ export function WebhookSecretForm({ initialSecret }: { initialSecret: string }) 
         {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
       </div>
     </form>
+  );
+}
+
+export function WebhookSecretForm({
+  initialSecret,
+  initialPlexSecret,
+  initialJellyfinSecret,
+  initialSonarrSecret,
+  initialRadarrSecret,
+}: {
+  initialSecret: string;
+  initialPlexSecret?: string;
+  initialJellyfinSecret?: string;
+  initialSonarrSecret?: string;
+  initialRadarrSecret?: string;
+}) {
+  return (
+    <div className="space-y-6">
+      <WebhookSecretField
+        id="webhook-secret-plex"
+        label="Plex webhook secret"
+        payloadKey="plexWebhookSecret"
+        initialSecret={initialPlexSecret ?? ""}
+        helpText={
+          <>
+            Used by the Plex webhook endpoint. Falls back to the legacy secret below if blank.
+          </>
+        }
+      />
+      <WebhookSecretField
+        id="webhook-secret-jellyfin"
+        label="Jellyfin webhook secret"
+        payloadKey="jellyfinWebhookSecret"
+        initialSecret={initialJellyfinSecret ?? ""}
+        helpText={
+          <>
+            Used by the Jellyfin webhook endpoint. Falls back to the legacy secret below if blank.
+          </>
+        }
+      />
+      <WebhookSecretField
+        id="webhook-secret-sonarr"
+        label="Sonarr webhook secret"
+        payloadKey="sonarrWebhookSecret"
+        initialSecret={initialSonarrSecret ?? ""}
+        helpText={
+          <>
+            Used by the Sonarr webhook endpoint. Falls back to the legacy secret below if blank.
+          </>
+        }
+      />
+      <WebhookSecretField
+        id="webhook-secret-radarr"
+        label="Radarr webhook secret"
+        payloadKey="radarrWebhookSecret"
+        initialSecret={initialRadarrSecret ?? ""}
+        helpText={
+          <>
+            Used by the Radarr webhook endpoint. Falls back to the legacy secret below if blank.
+          </>
+        }
+      />
+      <div className="border-t border-zinc-800 pt-5">
+        <WebhookSecretField
+          id="webhook-secret-legacy"
+          label="Legacy webhook secret (fallback — to be removed in a future release)"
+          payloadKey="webhookSecret"
+          initialSecret={initialSecret}
+          helpText={
+            <>
+              Shared fallback used when a source-specific secret above is blank. Prefer the per-source
+              secrets; this field will be removed in a future release.
+            </>
+          }
+        />
+      </div>
+    </div>
   );
 }
 
@@ -2337,8 +2421,6 @@ export function RatingsCacheClearButton() {
     setStatus("clearing");
     const res = await fetch("/api/admin/clear-ratings-cache", { method: "DELETE" });
     if (res.ok) {
-      const data = await res.json() as { cleared: number };
-      console.log(`Cleared ${data.cleared} ratings cache entries`);
       setStatus("cleared");
     } else {
       setStatus("error");
@@ -2360,7 +2442,7 @@ export function RatingsCacheClearButton() {
             type="button"
             size="sm"
             onClick={handleClear}
-            className="bg-red-600 hover:bg-red-500 h-7 px-3 text-xs"
+            className="bg-red-600 hover:bg-red-500 h-9 px-3 text-xs"
           >
             Clear
           </Button>
@@ -2369,7 +2451,7 @@ export function RatingsCacheClearButton() {
             size="sm"
             variant="outline"
             onClick={() => setStatus("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-white h-9 px-3 text-xs"
           >
             Cancel
           </Button>
