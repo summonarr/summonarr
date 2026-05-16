@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import type { PlayHistoryStatsResult } from "@/lib/play-history";
+import { posterUrl } from "@/lib/tmdb-types";
 import {
   ActivityCard,
   AreaChart,
@@ -141,10 +142,10 @@ export function ActivityStatsRedesign({
     },
   ];
 
-  const topMovies = stats.topRewatched
+  const topMovies = stats.topWatched
     .filter((m) => m.mediaType === "MOVIE")
     .slice(0, 8);
-  const topTV = stats.topRewatched
+  const topTV = stats.topWatched
     .filter((m) => m.mediaType === "TV")
     .slice(0, 8);
   const userMax = stats.topUsers[0]?.count ?? 1;
@@ -296,6 +297,7 @@ export function ActivityStatsRedesign({
                   rank={i + 1}
                   avatar={
                     <Poster
+                      src={m.posterPath ? posterUrl(m.posterPath, "w342") : null}
                       letter={(m.title[0] ?? "?").toUpperCase()}
                       w={26}
                       h={36}
@@ -321,6 +323,7 @@ export function ActivityStatsRedesign({
                   rank={i + 1}
                   avatar={
                     <Poster
+                      src={m.posterPath ? posterUrl(m.posterPath, "w342") : null}
                       letter={(m.title[0] ?? "?").toUpperCase()}
                       w={26}
                       h={36}

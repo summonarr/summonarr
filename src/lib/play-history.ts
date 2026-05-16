@@ -384,8 +384,8 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     // same show collapse) with title fallback for unmapped rows. See bug #7
     // notes: previously the GROUP BY also keyed on title, so the same show
     // appeared twice when one source resolved tmdbId and the other didn't.
-    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
        GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
@@ -454,7 +454,7 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     totalPlays,
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
     recentPlays,
-    topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, count: Number(r.count) })),
+    topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, posterPath: r.posterPath, count: Number(r.count) })),
     playsByDay: playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
     platformBreakdown: platformBreakdown.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
     activityCalendar: activityCalendar.map((r) => ({ day: r.day, count: Number(r.count) })),
@@ -874,6 +874,49 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   }));
 }
 
+// Top-watched titles split per media type. Unlike getMostRewatchedUncached
+// this has NO `HAVING COUNT(*) > 1` rewatch filter — a movie watched once
+// still ranks — and partitions by mediaType so movies can't be starved out
+// of a global top-N by TV shows (whose tmdbId aggregates every episode).
+// Carries the stored posterPath so callers get real cover art without a
+// TmdbCache round-trip.
+async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limitPerType = 8) {
+  const { where, params } = buildStatsFilters(filters);
+  // Push then read length so a future param insertion can't shift the $-index (cf. 803cd11).
+  params.push(limitPerType);
+  const limitIdx = params.length;
+
+  const rows = await prisma.$queryRawUnsafe<
+    { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[]
+  >(
+    `WITH agg AS (
+       SELECT "tmdbId", "mediaType"::text AS "mediaType", MAX("title") AS title,
+              MAX("posterPath") AS "posterPath",
+              COUNT(*)::bigint AS plays,
+              COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
+       FROM "PlayHistory"
+       WHERE ${where} AND "tmdbId" IS NOT NULL AND "watched" = true
+       GROUP BY "tmdbId", "mediaType"
+     ), ranked AS (
+       SELECT *, ROW_NUMBER() OVER (PARTITION BY "mediaType" ORDER BY plays DESC, viewers DESC) AS rn
+       FROM agg
+     )
+     SELECT "tmdbId", "mediaType", title, "posterPath", plays, viewers
+     FROM ranked WHERE rn <= $${limitIdx}
+     ORDER BY plays DESC`,
+    ...params,
+  );
+
+  return rows.map((r) => ({
+    tmdbId: r.tmdbId,
+    mediaType: r.mediaType,
+    title: r.title,
+    posterPath: r.posterPath,
+    plays: Number(r.plays),
+    viewers: Number(r.viewers),
+  }));
+}
+
 export interface PlayHistoryStatsFilters {
   days?: number;
   source?: string;
@@ -942,6 +985,7 @@ export type PlayHistoryStatsResult = {
 
   decadeBreakdown: { decade: string; count: number }[];
   topRewatched: { tmdbId: number; mediaType: string; title: string; plays: number; viewers: number }[];
+  topWatched: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: number; viewers: number }[];
   topEpisodes: { tmdbId: number | null; title: string; season: number | null; episode: number | null; episodeTitle: string | null; count: number }[];
 
   prevPeriod: { totalPlays: number; totalWatchTimeHours: number; uniqueViewers: number };
@@ -1015,6 +1059,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     peakConcurrentRaw,
     prevPeriodStats,
     topRewatchedRaw,
+    topWatchedRaw,
   ] = await Promise.all([
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
       `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${wwhere}`,
@@ -1293,6 +1338,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...prevParams,
     ),
     getMostRewatchedUncached(filters, 10),
+    getTopWatchedUncached(filters, 8),
   ]);
 
   const watchedCount = Number(completionStats[0]?.watched ?? 0);
@@ -1340,6 +1386,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     sourceSplit: sourceSplit.map((r) => ({ source: r.source, count: Number(r.count) })),
     decadeBreakdown: decadeBreakdown.map((r) => ({ decade: r.decade, count: Number(r.count) })),
     topRewatched: topRewatchedRaw,
+    topWatched: topWatchedRaw,
     topEpisodes: topEpisodes.map((r) => ({
       tmdbId: r.tmdbId,
       title: r.title,

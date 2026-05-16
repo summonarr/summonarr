@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { getUserPlayStats } from "@/lib/play-history";
 import { resolvePosterMap } from "@/lib/poster-cache";
+import { posterUrl } from "@/lib/tmdb-types";
 import {
   UserDetailView,
   type UserDetailData,
@@ -81,8 +82,13 @@ export default async function UserActivityPage({
     deviceList: stats.deviceList,
     transcodeRatio: stats.transcodeRatio,
     topMedia: stats.topMedia.map((m) => ({
-      ...m,
-      posterSrc: m.tmdbId != null ? topMediaPosters[m.tmdbId] ?? null : null,
+      title: m.title,
+      tmdbId: m.tmdbId,
+      mediaType: m.mediaType,
+      count: m.count,
+      posterSrc:
+        (m.posterPath ? posterUrl(m.posterPath, "w342") : null) ??
+        (m.tmdbId != null ? topMediaPosters[m.tmdbId] ?? null : null),
     })),
     knownIps,
     recentPlays: stats.recentPlays.slice(0, 12).map((p) => ({
