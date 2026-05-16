@@ -18,6 +18,7 @@ import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { posterUrl } from "@/lib/tmdb-types";
+import { resolvePosterMap } from "@/lib/poster-cache";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
@@ -380,12 +381,16 @@ export default async function ActivityPage({
       value: stats.totalPlays.toLocaleString(),
       delta: kpiDelta(stats.totalPlays, prevPlaysNum),
       spark: stats.playsByDay.map((d) => d.count),
+      sparkLabels: stats.playsByDay.map((d) => shortDay(d.day)),
+      sparkSuffix: " plays",
     },
     {
       label: "Watch time",
       value: `${watchHoursNd.toLocaleString()}h`,
       delta: kpiDelta(watchHoursNd, Math.round(prevWatchTimeNum)),
       spark: stats.watchTimeByDay.map((d) => d.hours),
+      sparkLabels: stats.watchTimeByDay.map((d) => shortDay(d.day)),
+      sparkSuffix: "h",
     },
     {
       label: "Active users",
@@ -506,13 +511,16 @@ export default async function ActivityPage({
     plays: playsById.get(u.id) ?? 0,
     rank: i + 1,
   }));
-  const leaderRewatched = mostRewatched.slice(0, 6).map((m, i) => ({
+  const rewatchedSlice = mostRewatched.slice(0, 6);
+  const rewatchedPosters = await resolvePosterMap(rewatchedSlice);
+  const leaderRewatched = rewatchedSlice.map((m, i) => ({
     tmdbId: m.tmdbId,
     mediaType: m.mediaType,
     title: m.title,
     plays: m.plays,
     viewers: m.viewers,
     rank: i + 1,
+    posterSrc: rewatchedPosters[m.tmdbId] ?? null,
   }));
 
   return (
@@ -539,6 +547,7 @@ export default async function ActivityPage({
 
       <AnalyticsRow
         playsByDay={stats.playsByDay.map((d) => d.count)}
+        playsByDayLabels={stats.playsByDay.map((d) => shortDay(d.day))}
         heatmapMatrix={heatmapMatrix}
         streamMix={streamMix}
         mediaMix={mediaMix}

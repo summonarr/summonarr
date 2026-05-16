@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
@@ -7,10 +7,7 @@ import { logAudit } from "@/lib/audit";
 const COOLDOWN_MS = 2 * 60 * 1000;
 const COOLDOWN_KEY = "lastActivityWarmAt";
 
-export async function POST() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (_req, _ctx, session) => {
   const now = Date.now();
 
   // Atomic upsert acts as a distributed CAS: only succeeds if the cooldown window has elapsed
@@ -52,4 +49,4 @@ export async function POST() {
     warmed,
     lastWarmAt: new Date(now).toISOString(),
   });
-}
+});

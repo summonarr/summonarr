@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withIssueAdmin } from "@/lib/api-auth";
 
 const spec = {
   openapi: "3.0.3",
@@ -1300,14 +1300,8 @@ const spec = {
   },
 };
 
-export async function GET() {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-  if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN") {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
+export const GET = withIssueAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json(spec, {
     headers: { "Cache-Control": "no-store" },
   });
-}
+});

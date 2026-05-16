@@ -1,12 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexUser } from "@/lib/plex";
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, _session) => {
   let body: { authToken?: string };
   try {
     body = await req.json();
@@ -39,12 +36,9 @@ export async function POST(req: NextRequest) {
   console.warn("[settings] plexAdminToken changed — cleared PlexTokenCache");
 
   return NextResponse.json({ email: plexUser.email, username: plexUser.username });
-}
+});
 
-export async function DELETE() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (_req, _ctx, _session) => {
   await prisma.setting.deleteMany({
     where: { key: { in: ["plexAdminToken", "plexAdminEmail"] } },
   });
@@ -53,4 +47,4 @@ export async function DELETE() {
   console.warn("[settings] plexAdminToken removed — cleared PlexTokenCache");
 
   return NextResponse.json({ ok: true });
-}
+});

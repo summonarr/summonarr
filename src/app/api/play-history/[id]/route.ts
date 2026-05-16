@@ -1,17 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(
-  _request: NextRequest,
+export const GET = withAdmin(async (
+  _request,
   { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  _session,
+) => {
   const { id } = await params;
   if (!id || typeof id !== "string") {
     return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
@@ -30,15 +28,13 @@ export async function GET(
   }
 
   return NextResponse.json(record);
-}
+});
 
-export async function DELETE(
-  request: NextRequest,
+export const DELETE = withAdmin(async (
+  request,
   { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  session,
+) => {
   const { id } = await params;
   if (!id || typeof id !== "string") {
     return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
@@ -79,4 +75,4 @@ export async function DELETE(
   });
 
   return new NextResponse(null, { status: 204 });
-}
+});

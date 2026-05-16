@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse, after } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse, after } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
@@ -46,10 +46,7 @@ import { verifyRequestToken } from "@/lib/request-token";
 
 const PAGE_SIZE = 20;
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const page = Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 
@@ -85,12 +82,9 @@ export async function GET(req: NextRequest) {
   ]);
 
   return NextResponse.json({ requests, total, page, pageSize: PAGE_SIZE });
-}
+});
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
 
@@ -301,4 +295,4 @@ export async function POST(req: NextRequest) {
     ]);
   });
   return NextResponse.json(request, { status: 201 });
-}
+});

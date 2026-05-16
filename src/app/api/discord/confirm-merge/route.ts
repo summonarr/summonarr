@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
@@ -9,10 +9,7 @@ import { timingSafeEqual } from "crypto";
 // Bot DM template lives in src/app/api/discord/initiate-merge/route.ts
 // (the 12-char code copy is updated there).
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
@@ -65,4 +62,4 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ error: "Could not link accounts." }, { status: 409 });
   }
-}
+});

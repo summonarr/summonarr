@@ -1,17 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, logAuditOrFail, auditContext } from "@/lib/audit";
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAdmin(async (
+  req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   const { id } = await params;
 
   if (id === session.user.id) {
@@ -142,15 +140,13 @@ export async function PATCH(
     return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
   }
   return NextResponse.json({ id, role: body.role });
-}
+});
 
-export async function DELETE(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (
+  _req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   const { id } = await params;
 
   if (id === session.user.id) {
@@ -193,4 +189,4 @@ export async function DELETE(
     return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
   }
   return NextResponse.json({ ok: true });
-}
+});

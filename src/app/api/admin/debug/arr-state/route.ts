@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
 import { isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
@@ -7,10 +7,7 @@ import { getCache } from "@/lib/tmdb-cache";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, _session) => {
   const sp = req.nextUrl.searchParams;
   const tmdbIdRaw = sp.get("tmdbId");
   const type = sp.get("type");
@@ -122,4 +119,4 @@ export async function GET(req: NextRequest) {
     wantedTableTotals: { radarr: radarrTotal, sonarr: sonarrTotal },
     lastFullSync: lastSync ? { at: lastSync.createdAt, details: lastSyncDetails } : null,
   });
-}
+});

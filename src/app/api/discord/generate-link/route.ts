@@ -1,15 +1,12 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`discord-link:${session.user.id}`, 5, 10 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -33,4 +30,4 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ token, expiresAt });
-}
+});

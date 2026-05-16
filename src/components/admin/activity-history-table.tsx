@@ -1,15 +1,28 @@
 "use client";
 
-import { Fragment, useState, useEffect, useCallback, useRef } from "react";
+// Refined History tab, ported from the Claude Design handoff (history.jsx).
+// Visual layer is the design; the data layer (debounced search, server-side
+// filter/sort/paginate against /api/play-history, distinct platform/user
+// fetch, row delete, CSV/JSON export) is preserved from the prior
+// implementation. Relative-time cells are gated behind useHasMounted so SSR
+// and hydration agree (guardrail 16).
+
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { Card } from "@/components/ui/card";
-import {
-  Film, Tv2, ChevronDown, ChevronRight, Loader2,
-  ArrowUpDown, ArrowUp, ArrowDown, Download, Search,
-  X, Trash2, ExternalLink, Calendar,
-} from "lucide-react";
-import { IpInfo } from "@/components/admin/ip-info";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { IpInfo } from "@/components/admin/ip-info";
+import {
+  ActivityCard,
+  Avatar,
+  MethodPill,
+  Poster,
+  Th,
+  ChevIcon,
+  methodLabel,
+  fmtDuration,
+  fmtBitrate,
+  fmtTimestamp,
+} from "@/components/admin/activity-ui";
 
 interface HistoryRow {
   id: string;
@@ -38,6 +51,7 @@ interface HistoryRow {
   seasonNumber: number | null;
   episodeNumber: number | null;
   episodeTitle: string | null;
+  posterUrl: string | null;
   mediaServerUserId: string;
   mediaServerUser: {
     username: string;
@@ -52,226 +66,384 @@ interface MediaServerUserOption {
   source: string;
 }
 
-type SortField = "startedAt" | "title" | "playDuration" | "duration" | "source" | "platform";
+type SortField =
+  | "startedAt"
+  | "title"
+  | "playDuration"
+  | "duration"
+  | "platform";
 type SortDir = "asc" | "desc";
 
-function formatDuration(seconds: number): string {
-  if (seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+function relTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
 
-function formatRelativeTime(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
+const inputStyle: React.CSSProperties = {
+  fontFamily: "inherit",
+  fontSize: 11.5,
+  padding: "5px 8px",
+  background: "var(--ds-bg-1)",
+  color: "var(--ds-fg)",
+  border: "1px solid var(--ds-border)",
+  borderRadius: 6,
+  colorScheme: "dark",
+};
 
-function formatTimestamp(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString();
-}
-
-function formatBitrate(raw: number | null): string {
-  if (!raw || raw <= 0) return "—";
-  const kbps = raw > 100000 ? raw / 1000 : raw;
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${Math.round(kbps)} kbps`;
-}
-
-function progressPercent(playDuration: number, duration: number): number {
-  if (duration <= 0) return 0;
-  return Math.min(Math.round((playDuration / duration) * 100), 100);
-}
-
-function SortHeader({
+function SegGroup<T extends string>({
   label,
-  field,
-  currentSort,
-  currentDir,
-  onSort,
-  className = "",
+  value,
+  setValue,
+  options,
 }: {
   label: string;
-  field: SortField;
-  currentSort: SortField;
-  currentDir: SortDir;
-  onSort: (field: SortField) => void;
-  className?: string;
+  value: T;
+  setValue: (v: T) => void;
+  options: { value: T; label: string }[];
 }) {
-  const isActive = currentSort === field;
   return (
-    <th
-      className={`py-2 pr-4 cursor-pointer select-none hover:text-zinc-300 transition-colors ${className}`}
-      onClick={() => onSort(field)}
-    >
-      <div className="flex items-center gap-1">
-        <span>{label}</span>
-        {isActive ? (
-          currentDir === "asc" ? (
-            <ArrowUp className="w-3 h-3" />
-          ) : (
-            <ArrowDown className="w-3 h-3" />
-          )
-        ) : (
-          <ArrowUpDown className="w-3 h-3 opacity-30" />
-        )}
-      </div>
-    </th>
-  );
-}
-
-function StreamBadge({ method }: { method: string | null }) {
-  if (!method) return <span className="text-zinc-600">—</span>;
-  const color =
-    method === "Transcode"
-      ? "text-orange-400"
-      : method === "DirectPlay"
-        ? "text-green-500"
-        : "text-blue-400";
-  return (
-    <span className={color}>
-      {method === "DirectPlay" ? "Direct" : method === "DirectStream" ? "Remux" : method}
-    </span>
-  );
-}
-
-function ProgressBar({ play, pause }: { play: number; pause: number }) {
-  const total = play + Math.max(pause ?? 0, 0);
-  if (total <= 0) return <span className="text-zinc-600">—</span>;
-  const pct = Math.min(Math.round((play / total) * 100), 100);
-  return (
-    <div className="flex items-center gap-2 min-w-[80px]">
-      <div className="flex-1 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full ${pct >= 80 ? "bg-green-500" : pct >= 50 ? "bg-blue-500" : "bg-zinc-500"}`}
-          style={{ width: `${pct}%` }}
-        />
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 9.5,
+          color: "var(--ds-fg-disabled)",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </span>
+      <div
+        style={{
+          display: "inline-flex",
+          padding: 2,
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 7,
+        }}
+      >
+        {options.map((o) => (
+          <button
+            key={o.value}
+            onClick={() => setValue(o.value)}
+            style={{
+              padding: "3px 10px",
+              fontSize: 11,
+              borderRadius: 5,
+              background:
+                value === o.value ? "var(--ds-bg-3)" : "transparent",
+              color:
+                value === o.value
+                  ? "var(--ds-fg)"
+                  : "var(--ds-fg-muted)",
+              border: "1px solid",
+              borderColor:
+                value === o.value
+                  ? "var(--ds-border-strong)"
+                  : "transparent",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              transition: "all 100ms var(--ds-ease)",
+            }}
+          >
+            {o.label}
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
-function DetailRow({ play }: { play: HistoryRow }) {
-  const pct = progressPercent(play.playDuration, play.duration);
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+}) {
   return (
-    <tr className="bg-zinc-800/30">
-      <td colSpan={10} className="px-4 py-3">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-2 text-xs">
-          <div>
-            <span className="text-zinc-500">Device</span>
-            <p className="text-zinc-300">{play.device ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">IP Address</span>
-            {play.ipAddress
-              ? <div className="mt-0.5"><IpInfo ip={play.ipAddress} /></div>
-              : <p className="text-zinc-300">—</p>}
-          </div>
-          <div>
-            <span className="text-zinc-500">Container</span>
-            <p className="text-zinc-300">{play.container ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Bitrate</span>
-            <p className="text-zinc-300">{formatBitrate(play.bitrate)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Video Decision</span>
-            <p className="text-zinc-300">{play.videoDecision ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Audio Decision</span>
-            <p className="text-zinc-300">{play.audioDecision ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Audio Codec</span>
-            <p className="text-zinc-300">{play.audioCodec?.toUpperCase() ?? "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Paused Duration</span>
-            <p className="text-zinc-300">{play.pausedDuration ? formatDuration(play.pausedDuration) : "—"}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Started</span>
-            <p className="text-zinc-300">{formatTimestamp(play.startedAt)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Stopped</span>
-            <p className="text-zinc-300">{formatTimestamp(play.stoppedAt)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Total Duration</span>
-            <p className="text-zinc-300">{formatDuration(play.duration)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Actual Watch Time</span>
-            <p className="text-zinc-300">{formatDuration(play.playDuration)}</p>
-          </div>
-          <div>
-            <span className="text-zinc-500">Progress</span>
-            <p className="text-zinc-300">{pct}%</p>
-          </div>
-          {play.seasonNumber != null && (
-            <div>
-              <span className="text-zinc-500">Season / Episode</span>
-              <p className="text-zinc-300">
-                S{String(play.seasonNumber).padStart(2, "0")}
-                E{String(play.episodeNumber ?? 0).padStart(2, "0")}
-                {play.episodeTitle ? ` — ${play.episodeTitle}` : ""}
-              </p>
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 9.5,
+          color: "var(--ds-fg-disabled)",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          fontFamily: "inherit",
+          fontSize: 11.5,
+          padding: "4px 26px 4px 9px",
+          background: "var(--ds-bg-1)",
+          color: value ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          appearance: "none",
+          WebkitAppearance: "none",
+          MozAppearance: "none",
+          cursor: "pointer",
+        }}
+      >
+        <option value="">All</option>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function DetailRow({ play, colSpan }: { play: HistoryRow; colSpan: number }) {
+  const pct =
+    play.duration > 0
+      ? Math.round((play.playDuration / play.duration) * 100)
+      : 0;
+  const details: [string, React.ReactNode][] = [
+    ["Started", fmtTimestamp(play.startedAt)],
+    ["Stopped", fmtTimestamp(play.stoppedAt)],
+    ["Total length", fmtDuration(play.duration)],
+    ["Watch time", fmtDuration(play.playDuration)],
+    [
+      "Paused",
+      play.pausedDuration ? fmtDuration(play.pausedDuration) : "—",
+    ],
+    ["Progress", `${pct}%`],
+    ["Device", play.device ?? "—"],
+    [
+      "IP address",
+      play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
+    ],
+    ["Container", play.container ?? "—"],
+    ["Bitrate", fmtBitrate(play.bitrate)],
+    ["Video codec", play.videoCodec ?? "—"],
+    ["Audio codec", play.audioCodec ?? "—"],
+    ["Video decision", play.videoDecision ?? "—"],
+    ["Audio decision", play.audioDecision ?? "—"],
+  ];
+  if (play.mediaType === "TV" && play.seasonNumber != null) {
+    details.push([
+      "Episode",
+      `S${String(play.seasonNumber).padStart(2, "0")} · E${String(
+        play.episodeNumber ?? 0,
+      ).padStart(2, "0")}${play.episodeTitle ? ` — ${play.episodeTitle}` : ""}`,
+    ]);
+  }
+  return (
+    <tr
+      style={{
+        background: "var(--ds-bg-1)",
+        borderBottom: "1px solid var(--ds-border)",
+      }}
+    >
+      <td colSpan={colSpan} style={{ padding: "16px 22px 18px 56px" }}>
+        <div
+          className="ds-mono uppercase"
+          style={{
+            fontSize: 9.5,
+            color: "var(--ds-fg-disabled)",
+            letterSpacing: "0.1em",
+            marginBottom: 10,
+          }}
+        >
+          Session detail
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+            gap: "10px 24px",
+          }}
+        >
+          {details.map(([k, v]) => (
+            <div
+              key={k}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+                minWidth: 0,
+              }}
+            >
+              <span
+                className="ds-mono uppercase"
+                style={{
+                  fontSize: 9,
+                  color: "var(--ds-fg-disabled)",
+                  letterSpacing: "0.08em",
+                }}
+              >
+                {k}
+              </span>
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 12,
+                  color: "var(--ds-fg-muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                {v}
+              </span>
             </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+          {play.tmdbId && (
+            <Link
+              href={`/admin/activity/media/${play.tmdbId}`}
+              style={{
+                fontSize: 11.5,
+                padding: "5px 11px",
+                borderRadius: 6,
+                background: "var(--ds-bg-3)",
+                border: "1px solid var(--ds-border)",
+                color: "var(--ds-fg)",
+                textDecoration: "none",
+                whiteSpace: "nowrap",
+              }}
+            >
+              View title activity →
+            </Link>
           )}
+          <Link
+            href={`/admin/activity/user/${play.mediaServerUserId}`}
+            style={{
+              fontSize: 11.5,
+              padding: "5px 11px",
+              borderRadius: 6,
+              background: "var(--ds-bg-3)",
+              border: "1px solid var(--ds-border)",
+              color: "var(--ds-fg)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            User activity →
+          </Link>
         </div>
       </td>
     </tr>
   );
 }
 
-function ExportButton({ filterParams }: { filterParams: URLSearchParams }) {
-  const [open, setOpen] = useState(false);
-
-  function exportAs(format: "csv" | "json") {
-    const exportParams = new URLSearchParams(filterParams.toString());
-    exportParams.set("format", format);
-    window.open(`/api/play-history/export?${exportParams.toString()}`, "_blank");
-    setOpen(false);
-  }
-
+function DeleteConfirm({
+  row,
+  deleting,
+  onConfirm,
+  onCancel,
+}: {
+  row: HistoryRow;
+  deleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
   return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+    <div
+      role="dialog"
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "oklch(0 0 0 / 0.5)",
+        backdropFilter: "blur(2px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 60,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 360,
+          padding: 18,
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border-strong)",
+          borderRadius: 10,
+          boxShadow: "var(--ds-shadow-lg)",
+        }}
       >
-        <Download size={14} /> Export
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
-            <button
-              onClick={() => exportAs("csv")}
-              className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700"
-            >
-              Export as CSV
-            </button>
-            <button
-              onClick={() => exportAs("json")}
-              className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700"
-            >
-              Export as JSON
-            </button>
-          </div>
-        </>
-      )}
+        <div
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--ds-fg)",
+            marginBottom: 6,
+            letterSpacing: "-0.01em",
+          }}
+        >
+          Delete this play?
+        </div>
+        <div
+          style={{
+            fontSize: 12,
+            color: "var(--ds-fg-muted)",
+            marginBottom: 14,
+            lineHeight: 1.5,
+          }}
+        >
+          The play record for{" "}
+          <span style={{ color: "var(--ds-fg)" }}>{row.title}</span> by{" "}
+          <span style={{ color: "var(--ds-fg)" }}>
+            {row.mediaServerUser.username}
+          </span>{" "}
+          will be permanently removed from history.
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button
+            onClick={onCancel}
+            disabled={deleting}
+            style={{
+              fontSize: 12,
+              padding: "6px 12px",
+              borderRadius: 6,
+              background: "transparent",
+              border: "1px solid var(--ds-border)",
+              color: "var(--ds-fg-muted)",
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={deleting}
+            style={{
+              fontSize: 12,
+              padding: "6px 12px",
+              borderRadius: 6,
+              background: "var(--ds-danger)",
+              border: "1px solid transparent",
+              color: "white",
+              cursor: deleting ? "default" : "pointer",
+              fontWeight: 500,
+              opacity: deleting ? 0.7 : 1,
+            }}
+          >
+            {deleting ? "Deleting…" : "Delete"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -285,23 +457,20 @@ export function ActivityHistoryTable({
   mediaType?: string;
   days: number;
 }) {
-  // `Date.now()` in `formatRelativeTime` would diverge between SSR and CSR
-  // (the server timestamp at render is older than the client's by the network
-  // round-trip), producing React #418 text mismatches. Gate the relative-time
-  // cell behind `useHasMounted` so SSR emits an empty string and the client
-  // fills it in after hydration.
   const mounted = useHasMounted();
+
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [watchedFilter, setWatchedFilter] = useState<"" | "true" | "false">("");
-  const [playMethodFilter, setPlayMethodFilter] = useState("");
-  const [platformFilter, setPlatformFilter] = useState("");
+  const [watched, setWatched] = useState<"" | "true" | "false">("");
+  const [method, setMethod] = useState("");
+  const [platform, setPlatform] = useState("");
   const [userFilter, setUserFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
@@ -315,22 +484,33 @@ export function ActivityHistoryTable({
   const [platforms, setPlatforms] = useState<string[]>([]);
   const [users, setUsers] = useState<MediaServerUserOption[]>([]);
 
-  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [deleteRow, setDeleteRow] = useState<HistoryRow | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  const [error, setError] = useState<string | null>(null);
-  const [refetchKey, setRefetchKey] = useState(0);
 
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedSearch(search), 350);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => setDebouncedSearch(search), 350);
+    return () => clearTimeout(t);
   }, [search]);
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, watchedFilter, playMethodFilter, platformFilter, userFilter, fromDate, toDate, sortBy, sortDir, limit, globalSource, globalMediaType, days]);
+  }, [
+    debouncedSearch,
+    watched,
+    method,
+    platform,
+    userFilter,
+    fromDate,
+    toDate,
+    sortBy,
+    sortDir,
+    limit,
+    globalSource,
+    globalMediaType,
+    days,
+  ]);
 
   useEffect(() => {
     fetch("/api/play-history?distinct=platforms")
@@ -347,24 +527,38 @@ export function ActivityHistoryTable({
     const params = new URLSearchParams();
     if (globalSource) params.set("source", globalSource);
     if (globalMediaType) params.set("mediaType", globalMediaType);
-
     if (fromDate) {
-      params.set("startDate", new Date(fromDate + "T00:00:00").toISOString());
+      params.set("startDate", new Date(`${fromDate}T00:00:00`).toISOString());
     } else if (days) {
-      params.set("startDate", new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString());
+      params.set(
+        "startDate",
+        new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString(),
+      );
     }
-    if (toDate) {
-      params.set("endDate", new Date(toDate + "T23:59:59").toISOString());
-    }
+    if (toDate)
+      params.set("endDate", new Date(`${toDate}T23:59:59`).toISOString());
     if (debouncedSearch) params.set("search", debouncedSearch);
-    if (watchedFilter) params.set("watched", watchedFilter);
-    if (playMethodFilter) params.set("playMethod", playMethodFilter);
-    if (platformFilter) params.set("platform", platformFilter);
+    if (watched) params.set("watched", watched);
+    if (method) params.set("playMethod", method);
+    if (platform) params.set("platform", platform);
     if (userFilter) params.set("userId", userFilter);
     params.set("sortBy", sortBy);
     params.set("sortDir", sortDir);
     return params;
-  }, [globalSource, globalMediaType, days, fromDate, toDate, debouncedSearch, watchedFilter, playMethodFilter, platformFilter, userFilter, sortBy, sortDir]);
+  }, [
+    globalSource,
+    globalMediaType,
+    days,
+    fromDate,
+    toDate,
+    debouncedSearch,
+    watched,
+    method,
+    platform,
+    userFilter,
+    sortBy,
+    sortDir,
+  ]);
 
   useEffect(() => {
     abortRef.current?.abort();
@@ -377,7 +571,9 @@ export function ActivityHistoryTable({
     params.set("page", String(page));
     params.set("limit", String(limit));
 
-    fetch(`/api/play-history?${params.toString()}`, { signal: controller.signal })
+    fetch(`/api/play-history?${params.toString()}`, {
+      signal: controller.signal,
+    })
       .then((r) => {
         if (!r.ok) throw new Error(`Fetch failed: ${r.status}`);
         return r.json();
@@ -391,14 +587,14 @@ export function ActivityHistoryTable({
       .catch((err) => {
         if (err.name === "AbortError") return;
         console.error("[activity-history]", err);
-        setError(err instanceof Error ? err.message : "Failed to load activity");
+        setError(err instanceof Error ? err.message : "Failed to load");
         setLoading(false);
       });
 
     return () => controller.abort();
-  }, [page, limit, buildFilterParams, refetchKey]);
+  }, [page, limit, buildFilterParams]);
 
-  function handleSort(field: SortField) {
+  function toggleSort(field: SortField) {
     if (sortBy === field) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
@@ -407,459 +603,861 @@ export function ActivityHistoryTable({
     }
   }
 
-  async function handleDelete(id: string) {
+  async function confirmDelete() {
+    if (!deleteRow) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/play-history/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/play-history/${deleteRow.id}`, {
+        method: "DELETE",
+      });
       if (res.ok) {
-        setRows((prev) => prev.filter((r) => r.id !== id));
+        setRows((prev) => prev.filter((r) => r.id !== deleteRow.id));
         setTotal((t) => Math.max(0, t - 1));
-        setDeleteId(null);
+        setExpandedId(null);
+        setDeleteRow(null);
       }
     } finally {
       setDeleting(false);
     }
   }
 
-  function getPageRange(): number[] {
-    const range: number[] = [];
-    const start = Math.max(1, page - 2);
-    const end = Math.min(totalPages, page + 2);
-    for (let i = start; i <= end; i++) range.push(i);
-    return range;
+  function exportAs(format: "csv" | "json") {
+    const params = buildFilterParams();
+    params.set("format", format);
+    window.open(`/api/play-history/export?${params.toString()}`, "_blank");
   }
 
-  const startItem = (page - 1) * limit + 1;
+  function clearFilters() {
+    setSearch("");
+    setWatched("");
+    setMethod("");
+    setPlatform("");
+    setUserFilter("");
+    setFromDate("");
+    setToDate("");
+  }
+
+  const hasFilter =
+    !!search ||
+    !!watched ||
+    !!method ||
+    !!platform ||
+    !!userFilter ||
+    !!fromDate ||
+    !!toDate;
+
+  const startItem = total > 0 ? (page - 1) * limit + 1 : 0;
   const endItem = Math.min(page * limit, total);
+  const pageRange: number[] = [];
+  {
+    const s = Math.max(1, page - 2);
+    const e = Math.min(totalPages, page + 2);
+    for (let i = s; i <= e; i++) pageRange.push(i);
+  }
+  const colSpan = 10;
 
   return (
-    <Card className="bg-zinc-900 border-zinc-800 p-5">
-      <div className="flex flex-col gap-3 mb-4">
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-sm">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search title or user..."
-              className="w-full pl-8 pr-8 py-1.5 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-            />
-            {search && (
-              <button
-                onClick={() => setSearch("")}
-                aria-label="Clear search"
-                title="Clear search"
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
+    <div>
+      <ActivityCard style={{ padding: 18 }}>
+        {/* Search + dates + export */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            marginBottom: 14,
+          }}
+        >
+          <div
+            className="resp-history-bar"
+            style={{ display: "flex", alignItems: "center", gap: 10 }}
+          >
+            <div style={{ position: "relative", flex: "0 1 360px" }}>
+              <svg
+                width="13"
+                height="13"
+                viewBox="0 0 14 14"
+                style={{
+                  position: "absolute",
+                  left: 10,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  color: "var(--ds-fg-subtle)",
+                }}
               >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-          <ExportButton filterParams={buildFilterParams()} />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Watched</span>
-            <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
-              {([["All", ""], ["Yes", "true"], ["No", "false"]] as const).map(([label, value]) => (
+                <circle
+                  cx="6"
+                  cy="6"
+                  r="3.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                />
+                <path
+                  d="M8.7 8.7L11 11"
+                  stroke="currentColor"
+                  strokeWidth="1.4"
+                  strokeLinecap="round"
+                />
+              </svg>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by title or user…"
+                style={{
+                  fontFamily: "inherit",
+                  fontSize: 12.5,
+                  width: "100%",
+                  padding: "7px 30px 7px 30px",
+                  background: "var(--ds-bg-1)",
+                  color: "var(--ds-fg)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 8,
+                  outline: "none",
+                }}
+              />
+              {search && (
                 <button
-                  key={value}
-                  onClick={() => setWatchedFilter(value)}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                    watchedFilter === value
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
-                  }`}
+                  onClick={() => setSearch("")}
+                  aria-label="Clear search"
+                  style={{
+                    position: "absolute",
+                    right: 8,
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "transparent",
+                    border: 0,
+                    color: "var(--ds-fg-subtle)",
+                    cursor: "pointer",
+                    padding: 4,
+                    lineHeight: 0,
+                  }}
                 >
-                  {label}
+                  <svg width="11" height="11" viewBox="0 0 12 12">
+                    <path
+                      d="M3 3l6 6M9 3l-6 6"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                    />
+                  </svg>
                 </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Stream</span>
-            <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
-              {([["All", ""], ["Direct", "DirectPlay"], ["Remux", "DirectStream"], ["Transcode", "Transcode"]] as const).map(
-                ([label, value]) => (
-                  <button
-                    key={value}
-                    onClick={() => setPlayMethodFilter(value)}
-                    className={`px-2.5 py-1 text-xs font-medium transition-colors ${
-                      playMethodFilter === value
-                        ? "bg-indigo-600 text-white"
-                        : "bg-zinc-800 text-zinc-400 hover:text-white"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ),
               )}
             </div>
-          </div>
 
-          {platforms.length > 0 && (
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-zinc-500 mr-1">Platform</span>
-              <select
-                value={platformFilter}
-                onChange={(e) => setPlatformFilter(e.target.value)}
-                className="px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-              >
-                <option value="">All</option>
-                {platforms.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {users.length > 0 && (
-            <div className="flex items-center gap-1">
-              <span className="text-xs text-zinc-500 mr-1">User</span>
-              <select
-                value={userFilter}
-                onChange={(e) => setUserFilter(e.target.value)}
-                className="px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-indigo-500 max-w-[160px]"
-              >
-                <option value="">All</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.username} ({u.source})
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="flex items-center gap-1.5">
-            <Calendar className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              className="px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
-              title="Start date"
-            />
-            <span className="text-xs text-zinc-500">—</span>
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              className="px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white focus:outline-none focus:border-indigo-500 [color-scheme:dark]"
-              title="End date"
-            />
-            {(fromDate || toDate) && (
-              <button
-                onClick={() => { setFromDate(""); setToDate(""); }}
-                aria-label="Clear date range"
-                className="text-zinc-500 hover:text-red-400 transition-colors"
-                title="Clear date range"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {(debouncedSearch || watchedFilter || playMethodFilter || platformFilter || userFilter || fromDate || toDate) && (
-            <button
-              onClick={() => {
-                setSearch("");
-                setWatchedFilter("");
-                setPlayMethodFilter("");
-                setPlatformFilter("");
-                setUserFilter("");
-                setFromDate("");
-                setToDate("");
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
               }}
-              className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 transition-colors"
             >
-              <X className="w-3 h-3" /> Clear filters
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800">
-              <th className="text-left py-2 pr-2 w-6" />
-              <SortHeader label="Media" field="title" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left" />
-              <th className="text-left py-2 pr-4">User</th>
-              <SortHeader label="Source" field="source" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left" />
-              <SortHeader label="Platform" field="platform" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-left" />
-              <th className="text-left py-2 pr-4">Stream</th>
-              <th className="text-left py-2 pr-4">Quality</th>
-              <SortHeader label="Duration" field="playDuration" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-right" />
-              <th className="text-left py-2 pr-4">Progress</th>
-              <SortHeader label="When" field="startedAt" currentSort={sortBy} currentDir={sortDir} onSort={handleSort} className="text-right" />
-              <th className="py-2 w-8" />
-            </tr>
-          </thead>
-          <tbody>
-            {loading && rows.length === 0 ? (
-              <tr>
-                <td colSpan={11} className="py-12 text-center">
-                  <Loader2 className="w-5 h-5 animate-spin text-zinc-500 mx-auto mb-2" />
-                  <p className="text-zinc-500 text-xs">Loading history...</p>
-                </td>
-              </tr>
-            ) : error ? (
-              <tr>
-                <td colSpan={11} className="py-12 text-center">
-                  <p className="text-red-400 text-sm mb-3">
-                    Failed to load activity: {error}
-                  </p>
-                  <button
-                    onClick={() => {
-                      setError(null);
-                      setRefetchKey((k) => k + 1);
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 text-red-400 hover:text-red-300 hover:bg-zinc-700 transition-colors"
-                  >
-                    Retry
-                  </button>
-                </td>
-              </tr>
-            ) : rows.length === 0 ? (
-              <tr>
-                <td colSpan={11} className="py-12 text-center text-zinc-500 text-sm">
-                  No play history found
-                </td>
-              </tr>
-            ) : (
-              rows.map((p) => {
-                const isExpanded = expandedId === p.id;
-                const qualityParts: string[] = [];
-                if (p.resolution) qualityParts.push(p.resolution);
-                if (p.videoCodec) qualityParts.push(p.videoCodec.toUpperCase());
-                const qualityStr = qualityParts.length > 0 ? qualityParts.join(" · ") : null;
-                const pct = progressPercent(p.playDuration, p.duration);
-
-                return (
-                  <Fragment key={p.id}>
-                    <tr
-                      className={`group border-b border-zinc-800/50 hover:bg-zinc-800/30 cursor-pointer transition-colors ${
-                        loading ? "opacity-50" : ""
-                      }`}
-                      onClick={() => setExpandedId(isExpanded ? null : p.id)}
-                    >
-                      <td className="py-2.5 pr-2 text-zinc-500">
-                        {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <div className="flex items-center gap-2">
-                          {(p.mediaType ?? "").toUpperCase() === "TV" ? (
-                            <Tv2 className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                          ) : (
-                            <Film className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                          )}
-                          {p.tmdbId && p.mediaType ? (
-                            <Link
-                              href={p.mediaType === "TV" ? `/tv/${p.tmdbId}` : `/movie/${p.tmdbId}`}
-                              className="text-white hover:text-indigo-400 transition-colors truncate max-w-[220px] block"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {p.title}
-                            </Link>
-                          ) : (
-                            <span className="text-white truncate max-w-[220px] block">{p.title}</span>
-                          )}
-                          {(p.mediaType ?? "").toUpperCase() === "TV" && p.seasonNumber != null && (
-                            <span className="text-zinc-500 text-xs shrink-0">
-                              S{String(p.seasonNumber).padStart(2, "0")}E{String(p.episodeNumber ?? 0).padStart(2, "0")}
-                            </span>
-                          )}
-                          {p.watched && (
-                            <span className="text-[10px] bg-green-600/20 text-green-400 px-1.5 py-0.5 rounded shrink-0">
-                              watched
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <div className="flex items-center gap-2">
-                          {p.mediaServerUser.thumbUrl && /^https?:\/\//i.test(p.mediaServerUser.thumbUrl) && (
-                            <img
-                              src={p.mediaServerUser.thumbUrl}
-                              alt=""
-                              className="w-5 h-5 rounded-full object-cover shrink-0"
-                            />
-                          )}
-                          <Link
-                            href={`/admin/activity/user/${p.mediaServerUserId}`}
-                            className="text-zinc-300 hover:text-indigo-400 transition-colors truncate max-w-[120px]"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {p.mediaServerUser.username}
-                          </Link>
-                        </div>
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                            p.source === "plex"
-                              ? "bg-amber-500/15 text-amber-400"
-                              : "bg-purple-500/15 text-purple-400"
-                          }`}
-                        >
-                          {p.source === "plex" ? "Plex" : "Jellyfin"}
-                        </span>
-                      </td>
-                      <td className="py-2.5 pr-4 text-zinc-400 text-xs truncate max-w-[100px]">
-                        {p.platform ?? "—"}
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <StreamBadge method={p.playMethod} />
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        {qualityStr ? (
-                          <span className="text-zinc-400 text-xs">{qualityStr}</span>
-                        ) : (
-                          <span className="text-zinc-600">—</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 pr-4 text-right text-zinc-400 tabular-nums">
-                        {formatDuration(p.playDuration)}
-                      </td>
-                      <td className="py-2.5 pr-4">
-                        <div className="flex items-center gap-2">
-                          <ProgressBar play={p.playDuration} pause={p.duration - p.playDuration} />
-                          <span className="text-[10px] text-zinc-500 tabular-nums w-8 text-right">{pct}%</span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 text-right text-zinc-500" title={formatTimestamp(p.startedAt)}>
-                        {mounted ? formatRelativeTime(p.startedAt) : ""}
-                      </td>
-                      <td className="py-2.5 pl-2">
-                        <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100">
-                          <Link
-                            href={`/admin/activity/play/${p.id}`}
-                            onClick={(e) => e.stopPropagation()}
-                            aria-label="View details"
-                            className="text-zinc-600 hover:text-indigo-400 transition-colors"
-                            title="View details"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5" />
-                          </Link>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setDeleteId(p.id);
-                            }}
-                            aria-label="Delete record"
-                            className="text-zinc-700 hover:text-red-400 transition-colors"
-                            title="Delete record"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                    {isExpanded && <DetailRow play={p} />}
-                  </Fragment>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {total > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-3 border-t border-zinc-800">
-          <div className="text-xs text-zinc-500">
-            Showing {startItem}–{endItem} of {total.toLocaleString()} results
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              disabled={page <= 1}
-              onClick={() => setPage(1)}
-              className="px-2 py-1 text-xs rounded bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              First
-            </button>
-            <button
-              disabled={page <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="px-2 py-1 text-xs rounded bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              Prev
-            </button>
-            {getPageRange().map((p) => (
-              <button
-                key={p}
-                onClick={() => setPage(p)}
-                className={`px-2.5 py-1 text-xs rounded transition-colors ${
-                  p === page
-                    ? "bg-indigo-600 text-white"
-                    : "bg-zinc-800 text-zinc-400 hover:text-white"
-                }`}
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  color: fromDate ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              />
+              <span
+                className="ds-mono"
+                style={{ fontSize: 11, color: "var(--ds-fg-disabled)" }}
               >
-                {p}
+                →
+              </span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  color: toDate ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              />
+            </div>
+
+            <div style={{ flex: 1 }} />
+
+            <div
+              className="ds-mono"
+              style={{
+                fontSize: 11,
+                color: "var(--ds-fg-subtle)",
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {total.toLocaleString()} total
+            </div>
+
+            {hasFilter && (
+              <button
+                onClick={clearFilters}
+                className="ds-mono"
+                style={{
+                  fontSize: 11,
+                  padding: "5px 10px",
+                  borderRadius: 6,
+                  background: "transparent",
+                  border: "1px solid var(--ds-border)",
+                  color: "var(--ds-fg-muted)",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Clear filters
               </button>
-            ))}
-            <button
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              className="px-2 py-1 text-xs rounded bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              Next
-            </button>
-            <button
-              disabled={page >= totalPages}
-              onClick={() => setPage(totalPages)}
-              className="px-2 py-1 text-xs rounded bg-zinc-800 text-zinc-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-            >
-              Last
-            </button>
+            )}
+
+            <div style={{ display: "inline-flex", gap: 4 }}>
+              <button
+                onClick={() => exportAs("csv")}
+                style={{
+                  fontSize: 12,
+                  padding: "6px 11px",
+                  borderRadius: 6,
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  color: "var(--ds-fg-muted)",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Export CSV
+              </button>
+              <button
+                onClick={() => exportAs("json")}
+                style={{
+                  fontSize: 12,
+                  padding: "6px 11px",
+                  borderRadius: 6,
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
+                  color: "var(--ds-fg-muted)",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                JSON
+              </button>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-500">Per page</span>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 14,
+              flexWrap: "wrap",
+            }}
+          >
+            <SegGroup
+              label="Watched"
+              value={watched}
+              setValue={setWatched}
+              options={[
+                { value: "", label: "All" },
+                { value: "true", label: "Yes" },
+                { value: "false", label: "No" },
+              ]}
+            />
+            <SegGroup
+              label="Stream"
+              value={method}
+              setValue={setMethod}
+              options={[
+                { value: "", label: "All" },
+                { value: "DirectPlay", label: "Direct" },
+                { value: "DirectStream", label: "Remux" },
+                { value: "Transcode", label: "Transcode" },
+              ]}
+            />
+            <SelectField
+              label="User"
+              value={userFilter}
+              onChange={setUserFilter}
+              options={users.map((u) => ({ value: u.id, label: u.username }))}
+            />
+            <SelectField
+              label="Platform"
+              value={platform}
+              onChange={setPlatform}
+              options={platforms.map((p) => ({ value: p, label: p }))}
+            />
+          </div>
+        </div>
+
+        <div
+          style={{
+            borderTop: "1px solid var(--ds-border)",
+            margin: "0 -18px",
+          }}
+        />
+
+        <div className="resp-table-scroll" style={{ margin: "0 -18px" }}>
+          <table
+            style={{
+              width: "100%",
+              minWidth: 920,
+              borderCollapse: "collapse",
+              fontSize: 12.5,
+            }}
+          >
+            <thead>
+              <tr style={{ background: "var(--ds-bg-1)" }}>
+                <Th width={28} />
+                <Th label="User" />
+                <Th
+                  label="Title"
+                  onSort={() => toggleSort("title")}
+                  active={sortBy === "title"}
+                  dir={sortDir}
+                />
+                <Th
+                  label="Started"
+                  onSort={() => toggleSort("startedAt")}
+                  active={sortBy === "startedAt"}
+                  dir={sortDir}
+                />
+                <Th
+                  label="Length"
+                  onSort={() => toggleSort("duration")}
+                  active={sortBy === "duration"}
+                  dir={sortDir}
+                  align="right"
+                />
+                <Th
+                  label="Watched"
+                  onSort={() => toggleSort("playDuration")}
+                  active={sortBy === "playDuration"}
+                  dir={sortDir}
+                  align="right"
+                />
+                <Th label="Stream" />
+                <Th label="Quality" />
+                <Th
+                  label="Platform"
+                  onSort={() => toggleSort("platform")}
+                  active={sortBy === "platform"}
+                  dir={sortDir}
+                />
+                <Th width={48} align="right" />
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr>
+                  <td
+                    colSpan={colSpan}
+                    style={{
+                      padding: "60px 20px",
+                      textAlign: "center",
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  >
+                    Loading…
+                  </td>
+                </tr>
+              ) : error ? (
+                <tr>
+                  <td
+                    colSpan={colSpan}
+                    style={{
+                      padding: "60px 20px",
+                      textAlign: "center",
+                      color: "var(--ds-danger)",
+                    }}
+                  >
+                    {error}
+                  </td>
+                </tr>
+              ) : rows.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={colSpan}
+                    style={{
+                      padding: "60px 20px",
+                      textAlign: "center",
+                      color: "var(--ds-fg-subtle)",
+                      fontSize: 13,
+                    }}
+                  >
+                    No plays match these filters.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r, i) => {
+                  const isExpanded = expandedId === r.id;
+                  const pct =
+                    r.duration > 0
+                      ? Math.min(
+                          100,
+                          Math.round((r.playDuration / r.duration) * 100),
+                        )
+                      : 0;
+                  const ml = methodLabel(
+                    r.playMethod,
+                    r.videoDecision,
+                    r.audioDecision,
+                  );
+                  return (
+                    <Fragment key={r.id}>
+                      <tr
+                        className="history-row"
+                        onClick={() =>
+                          setExpandedId((id) => (id === r.id ? null : r.id))
+                        }
+                        style={{
+                          background: isExpanded
+                            ? "var(--ds-bg-3)"
+                            : i % 2 === 1
+                              ? "oklch(1 0 0 / 0.012)"
+                              : "transparent",
+                          borderBottom: "1px solid var(--ds-border)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <td style={{ padding: "10px 0 10px 12px" }}>
+                          <ChevIcon open={isExpanded} />
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 11px",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          <Link
+                            href={`/admin/activity/user/${r.mediaServerUserId}`}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 8,
+                              textDecoration: "none",
+                              color: "inherit",
+                            }}
+                          >
+                            <Avatar
+                              letter={(
+                                r.mediaServerUser.username[0] ?? "?"
+                              ).toUpperCase()}
+                              size={20}
+                            />
+                            <span style={{ color: "var(--ds-fg)" }}>
+                              {r.mediaServerUser.username}
+                            </span>
+                            <span
+                              style={{
+                                width: 4,
+                                height: 4,
+                                borderRadius: 999,
+                                background:
+                                  r.source === "plex"
+                                    ? "var(--ds-plex)"
+                                    : "var(--ds-jellyfin)",
+                              }}
+                            />
+                          </Link>
+                        </td>
+                        <td style={{ padding: "10px 11px", minWidth: 240 }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 10,
+                            }}
+                          >
+                            <Poster
+                              src={r.posterUrl}
+                              letter={(r.title[0] ?? "?").toUpperCase()}
+                              w={28}
+                              h={40}
+                              radius={3}
+                            />
+                            <div
+                              style={{
+                                minWidth: 0,
+                                lineHeight: 1.25,
+                                flex: 1,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  color: "var(--ds-fg)",
+                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                }}
+                              >
+                                {r.title}
+                              </div>
+                              <div
+                                className="ds-mono"
+                                style={{
+                                  fontSize: 10.5,
+                                  color: "var(--ds-fg-disabled)",
+                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                }}
+                              >
+                                {r.mediaType === "TV" &&
+                                r.seasonNumber != null
+                                  ? `S${String(r.seasonNumber).padStart(2, "0")} · E${String(r.episodeNumber ?? 0).padStart(2, "0")}${r.episodeTitle ? ` · ${r.episodeTitle}` : ""}`
+                                  : (r.mediaType ?? "")}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        <td
+                          className="ds-mono"
+                          style={{
+                            padding: "10px 11px",
+                            color: "var(--ds-fg-muted)",
+                            fontVariantNumeric: "tabular-nums",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtTimestamp(r.startedAt)}
+                          <div
+                            className="ds-mono"
+                            style={{
+                              fontSize: 10,
+                              color: "var(--ds-fg-disabled)",
+                            }}
+                          >
+                            {mounted ? relTime(r.startedAt) : ""}
+                          </div>
+                        </td>
+                        <td
+                          className="ds-mono"
+                          style={{
+                            padding: "10px 11px",
+                            color: "var(--ds-fg-muted)",
+                            textAlign: "right",
+                            fontVariantNumeric: "tabular-nums",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtDuration(r.duration)}
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 11px",
+                            whiteSpace: "nowrap",
+                            minWidth: 130,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                flex: 1,
+                                height: 3,
+                                background: "oklch(1 0 0 / 0.06)",
+                                borderRadius: 999,
+                                overflow: "hidden",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  width: `${pct}%`,
+                                  height: "100%",
+                                  background: r.watched
+                                    ? "var(--ds-success)"
+                                    : "var(--ds-accent)",
+                                  borderRadius: 999,
+                                }}
+                              />
+                            </div>
+                            <span
+                              className="ds-mono"
+                              style={{
+                                fontSize: 10.5,
+                                color: r.watched
+                                  ? "var(--ds-success)"
+                                  : "var(--ds-fg-subtle)",
+                                fontVariantNumeric: "tabular-nums",
+                                width: 32,
+                                textAlign: "right",
+                              }}
+                            >
+                              {pct}%
+                            </span>
+                          </div>
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 11px",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          <MethodPill
+                            method={ml.label}
+                            methodClass={ml.cls}
+                          />
+                        </td>
+                        <td
+                          className="ds-mono"
+                          style={{
+                            padding: "10px 11px",
+                            color: "var(--ds-fg-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.resolution ?? "—"}
+                          {r.videoCodec && (
+                            <span
+                              style={{ color: "var(--ds-fg-disabled)" }}
+                            >
+                              {" "}
+                              · {r.videoCodec}
+                            </span>
+                          )}
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 11px",
+                            color: "var(--ds-fg-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.platform ?? "—"}
+                        </td>
+                        <td
+                          style={{
+                            padding: "10px 11px",
+                            textAlign: "right",
+                            whiteSpace: "nowrap",
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            onClick={() => setDeleteRow(r)}
+                            className="history-delete"
+                            aria-label="Delete play"
+                            style={{
+                              background: "transparent",
+                              border: "1px solid transparent",
+                              color: "var(--ds-fg-disabled)",
+                              cursor: "pointer",
+                              borderRadius: 4,
+                              padding: "4px 6px",
+                              lineHeight: 0,
+                              transition: "all 120ms var(--ds-ease)",
+                            }}
+                          >
+                            <svg
+                              width="13"
+                              height="13"
+                              viewBox="0 0 14 14"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="1.3"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M2.5 3.5h9M5 3.5V2.5a1 1 0 011-1h2a1 1 0 011 1v1M5 6v5M9 6v5M3.5 3.5l.5 8a1 1 0 001 1h4a1 1 0 001-1l.5-8" />
+                            </svg>
+                          </button>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <DetailRow play={r} colSpan={colSpan} />
+                      )}
+                    </Fragment>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <div
+          style={{
+            borderTop: "1px solid var(--ds-border)",
+            margin: "0 -18px",
+          }}
+        />
+
+        {/* Pagination */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "12px 0 0",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <span
+              className="ds-mono"
+              style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+            >
+              Rows
+            </span>
             <select
               value={limit}
               onChange={(e) => setLimit(Number(e.target.value))}
-              className="px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded text-white focus:outline-none focus:border-indigo-500"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                padding: "3px 7px",
+                background: "var(--ds-bg-1)",
+                color: "var(--ds-fg)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 5,
+                cursor: "pointer",
+              }}
             >
               {[10, 25, 50, 100].map((n) => (
-                <option key={n} value={n}>{n}</option>
+                <option key={n} value={n}>
+                  {n}
+                </option>
               ))}
             </select>
+            <span
+              className="ds-mono"
+              style={{
+                fontSize: 10.5,
+                color: "var(--ds-fg-disabled)",
+                marginLeft: 6,
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {total > 0
+                ? `${startItem.toLocaleString()}–${endItem.toLocaleString()} of ${total.toLocaleString()}`
+                : "0 results"}
+            </span>
+          </div>
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            {(
+              [
+                ["«", () => setPage(1), page === 1],
+                ["‹", () => setPage(page - 1), page === 1],
+              ] as const
+            ).map(([label, fn, disabled], idx) => (
+              <PageBtn key={idx} onClick={fn} disabled={disabled}>
+                {label}
+              </PageBtn>
+            ))}
+            {pageRange[0] > 1 && (
+              <span
+                className="ds-mono"
+                style={{
+                  color: "var(--ds-fg-disabled)",
+                  fontSize: 11,
+                  padding: "0 4px",
+                }}
+              >
+                …
+              </span>
+            )}
+            {pageRange.map((p) => (
+              <PageBtn
+                key={p}
+                onClick={() => setPage(p)}
+                active={p === page}
+              >
+                {p}
+              </PageBtn>
+            ))}
+            {pageRange[pageRange.length - 1] < totalPages && (
+              <span
+                className="ds-mono"
+                style={{
+                  color: "var(--ds-fg-disabled)",
+                  fontSize: 11,
+                  padding: "0 4px",
+                }}
+              >
+                …
+              </span>
+            )}
+            {(
+              [
+                ["›", () => setPage(page + 1), page >= totalPages],
+                ["»", () => setPage(totalPages), page >= totalPages],
+              ] as const
+            ).map(([label, fn, disabled], idx) => (
+              <PageBtn key={idx} onClick={fn} disabled={disabled}>
+                {label}
+              </PageBtn>
+            ))}
           </div>
         </div>
-      )}
+      </ActivityCard>
 
-      {deleteId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6 max-w-sm w-full mx-4 shadow-xl">
-            <h3 className="text-white font-semibold mb-2">Delete Play Record</h3>
-            <p className="text-zinc-400 text-sm mb-4">
-              Are you sure you want to delete this play history record? This action cannot be undone.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setDeleteId(null)}
-                disabled={deleting}
-                className="px-4 py-2 text-sm rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => handleDelete(deleteId)}
-                disabled={deleting}
-                className="px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50 flex items-center gap-2"
-              >
-                {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+      {deleteRow && (
+        <DeleteConfirm
+          row={deleteRow}
+          deleting={deleting}
+          onConfirm={confirmDelete}
+          onCancel={() => setDeleteRow(null)}
+        />
       )}
-    </Card>
+    </div>
+  );
+}
+
+function PageBtn({
+  children,
+  onClick,
+  disabled,
+  active,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  active?: boolean;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="ds-mono"
+      style={{
+        minWidth: 26,
+        height: 26,
+        padding: "0 6px",
+        fontSize: 11,
+        background: active ? "var(--ds-accent)" : "transparent",
+        color: active
+          ? "var(--ds-accent-fg)"
+          : disabled
+            ? "var(--ds-fg-disabled)"
+            : "var(--ds-fg-muted)",
+        border: "1px solid",
+        borderColor: active ? "transparent" : "var(--ds-border)",
+        borderRadius: 5,
+        cursor: disabled ? "default" : "pointer",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {children}
+    </button>
   );
 }

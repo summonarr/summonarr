@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -8,10 +8,7 @@ const MAX_BATCH = 200;
 
 type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`ratings-batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
@@ -89,4 +86,4 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ ratings });
-}
+});

@@ -1,12 +1,9 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinMediaFolders } from "@/lib/jellyfin";
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [urlRow, keyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
@@ -23,4 +20,4 @@ export async function GET() {
     console.error("[settings/jellyfin/libraries] Failed to fetch Jellyfin libraries:", err);
     return NextResponse.json({ error: "Could not connect to Jellyfin server" }, { status: 502 });
   }
-}
+});

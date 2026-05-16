@@ -152,12 +152,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 6. **Route all cron/sync handlers through `isCronAuthorized`.** Do not re-implement `CRON_SECRET` checks inline.
 
-6a. **User-session API routes must use `requireAuth` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
+6a. **User-session API routes must wrap their handlers with `withAuth`/`withAdmin`/`withIssueAdmin` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** The wrapper runs the auth check before the handler body and returns 401/403 itself, so the guard can never be forgotten or mis-returned (the failure mode that the older inline `requireAuth(...) + if (session instanceof NextResponse) return session;` pattern allowed). Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
     ```ts
-    const session = await requireAuth({ role: "ADMIN" });
-    if (session instanceof NextResponse) return session;
+    export const GET = withAuth(async (req, ctx, session) => { ... });        // any authenticated user
+    export const POST = withAdmin(async (req, ctx, session) => { ... });      // ADMIN only
+    export const PATCH = withIssueAdmin(async (                               // ADMIN or ISSUE_ADMIN
+      req,
+      { params }: { params: Promise<{ id: string }> },
+      session,
+    ) => { ... });
     ```
-    Semantics: 401 for missing/expired session, 403 only for wrong role. Options: omit `role` for any-authenticated-user; `role: "ADMIN"` requires ADMIN; `role: "ISSUE_ADMIN"` accepts ADMIN or ISSUE_ADMIN. Does not apply to cron/sync routes (use `isCronAuthorized`) or routes that return plain-text/binary responses (SSE, thumbnails) — those stay inline.
+    The handler only runs for an authorized session; `session` is always valid inside it. Keep the dynamic-route `ctx` param's `{ params: Promise<{...}> }` annotation — Next 16's build-time route-type checker needs it. Name unused params `_req`/`_ctx`/`_session`. Semantics: 401 for missing/expired session, 403 only for wrong role. `requireAuth` still exists and is what the wrappers call internally; call it directly **only** when the route legitimately can't use a wrapper — dual-auth routes that also accept a cron token (e.g. [check-schema](src/app/api/admin/check-schema/route.ts) wraps with `withAdmin` and keeps an inline `isCronAuthorized` check) and routes returning plain-text/binary/streaming responses (SSE, thumbnails: [/api/events](src/app/api/events/route.ts), [fix-match/thumb](src/app/api/admin/fix-match/thumb/route.ts), [play-history/export](src/app/api/play-history/export/route.ts)). Cron/sync routes use `isCronAuthorized`, not this. Two enforcement layers back this up: `npm run audit:routes` ([scripts/audit-routes.ts](scripts/audit-routes.ts)) fails CI if any route ships with no recognized guard (its `ROUTE_EXCEPTIONS` list documents every legitimate inline-auth/public route), and the `authorized()` callback in [src/lib/auth.config.ts](src/lib/auth.config.ts) returns a JSON 403 for any non-admin role hitting `/api/admin/*` as a defense-in-depth backstop — the per-route wrapper remains the source of truth for the exact ADMIN-vs-ISSUE_ADMIN decision, so the backstop can never wrongly deny a privileged caller.
 
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 

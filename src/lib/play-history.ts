@@ -901,7 +901,7 @@ function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "") {
   return { where: conditions.join(" AND "), params };
 }
 
-type PlayHistoryStatsResult = {
+export type PlayHistoryStatsResult = {
   totalPlays: number;
   totalWatchTimeHours: number;
   playsByDay: { day: string; count: number }[];

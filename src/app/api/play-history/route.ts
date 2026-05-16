@@ -1,13 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { resolvePosterMap } from "@/lib/poster-cache";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
 
   const distinctMode = params.get("distinct");
@@ -105,11 +103,20 @@ export async function GET(request: NextRequest) {
     prisma.playHistory.count({ where }),
   ]);
 
+  // Attach real TMDB poster art (cache-resolved) so the History tab can
+  // render covers instead of letter placeholders. Additive field — existing
+  // consumers ignore it.
+  const posters = await resolvePosterMap(items);
+  const itemsWithPosters = items.map((it) => ({
+    ...it,
+    posterUrl: it.tmdbId != null ? posters[it.tmdbId] ?? null : null,
+  }));
+
   return NextResponse.json({
-    items,
+    items: itemsWithPosters,
     total,
     page,
     limit,
     totalPages: Math.ceil(total / limit),
   });
-}
+});

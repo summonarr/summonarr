@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse, after } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse, after } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewIssue } from "@/lib/email";
@@ -13,10 +13,7 @@ import { isFeatureEnabled } from "@/lib/features";
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const where =
     (session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN") ? {} : { reportedBy: session.user.id };
 
@@ -40,12 +37,9 @@ export async function GET(req: NextRequest) {
       }));
 
   return NextResponse.json(issues);
-}
+});
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!(await isFeatureEnabled("feature.page.issues"))) {
     return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
   }
@@ -153,4 +147,4 @@ export async function POST(req: NextRequest) {
     ]);
   });
   return NextResponse.json(issue, { status: 201 });
-}
+});

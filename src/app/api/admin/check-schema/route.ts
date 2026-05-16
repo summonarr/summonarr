@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { isCronAuthorized } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
@@ -15,10 +15,9 @@ const EXPECTED: Record<string, string[]> = {
   MediaServerUser:     ["id","source","sourceUserId","username"],
 };
 
-export async function GET(request: NextRequest) {
-  // Requires both an admin session AND a cron bearer token to prevent accidental exposure
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
+// Requires both an admin session (withAdmin) AND a cron bearer token to
+// prevent accidental exposure — the inline isCronAuthorized check stays.
+export const GET = withAdmin(async (request, _ctx, _session) => {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -44,4 +43,4 @@ export async function GET(request: NextRequest) {
 
   const allOk = Object.values(results).every((r) => r.ok);
   return NextResponse.json({ allOk, tables: results, allTables: Object.keys(actual).sort() });
-}
+});

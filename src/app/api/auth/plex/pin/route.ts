@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { PLEX_CLIENT_ID } from "@/lib/plex";
 
@@ -14,10 +14,7 @@ const PLEX_PIN_HEADERS = {
   Accept: "application/json",
 };
 
-export async function POST() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (_req, _ctx, _session) => {
   const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
     allowedHosts: ["plex.tv"],
     method: "POST",
@@ -38,12 +35,9 @@ export async function POST() {
     return NextResponse.json({ error: "plex pin response malformed" }, { status: 502 });
   }
   return NextResponse.json({ id: data.id, code: data.code });
-}
+});
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, _session) => {
   const idRaw = req.nextUrl.searchParams.get("id");
   const id = idRaw ? Number(idRaw) : NaN;
   if (!Number.isFinite(id) || id <= 0) {
@@ -62,4 +56,4 @@ export async function GET(req: NextRequest) {
 
   const data = (await res.json()) as { authToken?: string | null };
   return NextResponse.json({ authToken: data.authToken ?? null });
-}
+});

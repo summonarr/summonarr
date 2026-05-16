@@ -1,9 +1,21 @@
-// Shared presentational primitives for the refined Activity dashboard.
-// Ported from the Claude Design "Activity Page" handoff — DS-token styled,
-// no client state so this module is safe to import from both the server
-// page (KPI strip / calendar) and the "use client" section components.
+"use client";
 
-import { Fragment, useId, type CSSProperties, type ReactNode } from "react";
+// Shared presentational primitives for the refined Activity dashboard.
+// Ported from the Claude Design "Activity Page" handoff — DS-token styled.
+// Only ever consumed by the "use client" section components
+// (activity-sections / -now-playing / -recent-plays); page.tsx never imports
+// this module directly. Sparkline/AreaChart carry hover state, so this is a
+// client module. Tooltip date labels are precomputed server-side and passed
+// down as `labels` — never derived from Date here (CLAUDE.md guardrail 16).
+
+import {
+  Fragment,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import Image from "next/image";
 
 /* ── Source helpers ───────────────────────────────────────────── */
@@ -205,107 +217,370 @@ export function Avatar({
 
 /* ── Charts ───────────────────────────────────────────────────── */
 
+// `labels[i]` is the precomputed (server-side) display label for `data[i]` —
+// e.g. "May 13". Never compute it from Date here (guardrail 16).
 export function Sparkline({
   data,
   w = 140,
   h = 22,
   color = "var(--ds-accent)",
+  labels,
+  valueSuffix = "",
+  interactive = true,
 }: {
   data: number[];
   w?: number;
   h?: number;
   color?: string;
+  labels?: string[];
+  valueSuffix?: string;
+  interactive?: boolean;
 }) {
   const gradId = useId().replace(/[:]/g, "");
-  if (!data || data.length < 2) return <span style={{ display: "block", height: h }} />;
+  const wrapRef = useRef<HTMLDivElement>(null);
+  // `wrapW` is captured in the mousemove handler (which has the live rect),
+  // not read off the ref during render — the React Compiler forbids reading
+  // ref.current in the render path.
+  const [hover, setHover] = useState<{
+    i: number;
+    x: number;
+    wrapW: number;
+  } | null>(null);
+
+  if (!data || data.length < 2)
+    return <span style={{ display: "block", height: h }} />;
+
   const max = Math.max(...data, 1);
   const min = Math.min(...data, 0);
   const range = max - min || 1;
   const step = w / (data.length - 1);
+  const yFor = (v: number) => h - ((v - min) / range) * h;
   const pts = data
-    .map(
-      (v, i) =>
-        `${(i * step).toFixed(2)},${(h - ((v - min) / range) * h).toFixed(2)}`,
-    )
+    .map((v, i) => `${(i * step).toFixed(2)},${yFor(v).toFixed(2)}`)
     .join(" ");
   const area = `0,${h} ${pts} ${w},${h}`;
+
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    setHover({
+      i: Math.round(t * (data.length - 1)),
+      x: t * rect.width,
+      wrapW: rect.width,
+    });
+  };
+
+  const TT_W = 120;
+  const ttLeft = hover
+    ? Math.max(-4, Math.min(hover.wrapW - TT_W + 4, hover.x - TT_W / 2))
+    : 0;
+
   return (
-    <svg width={w} height={h} style={{ display: "block", overflow: "visible" }}>
-      <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.32" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      <polygon points={area} fill={`url(#${gradId})`} />
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={color}
-        strokeWidth="1.25"
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
+    <div
+      ref={wrapRef}
+      onMouseMove={interactive ? onMove : undefined}
+      onMouseLeave={interactive ? () => setHover(null) : undefined}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: h,
+        cursor: interactive ? "crosshair" : "default",
+      }}
+    >
+      <svg
+        width="100%"
+        height={h}
+        viewBox={`0 0 ${w} ${h}`}
+        preserveAspectRatio="none"
+        style={{ display: "block", overflow: "visible" }}
+      >
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.32" />
+            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        <polygon points={area} fill={`url(#${gradId})`} />
+        <polyline
+          points={pts}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.25"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+        {hover && (
+          <>
+            <line
+              x1={hover.i * step}
+              x2={hover.i * step}
+              y1={0}
+              y2={h}
+              stroke={color}
+              strokeOpacity="0.5"
+              strokeWidth="1"
+              strokeDasharray="1.5 2"
+              vectorEffect="non-scaling-stroke"
+            />
+            <circle
+              cx={hover.i * step}
+              cy={yFor(data[hover.i])}
+              r="2.2"
+              fill="var(--ds-bg)"
+              stroke={color}
+              strokeWidth="1.4"
+              vectorEffect="non-scaling-stroke"
+            />
+          </>
+        )}
+      </svg>
+      {hover && (
+        <div
+          style={{
+            position: "absolute",
+            left: ttLeft,
+            bottom: h + 6,
+            width: TT_W,
+            pointerEvents: "none",
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border-strong)",
+            borderRadius: 6,
+            padding: "5px 8px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
+            fontSize: 11,
+            color: "var(--ds-fg)",
+            zIndex: 5,
+          }}
+        >
+          {labels?.[hover.i] && (
+            <div
+              className="ds-mono uppercase"
+              style={{
+                fontSize: 9,
+                letterSpacing: "0.08em",
+                color: "var(--ds-fg-disabled)",
+                marginBottom: 2,
+              }}
+            >
+              {labels[hover.i]}
+            </div>
+          )}
+          <div
+            className="ds-mono"
+            style={{
+              fontSize: 12.5,
+              fontVariantNumeric: "tabular-nums",
+              color: "var(--ds-fg)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background: color,
+                display: "inline-block",
+              }}
+            />
+            {data[hover.i].toLocaleString()}
+            {valueSuffix}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
+// `labels[i]` is the precomputed (server-side) label for `data[i]`.
 export function AreaChart({
   data,
   h = 160,
   color = "var(--ds-accent)",
+  labels,
+  valueSuffix = "",
 }: {
   data: number[];
   h?: number;
   color?: string;
+  labels?: string[];
+  valueSuffix?: string;
 }) {
   const gradId = useId().replace(/[:]/g, "");
+  const wrapRef = useRef<HTMLDivElement>(null);
+  // `wrapW` captured in the handler, not read off the ref during render.
+  const [hover, setHover] = useState<{
+    i: number;
+    x: number;
+    y: number;
+    wrapW: number;
+  } | null>(null);
   const w = 1000;
+
   if (!data || data.length < 2) return <div style={{ height: h }} />;
+
   const max = Math.max(...data, 1);
   const step = w / (data.length - 1);
+  const yFor = (v: number) => h - (v / max) * (h - 8) - 4;
   const pts = data
-    .map((v, i) => `${(i * step).toFixed(2)},${(h - (v / max) * (h - 8) - 4).toFixed(2)}`)
+    .map((v, i) => `${(i * step).toFixed(2)},${yFor(v).toFixed(2)}`)
     .join(" ");
   const area = `0,${h} ${pts} ${w},${h}`;
   const grid = [0.25, 0.5, 0.75].map((p) => h - p * (h - 8) - 4);
+
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const i = Math.round(t * (data.length - 1));
+    setHover({
+      i,
+      x: t * rect.width,
+      y: (yFor(data[i]) / h) * rect.height,
+      wrapW: rect.width,
+    });
+  };
+
+  const TT_W = 120;
+  const ttLeft = hover
+    ? Math.max(4, Math.min(hover.wrapW - TT_W - 4, hover.x - TT_W / 2))
+    : 0;
+
   return (
-    <svg
-      width="100%"
-      height={h}
-      viewBox={`0 0 ${w} ${h}`}
-      preserveAspectRatio="none"
-      style={{ display: "block" }}
+    <div
+      ref={wrapRef}
+      onMouseMove={onMove}
+      onMouseLeave={() => setHover(null)}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: h,
+        cursor: "crosshair",
+      }}
     >
-      <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.22" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {grid.map((y, i) => (
-        <line
-          key={i}
-          x1="0"
-          y1={y}
-          x2={w}
-          y2={y}
-          stroke="var(--ds-border)"
-          strokeWidth="1"
-          strokeDasharray="2 4"
+      <svg
+        width="100%"
+        height={h}
+        viewBox={`0 0 ${w} ${h}`}
+        preserveAspectRatio="none"
+        style={{ display: "block", overflow: "visible" }}
+      >
+        <defs>
+          <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.22" />
+            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          </linearGradient>
+        </defs>
+        {grid.map((y, i) => (
+          <line
+            key={i}
+            x1="0"
+            y1={y}
+            x2={w}
+            y2={y}
+            stroke="var(--ds-border)"
+            strokeWidth="1"
+            strokeDasharray="2 4"
+            vectorEffect="non-scaling-stroke"
+          />
+        ))}
+        <polygon points={area} fill={`url(#${gradId})`} />
+        <polyline
+          points={pts}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.5"
           vectorEffect="non-scaling-stroke"
+          strokeLinejoin="round"
         />
-      ))}
-      <polygon points={area} fill={`url(#${gradId})`} />
-      <polyline
-        points={pts}
-        fill="none"
-        stroke={color}
-        strokeWidth="1.5"
-        vectorEffect="non-scaling-stroke"
-        strokeLinejoin="round"
-      />
-    </svg>
+        {hover && (
+          <>
+            <line
+              x1={hover.i * step}
+              x2={hover.i * step}
+              y1={0}
+              y2={h}
+              stroke={color}
+              strokeOpacity="0.45"
+              strokeWidth="1"
+              strokeDasharray="2 3"
+              vectorEffect="non-scaling-stroke"
+            />
+            <circle
+              cx={hover.i * step}
+              cy={yFor(data[hover.i])}
+              r="3.2"
+              fill="var(--ds-bg)"
+              stroke={color}
+              strokeWidth="1.8"
+              vectorEffect="non-scaling-stroke"
+            />
+          </>
+        )}
+      </svg>
+      {hover && (
+        <div
+          style={{
+            position: "absolute",
+            left: ttLeft,
+            top: Math.max(2, hover.y - 46),
+            width: TT_W,
+            pointerEvents: "none",
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border-strong)",
+            borderRadius: 6,
+            padding: "5px 8px",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
+            fontSize: 11,
+            color: "var(--ds-fg)",
+            zIndex: 4,
+          }}
+        >
+          {labels?.[hover.i] && (
+            <div
+              className="ds-mono uppercase"
+              style={{
+                fontSize: 9,
+                letterSpacing: "0.08em",
+                color: "var(--ds-fg-disabled)",
+                marginBottom: 2,
+              }}
+            >
+              {labels[hover.i]}
+            </div>
+          )}
+          <div
+            className="ds-mono"
+            style={{
+              fontSize: 12.5,
+              fontVariantNumeric: "tabular-nums",
+              color: "var(--ds-fg)",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: 999,
+                background: color,
+                display: "inline-block",
+              }}
+            />
+            {data[hover.i].toLocaleString()}
+            {valueSuffix}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -593,4 +868,486 @@ export function formatMs(ms: number): string {
   if (h > 0)
     return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
   return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+export function fmtDuration(seconds: number): string {
+  if (!seconds || seconds <= 0) return "—";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.round(seconds)}s`;
+}
+
+export function fmtBitrate(raw: number | null): string {
+  if (!raw || raw <= 0) return "—";
+  // Plex reports kbps; Jellyfin bps — normalize to kbps.
+  const kbps = raw > 100000 ? raw / 1000 : raw;
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${Math.round(kbps)} kbps`;
+}
+
+// Deterministic from a fixed ISO/date string — safe in client render
+// (guardrail 16 only forbids Date.now()/new Date() with no args / "now").
+export function fmtTimestamp(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/* ── Bars / distribution ──────────────────────────────────────── */
+
+export function HorizontalBars({
+  items,
+  color = "var(--ds-accent)",
+  labelWidth = 110,
+}: {
+  items: { label: string; count: number }[];
+  color?: string;
+  labelWidth?: number;
+}) {
+  const max = Math.max(...items.map((i) => i.count), 1);
+  if (items.length === 0)
+    return (
+      <div
+        style={{
+          fontSize: 12,
+          color: "var(--ds-fg-disabled)",
+          padding: "20px 0",
+          textAlign: "center",
+        }}
+      >
+        No data yet
+      </div>
+    );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      {items.map((it) => (
+        <div
+          key={it.label}
+          style={{ display: "flex", alignItems: "center", gap: 10 }}
+        >
+          <span
+            style={{
+              width: labelWidth,
+              fontSize: 12,
+              color: "var(--ds-fg-muted)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              flexShrink: 0,
+            }}
+          >
+            {it.label}
+          </span>
+          <div
+            style={{
+              flex: 1,
+              height: 6,
+              background: "oklch(1 0 0 / 0.05)",
+              borderRadius: 999,
+              overflow: "hidden",
+              minWidth: 30,
+            }}
+          >
+            <div
+              style={{
+                width: `${(it.count / max) * 100}%`,
+                height: "100%",
+                background: color,
+                borderRadius: 999,
+              }}
+            />
+          </div>
+          <span
+            className="ds-mono"
+            style={{
+              fontSize: 11,
+              color: "var(--ds-fg-subtle)",
+              fontVariantNumeric: "tabular-nums",
+              width: 38,
+              textAlign: "right",
+              flexShrink: 0,
+            }}
+          >
+            {it.count.toLocaleString()}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function StreamTypeBars({
+  data,
+}: {
+  data: { label: string; count: number; color: string }[];
+}) {
+  const total = data.reduce((s, r) => s + r.count, 0);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div
+        style={{
+          display: "flex",
+          height: 8,
+          borderRadius: 999,
+          overflow: "hidden",
+          background: "oklch(1 0 0 / 0.04)",
+        }}
+      >
+        {data.map(
+          (r) =>
+            total > 0 &&
+            r.count > 0 && (
+              <div
+                key={r.label}
+                title={`${r.label}: ${r.count}`}
+                style={{
+                  flex: r.count,
+                  background: r.color,
+                  borderRight: "1px solid var(--ds-bg-2)",
+                }}
+              />
+            ),
+        )}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        {data.map((r) => {
+          const pct = total > 0 ? Math.round((r.count / total) * 100) : 0;
+          return (
+            <div
+              key={r.label}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                fontSize: 12,
+                gap: 10,
+              }}
+            >
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 7,
+                  color: "var(--ds-fg-muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 2,
+                    background: r.color,
+                    flexShrink: 0,
+                  }}
+                />
+                {r.label}
+              </span>
+              <span
+                className="ds-mono"
+                style={{
+                  fontSize: 11,
+                  color: "var(--ds-fg-subtle)",
+                  fontVariantNumeric: "tabular-nums",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {r.count.toLocaleString()}{" "}
+                <span style={{ color: "var(--ds-fg-disabled)" }}>· {pct}%</span>
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function BarColumn({
+  data,
+  h = 100,
+  color = "var(--ds-accent)",
+}: {
+  data: number[];
+  h?: number;
+  color?: string;
+}) {
+  const max = Math.max(...data, 1);
+  return (
+    <div
+      style={{ display: "flex", alignItems: "flex-end", gap: 2, height: h }}
+    >
+      {data.map((v, i) => (
+        <div
+          key={i}
+          title={`${v}`}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            height: `${Math.max((v / max) * 100, v > 0 ? 2 : 0)}%`,
+            background: color,
+            borderRadius: "2px 2px 0 0",
+            opacity: 0.55 + (v / max) * 0.45,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ── KPI / stat tiles ─────────────────────────────────────────── */
+
+export function MiniKpi({
+  label,
+  value,
+  sub,
+  big,
+}: {
+  label: string;
+  value: ReactNode;
+  sub?: ReactNode;
+  big?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        padding: "14px 16px",
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      <div
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 9.5,
+          color: "var(--ds-fg-disabled)",
+          letterSpacing: "0.1em",
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontSize: big ? 22 : 19,
+          fontWeight: 600,
+          letterSpacing: "-0.025em",
+          color: "var(--ds-fg)",
+          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div
+          className="ds-mono"
+          style={{
+            fontSize: 10.5,
+            color: "var(--ds-fg-subtle)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function HeaderStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  tone?: "ok" | "info" | "warn";
+}) {
+  const color =
+    tone === "ok"
+      ? "var(--ds-success)"
+      : tone === "info"
+        ? "var(--ds-info)"
+        : tone === "warn"
+          ? "var(--ds-warning)"
+          : "var(--ds-fg)";
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        alignItems: "flex-end",
+        textAlign: "right",
+      }}
+    >
+      <span
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 9.5,
+          color: "var(--ds-fg-disabled)",
+          letterSpacing: "0.1em",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          fontSize: 26,
+          fontWeight: 600,
+          color,
+          letterSpacing: "-0.025em",
+          fontVariantNumeric: "tabular-nums",
+          lineHeight: 1,
+        }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/* ── Table header / sort / chevron ────────────────────────────── */
+
+export function ChevIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 12 12"
+      style={{
+        transform: open ? "rotate(90deg)" : "none",
+        transition: "transform 150ms var(--ds-ease)",
+        color: "var(--ds-fg-subtle)",
+      }}
+    >
+      <path
+        d="M4.5 3l3 3-3 3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+export function SortIcon({
+  active,
+  dir,
+}: {
+  active: boolean;
+  dir?: "asc" | "desc";
+}) {
+  if (!active) {
+    return (
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 12 12"
+        style={{ opacity: 0.3, color: "currentColor" }}
+      >
+        <path
+          d="M4 5l2-2 2 2M4 7l2 2 2-2"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 12 12"
+      style={{ color: "var(--ds-accent)" }}
+    >
+      {dir === "asc" ? (
+        <path
+          d="M3 7l3-3 3 3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ) : (
+        <path
+          d="M3 5l3 3 3-3"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+    </svg>
+  );
+}
+
+export function Th({
+  label,
+  onSort,
+  active,
+  dir,
+  width,
+  align = "left",
+}: {
+  label?: string;
+  onSort?: () => void;
+  active?: boolean;
+  dir?: "asc" | "desc";
+  width?: number;
+  align?: "left" | "right";
+}) {
+  return (
+    <th
+      onClick={onSort}
+      style={{
+        textAlign: align,
+        padding: "10px 11px",
+        fontSize: 9.5,
+        fontWeight: 500,
+        color: active ? "var(--ds-fg)" : "var(--ds-fg-disabled)",
+        letterSpacing: "0.08em",
+        textTransform: "uppercase",
+        borderBottom: "1px solid var(--ds-border)",
+        cursor: onSort ? "pointer" : "default",
+        whiteSpace: "nowrap",
+        userSelect: "none",
+        width,
+        fontFamily: "var(--font-mono)",
+      }}
+    >
+      {onSort ? (
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            justifyContent: align === "right" ? "flex-end" : "flex-start",
+            width: "100%",
+          }}
+        >
+          <span>{label}</span>
+          <SortIcon active={!!active} dir={dir} />
+        </span>
+      ) : (
+        label
+      )}
+    </th>
+  );
 }

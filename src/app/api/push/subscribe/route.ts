@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { resolveToSafeUrl } from "@/lib/ssrf";
@@ -7,10 +7,7 @@ import { encryptToken } from "@/lib/token-crypto";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`push-sub:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -105,12 +102,9 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true });
-}
+});
 
-export async function DELETE(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAuth(async (req, _ctx, session) => {
   let body: { endpoint?: string };
   try {
     body = await req.json();
@@ -129,4 +123,4 @@ export async function DELETE(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true });
-}
+});

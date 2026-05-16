@@ -1,11 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { generateRequestToken } from "@/lib/request-token";
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const tmdbId = parseInt(req.nextUrl.searchParams.get("tmdbId") ?? "", 10);
   const mediaType = req.nextUrl.searchParams.get("mediaType");
 
@@ -18,4 +15,4 @@ export async function GET(req: NextRequest) {
 
   const token = generateRequestToken(tmdbId, mediaType, session.user.id);
   return NextResponse.json({ token });
-}
+});

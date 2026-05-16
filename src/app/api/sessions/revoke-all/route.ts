@@ -1,6 +1,6 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { requireAuth } from "@/lib/api-auth";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -20,10 +20,7 @@ const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 // Step-up auth mirrors DELETE /api/sessions: credentials users prove with
 // confirmPassword, SSO users must hold a session younger than 5 minutes.
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`sessions-revoke-all:${session.user.id}`, 5, 60 * 60_000)) {
     return NextResponse.json(
       { error: "rate_limit", message: "Too many revoke-all attempts. Try again later." },
@@ -110,4 +107,4 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true, count: deletedCount, includeCurrent });
-}
+});

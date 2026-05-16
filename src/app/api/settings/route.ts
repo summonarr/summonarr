@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { invalidateSessionDurationsCache } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { testRadarrConnection, testSonarrConnection } from "@/lib/arr";
@@ -156,10 +156,7 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...ALLOWED_KEYS] } },
   });
@@ -169,12 +166,9 @@ export async function GET() {
   ) as Partial<Record<AllowedKey, string>>;
 
   return NextResponse.json(settings);
-}
+});
 
-export async function PATCH(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAdmin(async (req, _ctx, session) => {
   if (!checkRateLimit(`admin-settings:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -475,4 +469,4 @@ export async function PATCH(req: NextRequest) {
     { ok: !testFailed, ...testResults },
     testFailed ? { status: 422 } : undefined,
   );
-}
+});

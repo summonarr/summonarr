@@ -1,14 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import bcrypt from "bcryptjs";
 
-export async function PATCH(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
     return NextResponse.json(
       { error: "Too many attempts — please wait 15 minutes before trying again." },
@@ -85,4 +82,4 @@ export async function PATCH(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true, requiresRelogin: true });
-}
+});

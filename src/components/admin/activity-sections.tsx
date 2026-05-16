@@ -28,6 +28,10 @@ export interface Kpi {
   value: string;
   delta?: { text: string; dir: "up" | "down" | "flat" } | null;
   spark?: number[];
+  // Precomputed server-side per-point labels for the sparkline tooltip
+  // (element i ↔ spark[i]). Never derive from Date client-side — guardrail 16.
+  sparkLabels?: string[];
+  sparkSuffix?: string;
   sub?: string;
 }
 
@@ -123,7 +127,13 @@ export function KpiStrip({ kpis }: { kpis: Kpi[] }) {
                 )}
               </div>
               {k.spark && k.spark.length > 1 ? (
-                <Sparkline data={k.spark} w={140} h={22} />
+                <Sparkline
+                  data={k.spark}
+                  w={140}
+                  h={22}
+                  labels={k.sparkLabels}
+                  valueSuffix={k.sparkSuffix ?? ""}
+                />
               ) : k.sub ? (
                 <span
                   className="ds-mono"
@@ -165,6 +175,7 @@ export function AnalyticsRow({
   days,
   peakSub,
   axisLabels,
+  playsByDayLabels,
   heatmapInsight,
 }: {
   playsByDay: number[];
@@ -174,6 +185,8 @@ export function AnalyticsRow({
   days: number;
   peakSub: string;
   axisLabels: string[];
+  // Per-point date labels for the area-chart hover tooltip (server-computed).
+  playsByDayLabels: string[];
   heatmapInsight: string;
 }) {
   return (
@@ -191,7 +204,12 @@ export function AnalyticsRow({
             label={`Plays per day · last ${days}d`}
             sub={peakSub}
           />
-          <AreaChart data={playsByDay} h={160} />
+          <AreaChart
+            data={playsByDay}
+            h={160}
+            labels={playsByDayLabels}
+            valueSuffix=" plays"
+          />
           <div
             className="ds-mono"
             style={{
@@ -257,6 +275,7 @@ export interface RewatchedTitle {
   plays: number;
   viewers: number;
   rank: number;
+  posterSrc?: string | null;
 }
 
 const POSTER_ACCENTS = [
@@ -431,6 +450,7 @@ export function Leaderboards({
                 </span>
                 {showPosters && (
                   <Poster
+                    src={m.posterSrc}
                     letter={(m.title[0] ?? "?").toUpperCase()}
                     accent={POSTER_ACCENTS[i % POSTER_ACCENTS.length]}
                     w={26}

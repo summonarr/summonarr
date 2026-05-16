@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs, describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
@@ -12,9 +12,7 @@ function busyResponse() {
   );
 }
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   try {
     const items = await resolveStarterPack();
     return NextResponse.json({ items });
@@ -28,12 +26,9 @@ export async function GET() {
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ items: [], error: message }, { status: 500 });
   }
-}
+});
 
-export async function POST() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (_req, _ctx, session) => {
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
     async () => {
@@ -78,4 +73,4 @@ export async function POST() {
     },
     busyResponse,
   );
-}
+});

@@ -1,12 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, _session) => {
   const service = req.nextUrl.searchParams.get("service");
   if (service !== "radarr" && service !== "sonarr") {
     return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
@@ -33,4 +30,4 @@ export async function GET(req: NextRequest) {
     console.error(`[settings/arr-options] Failed to fetch ${service} options:`, err);
     return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
   }
-}
+});

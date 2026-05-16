@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
@@ -11,10 +11,7 @@ function busyResponse() {
   );
 }
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   let body: { specIds?: unknown };
   try {
     body = await req.json();
@@ -64,4 +61,4 @@ export async function POST(req: NextRequest) {
     },
     busyResponse,
   );
-}
+});

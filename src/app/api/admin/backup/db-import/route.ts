@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { checkBodySize } from "@/lib/body-size";
 import {
@@ -11,10 +11,7 @@ export const dynamic = "force-dynamic";
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
@@ -77,4 +74,4 @@ export async function POST(req: NextRequest) {
     summary: result.summary,
     ...(result.warning ? { warning: result.warning } : {}),
   });
-}
+});

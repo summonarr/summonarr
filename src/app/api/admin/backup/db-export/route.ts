@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
@@ -143,10 +143,7 @@ function buildSqlStream(
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, session) => {
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
@@ -198,4 +195,4 @@ export async function GET(req: NextRequest) {
       "Cache-Control": "no-store",
     },
   });
-}
+});

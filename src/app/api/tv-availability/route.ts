@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 export interface TVSeasonInfo {
@@ -12,10 +12,7 @@ export interface TVAvailabilityResponse {
   seasons: TVSeasonInfo[];
 }
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const raw = req.nextUrl.searchParams.get("tmdbId");
   if (!raw) return NextResponse.json({ error: "tmdbId is required" }, { status: 400 });
   const tmdbId = parseInt(raw, 10);
@@ -62,4 +59,4 @@ export async function GET(req: NextRequest) {
   else if (sourcesPresent.has("jellyfin")) source = "jellyfin";
 
   return NextResponse.json({ source, seasons } satisfies TVAvailabilityResponse);
-}
+});
