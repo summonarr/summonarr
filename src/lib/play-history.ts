@@ -298,6 +298,7 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     videoDecision: session.videoDecision,
     audioDecision: session.audioDecision,
     container: session.container,
+    transcodeReason: session.transcodeReason,
   };
 
   await prisma.$transaction(async (tx) => {
@@ -1259,7 +1260,12 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
-      `SELECT COALESCE(NULLIF("videoDecision", ''), 'Unknown') AS reason,
+      // Group by the captured transcodeReason (Plex-derived / Jellyfin
+      // TranscodeReasons). Multi-reason sessions keep their comma-joined
+      // label as one bucket so counts still sum to exactly the transcode
+      // session total — the % math in the UI stays correct. Pre-capture
+      // rows have a null reason and fall into 'Unknown'.
+      `SELECT COALESCE(NULLIF("transcodeReason", ''), 'Unknown') AS reason,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE ${where} AND "playMethod" = 'Transcode'

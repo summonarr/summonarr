@@ -488,12 +488,22 @@ export function ActivityStatsRedesign({
                       lineHeight: 1.45,
                     }}
                   >
-                    {topReasonPct}% of transcodes come from{" "}
-                    <span style={{ color: "var(--ds-fg)" }}>
-                      {topReason.reason.toLowerCase()}
-                    </span>
-                    . Addressing it would meaningfully cut server transcode
-                    load.
+                    {topReason.reason === "Unknown" ? (
+                      <>
+                        {topReasonPct}% of transcodes have no recorded reason.
+                        Reasons are captured from new sessions onward — this
+                        clears as fresh playback data accumulates.
+                      </>
+                    ) : (
+                      <>
+                        {topReasonPct}% of transcodes are caused by{" "}
+                        <span style={{ color: "var(--ds-fg)" }}>
+                          {topReason.reason.toLowerCase()}
+                        </span>
+                        . Addressing it would meaningfully cut server
+                        transcode load.
+                      </>
+                    )}
                   </div>
                 </div>
               </div>

@@ -635,6 +635,7 @@ model PlayHistory {
   videoDecision String?
   audioDecision String?
   container     String?
+  transcodeReason String? // Why the server transcoded, from Plex transcodeSession / Jellyfin TranscodingInfo.TranscodeReasons. Comma-joined when multiple. Null/Unknown for sessions recorded before this was captured.
 
   createdAt DateTime @default(now())
 
@@ -696,6 +697,7 @@ model ActiveSession {
   videoDecision String?
   audioDecision String?
   container     String?
+  transcodeReason String?
 
   @@unique([source, sessionKey])
   @@index([source])

@@ -423,6 +423,7 @@ export interface PlexSessionData {
   videoDecision?: string;
   audioDecision?: string;
   container?: string;
+  transcodeReason?: string;
 }
 
 interface PlexSessionRaw {
@@ -472,6 +473,7 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
   return raw.map((s): PlexSessionData => {
     const videoStream = s.Media?.[0]?.Part?.[0]?.Stream?.find((st) => st.streamType === 1);
     const audioStream = s.Media?.[0]?.Part?.[0]?.Stream?.find((st) => st.streamType === 2);
+    const subtitleStream = s.Media?.[0]?.Part?.[0]?.Stream?.find((st) => st.streamType === 3);
     const ts = s.TranscodeSession;
 
     let playMethod = "DirectPlay";
@@ -479,6 +481,19 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       playMethod = "Transcode";
     } else if (ts?.videoDecision === "copy" || ts?.audioDecision === "copy") {
       playMethod = "DirectStream";
+    }
+
+    // Plex's /status/sessions has no single "reason" field — derive it from the
+    // per-stream decisions. Worded to match the humanized Jellyfin
+    // TranscodeReasons vocabulary so both servers share one chart.
+    let transcodeReason: string | undefined;
+    if (playMethod === "Transcode") {
+      const reasons: string[] = [];
+      if (ts?.videoDecision === "transcode") reasons.push("Video codec not supported");
+      if (ts?.audioDecision === "transcode") reasons.push("Audio codec not supported");
+      if (subtitleStream?.decision === "burn") reasons.push("Subtitle burn-in");
+      if (reasons.length === 0) reasons.push("Container not supported");
+      transcodeReason = reasons.join(", ");
     }
 
     return {
@@ -512,6 +527,7 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       videoDecision: ts?.videoDecision ?? videoStream?.decision ?? undefined,
       audioDecision: ts?.audioDecision ?? audioStream?.decision ?? undefined,
       container: s.Media?.[0]?.container ?? undefined,
+      transcodeReason,
     };
   });
 }
