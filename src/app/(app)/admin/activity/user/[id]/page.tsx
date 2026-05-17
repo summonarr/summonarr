@@ -86,9 +86,14 @@ export default async function UserActivityPage({
       tmdbId: m.tmdbId,
       mediaType: m.mediaType,
       count: m.count,
+      // Live TmdbCache (resolvePosterMap) is authoritative and current; the
+      // PlayHistory.posterPath snapshot is a point-in-time heuristic that is
+      // null for older rows and stale if the poster later changed. Prefer the
+      // cache, fall back to the snapshot only for titles no longer cached.
+      // (f1d609a preferred the snapshot, which regressed cover art here.)
       posterSrc:
-        (m.posterPath ? posterUrl(m.posterPath, "w342") : null) ??
-        (m.tmdbId != null ? topMediaPosters[m.tmdbId] ?? null : null),
+        (m.tmdbId != null ? topMediaPosters[m.tmdbId] : undefined) ??
+        (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
     })),
     knownIps,
     recentPlays: stats.recentPlays.slice(0, 12).map((p) => ({
