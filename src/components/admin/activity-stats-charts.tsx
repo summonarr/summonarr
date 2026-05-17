@@ -288,7 +288,7 @@ export function ActivityStatsCharts({ stats, days }: { stats: StatsData; days: n
               <h3 className="font-semibold text-white mb-3 text-sm">Top Movies</h3>
               <div className="space-y-2">
                 {topMovies.slice(0, 10).map((m, i) => {
-                  const href = m.tmdbId ? `/movie/${m.tmdbId}` : null;
+                  const href = m.tmdbId ? `/admin/activity/media/${m.tmdbId}` : null;
                   return (
                     <div key={`${m.title}-${i}`} className="flex items-center gap-3">
                       <span className="text-zinc-600 w-5 text-right text-xs">{i + 1}.</span>
@@ -316,7 +316,7 @@ export function ActivityStatsCharts({ stats, days }: { stats: StatsData; days: n
               <h3 className="font-semibold text-white mb-3 text-sm">Top TV Shows</h3>
               <div className="space-y-2">
                 {topTV.slice(0, 10).map((m, i) => {
-                  const href = m.tmdbId ? `/tv/${m.tmdbId}` : null;
+                  const href = m.tmdbId ? `/admin/activity/media/${m.tmdbId}` : null;
                   return (
                     <div key={`${m.title}-${i}`} className="flex items-center gap-3">
                       <span className="text-zinc-600 w-5 text-right text-xs">{i + 1}.</span>
@@ -352,8 +352,7 @@ export function ActivityStatsCharts({ stats, days }: { stats: StatsData; days: n
               </h3>
               <div className="space-y-2">
                 {stats.topRewatched.map((r, i) => {
-                  const href =
-                    r.mediaType === "MOVIE" ? `/movie/${r.tmdbId}` : `/tv/${r.tmdbId}`;
+                  const href = `/admin/activity/media/${r.tmdbId}`;
                   return (
                     <div key={`${r.tmdbId}-${i}`} className="flex items-center gap-3">
                       <span className="text-zinc-600 w-5 text-right text-xs">{i + 1}.</span>
@@ -387,7 +386,7 @@ export function ActivityStatsCharts({ stats, days }: { stats: StatsData; days: n
                   const tag = e.season != null && e.episode != null
                     ? `S${String(e.season).padStart(2, "0")}E${String(e.episode).padStart(2, "0")}`
                     : "";
-                  const href = e.tmdbId ? `/tv/${e.tmdbId}` : null;
+                  const href = e.tmdbId ? `/admin/activity/media/${e.tmdbId}` : null;
                   return (
                     <div key={`${e.tmdbId ?? "x"}-${i}`} className="flex items-center gap-3">
                       <span className="text-zinc-600 w-5 text-right text-xs">{i + 1}.</span>

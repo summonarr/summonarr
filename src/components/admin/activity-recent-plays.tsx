@@ -353,9 +353,7 @@ export function ActivityRecentPlays({
                   const isTV = p.mediaType === "TV";
                   const mediaHref =
                     p.tmdbId && p.mediaType
-                      ? isTV
-                        ? `/tv/${p.tmdbId}`
-                        : `/movie/${p.tmdbId}`
+                      ? `/admin/activity/media/${p.tmdbId}`
                       : null;
                   const sub = isTV
                     ? [

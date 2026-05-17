@@ -102,7 +102,7 @@ export default async function PlayDetailPage({
 
   const isTV = (play.mediaType ?? "").toString() === "TV";
   const mediaHref = play.tmdbId
-    ? isTV ? `/tv/${play.tmdbId}` : `/movie/${play.tmdbId}`
+    ? `/admin/activity/media/${play.tmdbId}`
     : null;
   const episodeStr = isTV && play.seasonNumber != null
     ? `S${String(play.seasonNumber).padStart(2, "0")}E${String(play.episodeNumber ?? 0).padStart(2, "0")}`

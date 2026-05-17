@@ -34,9 +34,7 @@ function accentFor(seed: string): string {
 function SessionCard({ s }: { s: ActiveSessionLive }) {
   const isTV = (s.mediaType ?? "").toUpperCase() === "TV";
   const mediaHref = s.tmdbId
-    ? isTV
-      ? `/tv/${s.tmdbId}`
-      : `/movie/${s.tmdbId}`
+    ? `/admin/activity/media/${s.tmdbId}`
     : null;
   const accent = accentFor(s.title || s.id);
   const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
