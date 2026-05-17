@@ -201,6 +201,7 @@ model MediaRequest {
 
   tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
 
+  lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
   notifiedAvailable Boolean   @default(false) // set when the "ready to watch" notification is sent; never reset on status revert
