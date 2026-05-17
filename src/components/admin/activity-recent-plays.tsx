@@ -154,12 +154,14 @@ export function ActivityRecentPlays({
   plays: initialPlays,
   source,
   mediaType,
-  days,
+  startDateIso,
 }: {
   plays: RecentPlay[];
   source?: string;
   mediaType?: string;
-  days?: number;
+  // Period lower bound, computed once on the server so paginated client
+  // fetches stay consistent with the server-rendered first page (guardrail 16).
+  startDateIso?: string;
 }) {
   const [plays, setPlays] = useState<RecentPlay[]>(initialPlays);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -177,12 +179,7 @@ export function ActivityRecentPlays({
       filterParams.set("limit", "20");
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
-      if (days) {
-        const startDate = new Date(
-          Date.now() - days * 24 * 60 * 60 * 1000,
-        ).toISOString();
-        filterParams.set("startDate", startDate);
-      }
+      if (startDateIso) filterParams.set("startDate", startDateIso);
       const res = await fetch(`/api/play-history?${filterParams.toString()}`);
       if (!res.ok) return;
       const data = await res.json();

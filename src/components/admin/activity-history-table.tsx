@@ -452,10 +452,14 @@ export function ActivityHistoryTable({
   source: globalSource,
   mediaType: globalMediaType,
   days,
+  startDateIso,
 }: {
   source?: string;
   mediaType?: string;
   days: number;
+  // Period lower bound, computed once on the server so client refetches don't
+  // drift off a fresh client clock (guardrail 16).
+  startDateIso?: string;
 }) {
   const mounted = useHasMounted();
 
@@ -529,11 +533,8 @@ export function ActivityHistoryTable({
     if (globalMediaType) params.set("mediaType", globalMediaType);
     if (fromDate) {
       params.set("startDate", new Date(`${fromDate}T00:00:00`).toISOString());
-    } else if (days) {
-      params.set(
-        "startDate",
-        new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString(),
-      );
+    } else if (startDateIso) {
+      params.set("startDate", startDateIso);
     }
     if (toDate)
       params.set("endDate", new Date(`${toDate}T23:59:59`).toISOString());
@@ -548,7 +549,7 @@ export function ActivityHistoryTable({
   }, [
     globalSource,
     globalMediaType,
-    days,
+    startDateIso,
     fromDate,
     toDate,
     debouncedSearch,

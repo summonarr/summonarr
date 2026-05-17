@@ -6,7 +6,9 @@ export const dynamic = "force-dynamic";
 
 export const GET = withAdmin(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
-  const days = parseInt(params.get("days") ?? "30", 10) || 30;
+  // Clamp to match the stats page route (src/app/(app)/admin/activity/stats):
+  // an unbounded/negative day window would scan or invert the whole table.
+  const days = Math.min(Math.max(parseInt(params.get("days") ?? "30", 10) || 30, 1), 3650);
   const source = params.get("source") ?? undefined;
   const mediaType = params.get("mediaType") ?? undefined;
 

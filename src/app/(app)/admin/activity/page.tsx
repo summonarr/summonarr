@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { getPlayHistoryStats, getMostRewatched, getActivityCalendar } from "@/lib/play-history";
+import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import {
@@ -69,21 +69,6 @@ export default async function ActivityPage({
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const extraFilters: { template: string; value: unknown }[] = [];
-  if (source) extraFilters.push({ template: `"source" = $`, value: source });
-  if (mediaType) extraFilters.push({ template: `"mediaType"::text = $`, value: mediaType });
-
-  function withFilters(...baseParams: unknown[]): { sql: string; params: unknown[] } {
-    if (extraFilters.length === 0) return { sql: "", params: baseParams };
-    // Parameter placeholder indices are 1-based and must start after the already-bound base params
-    const offset = baseParams.length;
-    const clauses = extraFilters.map((f, i) => `${f.template}${offset + i + 1}`);
-    return {
-      sql: ` AND ${clauses.join(" AND ")}`,
-      params: [...baseParams, ...extraFilters.map((f) => f.value)],
-    };
-  }
-
   if (isHistoryTab) {
     return (
       <div className="ds-page-enter">
@@ -98,6 +83,7 @@ export default async function ActivityPage({
           source={source}
           mediaType={mediaType}
           days={days}
+          startDateIso={periodCutoff.toISOString()}
         />
       </div>
     );
@@ -131,11 +117,9 @@ export default async function ActivityPage({
 
   const prevPeriodStart = new Date(periodCutoff.getTime() - days * 24 * 60 * 60 * 1000);
 
-  const fp = withFilters(periodCutoff);
-  const fpp = withFilters(prevPeriodStart, periodCutoff);
-
-  const fpJoin = withFilters(periodCutoff);
-  const joinSql = fpJoin.sql.replace(/"source"/g, 'p."source"').replace(/"mediaType"/g, 'p."mediaType"');
+  const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
+  const fpp = appendPlayHistoryFilter([prevPeriodStart, periodCutoff], { source, mediaType });
+  const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
 
   const [uniqueUsersNd, totalWatchTimeNd, watchTimeLeaderboard, mostActiveDay, prevPlays, prevWatchTime] =
     await Promise.all([
@@ -155,7 +139,7 @@ export default async function ActivityPage({
         `WITH user_hours AS (
            SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
            FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-           WHERE p."startedAt" >= $1${joinSql}
+           WHERE p."startedAt" >= $1${fpJoin.sql}
            GROUP BY m."id", m."username", m."source"
          ), ranked AS (
            SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
@@ -268,6 +252,13 @@ export default async function ActivityPage({
   const sessionsToBackfill = effectiveSessions.filter(
     (s: typeof effectiveSessions[0]) => s.tmdbId == null && s.effectiveTmdbId != null,
   );
+  // INTENTIONAL fire-and-forget: persist the resolved tmdbId so future renders
+  // skip the lookup chain. Deliberately NOT awaited — it's a cache warm, not
+  // part of the response, and must not delay the page. Safe because Summonarr
+  // runs as a single long-lived Node server (not serverless/edge), so the
+  // promise survives past render. Do NOT "fix" this by awaiting it or moving it
+  // into the request path. See CLAUDE.md guardrail 17. Errors are swallowed by
+  // design (next sync re-resolves).
   if (sessionsToBackfill.length > 0) {
     void Promise.all(
       sessionsToBackfill.map((s: typeof sessionsToBackfill[0]) =>
@@ -487,19 +478,15 @@ export default async function ActivityPage({
     ? `peak ${Number(busiestDay.count).toLocaleString()} on ${shortDay(busiestDay.day)}`
     : "";
 
+  // calendarData is GROUP BY date over the last 365 days, so every row already
+  // has count > 0 — activeDays is just the row count, total is their sum.
+  // (A real consecutive-day "streak" can't be derived here without the empty
+  // days; the stat was removed rather than left silently wrong.)
   let totalCalPlays = 0;
   let activeDays = 0;
-  let longestStreak = 0;
-  let curStreak = 0;
   for (const d of calendarData) {
     totalCalPlays += d.count;
-    if (d.count > 0) {
-      activeDays++;
-      curStreak++;
-      if (curStreak > longestStreak) longestStreak = curStreak;
-    } else {
-      curStreak = 0;
-    }
+    if (d.count > 0) activeDays++;
   }
 
   const playsById = new Map(stats.topUsers.map((u) => [u.id, u.count]));
@@ -566,7 +553,6 @@ export default async function ActivityPage({
       {showActivityCalendar && calendarData.length > 0 && (
         <CalendarSection
           activeDays={activeDays}
-          longestStreak={longestStreak}
           totalPlays={totalCalPlays}
         >
           <ActivityCalendar
@@ -581,7 +567,7 @@ export default async function ActivityPage({
         plays={serializedRecentPlays}
         source={source}
         mediaType={mediaType}
-        days={days}
+        startDateIso={periodCutoff.toISOString()}
       />
     </div>
   );

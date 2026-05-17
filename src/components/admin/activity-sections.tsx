@@ -547,12 +547,10 @@ export function Leaderboards({
 
 export function CalendarSection({
   activeDays,
-  longestStreak,
   totalPlays,
   children,
 }: {
   activeDays: number;
-  longestStreak: number;
   totalPlays: number;
   children: ReactNode;
 }) {
@@ -561,7 +559,7 @@ export function CalendarSection({
       <ActivityCard>
         <SectionHeader
           label="365-day activity"
-          sub={`${activeDays.toLocaleString()} active days · longest streak ${longestStreak}`}
+          sub={`${activeDays.toLocaleString()} active days · always the last 365 days, independent of the period filter`}
           right={
             <span
               className="ds-mono"
