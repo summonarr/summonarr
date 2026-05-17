@@ -48,14 +48,16 @@ export default async function UserActivityPage({
         (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
     );
 
-  // PlayHistory.tmdbId is null for plays unmapped at record time, so those
-  // "Most watched" rows render with no media link and no resolvable cover art.
-  // The same title was often resolved on another play — match against those
-  // rows (the authoritative signal the overview's session backfill also uses)
-  // so the link target and poster lookup both work.
+  // PlayHistory.tmdbId is null for plays unmapped at record time, so the
+  // affected "Most watched" / "Recent plays" rows render with no media link
+  // (and "Most watched" with no resolvable cover art). The same title was
+  // often resolved on another play — match against those rows (the
+  // authoritative signal the overview's session backfill also uses) so the
+  // link target and poster lookup both work.
+  const recentPlaysSlice = stats.recentPlays.slice(0, 12);
   const unmappedTitles = [
     ...new Set(
-      stats.topMedia
+      [...stats.topMedia, ...recentPlaysSlice]
         .filter((m) => m.tmdbId == null && m.title)
         .map((m) => m.title),
     ),
@@ -128,17 +130,20 @@ export default async function UserActivityPage({
         (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
     })),
     knownIps,
-    recentPlays: stats.recentPlays.slice(0, 12).map((p) => ({
-      id: p.id,
-      title: p.title,
-      tmdbId: p.tmdbId,
-      mediaType: p.mediaType,
-      seasonNumber: p.seasonNumber,
-      episodeNumber: p.episodeNumber,
-      resolution: p.resolution,
-      videoCodec: p.videoCodec,
-      startedAtIso: p.startedAt.toISOString(),
-    })),
+    recentPlays: recentPlaysSlice.map((p) => {
+      const r = p.tmdbId == null ? titleResolved[p.title] : undefined;
+      return {
+        id: p.id,
+        title: p.title,
+        tmdbId: p.tmdbId ?? r?.tmdbId ?? null,
+        mediaType: p.mediaType ?? r?.mediaType ?? null,
+        seasonNumber: p.seasonNumber,
+        episodeNumber: p.episodeNumber,
+        resolution: p.resolution,
+        videoCodec: p.videoCodec,
+        startedAtIso: p.startedAt.toISOString(),
+      };
+    }),
   };
 
   return <UserDetailView data={data} />;
