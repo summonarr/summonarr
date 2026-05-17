@@ -75,6 +75,29 @@ export default async function UserActivityPage({
         titleResolved[r.title] = { tmdbId: r.tmdbId, mediaType: r.mediaType };
       }
     }
+
+    // A title may be in a library but never resolved on any *play* (so the
+    // PlayHistory match above misses it). The library tables are an
+    // authoritative title→tmdbId mapping — use them so the title still links
+    // to its media page even when no cached poster exists.
+    const stillUnmapped = unmappedTitles.filter((t) => !titleResolved[t]);
+    if (stillUnmapped.length > 0) {
+      const [plexLib, jellyfinLib] = await Promise.all([
+        prisma.plexLibraryItem.findMany({
+          where: { title: { in: stillUnmapped } },
+          select: { title: true, tmdbId: true, mediaType: true },
+        }),
+        prisma.jellyfinLibraryItem.findMany({
+          where: { title: { in: stillUnmapped } },
+          select: { title: true, tmdbId: true, mediaType: true },
+        }),
+      ]);
+      for (const r of [...plexLib, ...jellyfinLib]) {
+        if (r.title && !titleResolved[r.title]) {
+          titleResolved[r.title] = { tmdbId: r.tmdbId, mediaType: r.mediaType };
+        }
+      }
+    }
   }
   const resolvedTopMedia = stats.topMedia.map((m) => {
     if (m.tmdbId != null) return m;
