@@ -48,7 +48,39 @@ export default async function UserActivityPage({
         (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
     );
 
-  const topMediaPosters = await resolvePosterMap(stats.topMedia);
+  // PlayHistory.tmdbId is null for plays unmapped at record time, so those
+  // "Most watched" rows render with no media link and no resolvable cover art.
+  // The same title was often resolved on another play — match against those
+  // rows (the authoritative signal the overview's session backfill also uses)
+  // so the link target and poster lookup both work.
+  const unmappedTitles = [
+    ...new Set(
+      stats.topMedia
+        .filter((m) => m.tmdbId == null && m.title)
+        .map((m) => m.title),
+    ),
+  ];
+  const titleResolved: Record<string, { tmdbId: number; mediaType: string | null }> = {};
+  if (unmappedTitles.length > 0) {
+    const matches = await prisma.playHistory.findMany({
+      where: { title: { in: unmappedTitles }, tmdbId: { not: null } },
+      distinct: ["title"],
+      orderBy: { startedAt: "desc" },
+      select: { title: true, tmdbId: true, mediaType: true },
+    });
+    for (const r of matches) {
+      if (r.tmdbId != null) {
+        titleResolved[r.title] = { tmdbId: r.tmdbId, mediaType: r.mediaType };
+      }
+    }
+  }
+  const resolvedTopMedia = stats.topMedia.map((m) => {
+    if (m.tmdbId != null) return m;
+    const r = titleResolved[m.title];
+    return r ? { ...m, tmdbId: r.tmdbId, mediaType: r.mediaType ?? m.mediaType } : m;
+  });
+
+  const topMediaPosters = await resolvePosterMap(resolvedTopMedia);
 
   const directPlays =
     stats.transcodeRatio.find((r) => r.method === "DirectPlay")?.count ?? 0;
@@ -81,7 +113,7 @@ export default async function UserActivityPage({
     resolutionBreakdown: stats.resolutionBreakdown,
     deviceList: stats.deviceList,
     transcodeRatio: stats.transcodeRatio,
-    topMedia: stats.topMedia.map((m) => ({
+    topMedia: resolvedTopMedia.map((m) => ({
       title: m.title,
       tmdbId: m.tmdbId,
       mediaType: m.mediaType,
