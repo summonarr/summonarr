@@ -67,6 +67,7 @@ interface AdminRequestListProps {
   total: number;
   pageSize: number;
   statusFilter?: string;
+  typeFilter?: string;
   sort?: string;
 }
 
@@ -96,7 +97,7 @@ function formatUserLabel(r: Requester) {
   return r.userName ?? r.userEmail;
 }
 
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, sort }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -170,6 +171,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     const params = new URLSearchParams();
     if (p > 1) params.set("page", String(p));
     if (statusFilter) params.set("status", statusFilter);
+    if (typeFilter) params.set("type", typeFilter);
     if (sort && sort !== "newest") params.set("sort", sort);
     const qs = params.toString();
     return `/admin${qs ? `?${qs}` : ""}`;

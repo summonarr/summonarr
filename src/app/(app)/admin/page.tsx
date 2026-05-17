@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { type RequestStatus, Prisma } from "@/generated/prisma";
+import { type RequestStatus, type MediaType, Prisma } from "@/generated/prisma";
 import { posterUrl, getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { getCacheStale } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -16,6 +16,8 @@ const PAGE_SIZE = 20;
 
 const VALID_STATUSES = ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"];
 
+const VALID_SORTS = ["newest", "oldest", "title", "year-desc", "year-asc"];
+
 const STATUS_RANK: Record<string, number> = {
   PENDING: 0,
   APPROVED: 1,
@@ -26,23 +28,29 @@ const STATUS_RANK: Record<string, number> = {
 export default async function AdminPage({
   searchParams,
 }: {
-  searchParams: Promise<{ page?: string; status?: string; sort?: string }>;
+  searchParams: Promise<{ page?: string; status?: string; sort?: string; type?: string }>;
 }) {
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const { page: pageParam, status: statusParam, sort: sortParam } = await searchParams;
+  const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam } = await searchParams;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 
   const statusFilter = VALID_STATUSES.includes(statusParam ?? "") ? (statusParam as RequestStatus) : undefined;
-  const sort = sortParam === "oldest" ? "oldest" : sortParam === "title" ? "title" : "newest";
+  const typeFilter = typeParam === "MOVIE" || typeParam === "TV" ? (typeParam as MediaType) : undefined;
+  const sort = VALID_SORTS.includes(sortParam ?? "") ? (sortParam as string) : "newest";
 
-  const where = statusFilter ? { status: statusFilter } : {};
+  const where = {
+    ...(statusFilter ? { status: statusFilter } : {}),
+    ...(typeFilter ? { mediaType: typeFilter } : {}),
+  };
 
   const groupOrderBy: Prisma.MediaRequestOrderByWithAggregationInput =
     sort === "oldest" ? { _min: { createdAt: "asc" } }
     : sort === "title" ? { _min: { title: "asc" } }
+    : sort === "year-desc" ? { _max: { releaseYear: "desc" } }
+    : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
     : { _max: { createdAt: "desc" } };
 
   const [statusCounts, userCount, allGroups, pagedGroups, userRequestCounts] = await Promise.all([
@@ -214,6 +222,7 @@ export default async function AdminPage({
         statusCounts={statusCountsMap}
         totalAll={totalAll}
         currentStatus={statusFilter ?? ""}
+        currentType={typeFilter ?? ""}
         currentSort={sort}
       />
 
@@ -240,6 +249,7 @@ export default async function AdminPage({
           total={total}
           pageSize={PAGE_SIZE}
           statusFilter={statusFilter}
+          typeFilter={typeFilter}
           sort={sort}
         />
       )}

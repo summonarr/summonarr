@@ -10,25 +10,35 @@ const STATUS_TABS = [
   { label: "Available", value: "AVAILABLE" },
 ];
 
+const TYPE_TABS = [
+  { label: "All",    value: "" },
+  { label: "Movies", value: "MOVIE" },
+  { label: "TV",     value: "TV" },
+];
+
 const SORT_OPTIONS = [
-  { label: "Newest first", value: "newest" },
-  { label: "Oldest first", value: "oldest" },
-  { label: "Title A–Z",    value: "title"  },
+  { label: "Newest first",  value: "newest"    },
+  { label: "Oldest first",  value: "oldest"    },
+  { label: "Title A–Z",     value: "title"     },
+  { label: "Year (newest)", value: "year-desc" },
+  { label: "Year (oldest)", value: "year-asc"  },
 ];
 
 interface AdminFilterBarProps {
   statusCounts: Record<string, number>;
   totalAll: number;
   currentStatus: string;
+  currentType: string;
   currentSort: string;
 }
 
-export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentSort }: AdminFilterBarProps) {
+export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentType, currentSort }: AdminFilterBarProps) {
   const router = useRouter();
 
-  function navigate(status: string, sort: string) {
+  function navigate(status: string, sort: string, type: string) {
     const params = new URLSearchParams();
     if (status) params.set("status", status);
+    if (type) params.set("type", type);
     if (sort && sort !== "newest") params.set("sort", sort);
     const qs = params.toString();
     router.push(`/admin${qs ? `?${qs}` : ""}`);
@@ -57,7 +67,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentS
             <button
               key={tab.value}
               type="button"
-              onClick={() => navigate(tab.value, currentSort)}
+              onClick={() => navigate(tab.value, currentSort, currentType)}
               className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
               style={{
                 padding: "5px 12px",
@@ -89,26 +99,61 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentS
         })}
       </div>
 
-      <select
-        value={currentSort}
-        onChange={(e) => navigate(currentStatus, e.target.value)}
-        className="focus:outline-none focus:ring-1"
-        style={{
-          padding: "5px 10px",
-          height: 30,
-          borderRadius: 6,
-          fontSize: 12,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg-muted)",
-          border: "1px solid var(--ds-border)",
-        }}
-      >
-        {SORT_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
+      <div className="flex flex-wrap items-center gap-3">
+        <div
+          className="flex flex-wrap gap-1 max-w-full"
+          style={{
+            padding: 2,
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 8,
+          }}
+        >
+          {TYPE_TABS.map((tab) => {
+            const active = currentType === tab.value;
+            return (
+              <button
+                key={tab.value}
+                type="button"
+                onClick={() => navigate(currentStatus, currentSort, tab.value)}
+                className="inline-flex items-center whitespace-nowrap shrink-0 font-medium transition-colors"
+                style={{
+                  padding: "5px 12px",
+                  borderRadius: 6,
+                  border: 0,
+                  fontSize: 12,
+                  background: active ? "var(--ds-bg-3)" : "transparent",
+                  color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                  cursor: "pointer",
+                }}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <select
+          value={currentSort}
+          onChange={(e) => navigate(currentStatus, e.target.value, currentType)}
+          className="focus:outline-none focus:ring-1"
+          style={{
+            padding: "5px 10px",
+            height: 30,
+            borderRadius: 6,
+            fontSize: 12,
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg-muted)",
+            border: "1px solid var(--ds-border)",
+          }}
+        >
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
     </div>
   );
 }
