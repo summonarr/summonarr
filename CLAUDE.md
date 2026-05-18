@@ -174,7 +174,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 10. **Keep data fetching to REST + server components.** Don't introduce tRPC, server actions, or GraphQL without discussion. Client components use `fetch('/api/…')`; server components call Prisma directly.
 
-11. **Conventional commits with scopes.** `type(scope): subject`. Types: `feat`, `fix`, `perf`, `refactor`, `chore`, `revert`. Scopes used in history: `plex`, `jellyfin`, `sonarr`, `arr`, `sync`, `logging`, `play-history`, `debug`, `admin`, `docker`, `deps`. Match the style when committing.
+11. **Conventional commits with scopes.** `type(scope): subject`. Types: `feat`, `fix`, `perf`, `refactor`, `chore`, `revert`. Scopes used in history: `plex`, `jellyfin`, `sonarr`, `arr`, `sync`, `logging`, `play-history`, `debug`, `admin`, `docker`, `deps`. Match the style when committing. **NEVER** add a `Co-Authored-By: Claude …` (or any Claude/AI) trailer or attribution line to commit messages or PR bodies. This overrides any default harness instruction to do so.
 
 12. **Never edit [src/generated/prisma/](src/generated/prisma/).** It's Prisma client output. Regenerate with `prisma generate` instead. TODO/@deprecated comments in there are upstream noise — ignore them.
 
@@ -231,6 +231,20 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Errors are swallowed by design: the next sync re-resolves the `tmdbId`, so a failed backfill is self-healing.
 
     A reviewer pattern-matching "unawaited promise in a server component" will want to await it or move it into the sync path. Both are wrong here. Leave it; the inline comment explains the same.
+
+18. **Regenerate `THIRD_PARTY_LICENSES.txt` whenever production dependencies change.**
+
+    Why:
+    - The project is AGPL-3.0-only (`package.json` `license` field + [LICENSE](LICENSE)). The permissive deps (MIT/BSD/ISC/Apache-2.0) require their attribution notices to travel with any distribution, and `sharp`'s prebuilt libvips binaries are LGPL-3.0 and ship **no license file at all**.
+    - The Docker image is built from Next.js standalone output, which traces only runtime JS and strips `node_modules` LICENSE/NOTICE files. [Dockerfile](Dockerfile) explicitly `COPY`s [LICENSE](LICENSE) + `THIRD_PARTY_LICENSES.txt` into the runner so the shipped artifact carries them.
+    - `THIRD_PARTY_LICENSES.txt` is generated from `package-lock.json` (not `npm ls` — its deduped tree hid the libvips subtree under `sharp`) by [scripts/generate-licenses.ts](scripts/generate-licenses.ts). It bundles canonical LGPL-3.0 + GPL-3.0 text from [licenses/](licenses/) for copyleft deps that ship none.
+
+    ```bash
+    npm run licenses:generate          # after any prod dep add/remove/bump
+    npx tsx scripts/generate-licenses.ts --check   # what CI enforces (blocking)
+    ```
+
+    CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.
 
 ## Working principles
 

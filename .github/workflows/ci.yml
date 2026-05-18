@@ -90,6 +90,14 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # License compliance: THIRD_PARTY_LICENSES.txt is generated from the
+      # lockfile and shipped in the Docker image (Next standalone strips
+      # node_modules notices). Blocking — a dependency change that doesn't
+      # regenerate it ships the image without required attribution / the
+      # LGPL libvips notice. Fix: npm run licenses:generate && commit.
+      - name: Third-party license notices in sync
+        run: npx tsx scripts/generate-licenses.ts --check
+
       # Dependency audit reports CVEs in the lockfile. Kept non-blocking
       # because upstream advisory churn shouldn't gate PRs — Dependabot
       # opens patch PRs weekly. The Actions log + summary is the signal.

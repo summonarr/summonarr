@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
+import { GitFork } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   userNavItems,
@@ -112,13 +113,29 @@ export function Sidebar({
         )}
       </nav>
 
-      {/* Footer — TMDB attribution */}
+      {/* Footer — source link + TMDB attribution */}
       <div
+        className="flex flex-col gap-2.5"
         style={{
           padding: "10px 14px 12px",
           borderTop: "1px solid var(--ds-border)",
         }}
       >
+        <a
+          href="https://github.com/Summonarr/Summonarr"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Summonarr is free software (AGPL-3.0). View the source and fork it on GitHub."
+          className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
+        >
+          <GitFork className="h-3 w-3 shrink-0" />
+          <span
+            className="ds-mono"
+            style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+          >
+            Fork me on GitHub
+          </span>
+        </a>
         <a
           href="https://www.themoviedb.org"
           target="_blank"
