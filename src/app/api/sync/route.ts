@@ -98,29 +98,43 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     availableTvSet    = new Set(availableTvRows.map((r) => r.tmdbId));
   }
 
-  for (const req of approved) {
-    const nowAvailable = req.mediaType === "MOVIE"
-      ? availableMovieSet.has(req.tmdbId)
-      : availableTvSet.has(req.tmdbId);
+  // C3: collapse the per-request update loop into two updateMany calls — one CAS for the
+  // unnotified candidates (which produces the arrNotify list), one bulk catch-up for the
+  // already-notified rows. Snapshot pre-state so we can attribute the CAS winners.
+  const nowAvailableApproved = approved.filter((r) =>
+    r.mediaType === "MOVIE" ? availableMovieSet.has(r.tmdbId) : availableTvSet.has(r.tmdbId),
+  );
+  if (nowAvailableApproved.length > 0) {
+    const nowAvailableIds = nowAvailableApproved.map((r) => r.id);
+    const preNotifiedRows = await prisma.mediaRequest.findMany({
+      where: { id: { in: nowAvailableIds } },
+      select: { id: true, notifiedAvailable: true },
+    });
+    const wasUnnotifiedIds = new Set(
+      preNotifiedRows.filter((r) => !r.notifiedAvailable).map((r) => r.id),
+    );
+    const wasNotifiedIds = preNotifiedRows.filter((r) => r.notifiedAvailable).map((r) => r.id);
 
-    if (nowAvailable) {
-      // CAS on notifiedAvailable: only the first writer fires notifications, preventing duplicates
-      const updated = await prisma.mediaRequest.updateMany({
-        where: { id: req.id, notifiedAvailable: false },
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null, notifiedAvailable: true },
-      });
-
-      if (updated.count === 0) {
-        // Another path already claimed notifiedAvailable; still mark AVAILABLE without re-notifying
-        await prisma.mediaRequest.updateMany({
-          where: { id: req.id, notifiedAvailable: true },
-          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-        });
-      } else {
-        arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
+    // CAS on notifiedAvailable: only the first writer fires notifications, preventing duplicates
+    const casUpdated = await prisma.mediaRequest.updateMany({
+      where: { id: { in: nowAvailableIds }, notifiedAvailable: false },
+      data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null, notifiedAvailable: true },
+    });
+    if (casUpdated.count > 0) {
+      for (const req of nowAvailableApproved) {
+        if (wasUnnotifiedIds.has(req.id)) {
+          arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
+        }
       }
-      marked++;
     }
+    if (wasNotifiedIds.length > 0) {
+      // Another path already claimed notifiedAvailable; still mark AVAILABLE without re-notifying
+      await prisma.mediaRequest.updateMany({
+        where: { id: { in: wasNotifiedIds }, notifiedAvailable: true },
+        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
+      });
+    }
+    marked = nowAvailableApproved.length;
   }
 
   const now = new Date();
@@ -318,23 +332,23 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     inSonarrSet = new Set([...inSonarrAvail.map((r) => r.tmdbId), ...inSonarrWanted.map((r) => r.tmdbId)]);
   }
 
-  for (const req of available) {
+  // C3: collapse the per-request revert loop into a single updateMany.
+  const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
     // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
-    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) continue;
-    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) continue;
-
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
     const stillInLibrary = req.mediaType === "MOVIE"
       ? inRadarrSet.has(req.tmdbId)
       : inSonarrSet.has(req.tmdbId);
-
-    if (!stillInLibrary) {
-      await prisma.mediaRequest.update({
-        where: { id: req.id },
-        data: { status: "APPROVED" },
-      });
-      reverted++;
-    }
+    return !stillInLibrary;
+  });
+  if (toRevert.length > 0) {
+    const result = await prisma.mediaRequest.updateMany({
+      where: { id: { in: toRevert.map((r) => r.id) } },
+      data: { status: "APPROVED" },
+    });
+    reverted = result.count;
   }
 
   let plexMarked = 0;
@@ -374,12 +388,20 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         ]);
         const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, addedAt: d.addedAt }));
         const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, addedAt: d.addedAt }));
+        // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the same write.
         await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
           await tx.plexLibraryItem.deleteMany();
           if (movieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         plexSyncSucceeded = true;
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+        await prisma.setting.upsert({
+          where: { key: "lastPlexSyncSucceededAt" },
+          update: { value: String(Date.now()) },
+          create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
+        }).catch((err) => console.error("[sync] failed to stamp lastPlexSyncSucceededAt:", err));
         try {
           const episodes = await getPlexTVEpisodes(serverUrl, token, undefined, sections);
           if (episodes.length > 0) {
@@ -408,12 +430,20 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         ]);
         const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, communityRating: d.communityRating, addedAt: d.addedAt }));
         const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, communityRating: d.communityRating, addedAt: d.addedAt }));
+        // Advisory lock 2001,2 — matches /api/sync/jellyfin so the two callers can't race the same write.
         await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
           await tx.jellyfinLibraryItem.deleteMany();
           if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
           if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         jellyfinSyncSucceeded = true;
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+        await prisma.setting.upsert({
+          where: { key: "lastJellyfinSyncSucceededAt" },
+          update: { value: String(Date.now()) },
+          create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
+        }).catch((err) => console.error("[sync] failed to stamp lastJellyfinSyncSucceededAt:", err));
 
         const jfSeriesMap = new Map<string, number>();
         for (const [tmdbId, data] of jfTvIds) {
@@ -530,18 +560,47 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   if (pendingAvailableNotify.length > 0) {
     const plexConfigured = !!(plexUrlRow?.value && plexTokenRow?.value);
     const jellyfinConfigured = !!(jfUrlRow?.value && jfKeyRow?.value);
+
+    // Fallback for notification starvation: if a per-source sync has been failing for more than
+    // STALE_SYNC_FALLBACK_MS, treat that source's data as "valid" so the *other* source can
+    // satisfy the notify gate alone. Without this, a permanently broken Plex would block every
+    // Jellyfin-only user's "now available" notification forever (and vice versa). The within-window
+    // guard is preserved: a recent failure still refuses to notify on stale data.
+    const STALE_SYNC_FALLBACK_MS = 24 * 60 * 60 * 1000;
+    const [lastPlexSuccessRow, lastJellyfinSuccessRow] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: "lastPlexSyncSucceededAt" } }),
+      prisma.setting.findUnique({ where: { key: "lastJellyfinSyncSucceededAt" } }),
+    ]);
+    const parseTs = (v: string | null | undefined): number | null => {
+      if (!v) return null;
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) ? n : null;
+    };
+    const lastPlexSuccessAt = parseTs(lastPlexSuccessRow?.value);
+    const lastJellyfinSuccessAt = parseTs(lastJellyfinSuccessRow?.value);
+    const nowMs = Date.now();
+    const plexStale = plexConfigured && !plexSyncSucceeded &&
+      lastPlexSuccessAt != null && (nowMs - lastPlexSuccessAt) > STALE_SYNC_FALLBACK_MS;
+    const jellyfinStale = jellyfinConfigured && !jellyfinSyncSucceeded &&
+      lastJellyfinSuccessAt != null && (nowMs - lastJellyfinSuccessAt) > STALE_SYNC_FALLBACK_MS;
+
     const userRows = await prisma.user.findMany({
       where: { id: { in: pendingAvailableNotify.map((r) => r.requestedBy) } },
       select: { id: true, mediaServer: true },
     });
     const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+
+    // C3: collect candidate ids, then do a single CAS updateMany + a single notify per channel
+    // rather than one-DB-roundtrip-per-request and one-notify-call-per-request.
+    const toNotify: typeof pendingAvailableNotify = [];
     for (const req of pendingAvailableNotify) {
       const ms = userMediaServer.get(req.requestedBy) ?? null;
       const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
       const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
-      // Use sync success flags rather than configured flags so a failed sync doesn't trigger false notifications
-      const plexDataValid = plexSyncSucceeded || !plexConfigured;
-      const jellyfinDataValid = jellyfinSyncSucceeded || !jellyfinConfigured;
+      // Use sync success flags rather than configured flags so a failed sync doesn't trigger false notifications.
+      // 24h-stale fallback (above) also flips dataValid TRUE so the other source can satisfy alone.
+      const plexDataValid = plexSyncSucceeded || !plexConfigured || plexStale;
+      const jellyfinDataValid = jellyfinSyncSucceeded || !jellyfinConfigured || jellyfinStale;
       const shouldNotify = !ms
         ? inPlex || inJellyfin || (plexDataValid && jellyfinDataValid && !plexConfigured && !jellyfinConfigured)
         : ms === "plex"
@@ -549,14 +608,32 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         : ms === "jellyfin"
         ? inJellyfin || (jellyfinDataValid && !jellyfinConfigured && (inPlex || (plexDataValid && !plexConfigured)))
         : false;
-      if (!shouldNotify) continue;
-      const cas = await prisma.mediaRequest.updateMany({
-        where: { id: req.id, status: "AVAILABLE", notifiedAvailable: false },
+      if (shouldNotify) toNotify.push(req);
+    }
+
+    if (toNotify.length > 0) {
+      // Single CAS updateMany flips notifiedAvailable=false→true for every candidate at once.
+      // To know which rows we actually claimed (vs. ones a concurrent path flipped between our
+      // initial snapshot and now), re-read the candidates' notifiedAvailable IMMEDIATELY before
+      // the updateMany; only those still showing false at that moment are ones we flipped.
+      const candidateIds = toNotify.map((r) => r.id);
+      const preState = await prisma.mediaRequest.findMany({
+        where: { id: { in: candidateIds } },
+        select: { id: true, notifiedAvailable: true },
+      });
+      const stillUnnotifiedIds = new Set(
+        preState.filter((r) => !r.notifiedAvailable).map((r) => r.id),
+      );
+      const updated = await prisma.mediaRequest.updateMany({
+        where: { id: { in: candidateIds }, status: "AVAILABLE", notifiedAvailable: false },
         data: { notifiedAvailable: true },
       });
-      if (cas.count > 0) {
-        notifyUsersRequestsAvailable([req]).catch(() => {});
-        notifyUsersRequestsAvailablePush([req]).catch(() => {});
+      if (updated.count > 0) {
+        const notifyBatch = toNotify.filter((r) => stillUnnotifiedIds.has(r.id));
+        if (notifyBatch.length > 0) {
+          notifyUsersRequestsAvailable(notifyBatch).catch(() => {});
+          notifyUsersRequestsAvailablePush(notifyBatch).catch(() => {});
+        }
       }
     }
   }

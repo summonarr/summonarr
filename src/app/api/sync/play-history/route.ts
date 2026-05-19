@@ -583,6 +583,7 @@ export async function POST(request: NextRequest) {
       if (purged > 0) results.purged = purged;
     }
   } catch (err) {
+    console.error("[sync-play-history]", err);
     return NextResponse.json({ error: "Sync failed" }, { status: 500 });
   }
 
