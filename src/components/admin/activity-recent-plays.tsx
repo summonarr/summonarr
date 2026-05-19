@@ -373,9 +373,18 @@ export function ActivityRecentPlays({
                     <Fragment key={p.id}>
                       <tr
                         className="recent-row"
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={isExpanded}
                         onClick={() =>
                           setExpandedId(isExpanded ? null : p.id)
                         }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setExpandedId(isExpanded ? null : p.id);
+                          }
+                        }}
                         style={{
                           borderBottom:
                             i < plays.length - 1

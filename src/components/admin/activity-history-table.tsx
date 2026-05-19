@@ -211,14 +211,22 @@ function SelectField({
   );
 }
 
-function DetailRow({ play, colSpan }: { play: HistoryRow; colSpan: number }) {
+function DetailRow({
+  play,
+  colSpan,
+  mounted,
+}: {
+  play: HistoryRow;
+  colSpan: number;
+  mounted: boolean;
+}) {
   const pct =
     play.duration > 0
       ? Math.round((play.playDuration / play.duration) * 100)
       : 0;
   const details: [string, React.ReactNode][] = [
-    ["Started", fmtTimestamp(play.startedAt)],
-    ["Stopped", fmtTimestamp(play.stoppedAt)],
+    ["Started", fmtTimestamp(play.startedAt, mounted)],
+    ["Stopped", fmtTimestamp(play.stoppedAt, mounted)],
     ["Total length", fmtDuration(play.duration)],
     ["Watch time", fmtDuration(play.playDuration)],
     [
@@ -1008,9 +1016,18 @@ export function ActivityHistoryTable({
                     <Fragment key={r.id}>
                       <tr
                         className="history-row"
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={isExpanded}
                         onClick={() =>
                           setExpandedId((id) => (id === r.id ? null : r.id))
                         }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setExpandedId((id) => (id === r.id ? null : r.id));
+                          }
+                        }}
                         style={{
                           background: isExpanded
                             ? "var(--ds-bg-3)"
@@ -1122,7 +1139,7 @@ export function ActivityHistoryTable({
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {fmtTimestamp(r.startedAt)}
+                          {fmtTimestamp(r.startedAt, mounted)}
                           <div
                             className="ds-mono"
                             style={{
@@ -1272,7 +1289,11 @@ export function ActivityHistoryTable({
                         </td>
                       </tr>
                       {isExpanded && (
-                        <DetailRow play={r} colSpan={colSpan} />
+                        <DetailRow
+                          play={r}
+                          colSpan={colSpan}
+                          mounted={mounted}
+                        />
                       )}
                     </Fragment>
                   );

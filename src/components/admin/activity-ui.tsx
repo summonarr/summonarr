@@ -887,9 +887,11 @@ export function fmtBitrate(raw: number | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
-// Deterministic from a fixed ISO/date string — safe in client render
-// (guardrail 16 only forbids Date.now()/new Date() with no args / "now").
-export function fmtTimestamp(iso: string | null): string {
+// Renders a localized timestamp. Locale + TZ depend on the client, so the
+// caller must pass `mounted` (from useHasMounted) — pre-hydration we return
+// "" so SSR and the first client paint agree (guardrail 16).
+export function fmtTimestamp(iso: string | null, mounted: boolean): string {
+  if (!mounted) return "";
   if (!iso) return "—";
   return new Date(iso).toLocaleString(undefined, {
     month: "short",
