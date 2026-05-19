@@ -1,6 +1,6 @@
 
 
-import { resolveToSafeUrlWithAddrs } from "@/lib/ssrf";
+import { resolveToSafeUrlWithAddrs, verifyResolvedHost } from "@/lib/ssrf";
 
 
 export type SafeFetchErrorReason =
@@ -51,15 +51,29 @@ async function doFetch(
     throw new SafeFetchError("ssrf-blocked", rawUrl, `Invalid URL: ${rawUrl}`);
   }
 
-  let targetUrl = rawUrl;
-  // NOTE: previously we created an undici Agent dispatcher to pin the resolved
-  // IP and defeat DNS-rebind. That broke at runtime because the npm undici
-  // package and Node's bundled undici disagree on the Dispatcher handler shape
-  // (assertRequestHandler throws "invalid onRequestStart method"). The pin is
-  // deferred until we can adopt a Node-bundled-undici-compatible mechanism.
-  // Accepted residual risk: hostname-rebind window between SSRF resolve and
-  // the actual connect on admin-configured URLs. Mitigated by short request
-  // lifetimes.
+  // DNS-rebind mitigation strategy.
+  //
+  // We can't pin the resolved IP at the dispatcher layer: a previous undici
+  // Agent dispatcher attempt broke at runtime because Node 22's bundled undici
+  // and the npm `undici` package disagree on the Dispatcher handler shape
+  // (assertRequestHandler throws "invalid onRequestStart method"). `node:undici`
+  // is not exposed as a builtin module on Node 22 either, so we can't reach the
+  // bundled copy from userland. The remaining viable option is to shrink the
+  // TOCTOU window from minutes-to-hours (the original gap between SSRF resolve
+  // and the actual connect) to milliseconds, and reject the request if DNS
+  // disagrees between the two checks.
+  //
+  // Both modes therefore converge: validate, resolve+SSRF-check, capture the
+  // expected address set, then immediately before fetch() re-resolve and
+  // require the address set to be unchanged and still safe. A hostile DNS
+  // server flipping its answer between the two lookups is detected and the
+  // request is blocked. Note hardcoded mode resolves with allowPrivate=false:
+  // a hostname like `api.themoviedb.org` is never legitimately backed by a
+  // private IP, so this also stops DNS-rebind attacks against trusted hosts.
+
+  const allowPrivate = mode === "admin";
+  let targetUrl: string;
+  let expectedAddrs: readonly string[];
 
   if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
@@ -77,11 +91,24 @@ async function doFetch(
         `URL blocked by trusted-host policy (host=${host}): ${rawUrl}`,
       );
     }
-    // Rebuild targetUrl from the URL we just validated. Same value as rawUrl,
-    // but the data-flow now passes through `parsedUrl` whose hostname has been
-    // checked against `allowedHosts` — that breaks CodeQL's request-forgery
-    // taint flow (CodeQL js/request-forgery, alert #4).
+    // Hardcoded hosts (TMDB, plex.tv, …) must resolve to public addresses.
+    // allowPrivate=false here blocks DNS-rebind to RFC1918/loopback.
+    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false });
+    if (!safe) {
+      throw new SafeFetchError(
+        "ssrf-blocked",
+        rawUrl,
+        `URL blocked by SSRF policy (trusted host resolves to unsafe address): ${rawUrl}`,
+      );
+    }
+    // Rebuild targetUrl from the URL we just validated. Same hostname as
+    // rawUrl (we deliberately don't switch to the resolved IP — TLS SNI and
+    // virtual-hosted endpoints both need the hostname), but the data-flow now
+    // passes through `parsedUrl` whose hostname has been checked against
+    // `allowedHosts` — that breaks CodeQL's request-forgery taint flow
+    // (CodeQL js/request-forgery, alert #4).
     targetUrl = parsedUrl.toString();
+    expectedAddrs = safe.addrs;
   } else {
     // mode === "admin"
     const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true });
@@ -93,9 +120,7 @@ async function doFetch(
       );
     }
     targetUrl = safe.url;
-    // DNS-pin via dispatcher disabled — see note above. The SSRF policy still
-    // ran on the resolved address, so the immediate decision was sound; only
-    // the connect-time rebind window is unmitigated.
+    expectedAddrs = safe.addrs;
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -118,6 +143,21 @@ async function doFetch(
     redirect: "error",
     signal,
   };
+
+  // Final TOCTOU check: re-resolve immediately before fetch. If DNS now answers
+  // with a different address set, or any address has become unsafe, refuse.
+  // This shrinks the rebind window from "however long until connect" to "the
+  // time between this call and undici's own getaddrinfo" — typically <1ms.
+  const verified = await verifyResolvedHost(parsedUrl.hostname, expectedAddrs, {
+    allowPrivate,
+  });
+  if (!verified) {
+    throw new SafeFetchError(
+      "ssrf-blocked",
+      targetUrl,
+      `Host ${parsedUrl.hostname} failed re-resolution check (DNS-rebind defence)`,
+    );
+  }
 
   let res: Response;
   try {
