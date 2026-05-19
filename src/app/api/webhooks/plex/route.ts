@@ -11,11 +11,13 @@ import {
   computePlaytimeIncrement,
   applyFinalTick,
   MediaServerMismatchError,
+  safeBigInt,
 } from "@/lib/play-history";
 import { extractTmdbIdFromGuids } from "@/lib/plex";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkAndRecordWebhook } from "@/lib/webhook-replay";
 import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -56,13 +58,22 @@ interface PlexWebhookPayload {
 }
 
 export async function POST(req: NextRequest) {
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
+
+  const clientIp = getClientIp(req.headers);
+  if (!checkRateLimit(`webhook:plex:${clientIp}`, 120, 60_000)) {
+    return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
+  }
+
   const [sourceRow, legacyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexWebhookSecret" } }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
   const secret = sourceRow?.value || legacyRow?.value || "";
   if (secret.length === 0) {
-    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 401 });
+    console.warn("[webhook/plex] secret not configured");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const authHeader = req.headers.get("authorization") ?? "";
   // ?token= fallback is load-bearing: Plex webhook UI only sends query params, no header field
@@ -79,9 +90,6 @@ export async function POST(req: NextRequest) {
       "Configure the Authorization header instead if your webhook source supports it."
     );
   }
-
-  const tooLarge = checkBodySize(req, 1_048_576);
-  if (tooLarge) return tooLarge;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
 
@@ -234,7 +242,7 @@ export async function POST(req: NextRequest) {
           episodeTitle: meta.type === "episode" ? (meta.title ?? null) : null,
           sourceItemId: meta.ratingKey,
           posterPath,
-          durationMs: BigInt(Math.max(0, meta.duration ?? 0)),
+          durationMs: safeBigInt(meta.duration),
           platform: player?.platform ?? null,
           player: player?.title ?? null,
           device: player?.uuid ?? null,
@@ -255,7 +263,7 @@ export async function POST(req: NextRequest) {
           lastSeenAt: now,
           state: "paused",
           ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-          ...(meta.viewOffset != null ? { progressMs: BigInt(Math.max(0, meta.viewOffset)) } : {}),
+          ...(meta.viewOffset != null ? { progressMs: safeBigInt(meta.viewOffset) } : {}),
         },
       });
     }
@@ -266,7 +274,7 @@ export async function POST(req: NextRequest) {
     const session = await prisma.activeSession.findUnique({ where: { id: sessionId } });
     if (session) {
       await recordCompletedSession(applyFinalTick(session, now, {
-        ...(meta.viewOffset != null ? { progressMs: BigInt(Math.max(0, meta.viewOffset)) } : {}),
+        ...(meta.viewOffset != null ? { progressMs: safeBigInt(meta.viewOffset) } : {}),
         stoppedAt: now,
       }));
       return NextResponse.json({ message: "Session stopped and recorded" });
@@ -283,8 +291,8 @@ export async function POST(req: NextRequest) {
     if (existing) {
       const threshold = await getWatchedThreshold();
       const durationMs = Number(existing.durationMs);
-      const watchedFloorMs = BigInt(Math.floor(durationMs * (threshold / 100)));
-      const scrobblePlayheadMs = BigInt(Math.floor(durationMs * 0.9));
+      const watchedFloorMs = safeBigInt(durationMs * (threshold / 100));
+      const scrobblePlayheadMs = safeBigInt(durationMs * 0.9);
       const increment = computePlaytimeIncrement(existing, now);
       const newPlaytime = existing.playtimeMs + increment;
       await prisma.activeSession.update({

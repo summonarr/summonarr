@@ -10,10 +10,12 @@ import {
   computePlaytimeIncrement,
   MAX_PLAYTIME_DELTA_MS,
   MediaServerMismatchError,
+  safeBigInt,
 } from "@/lib/play-history";
 import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -49,13 +51,22 @@ interface JellyfinWebhookPayload {
 }
 
 export async function POST(req: NextRequest) {
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
+
+  const clientIp = getClientIp(req.headers);
+  if (!checkRateLimit(`webhook:jellyfin:${clientIp}`, 120, 60_000)) {
+    return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
+  }
+
   const [sourceRow, legacyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "jellyfinWebhookSecret" } }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
   const secret = sourceRow?.value || legacyRow?.value || "";
   if (secret.length === 0) {
-    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 401 });
+    console.warn("[webhook/jellyfin] secret not configured");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const authHeader = req.headers.get("authorization") ?? "";
   // ?token= fallback is load-bearing: Jellyfin webhook plugin doesn't always support Authorization headers
@@ -72,9 +83,6 @@ export async function POST(req: NextRequest) {
       "Configure the Authorization header instead if your webhook source supports it."
     );
   }
-
-  const tooLarge = checkBodySize(req, 1_048_576);
-  if (tooLarge) return tooLarge;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {
@@ -191,7 +199,7 @@ export async function POST(req: NextRequest) {
         data: {
           lastSeenAt: now,
           state: "playing",
-          progressMs: BigInt(positionMs),
+          progressMs: safeBigInt(positionMs),
           progressPercent,
           ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
           ...(posterPath ? { posterPath } : {}),
@@ -218,8 +226,8 @@ export async function POST(req: NextRequest) {
           sourceItemId: payload.ItemId,
           posterPath,
           progressPercent,
-          progressMs: BigInt(positionMs),
-          durationMs: BigInt(durationMs),
+          progressMs: safeBigInt(positionMs),
+          durationMs: safeBigInt(durationMs),
           platform: payload.ClientName ?? null,
           player: payload.DeviceName ?? payload.ClientName ?? null,
           device: payload.DeviceName ?? null,
@@ -238,14 +246,14 @@ export async function POST(req: NextRequest) {
       const posDelta = positionMs - Number(existing.progressMs);
       // Use current payload state, not existing.state (stale DB value from previous event).
       const increment = (posDelta > 0 || state === "playing")
-        ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
+        ? safeBigInt(Math.min(MAX_PLAYTIME_DELTA_MS, wallDelta))
         : BigInt(0);
       await prisma.activeSession.update({
         where: { id: existing.id },
         data: {
           lastSeenAt: now,
           state,
-          progressMs: BigInt(positionMs),
+          progressMs: safeBigInt(positionMs),
           progressPercent,
           ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
         },
@@ -262,11 +270,11 @@ export async function POST(req: NextRequest) {
       // before Stop, leaving DB state="paused"). Cap by MAX_PLAYTIME_DELTA_MS for the same reasons
       // as computePlaytimeIncrement.
       const wallDelta = Math.max(0, now.getTime() - session.lastSeenAt.getTime());
-      const finalIncrement = BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, wallDelta));
+      const finalIncrement = safeBigInt(Math.min(MAX_PLAYTIME_DELTA_MS, wallDelta));
       await recordCompletedSession({
         ...session,
         playtimeMs: session.playtimeMs + finalIncrement,
-        progressMs: BigInt(positionMs),
+        progressMs: safeBigInt(positionMs),
         lastSeenAt: now,
       });
       return NextResponse.json({ message: "PlaybackStop recorded" });

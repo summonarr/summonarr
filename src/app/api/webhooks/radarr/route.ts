@@ -8,6 +8,7 @@ import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -24,6 +25,14 @@ interface RadarrWebhookPayload {
 }
 
 export async function POST(req: NextRequest) {
+  const tooLarge = checkBodySize(req, 1_048_576);
+  if (tooLarge) return tooLarge;
+
+  const clientIp = getClientIp(req.headers);
+  if (!checkRateLimit(`webhook:radarr:${clientIp}`, 120, 60_000)) {
+    return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
+  }
+
   const [sourceRow, legacyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "radarrWebhookSecret" } }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
@@ -31,8 +40,8 @@ export async function POST(req: NextRequest) {
   const secret = sourceRow?.value || legacyRow?.value || "";
 
   if (secret.length === 0) {
-    console.warn("[webhook/radarr] 401 secret not configured");
-    return NextResponse.json({ error: "Webhook secret not configured" }, { status: 401 });
+    console.warn("[webhook/radarr] secret not configured");
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const authHeader = req.headers.get("authorization") ?? "";
@@ -48,9 +57,6 @@ export async function POST(req: NextRequest) {
 
   // Radarr's webhook UI has no Authorization header field — ?token= is the only
   // option upstream supports. Don't warn about it; nothing the user can do.
-
-  const tooLarge = checkBodySize(req, 1_048_576);
-  if (tooLarge) return tooLarge;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {

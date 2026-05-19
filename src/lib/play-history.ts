@@ -3,6 +3,12 @@ import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
+export function safeBigInt(x: unknown): bigint {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n)) return BigInt(0);
+  return BigInt(Math.max(0, Math.floor(n)));
+}
+
 const SETTING_KEYS = [
   "playHistoryEnabled",
   "playHistoryPlexEnabled",
