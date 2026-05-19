@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { Film, Tv2, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { IpInfo } from "@/components/admin/ip-info";
 
 export interface RecentPlay {
   id: string;
@@ -120,7 +121,13 @@ function DetailRow({ play }: { play: RecentPlay }) {
           </div>
           <div>
             <span className="text-zinc-500">IP Address</span>
-            <p className="text-zinc-300 tabular-nums">{play.ipAddress ?? "—"}</p>
+            {play.ipAddress ? (
+              <div className="mt-0.5">
+                <IpInfo ip={play.ipAddress} inline />
+              </div>
+            ) : (
+              <p className="text-zinc-300 tabular-nums">—</p>
+            )}
           </div>
           <div>
             <span className="text-zinc-500">Container</span>
