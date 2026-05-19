@@ -12,6 +12,7 @@ import {
   methodLabel,
   sourceDotColor,
 } from "@/components/admin/activity-ui";
+import { IpInfo } from "@/components/admin/ip-info";
 
 export interface RecentPlay {
   id: string;
@@ -94,9 +95,12 @@ const TD: React.CSSProperties = {
 };
 
 function DetailRow({ play }: { play: RecentPlay }) {
-  const cells: [string, string][] = [
+  const cells: [string, React.ReactNode][] = [
     ["Device", play.device ?? "—"],
-    ["IP Address", play.ipAddress ?? "—"],
+    [
+      "IP Address",
+      play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
+    ],
     ["Container", play.container?.toUpperCase() ?? "—"],
     ["Bitrate", formatBitrate(play.bitrate)],
     ["Video Decision", play.videoDecision ?? "—"],
@@ -133,7 +137,7 @@ function DetailRow({ play }: { play: RecentPlay }) {
               >
                 {k}
               </span>
-              <p
+              <div
                 style={{
                   margin: "2px 0 0",
                   fontSize: 12,
@@ -141,7 +145,7 @@ function DetailRow({ play }: { play: RecentPlay }) {
                 }}
               >
                 {v}
-              </p>
+              </div>
             </div>
           ))}
         </div>
