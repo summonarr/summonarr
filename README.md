@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.10.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.10.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -153,6 +153,27 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Changelog
 
+### v0.10.3
+
+**Added**
+
+- Appearance system: selectable theme + accent color, with a new discover hero on the home page.
+- Admin Requested page gains a media-type filter and a release-year sort.
+- Activity titles now link through to a per-title page at `/admin/activity/media`; requests page shows content rating and external ratings.
+- Sync auto-retries `APPROVED` requests that Radarr/Sonarr never accepted, instead of leaving them stuck.
+- Play history captures the real transcode reason reported by the media server.
+
+**Changed**
+
+- Admin Activity overview redesigned (metrics dashboard, recent plays, now-playing).
+- Project relicensed/clarified as AGPL-3.0-only with bundled third-party notices and a source link in the UI.
+
+**Fixed**
+
+- Activity dashboard metrics corrected and filter SQL consolidated into one builder.
+- Play history Top movies/TV use real cover art and exclude rewatches; user "Most watched" prefers the live cache over a stale snapshot for artwork.
+- Unmapped titles in user "Most watched", Recent plays, and the user detail page now resolve via a library fallback so they link correctly.
+
 ### v0.10.2
 
 **Changed**
@@ -291,7 +312,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.10.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.10.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
