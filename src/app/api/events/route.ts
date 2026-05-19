@@ -1,11 +1,13 @@
 import { auth, isTokenExpired } from "@/lib/auth";
-import { sseEmitter, type SSEEvent } from "@/lib/sse-emitter";
+import { sseEmitter, SSE_MAX_LISTENERS, type SSEEvent } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 
 export const dynamic = "force-dynamic";
 
 const MAX_CONNECTIONS_PER_USER = 5;
-const MAX_TOTAL_CONNECTIONS = 500;
+// Kept in lockstep with the emitter's max-listener cap (one listener per
+// connection); tune both via SSE_MAX_LISTENERS. See @/lib/sse-emitter.
+const MAX_TOTAL_CONNECTIONS = SSE_MAX_LISTENERS;
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_CONNECTION_DURATION_MS = 3_600_000;
 

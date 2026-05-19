@@ -172,6 +172,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
+| `SSE_MAX_LISTENERS`            | integer; default `500`           | Concurrent real-time (SSE) connection cap; also raises the emitter listener limit so the two stay in lockstep. Raise for large/heavily multi-tabbed deployments. |
 | `/run/secrets/cron_secret`     | file mount                       | If mounted (Docker/Swarm secret), the entrypoint reads `CRON_SECRET` from the file so it doesn't appear in `docker inspect`. Takes precedence over the env var. |
 
 ## Sub-path deployment (`BASE_PATH`)

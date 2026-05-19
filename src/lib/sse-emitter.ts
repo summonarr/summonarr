@@ -7,8 +7,17 @@ declare global {
 
 // Persist the emitter on globalThis so Next.js hot-reloads don't create a new instance and drop live SSE connections
 const emitter: EventEmitter = globalThis.__sseEmitter ?? new EventEmitter();
-// One listener per open SSE connection — 500 covers a heavily multi-tabbed admin without MaxListenersExceededWarning
-emitter.setMaxListeners(500);
+
+// One "event" listener is registered per open SSE connection (see
+// /api/events), so this value also bounds the concurrent-connection cap in
+// that route — they must move together or Node emits MaxListenersExceededWarning.
+// Tunable via SSE_MAX_LISTENERS for large deployments; default 500 covers a
+// heavily multi-tabbed admin. Invalid/non-positive values fall back to 500.
+const parsedMax = parseInt(process.env.SSE_MAX_LISTENERS ?? "", 10);
+export const SSE_MAX_LISTENERS =
+  Number.isInteger(parsedMax) && parsedMax > 0 ? parsedMax : 500;
+
+emitter.setMaxListeners(SSE_MAX_LISTENERS);
 globalThis.__sseEmitter = emitter;
 
 export const sseEmitter = emitter;
