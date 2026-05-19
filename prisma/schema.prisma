@@ -388,6 +388,13 @@ model Setting {
 model PlexTokenCache {
   tokenHash  String   @id
   email      String
+  // Plex provider subject id (User.plexUserId). Nullable for legacy rows
+  // written before this column existed. The cache-hit path looks up the
+  // bound User row by this id rather than email — email is reassignable in
+  // Plex, so binding by id prevents a different account whose email matches
+  // a stale cache row from inheriting that row's identity. Legacy nulls
+  // force a Plex round-trip (which repopulates the column).
+  plexUserId String?
   verifiedAt DateTime @default(now())
   lastUsedAt DateTime @default(now()) @updatedAt
   // Optional: legacy rows (pre-TTL migration) have null. Auth flow populates
@@ -398,6 +405,7 @@ model PlexTokenCache {
 
   @@index([email])
   @@index([expiresAt])
+  @@index([plexUserId])
 }
 
 // ─── Issues ──────────────────────────────────────────────────────────────────
