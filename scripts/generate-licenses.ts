@@ -37,6 +37,7 @@ const LICENSE_FILE_RE = /^(licen[sc]e|copying|notice)(\..*)?$/i;
  * reference pulls in GPL-3.0 too.
  */
 const CANONICAL: Record<string, string[]> = {
+  "Apache-2.0": ["Apache-2.0"],
   "LGPL-3.0-or-later": ["LGPL-3.0", "GPL-3.0"],
   "LGPL-3.0-only": ["LGPL-3.0", "GPL-3.0"],
   "LGPL-3.0": ["LGPL-3.0", "GPL-3.0"],
@@ -52,6 +53,12 @@ interface LockEntry {
   devOptional?: boolean;
   extraneous?: boolean;
   link?: boolean;
+  // Platform-gating constraints. Their presence marks an optional native
+  // binary (e.g. @img/sharp-*) of which `npm ci` installs only the host's
+  // copy — see gating note in productionPackages().
+  os?: string[];
+  cpu?: string[];
+  libc?: string[];
 }
 
 interface Pkg {
@@ -60,6 +67,32 @@ interface Pkg {
   license: string;
   text: string;
   path: string;
+  /**
+   * True when the package is a platform-gated optional native binary. Only
+   * the host platform's copy is physically installed, so reading its on-disk
+   * LICENSE would make the generated file non-deterministic across OSes
+   * (macOS-generated vs Linux-CI `--check`). For these we never read disk
+   * text and rely solely on the lockfile `license` + canonical text, which
+   * is identical on every platform.
+   */
+  gated: boolean;
+}
+
+/**
+ * Resolve the canonical-text files for an SPDX license expression. Handles
+ * simple `A AND B` / `A OR B` compounds (e.g. sharp's win32 binaries are
+ * `Apache-2.0 AND LGPL-3.0-or-later`) by unioning the canonical set of each
+ * component. Returns undefined when no component has canonical text.
+ */
+function canonicalFor(license: string): string[] | undefined {
+  const out: string[] = [];
+  for (const raw of license.split(/\s+(?:AND|OR)\s+/i)) {
+    const part = raw.replace(/[()]/g, "").trim();
+    for (const c of CANONICAL[part] ?? []) {
+      if (!out.includes(c)) out.push(c);
+    }
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -82,12 +115,18 @@ function productionPackages(): Pkg[] {
     const name = path.slice(path.lastIndexOf("node_modules/") + 13);
     const key = `${name}@${e.version}`;
     if (seen.has(key)) continue;
+    // Platform-gated optional binary: `npm ci` installs only the host's
+    // copy, so its on-disk LICENSE (and package.json) is absent on other
+    // OSes. Never touch disk for these — the output must be byte-identical
+    // whether generated on a dev macOS box or in Linux CI.
+    const gated = Boolean(e.os || e.cpu || e.libc);
     seen.set(key, {
       name,
       version: e.version,
-      license: e.license ?? declaredLicense(path),
-      text: readLicenseText(path),
+      license: e.license ?? (gated ? "UNKNOWN" : declaredLicense(path)),
+      text: gated ? "" : readLicenseText(path),
       path,
+      gated,
     });
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -149,7 +188,7 @@ function build(): string {
   const body = pkgs
     .map((p) => {
       const block = [`${p.name}@${p.version}`, `License: ${p.license}`];
-      const canon = CANONICAL[p.license];
+      const canon = canonicalFor(p.license);
       if (p.text) {
         block.push("", p.text);
       } else if (canon) {
@@ -169,7 +208,7 @@ function build(): string {
 
   let appendix = "";
   if (neededCanonical.size > 0) {
-    const order = ["LGPL-3.0", "GPL-3.0"].filter((c) =>
+    const order = ["Apache-2.0", "LGPL-3.0", "GPL-3.0"].filter((c) =>
       neededCanonical.has(c),
     );
     appendix =
