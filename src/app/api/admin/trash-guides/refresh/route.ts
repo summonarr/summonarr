@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { refreshCatalog, describeSchemaError, type RefreshResult } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
@@ -12,10 +12,7 @@ function busyResponse() {
   );
 }
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   // Body is optional. Accept missing/empty body silently (UI's "Refresh both" sends none); reject
   // malformed JSON loudly (typos otherwise silently fall through to "refresh both").
   const contentLength = req.headers.get("content-length");
@@ -75,4 +72,4 @@ export async function POST(req: NextRequest) {
     },
     busyResponse,
   );
-}
+});

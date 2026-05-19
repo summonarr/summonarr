@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -29,10 +29,7 @@ function escapeCSV(value: string): string {
   return safe;
 }
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, session) => {
   // Audit-log export streams up to MAX_EXPORT_RECORDS rows of PII; throttle to 3/hour per admin
   if (!checkRateLimit(`audit-log-export:${session.user.id}`, 3, 3_600_000)) {
     return NextResponse.json({ error: "Too many exports — try again later" }, { status: 429 });
@@ -165,4 +162,4 @@ export async function GET(req: NextRequest) {
       "X-Content-Type-Options": "nosniff",
     },
   });
-}
+});

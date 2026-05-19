@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
@@ -7,10 +7,7 @@ import { logAudit } from "@/lib/audit";
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastOmdbWarmAt";
 
-export async function POST() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (_req, _ctx, session) => {
   const now = Date.now();
 
   // Atomic upsert acts as a distributed CAS: only succeeds if the cooldown window has elapsed
@@ -45,4 +42,4 @@ export async function POST() {
   });
 
   return NextResponse.json(result);
-}
+});

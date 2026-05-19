@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import {
   processBackupImport,
@@ -41,10 +41,7 @@ function passwordOrError(): { password: string } | NextResponse {
 //   X-Chunk-Index   0-based index of this chunk
 //   X-Chunk-Total   total chunks
 //   X-File-Size     total file size in bytes
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   const pw = passwordOrError();
   if (pw instanceof NextResponse) return pw;
   const { password } = pw;
@@ -172,17 +169,14 @@ export async function POST(req: NextRequest) {
     summary: result.summary,
     ...(result.warning ? { warning: result.warning } : {}),
   });
-}
+});
 
 // DELETE: cancel the in-flight upload.
-export async function DELETE(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (req, _ctx, _session) => {
   const uploadId = req.headers.get("x-upload-id") ?? "";
   if (!uploadId) {
     return NextResponse.json({ error: "Missing X-Upload-Id." }, { status: 400 });
   }
   await clearSession(uploadId);
   return NextResponse.json({ ok: true });
-}
+});

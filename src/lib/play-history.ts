@@ -298,6 +298,7 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     videoDecision: session.videoDecision,
     audioDecision: session.audioDecision,
     container: session.container,
+    transcodeReason: session.transcodeReason,
   };
 
   await prisma.$transaction(async (tx) => {
@@ -384,8 +385,8 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     // same show collapse) with title fallback for unmapped rows. See bug #7
     // notes: previously the GROUP BY also keyed on title, so the same show
     // appeared twice when one source resolved tmdbId and the other didn't.
-    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
        GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
@@ -454,7 +455,7 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     totalPlays,
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
     recentPlays,
-    topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, count: Number(r.count) })),
+    topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, posterPath: r.posterPath, count: Number(r.count) })),
     playsByDay: playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
     platformBreakdown: platformBreakdown.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
     activityCalendar: activityCalendar.map((r) => ({ day: r.day, count: Number(r.count) })),
@@ -874,6 +875,49 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   }));
 }
 
+// Top-watched titles split per media type. Unlike getMostRewatchedUncached
+// this has NO `HAVING COUNT(*) > 1` rewatch filter — a movie watched once
+// still ranks — and partitions by mediaType so movies can't be starved out
+// of a global top-N by TV shows (whose tmdbId aggregates every episode).
+// Carries the stored posterPath so callers get real cover art without a
+// TmdbCache round-trip.
+async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limitPerType = 8) {
+  const { where, params } = buildStatsFilters(filters);
+  // Push then read length so a future param insertion can't shift the $-index (cf. 803cd11).
+  params.push(limitPerType);
+  const limitIdx = params.length;
+
+  const rows = await prisma.$queryRawUnsafe<
+    { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[]
+  >(
+    `WITH agg AS (
+       SELECT "tmdbId", "mediaType"::text AS "mediaType", MAX("title") AS title,
+              MAX("posterPath") AS "posterPath",
+              COUNT(*)::bigint AS plays,
+              COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
+       FROM "PlayHistory"
+       WHERE ${where} AND "tmdbId" IS NOT NULL AND "watched" = true
+       GROUP BY "tmdbId", "mediaType"
+     ), ranked AS (
+       SELECT *, ROW_NUMBER() OVER (PARTITION BY "mediaType" ORDER BY plays DESC, viewers DESC) AS rn
+       FROM agg
+     )
+     SELECT "tmdbId", "mediaType", title, "posterPath", plays, viewers
+     FROM ranked WHERE rn <= $${limitIdx}
+     ORDER BY plays DESC`,
+    ...params,
+  );
+
+  return rows.map((r) => ({
+    tmdbId: r.tmdbId,
+    mediaType: r.mediaType,
+    title: r.title,
+    posterPath: r.posterPath,
+    plays: Number(r.plays),
+    viewers: Number(r.viewers),
+  }));
+}
+
 export interface PlayHistoryStatsFilters {
   days?: number;
   source?: string;
@@ -881,27 +925,57 @@ export interface PlayHistoryStatsFilters {
 }
 
 // Parameters start at $1 here — callers that append further params must continue from params.length+1, not re-start at $1
-function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "") {
-  const prefix = tableAlias ? `${tableAlias}.` : "";
-  const conditions: string[] = [`${prefix}"startedAt" >= $1`];
-  const params: unknown[] = [new Date(Date.now() - (filters.days ?? 30) * 24 * 60 * 60 * 1000)];
+/**
+ * Single source of truth for the play-history `source` / `mediaType` filter
+ * suffix and its parameter-index math.
+ *
+ * Three call sites used to hand-maintain copies of this clause + its `$N`
+ * offset (buildStatsFilters, getActivityCalendarUncached, and the activity
+ * page's raw queries). A divergence in the `$`-index between copies is the
+ * exact 803cd11 bug class — keep this the only place it lives.
+ *
+ * `baseParams` are the params already bound *before* this suffix (e.g. a
+ * startedAt cutoff); placeholder indices continue from `baseParams.length`,
+ * so the returned `sql` is safe to append after `WHERE …$1 [AND …$2]`.
+ * `tableAlias` namespaces the columns (e.g. "p" → `p."source"`) for JOINs.
+ * `source` / `mediaType` are whitelist-validated; anything else is ignored.
+ */
+export function appendPlayHistoryFilter(
+  baseParams: unknown[],
+  opts: { source?: string; mediaType?: string; tableAlias?: string } = {},
+): { sql: string; params: unknown[] } {
+  const prefix = opts.tableAlias ? `${opts.tableAlias}.` : "";
+  const clauses: string[] = [];
+  const params: unknown[] = [...baseParams];
 
-  const validSources = new Set(["plex", "jellyfin"]);
-  if (filters.source && validSources.has(filters.source)) {
-    params.push(filters.source);
-    conditions.push(`${prefix}"source" = $${params.length}`);
+  if (opts.source === "plex" || opts.source === "jellyfin") {
+    params.push(opts.source);
+    clauses.push(`${prefix}"source" = $${params.length}`);
   }
 
-  const validMediaTypes = new Set(["MOVIE", "TV"]);
-  if (filters.mediaType && validMediaTypes.has(filters.mediaType)) {
-    params.push(filters.mediaType);
-    conditions.push(`${prefix}"mediaType"::text = $${params.length}`);
+  if (opts.mediaType === "MOVIE" || opts.mediaType === "TV") {
+    params.push(opts.mediaType);
+    clauses.push(`${prefix}"mediaType"::text = $${params.length}`);
   }
 
-  return { where: conditions.join(" AND "), params };
+  return {
+    sql: clauses.length > 0 ? ` AND ${clauses.join(" AND ")}` : "",
+    params,
+  };
 }
 
-type PlayHistoryStatsResult = {
+function buildStatsFilters(filters: PlayHistoryStatsFilters, tableAlias = "") {
+  const prefix = tableAlias ? `${tableAlias}.` : "";
+  const cutoff = new Date(Date.now() - (filters.days ?? 30) * 24 * 60 * 60 * 1000);
+  const { sql, params } = appendPlayHistoryFilter([cutoff], {
+    source: filters.source,
+    mediaType: filters.mediaType,
+    tableAlias,
+  });
+  return { where: `${prefix}"startedAt" >= $1${sql}`, params };
+}
+
+export type PlayHistoryStatsResult = {
   totalPlays: number;
   totalWatchTimeHours: number;
   playsByDay: { day: string; count: number }[];
@@ -942,6 +1016,7 @@ type PlayHistoryStatsResult = {
 
   decadeBreakdown: { decade: string; count: number }[];
   topRewatched: { tmdbId: number; mediaType: string; title: string; plays: number; viewers: number }[];
+  topWatched: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: number; viewers: number }[];
   topEpisodes: { tmdbId: number | null; title: string; season: number | null; episode: number | null; episodeTitle: string | null; count: number }[];
 
   prevPeriod: { totalPlays: number; totalWatchTimeHours: number; uniqueViewers: number };
@@ -1015,6 +1090,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     peakConcurrentRaw,
     prevPeriodStats,
     topRewatchedRaw,
+    topWatchedRaw,
   ] = await Promise.all([
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
       `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE ${wwhere}`,
@@ -1214,7 +1290,12 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
-      `SELECT COALESCE(NULLIF("videoDecision", ''), 'Unknown') AS reason,
+      // Group by the captured transcodeReason (Plex-derived / Jellyfin
+      // TranscodeReasons). Multi-reason sessions keep their comma-joined
+      // label as one bucket so counts still sum to exactly the transcode
+      // session total — the % math in the UI stays correct. Pre-capture
+      // rows have a null reason and fall into 'Unknown'.
+      `SELECT COALESCE(NULLIF("transcodeReason", ''), 'Unknown') AS reason,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE ${where} AND "playMethod" = 'Transcode'
@@ -1293,6 +1374,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...prevParams,
     ),
     getMostRewatchedUncached(filters, 10),
+    getTopWatchedUncached(filters, 8),
   ]);
 
   const watchedCount = Number(completionStats[0]?.watched ?? 0);
@@ -1340,6 +1422,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     sourceSplit: sourceSplit.map((r) => ({ source: r.source, count: Number(r.count) })),
     decadeBreakdown: decadeBreakdown.map((r) => ({ decade: r.decade, count: Number(r.count) })),
     topRewatched: topRewatchedRaw,
+    topWatched: topWatchedRaw,
     topEpisodes: topEpisodes.map((r) => ({
       tmdbId: r.tmdbId,
       title: r.title,
@@ -1373,21 +1456,12 @@ async function getActivityCalendarUncached(
   source?: string,
   mediaType?: string,
 ): Promise<{ day: string; count: number }[]> {
-  // Parameters start at $1 (commit 803cd11 fixed an off-by-one where the filtered path incorrectly used $2)
-  const filterParams: unknown[] = [];
-  const filterClauses: string[] = [];
-
-  if (source && ["plex", "jellyfin"].includes(source)) {
-    filterClauses.push(`"source" = $${filterParams.length + 1}`);
-    filterParams.push(source);
-  }
-
-  if (mediaType && ["MOVIE", "TV"].includes(mediaType)) {
-    filterClauses.push(`"mediaType"::text = $${filterParams.length + 1}`);
-    filterParams.push(mediaType);
-  }
-
-  const filterSql = filterClauses.length > 0 ? ` AND ${filterClauses.join(" AND ")}` : "";
+  // No params bound before the suffix here (the CURRENT_DATE window uses no
+  // placeholder), so filter params start at $1 — see appendPlayHistoryFilter.
+  const { sql: filterSql, params: filterParams } = appendPlayHistoryFilter([], {
+    source,
+    mediaType,
+  });
 
   const result = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
     `SELECT DATE("startedAt")::text AS day, COUNT(*)::bigint AS count

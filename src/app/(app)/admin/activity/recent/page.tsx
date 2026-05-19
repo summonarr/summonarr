@@ -128,14 +128,13 @@ export default async function RecentlyAddedPage() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {items.map((item, i) => {
-            const mediaHref = item.mediaType === "TV" ? `/tv/${item.tmdbId}` : `/movie/${item.tmdbId}`;
             const activityHref = `/admin/activity/media/${item.tmdbId}`;
 
             return (
               <div key={`${item.mediaType}-${item.tmdbId}-${i}`} className="group">
                 <div className="relative aspect-[2/3] bg-zinc-800 rounded-lg overflow-hidden mb-2">
                   {item.posterPath ? (
-                    <Link href={mediaHref}>
+                    <Link href={activityHref}>
                       <Image
                         src={item.posterPath}
                         alt={item.title}
@@ -163,17 +162,9 @@ export default async function RecentlyAddedPage() {
                     </span>
                   </div>
                   {}
-                  <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-2">
-                    <Link
-                      href={activityHref}
-                      className="text-[10px] text-indigo-300 hover:text-indigo-200 font-medium"
-                    >
-                      Activity ↗
-                    </Link>
-                  </div>
                 </div>
                 <div className="min-w-0">
-                  <Link href={mediaHref} className="text-xs font-medium text-white hover:text-indigo-400 transition-colors truncate block">
+                  <Link href={activityHref} className="text-xs font-medium text-white hover:text-indigo-400 transition-colors truncate block">
                     {item.title}
                   </Link>
                   <p className="text-[10px] text-zinc-500">

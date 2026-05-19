@@ -86,6 +86,23 @@ export const authConfig: NextAuthConfig = {
       }
 
       const role = auth?.user?.role;
+
+      // Defense-in-depth backstop for the admin API surface. The per-route
+      // requireAuth/withAdmin guard is the source of truth for the exact
+      // ADMIN-vs-ISSUE_ADMIN decision (e.g. /api/admin/fix-match accepts
+      // ISSUE_ADMIN). This only fails closed if such a guard is ever missing,
+      // and only for roles with NO admin access at all — so it can never
+      // wrongly deny a privileged caller. Returns JSON 403 (not a redirect)
+      // because API clients can't follow an HTML login redirect.
+      // See CLAUDE.md guardrail 6a.
+      if (
+        nextUrl.pathname.startsWith("/api/admin/") &&
+        role !== "ADMIN" &&
+        role !== "ISSUE_ADMIN"
+      ) {
+        return Response.json({ error: "Forbidden" }, { status: 403 });
+      }
+
       const lowerPath = nextUrl.pathname.toLowerCase();
       if (lowerPath.startsWith("/admin") && role !== "ADMIN") {
         if (

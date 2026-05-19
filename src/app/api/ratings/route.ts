@@ -1,13 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
 import { checkRateLimit } from "@/lib/rate-limit";
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`ratings:${session.user.id}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
@@ -34,4 +31,4 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json(null);
-}
+});

@@ -131,6 +131,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 
+# License compliance: Next.js standalone tracing strips LICENSE/NOTICE files
+# from node_modules, so the project license (AGPL-3.0) and the third-party
+# notices (MIT/BSD/ISC/Apache attribution + the LGPL libvips relink notice
+# and full LGPL/GPL text) must be carried into the image explicitly.
+COPY --from=builder --chown=nextjs:nodejs /app/LICENSE ./LICENSE
+COPY --from=builder --chown=nextjs:nodejs /app/THIRD_PARTY_LICENSES.txt ./THIRD_PARTY_LICENSES.txt
+
 # Merge prisma CLI deps on top of the standalone's node_modules.
 # COPY into an existing directory adds files without removing what's already there,
 # so the standalone's next, react, etc. are preserved.

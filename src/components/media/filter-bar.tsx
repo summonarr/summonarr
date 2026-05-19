@@ -5,6 +5,7 @@ import { useCallback, useMemo } from "react";
 import type { Genre, WatchProvider } from "@/lib/tmdb-types";
 import { X } from "lucide-react";
 import { StyledSelect } from "@/components/ui/styled-select";
+import { FilterBar as SortSegments } from "@/components/ui/design";
 
 interface FilterBarProps {
   genres: Genre[];
@@ -160,16 +161,16 @@ export function FilterBar({
 
   return (
     <div className="flex flex-col gap-3 mb-8">
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
-        <StyledSelect
-          value={activeSortBy ?? "popularity.desc"}
-          onChange={(e) => push({ sortBy: e.target.value === "popularity.desc" ? undefined : e.target.value })}
-        >
-          {SORT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </StyledSelect>
+      <SortSegments
+        segments={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+        active={activeSortBy ?? "popularity.desc"}
+        onChange={(v) =>
+          push({ sortBy: v === "popularity.desc" ? undefined : v })
+        }
+        className="mb-0"
+      />
 
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
           value={activeGenreId ?? ""}
           onChange={(e) => push({ genreId: e.target.value || undefined })}

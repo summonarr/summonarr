@@ -542,6 +542,21 @@ export interface JellyfinSessionData {
   resolution?: string;
   container?: string;
   bitrate?: number;
+  transcodeReason?: string;
+}
+
+// Jellyfin TranscodeReasons are PascalCase enum tokens
+// ("AudioCodecNotSupported"). Render to the same sentence-case vocabulary
+// the Plex path derives so both servers share one chart.
+function humanizeJellyfinReasons(reasons: string[] | undefined): string | undefined {
+  if (!reasons || reasons.length === 0) return undefined;
+  const phrases = reasons.map((r) => {
+    const words = r.replace(/([a-z0-9])([A-Z])/g, "$1 $2").split(" ");
+    return words
+      .map((w, i) => (i === 0 ? w : w.toLowerCase()))
+      .join(" ");
+  });
+  return [...new Set(phrases)].join(", ");
 }
 
 interface JellyfinSessionRaw {
@@ -579,6 +594,7 @@ interface JellyfinSessionRaw {
     Container?: string;
     IsVideoDirect?: boolean;
     IsAudioDirect?: boolean;
+    TranscodeReasons?: string[];
   };
 }
 
@@ -640,6 +656,10 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
           : undefined,
         container: ti?.Container ?? np.Container,
         bitrate: ti?.Bitrate ?? videoStream?.BitRate,
+        transcodeReason:
+          playMethod === "Transcode"
+            ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? "Container not supported"
+            : undefined,
       };
     });
 }

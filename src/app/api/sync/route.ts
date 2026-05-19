@@ -8,6 +8,8 @@ import {
   isSeriesDownloadingInSonarr,
   getMovieReleaseInfo,
   getSeriesFirstAired,
+  addMovieToRadarr,
+  addSeriesToSonarr,
 } from "@/lib/arr";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
@@ -26,6 +28,13 @@ import { withAdvisoryLock } from "@/lib/advisory-lock";
 const SYNC_ORCHESTRATOR_LOCK_ID = 2000;
 
 const CONCURRENCY_LIMIT = 5;
+
+// Re-push backoff for APPROVED requests the *arr never accepted (e.g. unreleased title with
+// no Radarr/TheTVDB metadata yet). Without this the orchestrator would retry every sync tick
+// (hourly) forever. Upstream metadata for an upcoming title appears some unpredictable day in
+// the weeks before air, so a daily attempt catches it within ~24h of it landing while cutting
+// the wasted lookups ~24×.
+const ARR_REPUSH_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
 async function runConcurrent<T>(
   items: T[],
@@ -69,6 +78,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
 
   let marked = 0;
   let reverted = 0;
+  let repushed = 0;
   const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
@@ -219,6 +229,71 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       console.error("[sync] Sonarr wanted sync failed:", err);
     }
   }
+
+  // Re-push APPROVED requests that never made it into Radarr/Sonarr. The approve-time push
+  // can fail when the title has no Radarr/TheTVDB metadata yet (common for not-yet-released
+  // titles, e.g. a show that airs in a few weeks); the request is then stranded in APPROVED
+  // with nothing retrying it. We act only when the integration is enabled AND this run
+  // refreshed its cache — same guard as the revert block below, so a stale or failed cache
+  // can't trigger a mass re-push. A title absent from BOTH the freshly-synced wanted and
+  // available sets is genuinely unknown to the *arr, so the earlier add never landed.
+  // ARR_REPUSH_BACKOFF_MS gates retries to ~daily (lastArrPushAt is stamped on every
+  // attempt, success or fail) so a permanently-unresolvable request doesn't churn hourly.
+  const repushCutoff = new Date(Date.now() - ARR_REPUSH_BACKOFF_MS);
+  const stillApproved = await prisma.mediaRequest.findMany({
+    where: {
+      id: { in: approved.map((r) => r.id) },
+      status: "APPROVED",
+      OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
+    },
+    select: { id: true, tmdbId: true, mediaType: true },
+  });
+  const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
+  const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
+  let knownRadarrSet = new Set<number>();
+  let knownSonarrSet = new Set<number>();
+  if (repushMovieIds.length > 0 || repushTvIds.length > 0) {
+    const [rAvail, rWant, sAvail, sWant] = await Promise.all([
+      repushMovieIds.length > 0
+        ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: repushMovieIds } } })
+        : Promise.resolve([]),
+      repushMovieIds.length > 0
+        ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: repushMovieIds } } })
+        : Promise.resolve([]),
+      repushTvIds.length > 0
+        ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: repushTvIds } } })
+        : Promise.resolve([]),
+      repushTvIds.length > 0
+        ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: repushTvIds } } })
+        : Promise.resolve([]),
+    ]);
+    knownRadarrSet = new Set([...rAvail.map((r) => r.tmdbId), ...rWant.map((r) => r.tmdbId)]);
+    knownSonarrSet = new Set([...sAvail.map((r) => r.tmdbId), ...sWant.map((r) => r.tmdbId)]);
+  }
+  const toRepush = stillApproved.filter((r) =>
+    r.mediaType === "MOVIE"
+      ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(r.tmdbId)
+      : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(r.tmdbId),
+  );
+  const pushedAt = new Date();
+  await runConcurrent(toRepush, async (req) => {
+    try {
+      if (req.mediaType === "MOVIE") {
+        await addMovieToRadarr(req.tmdbId);
+        await prisma.mediaRequest.update({ where: { id: req.id }, data: { lastArrPushAt: pushedAt } });
+      } else {
+        const tvdbId = await addSeriesToSonarr(req.tmdbId);
+        await prisma.mediaRequest.update({ where: { id: req.id }, data: { tvdbId, lastArrPushAt: pushedAt } });
+      }
+      repushed++;
+    } catch (err) {
+      // Stamp the attempt so the backoff applies even though it failed.
+      await prisma.mediaRequest.update({ where: { id: req.id }, data: { lastArrPushAt: pushedAt } }).catch(() => {});
+      // Still unresolvable upstream (e.g. unreleased title with no Radarr/TVDB entry yet).
+      // Leave the request APPROVED; a later tick retries once the metadata exists.
+      console.error("[sync] re-push to *arr failed for", req.id, err);
+    }
+  });
 
   const availableMovieTmdbIds = available.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const availableTvTmdbIds    = available.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -509,7 +584,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       userName: session.user.name ?? session.user.id,
       action: "LIBRARY_SYNC",
       target: "sync:full",
-      details: { marked, reverted, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted, durationMs },
+      details: { marked, reverted, repushed, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted, durationMs },
     });
   }
 
@@ -517,6 +592,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     checked: { approved: approved.length, available: available.length },
     marked,
     reverted,
+    repushed,
     plexMarked,
     jellyfinMarked,
     radarrWanted,

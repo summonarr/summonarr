@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
 import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
@@ -15,13 +15,11 @@ import { scheduleDelayed } from "@/lib/delayed-jobs";
 const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAdmin(async (
+  req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   if (!checkRateLimit(`admin-req:${session.user.id}`, 60, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -107,7 +105,7 @@ export async function PATCH(
   const VALID_TRANSITIONS: Record<string, string[]> = {
     PENDING:   ["APPROVED", "DECLINED"],
     APPROVED:  ["AVAILABLE", "DECLINED"],
-    DECLINED:  ["PENDING"],
+    DECLINED:  ["PENDING", "APPROVED"],
     AVAILABLE: [],
   };
 
@@ -126,6 +124,9 @@ export async function PATCH(
       where: { id, status: existing.status },
       data: {
         status: "APPROVED",
+        // Approving clears a prior decline; otherwise an APPROVED row keeps
+        // permanentlyDeclined=true and re-requests stay blocked (route.ts:197).
+        permanentlyDeclined: false,
         ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
         // pendingNotifyAt triggers a 90s download-check notification if the item still isn't in the queue
         pendingNotifyAt: new Date(Date.now() + 90_000),
@@ -266,15 +267,13 @@ export async function PATCH(
   }
 
   return NextResponse.json(updated);
-}
+});
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (
+  req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   const { id } = await params;
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -283,4 +282,4 @@ export async function DELETE(
   emitSSE({ type: "request:deleted", requestId: id, userId: existing.requestedBy });
   await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
   return NextResponse.json({ ok: true });
-}
+});

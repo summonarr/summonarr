@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
@@ -17,10 +17,7 @@ import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
 // Default = dry run (returns counts + a five-row sample). Pass `?execute=true` to apply.
 // Idempotent — the WHERE clause excludes rows that don't need clamping, so re-runs are a no-op.
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const threshold = await getWatchedThreshold();
 
@@ -142,4 +139,4 @@ export async function POST(req: NextRequest) {
     updated,
     watchedFlippedToFalse,
   });
-}
+});

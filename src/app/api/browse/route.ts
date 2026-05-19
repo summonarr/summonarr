@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import {
   getPopularMoviesPage, getPopularTVPage,
   discoverMoviesPage, discoverTVPage,
@@ -34,10 +34,7 @@ function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): Tm
   });
 }
 
-export async function GET(request: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (request, _ctx, session) => {
   const sp = request.nextUrl.searchParams;
   const mediaType     = sp.get("mediaType") === "tv" ? "tv" : "movie";
   const page          = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
@@ -92,4 +89,4 @@ export async function GET(request: NextRequest) {
     console.error("[browse] Failed:", err);
     return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
   }
-}
+});

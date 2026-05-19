@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 const SAMPLE_COUNT = 6;
@@ -49,10 +49,7 @@ function pickTvShowSamples(paths: string[], mountPoint: string): string[] {
   return result;
 }
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [plexMovieRows, plexTvRows, jellyfinMovieRows, jellyfinTvRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
     prisma.plexLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
@@ -80,4 +77,4 @@ export async function GET() {
       tv:    { mountPoint: jellyfinTvMount,    samples: pickSamples(jellyfinTvPaths,    jellyfinTvMount)    },
     },
   });
-}
+});

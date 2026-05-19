@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { getPersonDetails } from "@/lib/tmdb";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -8,13 +8,11 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { checkRateLimit } from "@/lib/rate-limit";
 
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (
+  _req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   if (!checkRateLimit(`person:${session.user.id}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
@@ -108,4 +106,4 @@ export async function GET(
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-}
+});

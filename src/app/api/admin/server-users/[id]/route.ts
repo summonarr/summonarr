@@ -1,15 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
 
-export async function PATCH(
-  req: NextRequest,
+export const PATCH = withAdmin(async (
+  req,
   { params }: { params: Promise<{ id: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  _session,
+) => {
   const { id } = await params;
 
   let body: { downloadsEnabled?: boolean };
@@ -50,4 +48,4 @@ export async function PATCH(
   }
 
   return NextResponse.json({ ok: true });
-}
+});

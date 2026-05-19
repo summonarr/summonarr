@@ -1,13 +1,16 @@
 {
   "name": "summonarr",
-  "version": "0.10.1",
+  "version": "0.10.3",
   "private": true,
+  "license": "AGPL-3.0-only",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "audit:deps": "tsx scripts/audit-deps.ts"
+    "audit:deps": "tsx scripts/audit-deps.ts",
+    "audit:routes": "tsx scripts/audit-routes.ts",
+    "licenses:generate": "tsx scripts/generate-licenses.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",

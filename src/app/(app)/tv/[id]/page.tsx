@@ -14,6 +14,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
+import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { Chip } from "@/components/ui/design";
 
 export default async function TVDetailPage({
@@ -126,29 +127,44 @@ export default async function TVDetailPage({
           <div className="flex flex-col justify-end" style={{ gap: 10 }}>
             <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
               <Chip tone="accent">TV SHOW</Chip>
-              {media.releaseYear && (
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}
-                >
-                  {media.releaseYear}
-                </span>
-              )}
-              {media.certification && <Chip>{media.certification}</Chip>}
+              <AvailabilityBadges
+                plexAvailable={plexAvailable}
+                jellyfinAvailable={jellyfinAvailable}
+                arrPending={arrPending}
+                requested={requested}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+              />
             </div>
 
             <h1
-              className="font-bold"
+              className="font-semibold"
               style={{
-                fontSize: 28,
-                letterSpacing: "-0.02em",
+                fontSize: 32,
+                letterSpacing: "-0.025em",
                 color: "var(--ds-fg)",
                 margin: 0,
-                lineHeight: 1.1,
+                lineHeight: 1.08,
               }}
             >
               {media.title}
             </h1>
+
+            <div
+              className="ds-mono flex items-center flex-wrap"
+              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 12 }}
+            >
+              {media.releaseYear && <span>{media.releaseYear}</span>}
+              {media.certification && <span>{media.certification}</span>}
+              {media.runtime ? <span>{media.runtime}m/ep</span> : null}
+              {media.numberOfSeasons ? (
+                <span>
+                  {media.numberOfSeasons} season
+                  {media.numberOfSeasons === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
+            </div>
 
             <RatingsBar
               imdbRating={media.imdbRating}
@@ -163,12 +179,17 @@ export default async function TVDetailPage({
               malRating={media.malRating}
               rogerEbertRating={media.rogerEbertRating}
               voteAverage={media.voteAverage}
+              size="md"
             />
 
             {media.overview && (
               <p
-                className="max-w-2xl leading-relaxed"
-                style={{ fontSize: 13, color: "var(--ds-fg-muted)" }}
+                className="max-w-2xl"
+                style={{
+                  fontSize: 14,
+                  color: "var(--ds-fg-muted)",
+                  lineHeight: 1.65,
+                }}
               >
                 {media.overview}
               </p>

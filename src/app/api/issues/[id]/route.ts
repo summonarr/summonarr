@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import {
   searchMovieInRadarr,
@@ -15,13 +15,11 @@ import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withIssueAdmin(async (
+  req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   const { id } = await params;
 
   let body: { status?: string; resolution?: string; refetch?: boolean };
@@ -115,15 +113,13 @@ export async function PATCH(
   }
 
   return NextResponse.json(updated);
-}
+});
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withIssueAdmin(async (
+  req,
+  { params }: { params: Promise<{ id: string }> },
+  session
+) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -149,4 +145,4 @@ export async function DELETE(
   emitSSE({ type: "issue:deleted", issueId: id, userId: issue.reportedBy });
 
   return NextResponse.json({ ok: true });
-}
+});

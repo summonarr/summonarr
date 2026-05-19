@@ -1,14 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { searchMulti } from "@/lib/tmdb";
 import { prisma } from "@/lib/prisma";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit } from "@/lib/rate-limit";
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
 
@@ -56,4 +53,4 @@ export async function GET(req: NextRequest) {
     console.error("TMDB search error:", err);
     return NextResponse.json({ error: "Search failed" }, { status: 500 });
   }
-}
+});

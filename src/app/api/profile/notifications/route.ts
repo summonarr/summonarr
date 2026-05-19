@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
@@ -7,10 +7,7 @@ import { prisma } from "@/lib/prisma";
 // Intentionally loose — SMTP will reject anything the regex lets through.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-export async function PATCH(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAuth(async (req, _ctx, session) => {
   let body: {
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
     emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
@@ -65,4 +62,4 @@ export async function PATCH(req: NextRequest) {
 
   await prisma.user.update({ where: { id: session.user.id }, data });
   return NextResponse.json({ ok: true });
-}
+});

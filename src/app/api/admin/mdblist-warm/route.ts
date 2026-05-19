@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit } from "@/lib/audit";
@@ -7,10 +7,7 @@ import { logAudit } from "@/lib/audit";
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
 
-export async function POST(req: Request) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   let force = false;
   try {
     const body = await req.json() as { force?: boolean };
@@ -48,4 +45,4 @@ export async function POST(req: Request) {
   });
 
   return NextResponse.json(result);
-}
+});

@@ -1,12 +1,9 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 
-export async function DELETE(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (req, _ctx, session) => {
   const { count } = await prisma.tmdbCache.deleteMany({
     where: {
       OR: [
@@ -31,4 +28,4 @@ export async function DELETE(req: NextRequest) {
   }
 
   return NextResponse.json({ cleared: count });
-}
+});

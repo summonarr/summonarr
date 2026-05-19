@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -51,10 +51,7 @@ const SLASH_COMMANDS = [
   },
 ];
 
-export async function POST() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (_req, _ctx, _session) => {
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["discordBotToken", "discordClientId", "discordGuildId"] } },
   });
@@ -86,4 +83,4 @@ export async function POST() {
 
   const scope = cfg.discordGuildId ? `guild ${cfg.discordGuildId}` : "globally";
   return NextResponse.json({ ok: true, message: `Slash commands registered ${scope}` });
-}
+});

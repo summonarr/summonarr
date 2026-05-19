@@ -4,6 +4,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import { X } from "lucide-react";
 import { StyledSelect } from "@/components/ui/styled-select";
+import { FilterBar as Segments } from "@/components/ui/design";
 
 interface TopFilterBarProps {
   activeMediaType?: string;
@@ -25,6 +26,16 @@ const SORT_OPTIONS = [
   { value: "rt",         label: "Sort: Rotten Tomatoes" },
   { value: "trakt",      label: "Sort: Trakt" },
   { value: "mdblist",    label: "Sort: MDBList Score" },
+];
+
+// Concise labels for the segmented sort control (SORT_OPTIONS keeps the
+// "Sort: …" prefix for the active-filter chips below).
+const SORT_SEGMENTS = [
+  { value: "", label: "IMDb" },
+  { value: "letterboxd", label: "Letterboxd" },
+  { value: "rt", label: "Rotten Tomatoes" },
+  { value: "trakt", label: "Trakt" },
+  { value: "mdblist", label: "MDBList" },
 ];
 
 const IMDB_OPTIONS = [
@@ -79,49 +90,27 @@ export function TopFilterBar({
 
   return (
     <div className="flex flex-col gap-3 mb-8">
-      <div
-        className="ds-no-scrollbar inline-flex self-start overflow-x-auto"
-        style={{
-          padding: 2,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 8,
-        }}
-      >
-        {(["both", "movies", "tv"] as const).map((type) => {
-          const active = (activeMediaType ?? "both") === type;
-          return (
-            <button
-              key={type}
-              type="button"
-              onClick={() => push({ mediaType: type === "both" ? undefined : type })}
-              className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
-              style={{
-                padding: "5px 12px",
-                borderRadius: 6,
-                border: 0,
-                fontSize: 12,
-                background: active ? "var(--ds-bg-3)" : "transparent",
-                color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                cursor: "pointer",
-              }}
-            >
-              {type === "both" ? "All" : type === "movies" ? "Movies" : "TV Shows"}
-            </button>
-          );
-        })}
-      </div>
+      <Segments
+        segments={[
+          { value: "both", label: "All" },
+          { value: "movies", label: "Movies" },
+          { value: "tv", label: "TV Shows" },
+        ]}
+        active={activeMediaType ?? "both"}
+        onChange={(v) =>
+          push({ mediaType: v === "both" ? undefined : v })
+        }
+        className="mb-0"
+      />
+
+      <Segments
+        segments={SORT_SEGMENTS}
+        active={activeSortBy ?? ""}
+        onChange={(v) => push({ sortBy: v || undefined })}
+        className="mb-0"
+      />
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
-        <StyledSelect
-          value={activeSortBy ?? ""}
-          onChange={(e) => push({ sortBy: e.target.value || undefined })}
-        >
-          {SORT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </StyledSelect>
-
         <StyledSelect
           value={activeMinImdb ?? ""}
           onChange={(e) => push({ minImdb: e.target.value || undefined })}

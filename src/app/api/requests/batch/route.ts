@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
@@ -12,10 +12,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
-export async function PATCH(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAdmin(async (req, _ctx, session) => {
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
   }
@@ -147,4 +144,4 @@ export async function PATCH(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true });
-}
+});

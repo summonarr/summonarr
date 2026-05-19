@@ -1,12 +1,22 @@
 "use client";
 
-// GitHub-style 365-day heatmap; data comes from getActivityCalendarUncached() in play-history.ts
+// GitHub-style 365-day heatmap; data comes from getActivityCalendarUncached()
+// in play-history.ts. Restyled to the Claude Design "Activity Page" handoff:
+// DS-token indigo wash, 11px cells, mono gutter labels, Less→More legend.
 
 const DOW_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
+const CELL = 11;
+const GAP = 2;
 
 interface CalendarData {
   day: string;
   count: number;
+}
+
+function cellBg(count: number, max: number): string {
+  if (count === 0) return "oklch(1 0 0 / 0.025)";
+  const intensity = max > 0 ? count / max : 0;
+  return `oklch(0.58 0.21 275 / ${(0.12 + intensity * 0.76).toFixed(3)})`;
 }
 
 // `today` arrives as an ISO date string from the server page so SSR and
@@ -14,7 +24,13 @@ interface CalendarData {
 // in render — module/render-level Date.now() is the canonical React #418
 // hydration source (server's day vs client's day can disagree across
 // timezones and second-of-the-day rollovers).
-export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData[]; today: string }) {
+export function ActivityCalendar({
+  data,
+  today: todayIso,
+}: {
+  data: CalendarData[];
+  today: string;
+}) {
   const countMap = new Map(data.map((d) => [d.day, d.count]));
   const max = Math.max(...data.map((d) => d.count), 1);
 
@@ -23,15 +39,11 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
   for (let i = 364; i >= 0; i--) {
     const d = new Date(today);
     d.setUTCDate(d.getUTCDate() - i);
-    days.push({
-      date: d.toISOString().split("T")[0],
-      dow: d.getUTCDay(),
-    });
+    days.push({ date: d.toISOString().split("T")[0], dow: d.getUTCDay() });
   }
 
   const weeks: { date: string; dow: number; count: number }[][] = [];
   let currentWeek: { date: string; dow: number; count: number }[] = [];
-
   for (const day of days) {
     if (day.dow === 0 && currentWeek.length > 0) {
       weeks.push(currentWeek);
@@ -49,7 +61,10 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
       const month = new Date(firstDay.date).getUTCMonth();
       if (month !== lastMonth) {
         monthLabels.push({
-          label: new Date(firstDay.date).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
+          label: new Date(firstDay.date).toLocaleString("en-US", {
+            month: "short",
+            timeZone: "UTC",
+          }),
           weekIndex: wi,
         });
         lastMonth = month;
@@ -59,79 +74,121 @@ export function ActivityCalendar({ data, today: todayIso }: { data: CalendarData
 
   return (
     <div>
-      {/* Mobile audit F-6.2: the 365-day heatmap is `min-w-[700px]` so cells stay
-          visually readable. On 440 px the calendar overflows by ~260 px. The
-          parent already wraps in overflow-x-auto, but with `ds-no-scrollbar`
-          patterns elsewhere users had no cue scrolling was possible. Add an
-          explicit "swipe →" caption visible only at < sm breakpoint. */}
-      <p className="sm:hidden text-xs text-zinc-500 italic mb-1.5 select-none">
+      <p
+        className="sm:hidden ds-mono"
+        style={{
+          fontSize: 10.5,
+          color: "var(--ds-fg-disabled)",
+          marginBottom: 6,
+          userSelect: "none",
+        }}
+      >
         ← swipe to see the full year →
       </p>
       <div className="overflow-x-auto">
-        <div className="min-w-[700px]">
-          <div className="flex ml-8 mb-1 gap-0.5">
-          {weeks.map((_, wi) => {
-            const ml = monthLabels.find((m) => m.weekIndex === wi);
-            return (
-              <div key={wi} className="w-3 text-[9px] text-zinc-600 shrink-0">
-                {ml?.label ?? ""}
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="flex gap-1">
-          <div className="flex flex-col gap-0.5 shrink-0 w-7">
-            {DOW_LABELS.map((label, i) => (
-              <div key={i} className="h-3 text-[9px] text-zinc-600 flex items-center justify-end pr-1">
-                {label}
-              </div>
-            ))}
+        <div style={{ minWidth: 700 }}>
+          {/* Month labels */}
+          <div style={{ display: "flex", marginLeft: 26, marginBottom: 6, gap: GAP }}>
+            {weeks.map((_, wi) => {
+              const ml = monthLabels.find((m) => m.weekIndex === wi);
+              return (
+                <div
+                  key={wi}
+                  className="ds-mono"
+                  style={{
+                    width: CELL,
+                    fontSize: 9.5,
+                    color: "var(--ds-fg-disabled)",
+                    flexShrink: 0,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {ml?.label ?? ""}
+                </div>
+              );
+            })}
           </div>
 
-          <div className="flex gap-0.5">
-            {weeks.map((week, wi) => (
-              <div key={wi} className="flex flex-col gap-0.5">
-                {wi === 0 &&
-                  Array.from({ length: week[0]?.dow ?? 0 }, (_, i) => (
-                    <div key={`empty-${i}`} className="w-3 h-3" />
-                  ))}
-                {week.map((day) => {
-                  const intensity = day.count / max;
-                  return (
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+            {/* Day-of-week gutter */}
+            <div
+              style={{ display: "flex", flexDirection: "column", gap: GAP }}
+            >
+              {DOW_LABELS.map((label, i) => (
+                <div
+                  key={i}
+                  className="ds-mono"
+                  style={{
+                    height: CELL,
+                    lineHeight: `${CELL}px`,
+                    fontSize: 9.5,
+                    color: "var(--ds-fg-disabled)",
+                    textAlign: "right",
+                    width: 20,
+                  }}
+                >
+                  {label}
+                </div>
+              ))}
+            </div>
+
+            {/* Cells */}
+            <div style={{ display: "flex", gap: GAP }}>
+              {weeks.map((week, wi) => (
+                <div
+                  key={wi}
+                  style={{ display: "flex", flexDirection: "column", gap: GAP }}
+                >
+                  {wi === 0 &&
+                    Array.from({ length: week[0]?.dow ?? 0 }, (_, i) => (
+                      <div
+                        key={`empty-${i}`}
+                        style={{ width: CELL, height: CELL }}
+                      />
+                    ))}
+                  {week.map((day) => (
                     <div
                       key={day.date}
-                      className="w-3 h-3 rounded-sm"
-                      style={{
-                        backgroundColor:
-                          day.count === 0
-                            ? "var(--ds-bg-3)"
-                            : `rgba(99, 102, 241, ${0.45 + intensity * 0.55})`,
-                      }}
                       title={`${day.date}: ${day.count} plays`}
+                      style={{
+                        width: CELL,
+                        height: CELL,
+                        borderRadius: 2,
+                        background: cellBg(day.count, max),
+                      }}
                     />
-                  );
-                })}
-              </div>
-            ))}
+                  ))}
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
 
-          <div className="flex items-center gap-1 mt-2 ml-8">
-            <span className="text-[9px] text-zinc-600">Less</span>
+          {/* Legend */}
+          <div
+            className="ds-mono"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              marginTop: 10,
+              marginLeft: 26,
+              fontSize: 10,
+              color: "var(--ds-fg-disabled)",
+            }}
+          >
+            <span>Less</span>
             {[0, 0.25, 0.5, 0.75, 1].map((level) => (
               <div
                 key={level}
-                className="w-3 h-3 rounded-sm"
                 style={{
-                  backgroundColor:
-                    level === 0
-                      ? "var(--ds-bg-3)"
-                      : `rgba(99, 102, 241, ${0.45 + level * 0.55})`,
+                  width: CELL,
+                  height: CELL,
+                  borderRadius: 2,
+                  background: cellBg(level === 0 ? 0 : level * max, max),
                 }}
               />
             ))}
-            <span className="text-[9px] text-zinc-600">More</span>
+            <span>More</span>
           </div>
         </div>
       </div>

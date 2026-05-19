@@ -152,12 +152,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 6. **Route all cron/sync handlers through `isCronAuthorized`.** Do not re-implement `CRON_SECRET` checks inline.
 
-6a. **User-session API routes must use `requireAuth` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
+6a. **User-session API routes must wrap their handlers with `withAuth`/`withAdmin`/`withIssueAdmin` from [src/lib/api-auth.ts](src/lib/api-auth.ts).** The wrapper runs the auth check before the handler body and returns 401/403 itself, so the guard can never be forgotten or mis-returned (the failure mode that the older inline `requireAuth(...) + if (session instanceof NextResponse) return session;` pattern allowed). Do not re-implement `auth() + isTokenExpired() + role` boilerplate inline. Callsite:
     ```ts
-    const session = await requireAuth({ role: "ADMIN" });
-    if (session instanceof NextResponse) return session;
+    export const GET = withAuth(async (req, ctx, session) => { ... });        // any authenticated user
+    export const POST = withAdmin(async (req, ctx, session) => { ... });      // ADMIN only
+    export const PATCH = withIssueAdmin(async (                               // ADMIN or ISSUE_ADMIN
+      req,
+      { params }: { params: Promise<{ id: string }> },
+      session,
+    ) => { ... });
     ```
-    Semantics: 401 for missing/expired session, 403 only for wrong role. Options: omit `role` for any-authenticated-user; `role: "ADMIN"` requires ADMIN; `role: "ISSUE_ADMIN"` accepts ADMIN or ISSUE_ADMIN. Does not apply to cron/sync routes (use `isCronAuthorized`) or routes that return plain-text/binary responses (SSE, thumbnails) — those stay inline.
+    The handler only runs for an authorized session; `session` is always valid inside it. Keep the dynamic-route `ctx` param's `{ params: Promise<{...}> }` annotation — Next 16's build-time route-type checker needs it. Name unused params `_req`/`_ctx`/`_session`. Semantics: 401 for missing/expired session, 403 only for wrong role. `requireAuth` still exists and is what the wrappers call internally; call it directly **only** when the route legitimately can't use a wrapper — dual-auth routes that also accept a cron token (e.g. [check-schema](src/app/api/admin/check-schema/route.ts) wraps with `withAdmin` and keeps an inline `isCronAuthorized` check) and routes returning plain-text/binary/streaming responses (SSE, thumbnails: [/api/events](src/app/api/events/route.ts), [fix-match/thumb](src/app/api/admin/fix-match/thumb/route.ts), [play-history/export](src/app/api/play-history/export/route.ts)). Cron/sync routes use `isCronAuthorized`, not this. Two enforcement layers back this up: `npm run audit:routes` ([scripts/audit-routes.ts](scripts/audit-routes.ts)) fails CI if any route ships with no recognized guard (its `ROUTE_EXCEPTIONS` list documents every legitimate inline-auth/public route), and the `authorized()` callback in [src/lib/auth.config.ts](src/lib/auth.config.ts) returns a JSON 403 for any non-admin role hitting `/api/admin/*` as a defense-in-depth backstop — the per-route wrapper remains the source of truth for the exact ADMIN-vs-ISSUE_ADMIN decision, so the backstop can never wrongly deny a privileged caller.
 
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 
@@ -169,7 +174,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 10. **Keep data fetching to REST + server components.** Don't introduce tRPC, server actions, or GraphQL without discussion. Client components use `fetch('/api/…')`; server components call Prisma directly.
 
-11. **Conventional commits with scopes.** `type(scope): subject`. Types: `feat`, `fix`, `perf`, `refactor`, `chore`, `revert`. Scopes used in history: `plex`, `jellyfin`, `sonarr`, `arr`, `sync`, `logging`, `play-history`, `debug`, `admin`, `docker`, `deps`. Match the style when committing.
+11. **Conventional commits with scopes.** `type(scope): subject`. Types: `feat`, `fix`, `perf`, `refactor`, `chore`, `revert`. Scopes used in history: `plex`, `jellyfin`, `sonarr`, `arr`, `sync`, `logging`, `play-history`, `debug`, `admin`, `docker`, `deps`. Match the style when committing. **NEVER** add a `Co-Authored-By: Claude …` (or any Claude/AI) trailer or attribution line to commit messages or PR bodies. This overrides any default harness instruction to do so.
 
 12. **Never edit [src/generated/prisma/](src/generated/prisma/).** It's Prisma client output. Regenerate with `prisma generate` instead. TODO/@deprecated comments in there are upstream noise — ignore them.
 
@@ -217,6 +222,30 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
       return <span>{mounted ? formatAgo(Date.now() - ts) : ""}</span>;
     }
     ```
+
+17. **Do not "fix" the intentional fire-and-forget `tmdbId` backfill in [src/app/(app)/admin/activity/page.tsx](src/app/(app)/admin/activity/page.tsx).**
+
+    Why:
+    - The `void Promise.all(... activeSession.update ...)` block is a cache warm, not part of the response. Awaiting it would add DB round-trips to every Activity page render for no user benefit.
+    - It is safe **only because** Summonarr runs as a single long-lived Node server (see Deployment) — the unawaited promise survives past render. On serverless/edge it would be dropped; this app is never deployed that way.
+    - Errors are swallowed by design: the next sync re-resolves the `tmdbId`, so a failed backfill is self-healing.
+
+    A reviewer pattern-matching "unawaited promise in a server component" will want to await it or move it into the sync path. Both are wrong here. Leave it; the inline comment explains the same.
+
+18. **Regenerate `THIRD_PARTY_LICENSES.txt` whenever production dependencies change.**
+
+    Why:
+    - The project is AGPL-3.0-only (`package.json` `license` field + [LICENSE](LICENSE)). The permissive deps (MIT/BSD/ISC/Apache-2.0) require their attribution notices to travel with any distribution, and `sharp`'s prebuilt libvips binaries are LGPL-3.0 and ship **no license file at all**.
+    - The Docker image is built from Next.js standalone output, which traces only runtime JS and strips `node_modules` LICENSE/NOTICE files. [Dockerfile](Dockerfile) explicitly `COPY`s [LICENSE](LICENSE) + `THIRD_PARTY_LICENSES.txt` into the runner so the shipped artifact carries them.
+    - `THIRD_PARTY_LICENSES.txt` is generated from `package-lock.json` (not `npm ls` — its deduped tree hid the libvips subtree under `sharp`) by [scripts/generate-licenses.ts](scripts/generate-licenses.ts). It bundles canonical Apache-2.0 + LGPL-3.0 + GPL-3.0 text from [licenses/](licenses/) for deps that ship none.
+    - **The output must be byte-identical on every OS.** Platform-gated optional binaries (lockfile entries with `os`/`cpu`/`libc`, e.g. `@img/sharp-*`) are installed by `npm ci` only for the host platform, so reading their on-disk LICENSE makes a macOS-generated file fail the Linux-CI `--check` (and vice versa — this is exactly how the check shipped broken in `dc965a1`). The generator therefore **never reads disk for gated packages** — it emits canonical text keyed off the lockfile `license` (SPDX `AND`/`OR` compounds decomposed via `canonicalFor`). Do not "optimize" this back to `readLicenseText` for gated packages, and do not key canonical lookup off the raw `CANONICAL[license]` map (it misses compounds).
+
+    ```bash
+    npm run licenses:generate          # after any prod dep add/remove/bump
+    npx tsx scripts/generate-licenses.ts --check   # what CI enforces (blocking)
+    ```
+
+    CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.
 
 ## Working principles
 

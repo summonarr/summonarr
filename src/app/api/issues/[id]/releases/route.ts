@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import {
   getReleasesForMovie,
@@ -12,10 +12,7 @@ import {
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(_req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withIssueAdmin(async (_req, { params }: RouteContext, _session) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -49,12 +46,9 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
     console.error("[releases] Fetch failed:", err);
     return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
   }
-}
+});
 
-export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -119,4 +113,4 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
     console.error("[releases] Grab failed:", err);
     return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
   }
-}
+});

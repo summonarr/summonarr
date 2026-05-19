@@ -1,15 +1,13 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 
-export async function PATCH(
-  req: NextRequest,
+export const PATCH = withAdmin(async (
+  req,
   ctx: { params: Promise<{ id: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  session,
+) => {
   const { id } = await ctx.params;
   let body: { enabled?: unknown };
   try {
@@ -41,15 +39,13 @@ export async function PATCH(
   });
 
   return NextResponse.json({ ok: true });
-}
+});
 
-export async function DELETE(
-  _req: NextRequest,
+export const DELETE = withAdmin(async (
+  _req,
   ctx: { params: Promise<{ id: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  session,
+) => {
   const { id } = await ctx.params;
   const app = await prisma.trashApplication.findUnique({
     where: { id },
@@ -68,4 +64,4 @@ export async function DELETE(
   });
 
   return NextResponse.json({ ok: true });
-}
+});

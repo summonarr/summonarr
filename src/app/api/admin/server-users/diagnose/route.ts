@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
@@ -25,10 +25,7 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [urlRow, keyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
@@ -112,4 +109,4 @@ export async function GET() {
       downloadsEnabled: u.downloadsEnabled,
     })),
   });
-}
+});

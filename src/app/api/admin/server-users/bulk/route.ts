@@ -1,14 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, session) => {
   // Bulk policy push fans out to N Jellyfin admin calls per invocation; cap to 5/min per admin
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
     return NextResponse.json({ error: "Too many bulk operations — try again later" }, { status: 429 });
@@ -69,4 +66,4 @@ export async function POST(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true, pushed, errors });
-}
+});

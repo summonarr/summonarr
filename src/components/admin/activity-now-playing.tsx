@@ -2,305 +2,287 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
-import { Card } from "@/components/ui/card";
-import {
-  Monitor, Pause, Play, Tv2, Film, Wifi, WifiOff,
-  Smartphone, Laptop, MonitorPlay, Gamepad2, Tablet,
-  User, Clock, Zap, HardDrive, Activity,
-} from "lucide-react";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
-import { useHasMounted } from "@/hooks/use-has-mounted";
 import { IpInfo } from "@/components/admin/ip-info";
+import {
+  Avatar,
+  KeyVal,
+  MethodPill,
+  Poster,
+  ProgressTrack,
+  SectionHeader,
+  SourceTag,
+  formatMs,
+  methodLabel,
+} from "@/components/admin/activity-ui";
 
-function formatDuration(ms: number): string {
-  if (ms <= 0) return "0:00";
-  const s = Math.floor(ms / 1000);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  return `${m}:${String(sec).padStart(2, "0")}`;
-}
-
-function formatBitrate(raw: number | null): string {
-  if (!raw || raw <= 0) return "";
-  const kbps = raw > 100000 ? raw / 1000 : raw;
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${Math.round(kbps)} kbps`;
-}
-
+// Plex reports bitrate in kbps; Jellyfin in bps — normalize to kbps.
 function toBitrateKbps(raw: number | null): number {
   if (!raw || raw <= 0) return 0;
-  // Plex reports bitrate in kbps; Jellyfin reports in bps — normalize to kbps
   return raw > 100000 ? raw / 1000 : raw;
 }
 
-function formatElapsed(startedAt: string | null): string {
-  if (!startedAt) return "";
-  const elapsed = Date.now() - new Date(startedAt).getTime();
-  const mins = Math.floor(elapsed / 60000);
-  if (mins < 1) return "just started";
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+// Stable, pleasant per-title poster wash so the radial accent is consistent
+// across renders without depending on TMDB colors.
+function accentFor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `oklch(0.38 0.08 ${hue})`;
 }
 
-function PlatformIcon({ platform }: { platform: string | null }) {
-  const p = (platform ?? "").toLowerCase();
-  if (p.includes("android") || p.includes("ios") || p.includes("iphone")) return <Smartphone className="w-4 h-4" />;
-  if (p.includes("roku") || p.includes("apple tv") || p.includes("fire") || p.includes("chromecast") || p.includes("shield")) return <MonitorPlay className="w-4 h-4" />;
-  if (p.includes("xbox") || p.includes("playstation") || p.includes("nintendo")) return <Gamepad2 className="w-4 h-4" />;
-  if (p.includes("ipad") || p.includes("tablet")) return <Tablet className="w-4 h-4" />;
-  if (p.includes("chrome") || p.includes("firefox") || p.includes("safari") || p.includes("web") || p.includes("edge")) return <Laptop className="w-4 h-4" />;
-  return <Monitor className="w-4 h-4" />;
-}
-
-function PlayMethodLabel({ session }: { session: ActiveSessionLive }) {
-  const vd = session.videoDecision;
-  const ad = session.audioDecision;
-  const method = session.playMethod;
-
-  if (method === "DirectPlay") {
-    return <span className="font-medium text-green-400">Direct Play</span>;
-  }
-  if (method === "DirectStream") {
-    return <span className="font-medium text-blue-400">Remux</span>;
-  }
-  if (method === "Transcode") {
-    const videoT = vd === "transcode";
-    const audioT = ad === "transcode";
-    if (videoT && audioT) return <span className="font-medium text-orange-400">Transcoding video + audio</span>;
-    if (videoT) return <span className="font-medium text-orange-400">Transcoding video</span>;
-    if (audioT) return <span className="font-medium text-orange-400">Transcoding audio</span>;
-    return <span className="font-medium text-orange-400">Transcode</span>;
-  }
-  if (method) return <span className="font-medium text-zinc-300">{method}</span>;
-  return null;
-}
-
-function StreamDetails({ session: s }: { session: ActiveSessionLive }) {
-  const hasVideo = !!s.videoCodec;
-  const hasAudio = !!s.audioCodec;
-  if (!hasVideo && !hasAudio && !s.container) return null;
-
-  return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2 pt-2 border-t border-zinc-700/50 text-xs">
-      {hasVideo && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-zinc-500 text-[10px] uppercase w-10">Video</span>
-          <span className={s.videoDecision === "transcode" ? "text-orange-400 font-medium" : "text-zinc-300"}>
-            {s.videoCodec!.toUpperCase()}
-          </span>
-          {s.resolution && <span className="text-zinc-500">{s.resolution}</span>}
-          {s.videoDecision && (
-            <span className={`text-[9px] px-1 py-0.5 rounded ${
-              s.videoDecision === "transcode"
-                ? "bg-orange-500/15 text-orange-400"
-                : "bg-green-500/15 text-green-400"
-            }`}>
-              {s.videoDecision === "transcode" ? "Transcode" : "Direct"}
-            </span>
-          )}
-        </div>
-      )}
-      {hasAudio && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-zinc-500 text-[10px] uppercase w-10">Audio</span>
-          <span className={s.audioDecision === "transcode" ? "text-orange-400 font-medium" : "text-zinc-300"}>
-            {s.audioCodec!.toUpperCase()}
-          </span>
-          {s.audioDecision && (
-            <span className={`text-[9px] px-1 py-0.5 rounded ${
-              s.audioDecision === "transcode"
-                ? "bg-orange-500/15 text-orange-400"
-                : "bg-green-500/15 text-green-400"
-            }`}>
-              {s.audioDecision === "transcode" ? "Transcode" : "Direct"}
-            </span>
-          )}
-        </div>
-      )}
-      {s.container && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-zinc-500 text-[10px] uppercase w-10">Cont.</span>
-          <span className="text-zinc-400">{s.container.toUpperCase()}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SessionCard({ session: s, mounted }: { session: ActiveSessionLive; mounted: boolean }) {
+function SessionCard({ s }: { s: ActiveSessionLive }) {
   const isTV = (s.mediaType ?? "").toUpperCase() === "TV";
   const mediaHref = s.tmdbId
-    ? isTV ? `/tv/${s.tmdbId}` : `/movie/${s.tmdbId}`
+    ? `/admin/activity/media/${s.tmdbId}`
     : null;
+  const accent = accentFor(s.title || s.id);
+  const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
+  const bitrateMbps = toBitrateKbps(s.bitrate) / 1000;
+  const paused = s.state === "paused";
 
-  const episodeStr = isTV && (s.seasonNumber || s.episodeNumber)
-    ? `S${String(s.seasonNumber ?? 0).padStart(2, "0")}E${String(s.episodeNumber ?? 0).padStart(2, "0")}`
-    : null;
-
-  const bitrateStr = formatBitrate(s.bitrate);
-  const elapsed = mounted ? formatElapsed(s.startedAt) : "";
-  const remaining = s.durationMs > 0 && s.progressMs > 0
-    ? formatDuration(s.durationMs - s.progressMs)
-    : null;
-
-  const isTranscoding = s.playMethod === "Transcode";
+  const userNode = s.serverUsername ? (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        minWidth: 0,
+      }}
+    >
+      <Avatar
+        letter={(s.serverUsername[0] ?? "?").toUpperCase()}
+        accent={accent}
+        size={14}
+      />
+      {s.mediaServerUserId ? (
+        <Link
+          href={`/admin/activity/user/${s.mediaServerUserId}`}
+          style={{ color: "inherit", textDecoration: "none" }}
+        >
+          {s.serverUsername}
+        </Link>
+      ) : (
+        <span>{s.serverUsername}</span>
+      )}
+    </span>
+  ) : (
+    "—"
+  );
 
   return (
-    <div className={`bg-zinc-800/60 rounded-xl overflow-hidden ${isTranscoding ? "ring-1 ring-orange-500/20" : ""}`}>
-      <div className="flex">
-        <div className="relative w-20 sm:w-28 shrink-0 bg-zinc-800">
-          {s.posterUrl && /^https?:\/\//i.test(s.posterUrl) ? (
-            mediaHref ? (
-              <Link href={mediaHref} className="block w-full h-full">
-                <Image
-                  src={s.posterUrl}
-                  alt={s.title}
-                  width={154}
-                  height={231}
-                  className="w-full h-full object-cover"
-                  sizes="(min-width: 640px) 112px, 80px"
-                />
+    <article
+      style={{
+        padding: 16,
+        background: "var(--ds-bg-2)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 10,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: `radial-gradient(120% 80% at 0% 0%, ${accent} 0%, transparent 55%)`,
+          opacity: 0.1,
+          pointerEvents: "none",
+        }}
+      />
+      <div style={{ display: "flex", gap: 12, position: "relative" }}>
+        {mediaHref ? (
+          <Link href={mediaHref} style={{ display: "block" }}>
+            <Poster
+              src={s.posterUrl}
+              letter={(s.title[0] ?? "?").toUpperCase()}
+              accent={accent}
+              w={50}
+              h={75}
+              radius={5}
+            />
+          </Link>
+        ) : (
+          <Poster
+            src={s.posterUrl}
+            letter={(s.title[0] ?? "?").toUpperCase()}
+            accent={accent}
+            w={50}
+            h={75}
+            radius={5}
+          />
+        )}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <SourceTag source={s.source} />
+            <span
+              className="ds-mono"
+              style={{ fontSize: 9.5, color: "var(--ds-fg-disabled)" }}
+            >
+              {paused
+                ? "PAUSED"
+                : s.state === "buffering"
+                  ? "BUFFERING"
+                  : "PLAYING"}
+            </span>
+          </div>
+          <h3
+            style={{
+              margin: 0,
+              fontSize: 14.5,
+              fontWeight: 600,
+              letterSpacing: "-0.015em",
+              color: "var(--ds-fg)",
+              lineHeight: 1.25,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+            }}
+          >
+            {mediaHref ? (
+              <Link
+                href={mediaHref}
+                style={{ color: "inherit", textDecoration: "none" }}
+              >
+                {s.title}
               </Link>
             ) : (
-              <Image
-                src={s.posterUrl}
-                alt={s.title}
-                width={154}
-                height={231}
-                className="w-full h-full object-cover"
-                sizes="(min-width: 640px) 112px, 80px"
-              />
-            )
-          ) : (
-            <div className="w-full h-full flex items-center justify-center min-h-[120px]">
-              {isTV ? (
-                <Tv2 className="w-8 h-8 text-zinc-700" />
-              ) : (
-                <Film className="w-8 h-8 text-zinc-700" />
-              )}
-            </div>
-          )}
-          <div className={`absolute bottom-0 left-0 right-0 flex items-center justify-center py-1 ${
-            s.state === "paused"
-              ? "bg-yellow-500/90"
-              : s.state === "buffering"
-                ? "bg-blue-500/90"
-                : "bg-green-500/90"
-          }`}>
-            <div className="flex items-center gap-1">
-              {s.state === "paused" ? (
-                <Pause className="w-3 h-3 text-white" />
-              ) : (
-                <Play className="w-3 h-3 text-white" />
-              )}
-              <span className="text-[10px] font-semibold text-white uppercase tracking-wide">
-                {s.state === "paused" ? "Paused" : s.state === "buffering" ? "Buffering" : "Playing"}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-1 min-w-0 p-3 sm:p-4">
-          <div className="flex items-start justify-between gap-2 mb-1.5">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                {mediaHref ? (
-                  <Link href={mediaHref} className="text-sm font-semibold text-white hover:text-indigo-400 transition-colors truncate">
-                    {s.title}
-                  </Link>
-                ) : (
-                  <span className="text-sm font-semibold text-white truncate">{s.title}</span>
+              s.title
+            )}
+          </h3>
+          <div
+            style={{
+              fontSize: 11.5,
+              color: "var(--ds-fg-muted)",
+              lineHeight: 1.3,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isTV ? (
+              <>
+                S{String(s.seasonNumber ?? 0).padStart(2, "0")} · E
+                {String(s.episodeNumber ?? 0).padStart(2, "0")}
+                {s.episodeTitle && (
+                  <>
+                    {" "}
+                    · <span style={{ color: "var(--ds-fg-subtle)" }}>{s.episodeTitle}</span>
+                  </>
                 )}
-                {s.year && <span className="text-zinc-600 text-xs shrink-0">({s.year})</span>}
-              </div>
-              {(episodeStr || s.episodeTitle) && (
-                <p className="text-xs text-zinc-400 truncate mt-0.5">
-                  {episodeStr && <span className="text-zinc-500 font-medium">{episodeStr}</span>}
-                  {episodeStr && s.episodeTitle && <span className="text-zinc-600"> · </span>}
-                  {s.episodeTitle && <span>{s.episodeTitle}</span>}
-                </p>
-              )}
-            </div>
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
-              s.source === "plex" ? "bg-amber-500/15 text-amber-400" : "bg-purple-500/15 text-purple-400"
-            }`}>
-              {s.source === "plex" ? "Plex" : "Jellyfin"}
-            </span>
+              </>
+            ) : (
+              <>
+                {s.year ? `${s.year} · ` : ""}Movie
+              </>
+            )}
           </div>
-
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-[11px] text-zinc-400 tabular-nums shrink-0 w-12 text-right">
-              {formatDuration(s.progressMs)}
-            </span>
-            <div className="flex-1 h-1.5 bg-zinc-700 rounded-full overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all duration-1000 ${
-                  s.state === "paused" ? "bg-yellow-500" : "bg-indigo-500"
-                }`}
-                style={{ width: `${Math.min(s.progressPercent, 100)}%` }}
-              />
-            </div>
-            <span className="text-[11px] text-zinc-500 tabular-nums shrink-0 w-12">
-              {formatDuration(s.durationMs)}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1.5 text-xs">
-            <div className="flex items-center gap-1.5 text-zinc-300">
-              <User className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-              {s.mediaServerUserId ? (
-                <Link
-                  href={`/admin/activity/user/${s.mediaServerUserId}`}
-                  className="font-medium truncate hover:text-indigo-400 transition-colors"
-                >
-                  {s.serverUsername}
-                </Link>
-              ) : (
-                <span className="font-medium truncate">{s.serverUsername}</span>
-              )}
-            </div>
-
-            {(s.platform || s.player) && (
-              <div className="flex items-center gap-1.5 text-zinc-400">
-                <PlatformIcon platform={s.platform ?? s.player} />
-                <span className="truncate">{s.player ?? s.platform}</span>
-              </div>
-            )}
-
-            {elapsed && (
-              <div className="flex items-center gap-1.5 text-zinc-400">
-                <Clock className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                <span>Session: {elapsed}</span>
-                {remaining && <span className="text-zinc-600">({remaining} left)</span>}
-              </div>
-            )}
-
-            {s.playMethod && (
-              <div className="flex items-center gap-1.5">
-                <Zap className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                <PlayMethodLabel session={s} />
-              </div>
-            )}
-
-            {bitrateStr && (
-              <div className="flex items-center gap-1.5 text-zinc-400">
-                <HardDrive className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                <span>{bitrateStr}</span>
-              </div>
-            )}
-
-            {s.ipAddress && <IpInfo ip={s.ipAddress} />}
-          </div>
-
-          <StreamDetails session={s} />
         </div>
       </div>
-    </div>
+
+      <div style={{ position: "relative" }}>
+        <ProgressTrack
+          pct={Math.min(s.progressPercent, 100) / 100}
+          paused={paused}
+          height={3}
+        />
+        <div
+          className="ds-mono"
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            marginTop: 6,
+            fontSize: 10.5,
+            color: "var(--ds-fg-subtle)",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          <span>
+            {formatMs(s.progressMs)} / {formatMs(s.durationMs)}
+          </span>
+          <span>{Math.round(Math.min(s.progressPercent, 100))}%</span>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 8,
+          position: "relative",
+        }}
+      >
+        <KeyVal k="User" v={userNode} />
+        <KeyVal
+          k="Device"
+          v={[s.device, s.platform ?? s.player].filter(Boolean).join(" · ") || "—"}
+        />
+        <KeyVal
+          k="Stream"
+          v={<MethodPill method={m.label} methodClass={m.cls} />}
+        />
+        <KeyVal
+          k="Quality"
+          v={
+            <>
+              <span className="ds-mono">{s.resolution ?? "—"}</span>
+              {bitrateMbps > 0 && (
+                <>
+                  {" "}
+                  ·{" "}
+                  <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>
+                    {bitrateMbps.toFixed(1)} Mbps
+                  </span>
+                </>
+              )}
+            </>
+          }
+        />
+        <KeyVal
+          k="Codec"
+          v={
+            <>
+              <span className="ds-mono">
+                {(s.videoCodec ?? "—").toUpperCase()}
+              </span>
+              {s.audioCodec && (
+                <>
+                  {" "}
+                  ·{" "}
+                  <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>
+                    {s.audioCodec.toUpperCase()}
+                  </span>
+                </>
+              )}
+            </>
+          }
+        />
+        <KeyVal
+          k="Origin"
+          v={
+            s.ipAddress ? (
+              <IpInfo ip={s.ipAddress} inline />
+            ) : (
+              <span style={{ color: "var(--ds-fg-disabled)" }}>—</span>
+            )
+          }
+        />
+      </div>
+    </article>
   );
 }
 
@@ -313,21 +295,20 @@ export function ActivityNowPlaying({
   source?: string;
   mediaType?: string;
 }) {
-  const [sessions, setSessions] = useState<ActiveSessionLive[]>(initialSessions);
+  const [sessions, setSessions] =
+    useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
-  const mounted = useHasMounted();
 
   useLiveEvents((event) => {
-    if (event.type === "connected") {
-      setConnected(true);
-    }
+    if (event.type === "connected") setConnected(true);
     if (event.type === "activity:sessions") {
       setSessions((prev) => {
-        // Preserve poster URLs from previous state: SSE payloads omit posterUrl to keep them small
+        // SSE payloads omit posterUrl to stay small — carry the prior value.
         const posterMap = new Map(prev.map((s) => [s.id, s.posterUrl]));
         const filtered = event.sessions.filter((s) => {
           if (source && s.source !== source) return false;
-          if (mediaType && (s.mediaType ?? "").toUpperCase() !== mediaType) return false;
+          if (mediaType && (s.mediaType ?? "").toUpperCase() !== mediaType)
+            return false;
           return true;
         });
         return filtered.map((s) => ({
@@ -338,53 +319,79 @@ export function ActivityNowPlaying({
     }
   });
 
-  const totalBitrateMbps = sessions.reduce((sum, s) => sum + toBitrateKbps(s.bitrate), 0) / 1000;
+  const plexCount = sessions.filter((s) => s.source === "plex").length;
+  const jellyfinCount = sessions.length - plexCount;
+  const totalMbps =
+    sessions.reduce((sum, s) => sum + toBitrateKbps(s.bitrate), 0) / 1000;
+
+  const sub =
+    sessions.length === 0
+      ? "no active streams"
+      : `${sessions.length} active${
+          plexCount > 0 && jellyfinCount > 0
+            ? ` · ${plexCount} Plex · ${jellyfinCount} Jellyfin`
+            : ""
+        }${totalMbps > 0 ? ` · ${totalMbps.toFixed(1)} Mbps combined` : ""}`;
 
   return (
-    <Card className="bg-zinc-900 border-zinc-800 p-5 mb-8">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="font-semibold text-white flex items-center gap-2">
-          <Monitor className="w-4 h-4" />
-          Now Playing
-          {sessions.length > 0 && (() => {
-            const plexCount = sessions.filter((s) => s.source === "plex").length;
-            const jellyfinCount = sessions.filter((s) => s.source === "jellyfin").length;
-            const singleSource = plexCount === 0 || jellyfinCount === 0;
-            const sourceLabel = plexCount > 0 ? "Plex" : "Jellyfin";
-            const sourceText = singleSource
-              ? `${sessions.length} ${sourceLabel} stream${sessions.length !== 1 ? "s" : ""}`
-              : `${sessions.length} streams • ${plexCount} Plex · ${jellyfinCount} Jellyfin`;
-            return (
-              <span className="text-xs bg-green-600/20 text-green-400 px-2 py-0.5 rounded-full">
-                {sourceText}
-              </span>
-            );
-          })()}
-          {totalBitrateMbps > 0 && (
-            <span className="text-xs text-zinc-500 flex items-center gap-1">
-              <Activity className="w-3 h-3" />
-              {totalBitrateMbps.toFixed(1)} Mbps
-            </span>
-          )}
-        </h2>
-        <div className="flex items-center gap-1.5 text-[10px]">
-          {connected ? (
-            <><Wifi className="w-3 h-3 text-green-500" /><span className="text-green-500">Live</span></>
-          ) : (
-            <><WifiOff className="w-3 h-3 text-zinc-600" /><span className="text-zinc-600">Connecting...</span></>
-          )}
-        </div>
-      </div>
-
+    <section style={{ marginBottom: 28 }}>
+      <SectionHeader
+        label="Now playing"
+        sub={sub}
+        right={
+          <span
+            className="ds-mono"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: 10.5,
+              color: connected ? "var(--ds-success)" : "var(--ds-fg-subtle)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 999,
+                background: connected
+                  ? "var(--ds-success)"
+                  : "var(--ds-fg-disabled)",
+              }}
+            />
+            {connected ? "Live" : "Connecting…"}
+          </span>
+        }
+      />
       {sessions.length === 0 ? (
-        <p className="text-zinc-500 text-sm">No active streams</p>
+        <div
+          style={{
+            padding: "28px 18px",
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 10,
+            color: "var(--ds-fg-subtle)",
+            fontSize: 13,
+            textAlign: "center",
+          }}
+        >
+          No active streams
+        </div>
       ) : (
-        <div className="space-y-3">
+        <div
+          className="resp-grid-3"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+            gap: 10,
+          }}
+        >
           {sessions.map((s) => (
-            <SessionCard key={s.id} session={s} mounted={mounted} />
+            <SessionCard key={s.id} s={s} />
           ))}
         </div>
       )}
-    </Card>
+    </section>
   );
 }

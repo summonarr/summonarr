@@ -124,6 +124,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
             progressMs: BigInt(s.viewOffset),
             playMethod: s.playMethod,
             resolution: s.resolution,
+            transcodeReason: s.transcodeReason ?? null,
             ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
             ...(tmdbId != null ? { tmdbId, mediaType } : {}),
             ...(posterPath ? { posterPath } : {}),
@@ -166,6 +167,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           videoDecision: s.videoDecision ?? null,
           audioDecision: s.audioDecision ?? null,
           container: s.container ?? null,
+          transcodeReason: s.transcodeReason ?? null,
         },
       });
       return "started";
@@ -340,6 +342,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
             progressMs: BigInt(positionMs),
             playMethod: s.playMethod,
             resolution: s.resolution ?? null,
+            transcodeReason: s.transcodeReason ?? null,
             ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
             ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
             ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
@@ -381,6 +384,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           resolution: s.resolution ?? null,
           bitrate: s.bitrate ?? null,
           container: s.container ?? null,
+          transcodeReason: s.transcodeReason ?? null,
         },
       });
       return "started";

@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getTVSeasonEpisodes } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
@@ -10,13 +10,11 @@ export interface TVSeasonResponse {
   source: "plex" | "jellyfin" | "both" | null;
 }
 
-export async function GET(
-  _req: NextRequest,
+export const GET = withAuth(async (
+  _req,
   { params }: { params: Promise<{ id: string; n: string }> },
-) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+  session
+) => {
   const { id: rawId, n: rawN } = await params;
   const tmdbId = parseInt(rawId, 10);
   const seasonNumber = parseInt(rawN, 10);
@@ -89,4 +87,4 @@ export async function GET(
     owned: Array.from(ownedSet).sort((a, b) => a - b),
     source,
   } satisfies TVSeasonResponse);
-}
+});

@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
@@ -11,10 +11,7 @@ export type FileInfoResponse = {
   arrTitle:          string | null;
 };
 
-export async function GET(request: NextRequest) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   const { searchParams } = new URL(request.url);
   const tmdbIdParam = searchParams.get("tmdbId");
   const tmdbId      = parseInt(tmdbIdParam ?? "", 10);
@@ -88,4 +85,4 @@ export async function GET(request: NextRequest) {
     arrTmdbId,
     arrTitle,
   } satisfies FileInfoResponse);
-}
+});

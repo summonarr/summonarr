@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { notifyUserIssueMessage, notifyAdminsIssueMessage } from "@/lib/discord-notify";
 import { notifyUserIssueMessagePush, notifyAdminsIssueMessagePush } from "@/lib/push";
@@ -12,10 +12,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(_req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -33,12 +30,9 @@ export async function GET(_req: NextRequest, { params }: RouteContext) {
   });
 
   return NextResponse.json(messages);
-}
+});
 
-export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
 
@@ -129,4 +123,4 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   }
 
   return NextResponse.json(message, { status: 201 });
-}
+});

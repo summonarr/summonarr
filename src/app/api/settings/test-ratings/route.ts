@@ -1,14 +1,11 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { testOmdbConnection } from "@/lib/omdb";
 import { testMdblistConnection } from "@/lib/mdblist";
 import { testTraktConnection } from "@/lib/trakt";
 import { testIpinfoConnection } from "@/lib/ip-lookup";
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAdmin(async (req, _ctx, _session) => {
   let body: { service?: string };
   try {
     body = await req.json();
@@ -57,4 +54,4 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ error: "service must be 'omdb', 'mdblist', 'trakt', or 'ipinfo'" }, { status: 400 });
-}
+});

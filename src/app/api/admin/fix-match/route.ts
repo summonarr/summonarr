@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -450,11 +450,8 @@ async function fixJellyfinMatch(
   return { newItemId: confirmed ? resolvedItemId : itemId, baseUrl, apiKey };
 }
 
-export async function POST(request: NextRequest) {
-  // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+// ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
+export const POST = withIssueAdmin(async (request, _ctx, session) => {
   let body: FixMatchBody;
   try {
     body = await request.json() as FixMatchBody;
@@ -566,4 +563,4 @@ export async function POST(request: NextRequest) {
     console.error("[fix-match]", `${serverLabel} error (${errClass})`);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
-}
+});

@@ -1,16 +1,14 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth, withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 
-export async function DELETE(
-  req: NextRequest,
+export const DELETE = withAuth(async (
+  req,
   { params }: { params: Promise<{ tmdbId: string }> },
-) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+  session
+) => {
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
   if (isNaN(tmdbId)) return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
@@ -29,15 +27,13 @@ export async function DELETE(
   }
 
   return NextResponse.json({ ok: true });
-}
+});
 
-export async function PATCH(
-  req: NextRequest,
+export const PATCH = withAdmin(async (
+  req,
   { params }: { params: Promise<{ tmdbId: string }> },
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+  session
+) => {
   if (!checkRateLimit(`votes-dismiss:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many dismiss operations — try again later" }, { status: 429 });
   }
@@ -70,4 +66,4 @@ export async function PATCH(
   });
 
   return NextResponse.json({ ok: true, dismissed: deleted.count });
-}
+});

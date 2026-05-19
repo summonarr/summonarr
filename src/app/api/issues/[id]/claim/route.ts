@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -12,10 +12,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 //   - claimed by other  → take over (claim for current user)
 // Notifications for replies on a claimed issue narrow to the claimer + the
 // reporter — see src/app/api/issues/[id]/messages/route.ts.
-export async function POST(req: NextRequest, { params }: RouteContext) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({
     where: { id },
@@ -66,4 +63,4 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   });
 
   return NextResponse.json(updated);
-}
+});

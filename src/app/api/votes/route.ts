@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse, after } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse, after } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -13,10 +13,7 @@ import { isFeatureEnabled } from "@/lib/features";
 
 const PAGE_SIZE = 40;
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (req, _ctx, session) => {
   const page = Math.min(Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1), 10_000);
 
   const [grouped, totalItems] = await Promise.all([
@@ -70,12 +67,9 @@ export async function GET(req: NextRequest) {
   });
 
   return NextResponse.json({ items, total: totalItems.length, page, pageSize: PAGE_SIZE });
-}
+});
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   if (!(await isFeatureEnabled("feature.page.votes"))) {
     return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
   }
@@ -192,4 +186,4 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json(vote, { status: 201 });
-}
+});

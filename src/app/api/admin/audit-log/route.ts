@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
@@ -27,10 +27,7 @@ const GROUP_ACTIONS: Record<"auth" | "admin" | "system", AuditAction[]> = {
   system: ["LIBRARY_SYNC", "CACHE_WARM"],
 };
 
-export async function GET(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (req, _ctx, _session) => {
   const url = req.nextUrl;
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));
   const cursor = url.searchParams.get("cursor") ?? undefined;
@@ -95,12 +92,9 @@ export async function GET(req: NextRequest) {
   const nextCursor = logs.length > 0 ? logs[logs.length - 1].id : null;
 
   return NextResponse.json({ logs, nextCursor, hasMore });
-}
+});
 
-export async function DELETE(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (req, _ctx, session) => {
   // Beyond the retention cutoff, scrub all remaining PII:
   //   - ipAddress / userAgent: nulled on every row
   //   - userName: redacted on every row (still keyed by userId for joinability)
@@ -148,4 +142,4 @@ export async function DELETE(req: NextRequest) {
     detailsScrubbed: detailsResult.count,
     cutoff: cutoff.toISOString(),
   });
-}
+});

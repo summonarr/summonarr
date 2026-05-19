@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withIssueAdmin } from "@/lib/api-auth";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
@@ -166,10 +166,7 @@ function assessCandidate(
   return { matchLevel, confidence: score, titleSimilarity: ts };
 }
 
-export async function GET(request: NextRequest) {
-  const session = await requireAuth({ role: "ISSUE_ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   const { searchParams } = new URL(request.url);
   const server             = searchParams.get("server");
   const mediaType          = searchParams.get("mediaType") as "MOVIE" | "TV" | null;
@@ -523,4 +520,4 @@ export async function GET(request: NextRequest) {
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,
   } satisfies CandidatesResponse);
-}
+});

@@ -102,7 +102,7 @@ export default async function PlayDetailPage({
 
   const isTV = (play.mediaType ?? "").toString() === "TV";
   const mediaHref = play.tmdbId
-    ? isTV ? `/tv/${play.tmdbId}` : `/movie/${play.tmdbId}`
+    ? `/admin/activity/media/${play.tmdbId}`
     : null;
   const episodeStr = isTV && play.seasonNumber != null
     ? `S${String(play.seasonNumber).padStart(2, "0")}E${String(play.episodeNumber ?? 0).padStart(2, "0")}`
@@ -138,7 +138,6 @@ export default async function PlayDetailPage({
         Back to History
       </Link>
 
-      {}
       <div className="flex items-start gap-4 mb-8">
         {posterPath && (
           <div className="shrink-0 w-16 sm:w-20 rounded-lg overflow-hidden shadow-lg">
@@ -188,7 +187,6 @@ export default async function PlayDetailPage({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        {}
         <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
           <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
             <Clock className="w-4 h-4 text-zinc-400" /> Playback
@@ -216,7 +214,6 @@ export default async function PlayDetailPage({
           </div>
         </Card>
 
-        {}
         <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
           <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
             <Zap className="w-4 h-4 text-zinc-400" /> Stream Quality
@@ -246,7 +243,6 @@ export default async function PlayDetailPage({
           </div>
         </Card>
 
-        {}
         <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
           <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
             <Monitor className="w-4 h-4 text-zinc-400" /> Device
@@ -278,7 +274,6 @@ export default async function PlayDetailPage({
         </Card>
       </div>
 
-      {}
       <div className="flex justify-end">
         <DeletePlayButton id={play.id} />
       </div>

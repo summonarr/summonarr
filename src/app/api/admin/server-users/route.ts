@@ -1,11 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
-export async function GET() {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   const users = await prisma.mediaServerUser.findMany({
     select: {
       id: true,
@@ -23,12 +20,9 @@ export async function GET() {
   });
 
   return NextResponse.json(users);
-}
+});
 
-export async function PATCH(req: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const PATCH = withAdmin(async (req, _ctx, _session) => {
   let body: { autoDisableNew?: boolean };
   try {
     body = await req.json();
@@ -48,4 +42,4 @@ export async function PATCH(req: NextRequest) {
   }
 
   return NextResponse.json({ ok: true });
-}
+});

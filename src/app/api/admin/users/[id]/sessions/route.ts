@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAuditOrFail } from "@/lib/audit";
@@ -7,13 +7,11 @@ import { getClientIp } from "@/lib/rate-limit";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-export async function GET(
-  _req: NextRequest,
-  { params }: RouteParams
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (
+  _req,
+  { params }: RouteParams,
+  _session
+) => {
   const { id } = await params;
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
@@ -35,15 +33,13 @@ export async function GET(
   });
 
   return NextResponse.json(sessions);
-}
+});
 
-export async function DELETE(
-  req: NextRequest,
-  { params }: RouteParams
-) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAdmin(async (
+  req,
+  { params }: RouteParams,
+  session
+) => {
   const { id } = await params;
 
   const target = await prisma.user.findUnique({
@@ -111,4 +107,4 @@ export async function DELETE(
   }
 
   return NextResponse.json({ error: "Provide sessionId or all: true" }, { status: 400 });
-}
+});

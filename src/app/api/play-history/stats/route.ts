@@ -1,18 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAdmin } from "@/lib/api-auth";
 import { getPlayHistoryStats } from "@/lib/play-history";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(request: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAdmin(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
-  const days = parseInt(params.get("days") ?? "30", 10) || 30;
+  // Clamp to match the stats page route (src/app/(app)/admin/activity/stats):
+  // an unbounded/negative day window would scan or invert the whole table.
+  const days = Math.min(Math.max(parseInt(params.get("days") ?? "30", 10) || 30, 1), 3650);
   const source = params.get("source") ?? undefined;
   const mediaType = params.get("mediaType") ?? undefined;
 
   const stats = await getPlayHistoryStats({ days, source, mediaType });
   return NextResponse.json(stats);
-}
+});

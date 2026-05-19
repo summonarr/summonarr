@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -9,10 +9,7 @@ const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 
-export async function POST(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (req, _ctx, session) => {
   let discordId: string;
   try {
     const body = await req.json();
@@ -108,4 +105,4 @@ export async function POST(req: NextRequest) {
   }
 
   return NextResponse.json({ ok: true, pendingCount });
-}
+});

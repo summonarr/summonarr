@@ -1,12 +1,9 @@
 import { NextResponse } from "next/server";
-import { requireAuth } from "@/lib/api-auth";
+import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import webpush from "web-push";
 
-export async function POST() {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const POST = withAuth(async (_req, _ctx, session) => {
   const keys = await prisma.setting.findMany({
     where: { key: { in: ["vapidPublicKey", "vapidPrivateKey", "smtpFrom", "smtpUser"] } },
   });
@@ -51,4 +48,4 @@ export async function POST() {
 
   const allOk = results.every((r) => r.ok);
   return NextResponse.json({ results }, { status: allOk ? 200 : 502 });
-}
+});

@@ -1,15 +1,12 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
-import { requireAuth } from "@/lib/api-auth";
+import { withAuth } from "@/lib/api-auth";
 import { revokeSessionById } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
-export async function GET() {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const GET = withAuth(async (_req, _ctx, session) => {
   const sessions = await prisma.authSession.findMany({
     where: { userId: session.user.id },
     orderBy: { lastSeenAt: "desc" },
@@ -33,14 +30,11 @@ export async function GET() {
       isCurrent: s.sessionId === currentSessionId,
     }))
   );
-}
+});
 
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
-export async function DELETE(req: NextRequest) {
-  const session = await requireAuth();
-  if (session instanceof NextResponse) return session;
-
+export const DELETE = withAuth(async (req, _ctx, session) => {
   // Per-user cap: cookie/CSRF-replay attempts can't sweep all devices in a tight loop
   if (!checkRateLimit(`sessions-delete:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json(
@@ -138,4 +132,4 @@ export async function DELETE(req: NextRequest) {
   });
 
   return NextResponse.json({ ok: true });
-}
+});
