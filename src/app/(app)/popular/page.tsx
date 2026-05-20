@@ -15,7 +15,7 @@ import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { Suspense } from "react";
 import { PageHeader, EmptyState } from "@/components/ui/design";
-import { TrendingUp, Film } from "lucide-react";
+import { TrendingUp, Film } from "@/components/icons";
 
 type EnrichedMedia = TmdbMedia & {
   plays: number;

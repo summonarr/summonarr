@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import {
   ActivityCard,

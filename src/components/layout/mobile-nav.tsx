@@ -14,8 +14,8 @@ import {
   Menu,
   Search,
   X,
-  type LucideIcon,
-} from "lucide-react";
+  type IconComponent,
+} from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { filterNavByFeatures, userNavItems } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
@@ -27,7 +27,7 @@ import { SearchBar } from "@/components/layout/header";
 type Tab = {
   href: string;
   label: string;
-  icon: LucideIcon;
+  icon: IconComponent;
   match: (pathname: string) => boolean;
 };
 

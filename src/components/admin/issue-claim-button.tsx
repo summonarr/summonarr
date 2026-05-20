@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, UserCheck, UserX, X } from "lucide-react";
+import { Loader2, UserCheck, UserX, X } from "@/components/icons";
 
 interface IssueClaimButtonProps {
   issueId: string;

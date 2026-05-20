@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "lucide-react";
+import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 
 function TokenLinkFlow() {
   const [token, setToken] = useState<string | null>(null);

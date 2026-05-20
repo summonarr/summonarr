@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Film, Tv2, X } from "lucide-react";
+import { Film, Tv2, X } from "@/components/icons";
 import {
   Drawer,
   DrawerPortal,

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
-import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "lucide-react";
+import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 
 interface ServerUser {
   id: string;

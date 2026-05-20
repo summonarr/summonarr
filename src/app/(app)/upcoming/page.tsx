@@ -11,7 +11,7 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
-import { AlertTriangle, Calendar } from "lucide-react";
+import { AlertTriangle, Calendar } from "@/components/icons";
 
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
   const today = new Date().toISOString().slice(0, 10);

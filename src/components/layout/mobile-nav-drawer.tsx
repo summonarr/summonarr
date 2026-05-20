@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
-import { LogOut, Bell, GitFork, type LucideIcon } from "lucide-react";
+import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
 import {
   userNavItems,
   getVisibleAdminItems,
@@ -245,7 +245,7 @@ function NavLink({
   active: boolean;
   onClick: () => void;
 }) {
-  const Icon = item.icon as LucideIcon;
+  const Icon = item.icon as IconComponent;
   return (
     <Link
       href={item.href}

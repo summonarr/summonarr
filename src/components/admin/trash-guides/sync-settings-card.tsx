@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CheckCircle, Loader2, Play, RefreshCw, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, Play, RefreshCw, XCircle } from "@/components/icons";
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
 
 interface SyncSettingsCardProps {

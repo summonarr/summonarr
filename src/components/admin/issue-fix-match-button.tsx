@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Wrench, Search, X, Check, ChevronLeft } from "lucide-react";
+import { Wrench, Search, X, Check, ChevronLeft } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";

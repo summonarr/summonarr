@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 import { SetupForm } from "@/app/setup/setup-form";
-import { Film } from "lucide-react";
+import { Film } from "@/components/icons";
 
 // Public self-registration is disabled; route always redirects to /setup (empty DB) or /login
 export default async function RegisterPage() {

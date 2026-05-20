@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { Lock, Download, Upload } from "lucide-react";
+import { Lock, Download, Upload } from "@/components/icons";
 import { BackupUI } from "@/components/admin/backup-ui";
 import { requireFeature } from "@/lib/features";
 import { PageHeader } from "@/components/ui/design";

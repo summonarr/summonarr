@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { X, ExternalLink } from "lucide-react";
+import { X, ExternalLink } from "@/components/icons";
 
 interface DiscordJoinBannerProps {
   inviteUrl: string;

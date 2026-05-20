@@ -2,7 +2,7 @@ import NextAuth, { type Session } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
+import { dummyVerify, isLegacyHash, verifyAndMaybeRehash } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { authConfig } from "@/lib/auth.config";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
@@ -11,8 +11,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 
-// Always run bcrypt even on missing accounts to prevent timing-based user enumeration
-const DUMMY_HASH = "$2a$12$K4v7Dp0.fiN0EKr9lUDBTeVrQBH1/6Mo3hVRfVIGdFJZQ6XH2GKGK";
+// Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
@@ -604,12 +603,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         const user = await prisma.user.findUnique({ where: { email } });
 
-        const hash = user?.passwordHash ?? DUMMY_HASH;
-        const valid = await bcrypt.compare(credentials.password as string, hash);
+        let valid = false;
+        let rehashed: string | null = null;
+        if (user?.passwordHash) {
+          ({ valid, rehashed } = await verifyAndMaybeRehash(credentials.password as string, user.passwordHash));
+        } else {
+          await dummyVerify();
+        }
 
         if (!valid || !user) {
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
           return null;
+        }
+
+        if (rehashed && isLegacyHash(user.passwordHash ?? "")) {
+          await prisma.user.update({ where: { id: user.id }, data: { passwordHash: rehashed } }).catch(() => {});
         }
 
         const device = buildDeviceMeta(headers);
@@ -670,7 +678,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             console.warn("[auth] Plex sign-in refused: plexServerUrl is not configured.");
             void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "plex_server_not_configured" } });
             // Fall through to the unified failure path below.
-            await bcrypt.compare("x", DUMMY_HASH);
+            await dummyVerify();
             return null;
           }
 
@@ -765,7 +773,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         }
         if (!plexResult) {
           // Constant-time delay mirrors the credentials provider path to prevent timing oracle
-          await bcrypt.compare("x", DUMMY_HASH);
+          await dummyVerify();
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "invalid_credentials" } });
           return null;
         }
@@ -841,13 +849,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
                 );
               } catch (err) {
                 console.error("[jellyfin auth] authentication failed:", err);
-                await bcrypt.compare("x", DUMMY_HASH);
+                await dummyVerify();
                 void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "invalid_credentials" } });
                 return null;
               }
               const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
               if (jfDbUser === PROVIDER_REBIND_REQUIRED) {
-                await bcrypt.compare("x", DUMMY_HASH);
+                await dummyVerify();
                 void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "email_collision_needs_rebind" } });
                 return null;
               }

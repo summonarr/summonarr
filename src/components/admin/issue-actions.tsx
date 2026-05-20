@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import {
   Loader2, Check, RefreshCw, AlertTriangle, Clock, Trash2,
   Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X,
-} from "lucide-react";
+} from "@/components/icons";
 import type { ArrRelease } from "@/lib/arr";
 
 interface IssueActionsProps {

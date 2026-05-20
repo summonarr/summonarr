@@ -8,7 +8,7 @@ import { IssueCardShell } from "@/components/admin/issue-card-shell";
 import { IssueClaimButton } from "@/components/admin/issue-claim-button";
 import { IssueThread } from "@/components/issues/issue-thread";
 import Image from "next/image";
-import { Film, Tv2, MessageSquare } from "lucide-react";
+import { Film, Tv2, MessageSquare } from "@/components/icons";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Tv2 } from "lucide-react";
+import { Tv2 } from "@/components/icons";
 
 interface SyncResult {
   plex?: number;

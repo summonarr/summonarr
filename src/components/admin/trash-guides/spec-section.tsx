@@ -13,7 +13,7 @@ import {
   Shield,
   ShieldOff,
   XCircle,
-} from "lucide-react";
+} from "@/components/icons";
 import {
   formatRelative,
   type ApplyResult,

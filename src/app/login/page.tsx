@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { Film, Wrench } from "lucide-react";
+import { Film, Wrench } from "@/components/icons";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 

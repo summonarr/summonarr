@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ThumbsUp, Trash2, Loader2 } from "lucide-react";
+import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
 
 interface Props {
   tmdbId: number;

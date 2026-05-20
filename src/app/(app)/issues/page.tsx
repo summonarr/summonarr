@@ -8,7 +8,7 @@ import {
 } from "@/components/issues/issue-detail-mobile-drawer";
 import Image from "next/image";
 import Link from "next/link";
-import { Film, Tv2, MessageSquare, ChevronRight } from "lucide-react";
+import { Film, Tv2, MessageSquare, ChevronRight } from "@/components/icons";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";

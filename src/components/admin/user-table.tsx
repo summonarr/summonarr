@@ -26,7 +26,7 @@ import {
   MapPin,
   Clock,
   AlertTriangle,
-} from "lucide-react";
+} from "@/components/icons";
 
 interface User {
   id: string;

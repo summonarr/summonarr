@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "lucide-react";
+import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { Moon, Sun, Check } from "lucide-react";
+import { Moon, Sun, Check } from "@/components/icons";
 import { ACCENTS, useTheme, type Accent } from "./theme-provider";
 
 /* Theme + accent picker. Designed to drop into the header user dropdown

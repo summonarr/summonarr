@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from "react";
 import Image from "next/image";
-import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "lucide-react";
+import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
 

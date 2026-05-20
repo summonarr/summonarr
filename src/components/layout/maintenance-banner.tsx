@@ -1,6 +1,6 @@
 "use client";
 
-import { Wrench, X } from "lucide-react";
+import { Wrench, X } from "@/components/icons";
 import { useState } from "react";
 
 export function MaintenanceBanner({ message }: { message?: string }) {

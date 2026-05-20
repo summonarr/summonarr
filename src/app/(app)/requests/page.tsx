@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { Film, Tv2 } from "lucide-react";
+import { Film, Tv2 } from "@/components/icons";
 import Image from "next/image";
 import Link from "next/link";
 import { LiveRefresh } from "@/components/live-refresh";

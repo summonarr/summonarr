@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Home, Film, Tv } from "lucide-react";
+import { Home, Film, Tv } from "@/components/icons";
 
 // Mobile audit F-2.1: replaces Next.js's default "404 / This page could not
 // be found." text-only page. Server Component (no props per Next.js 16

@@ -7,7 +7,7 @@ import { NotificationPrefs } from "@/components/profile/notification-prefs";
 import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
-import { User } from "lucide-react";
+import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";

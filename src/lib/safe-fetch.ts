@@ -30,7 +30,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const USER_AGENT = "Summonarr/0.1";
 
-type FetchMode = "hardcoded" | "admin";
+type FetchMode = "hardcoded" | "admin" | "user";
 
 async function doFetch(
   rawUrl: string,
@@ -75,7 +75,23 @@ async function doFetch(
   let targetUrl: string;
   let expectedAddrs: readonly string[];
 
-  if (mode === "hardcoded") {
+  if (mode === "user") {
+    // User-supplied URL with no hostname allowlist — used by Web Push, whose
+    // subscription endpoints span an unbounded set of vendor push services
+    // (fcm.googleapis.com, *.push.apple.com, updates.push.services.mozilla.com,
+    // *.notify.windows.com, …). allowPrivate=false blocks RFC1918/loopback/
+    // link-local/CGNAT/multicast — push services must be public.
+    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false });
+    if (!safe) {
+      throw new SafeFetchError(
+        "ssrf-blocked",
+        rawUrl,
+        `URL blocked by SSRF policy: ${rawUrl}`,
+      );
+    }
+    targetUrl = safe.url;
+    expectedAddrs = safe.addrs;
+  } else if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -298,4 +314,15 @@ export function safeFetchAdminConfigured(
   opts: SafeFetchOptions = {},
 ): Promise<Response> {
   return doFetch(url, opts, "admin");
+}
+
+// safeFetch runs the full SSRF policy (allowPrivate=false) with no hostname
+// allowlist — use for genuinely user-supplied URLs whose host set is unbounded
+// (e.g. Web Push subscription endpoints, which fan out across every vendor push
+// service). RFC1918/loopback/link-local/CGNAT/multicast are all blocked.
+export function safeFetch(
+  url: string,
+  opts: SafeFetchOptions = {},
+): Promise<Response> {
+  return doFetch(url, opts, "user");
 }

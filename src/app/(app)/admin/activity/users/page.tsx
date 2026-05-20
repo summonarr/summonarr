@@ -4,7 +4,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { ArrowDown, ArrowUp, ArrowUpDown, Users } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Users } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 

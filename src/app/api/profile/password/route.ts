@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import bcrypt from "bcryptjs";
+import { hashPassword, verifyPassword } from "@/lib/password-hash";
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
@@ -50,12 +50,12 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  const currentOk = await bcrypt.compare(currentPassword ?? "", user.passwordHash);
+  const currentOk = await verifyPassword(currentPassword ?? "", user.passwordHash);
   if (!currentOk) {
     return NextResponse.json({ error: "Invalid password" }, { status: 400 });
   }
 
-  const newHash = await bcrypt.hash(newPassword, 12);
+  const newHash = await hashPassword(newPassword);
   const now = new Date();
 
   await prisma.$transaction([

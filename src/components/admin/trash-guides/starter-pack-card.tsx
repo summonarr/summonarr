@@ -12,7 +12,7 @@ import {
   RefreshCw,
   Sparkles,
   XCircle,
-} from "lucide-react";
+} from "@/components/icons";
 import {
   KIND_LABEL,
   type ActionState,

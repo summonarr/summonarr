@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight } from "@/components/icons";
 import { MediaCard } from "./media-card";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 

@@ -13,7 +13,7 @@ import {
   Plus,
   Check,
   X,
-} from "lucide-react";
+} from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";

@@ -14,7 +14,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
 import { PageHeader, EmptyState } from "@/components/ui/design";
-import { Filter, Film, Tv } from "lucide-react";
+import { Filter, Film, Tv } from "@/components/icons";
 
 const PER_PAGE = 36;
 

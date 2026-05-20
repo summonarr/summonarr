@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Loader2, Play, CheckCircle, XCircle, Clock } from "lucide-react";
+import { Loader2, Play, CheckCircle, XCircle, Clock } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 

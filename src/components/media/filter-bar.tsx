@@ -3,7 +3,7 @@
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useMemo } from "react";
 import type { Genre, WatchProvider } from "@/lib/tmdb-types";
-import { X } from "lucide-react";
+import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as SortSegments } from "@/components/ui/design";
 

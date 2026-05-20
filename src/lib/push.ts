@@ -1,4 +1,4 @@
-import webpush from "web-push";
+import { generateVapidKeys, sendPushNotification } from "@/lib/web-push";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { isFeatureEnabled } from "@/lib/features";
@@ -24,7 +24,7 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
   const existing = await getVapidKeysRaw();
   if (existing) return existing.publicKey;
 
-  const generated = webpush.generateVAPIDKeys();
+  const generated = generateVapidKeys();
   await prisma.$transaction(async (tx) => {
     // Advisory lock prevents two concurrent requests both generating and storing different key pairs
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 5)`;
@@ -82,11 +82,17 @@ async function sendPush(
   subscription: { endpoint: string; p256dh: string; auth: string },
   payload: object
 ): Promise<boolean> {
-  webpush.setVapidDetails(keys.contact, keys.publicKey, keys.privateKey);
   try {
-    await webpush.sendNotification(
-      { endpoint: subscription.endpoint, keys: { p256dh: decryptToken(subscription.p256dh, "PushSubscription.p256dh"), auth: decryptToken(subscription.auth, "PushSubscription.auth") } },
-      JSON.stringify(payload)
+    await sendPushNotification(
+      {
+        endpoint: subscription.endpoint,
+        keys: {
+          p256dh: decryptToken(subscription.p256dh, "PushSubscription.p256dh"),
+          auth: decryptToken(subscription.auth, "PushSubscription.auth"),
+        },
+      },
+      JSON.stringify(payload),
+      { contact: keys.contact, vapidPublicKey: keys.publicKey, vapidPrivateKey: keys.privateKey },
     );
     return true;
   } catch (err: unknown) {

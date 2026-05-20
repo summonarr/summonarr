@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Zap } from "lucide-react";
+import { Zap } from "@/components/icons";
 
 export function ActivityWarmButton() {
   const [loading, setLoading] = useState(false);

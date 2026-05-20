@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { SetupForm } from "./setup-form";
 import { SetupImportPanel } from "./setup-import-panel";
-import { UserPlus, Upload } from "lucide-react";
+import { UserPlus, Upload } from "@/components/icons";
 
 type Tab = "create" | "restore";
 

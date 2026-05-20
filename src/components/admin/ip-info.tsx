@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
-import { ChevronDown, Globe, Loader2, MapPin, Network } from "lucide-react";
+import { ChevronDown, Globe, Loader2, MapPin, Network } from "@/components/icons";
 
 type Lookup = {
   ip: string;
