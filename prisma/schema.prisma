@@ -146,11 +146,11 @@ model VerificationToken {
 // Enables per-device session listing, forced logout, and cross-replica revocation via DB.
 model AuthSession {
   id          String   @id @default(cuid(2))
-  sessionId   String   @unique // mirrors JWT token.sessionId
+  sessionId   String   @unique @db.VarChar(64) // mirrors JWT token.sessionId
   userId      String
-  deviceType  String // "mobile" | "tablet" | "desktop"
-  deviceLabel String? // e.g. "Chrome on Windows"
-  ipAddress   String?
+  deviceType  String   @db.VarChar(16) // "mobile" | "tablet" | "desktop"
+  deviceLabel String?  @db.VarChar(256) // e.g. "Chrome on Windows"
+  ipAddress   String?  @db.VarChar(64)
   createdAt   DateTime @default(now())
   lastSeenAt  DateTime @default(now())
   expiresAt   DateTime
@@ -189,9 +189,9 @@ model MediaRequest {
   id                  String        @id @default(cuid(2))
   mediaType           MediaType
   tmdbId              Int
-  title               String
-  posterPath          String?
-  releaseYear         String?
+  title               String        @db.VarChar(500)
+  posterPath          String?       @db.VarChar(500)
+  releaseYear         String?       @db.VarChar(16)
   status              RequestStatus @default(PENDING)
   note                String?       @db.VarChar(500)
   adminNote           String?       @db.VarChar(500)
@@ -427,17 +427,17 @@ model Issue {
   mediaType  MediaType
   tmdbId     Int
   tvdbId     Int?
-  title      String
-  posterPath String?
+  title      String     @db.VarChar(500)
+  posterPath String?    @db.VarChar(500)
 
   issueType     IssueType
   scope         IssueScope @default(FULL)
   seasonNumber  Int?
   episodeNumber Int?
-  note          String?
+  note          String?    @db.VarChar(2000)
 
   status     IssueStatus @default(OPEN)
-  resolution String?
+  resolution String?     @db.VarChar(2000)
 
   messages IssueMessage[]
   grabs    IssueGrab[]
@@ -503,8 +503,8 @@ model DeletionVote {
 
   tmdbId     Int
   mediaType  MediaType
-  title      String
-  posterPath String?
+  title      String  @db.VarChar(500)
+  posterPath String? @db.VarChar(500)
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -520,15 +520,15 @@ model DeletionVote {
 model AuditLog {
   id        String      @id @default(cuid(2))
   createdAt DateTime    @default(now())
-  userId    String?
-  userName  String
+  userId    String?     @db.VarChar(64)
+  userName  String      @db.VarChar(256)
   action    AuditAction
-  target    String
-  details   String?
-  ipAddress String?
-  userAgent String?
-  provider  String?
-  sessionId String?
+  target    String      @db.VarChar(500)
+  details   String?     @db.VarChar(8000)
+  ipAddress String?     @db.VarChar(64)
+  userAgent String?     @db.VarChar(512)
+  provider  String?     @db.VarChar(32)
+  sessionId String?     @db.VarChar(64)
 
   @@index([createdAt(sort: Desc)])
   @@index([action])
@@ -600,7 +600,7 @@ model MediaServerUser {
 
 model PlayHistory {
   id     String @id @default(cuid(2))
-  source String // "plex" | "jellyfin"
+  source String @db.VarChar(16) // "plex" | "jellyfin"
 
   // Session timing
   startedAt      DateTime
@@ -618,33 +618,33 @@ model PlayHistory {
   // Media identification
   tmdbId        Int?
   mediaType     MediaType?
-  title         String
-  year          String?
-  posterPath    String?
+  title         String     @db.VarChar(500)
+  year          String?    @db.VarChar(16)
+  posterPath    String?    @db.VarChar(500)
   seasonNumber  Int?
   episodeNumber Int?
-  episodeTitle  String?
+  episodeTitle  String?    @db.VarChar(500)
 
   // Source-specific keys (for deduplication)
-  sourceSessionId String?
-  sourceItemId    String?
+  sourceSessionId String?  @db.VarChar(256)
+  sourceItemId    String?  @db.VarChar(256)
 
   // Playback metadata
-  platform  String?
-  player    String?
-  device    String?
-  ipAddress String?
+  platform  String?        @db.VarChar(256)
+  player    String?        @db.VarChar(256)
+  device    String?        @db.VarChar(256)
+  ipAddress String?        @db.VarChar(64)
 
   // Transcode info
-  playMethod    String? // "DirectPlay" | "DirectStream" | "Transcode"
-  videoCodec    String?
-  audioCodec    String?
-  resolution    String?
+  playMethod    String?    @db.VarChar(32) // "DirectPlay" | "DirectStream" | "Transcode"
+  videoCodec    String?    @db.VarChar(64)
+  audioCodec    String?    @db.VarChar(64)
+  resolution    String?    @db.VarChar(32)
   bitrate       Int? // kbps
-  videoDecision String?
-  audioDecision String?
-  container     String?
-  transcodeReason String? // Why the server transcoded, from Plex transcodeSession / Jellyfin TranscodingInfo.TranscodeReasons. Comma-joined when multiple. Null/Unknown for sessions recorded before this was captured.
+  videoDecision String?    @db.VarChar(32)
+  audioDecision String?    @db.VarChar(32)
+  container     String?    @db.VarChar(32)
+  transcodeReason String?  @db.VarChar(500) // Why the server transcoded, from Plex transcodeSession / Jellyfin TranscodingInfo.TranscodeReasons. Comma-joined when multiple. Null/Unknown for sessions recorded before this was captured.
 
   createdAt DateTime @default(now())
 
@@ -662,30 +662,30 @@ model PlayHistory {
 }
 
 model ActiveSession {
-  id     String @id // source:sessionKey composite
-  source String // "plex" | "jellyfin"
+  id     String @id @db.VarChar(256) // source:sessionKey composite
+  source String @db.VarChar(16) // "plex" | "jellyfin"
 
-  sessionKey String
+  sessionKey String   @db.VarChar(256)
   startedAt  DateTime
   lastSeenAt DateTime
-  state      String // "playing" | "paused" | "buffering"
+  state      String   @db.VarChar(16) // "playing" | "paused" | "buffering"
 
   // User
   mediaServerUserId String
   mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Cascade)
-  serverUsername    String
+  serverUsername    String          @db.VarChar(256)
 
   // Media
   tmdbId        Int?
-  mediaType     String?
-  title         String
-  year          String?
+  mediaType     String?  @db.VarChar(16)
+  title         String   @db.VarChar(500)
+  year          String?  @db.VarChar(16)
   seasonNumber  Int?
   episodeNumber Int?
-  episodeTitle  String?
-  sourceItemId  String?
+  episodeTitle  String?  @db.VarChar(500)
+  sourceItemId  String?  @db.VarChar(256)
 
-  posterPath String? // populated from TmdbMediaCore on session create
+  posterPath String?    @db.VarChar(500) // populated from TmdbMediaCore on session create
 
   // Progress
   progressPercent Float  @default(0)
@@ -694,19 +694,19 @@ model ActiveSession {
   durationMs      BigInt @default(0)
 
   // Playback metadata
-  platform      String?
-  player        String?
-  device        String?
-  ipAddress     String?
-  playMethod    String?
-  videoCodec    String?
-  audioCodec    String?
-  resolution    String?
+  platform      String?  @db.VarChar(256)
+  player        String?  @db.VarChar(256)
+  device        String?  @db.VarChar(256)
+  ipAddress     String?  @db.VarChar(64)
+  playMethod    String?  @db.VarChar(32)
+  videoCodec    String?  @db.VarChar(64)
+  audioCodec    String?  @db.VarChar(64)
+  resolution    String?  @db.VarChar(32)
   bitrate       Int?
-  videoDecision String?
-  audioDecision String?
-  container     String?
-  transcodeReason String?
+  videoDecision String?  @db.VarChar(32)
+  audioDecision String?  @db.VarChar(32)
+  container     String?  @db.VarChar(32)
+  transcodeReason String? @db.VarChar(500)
 
   @@unique([source, sessionKey])
   @@index([source])
@@ -716,16 +716,16 @@ model ActiveSession {
 // Cached ipinfo.io lookups, keyed by IP. `notFound=true` means the IP is bogon
 // (RFC1918, loopback, etc) or upstream returned no data — short-TTL re-checked.
 model IpLookupCache {
-  ip        String   @id
-  hostname  String?
-  city      String?
-  region    String?
-  country   String? // ISO 3166-1 alpha-2
-  postal    String?
+  ip        String   @id @db.VarChar(64)
+  hostname  String?  @db.VarChar(256)
+  city      String?  @db.VarChar(128)
+  region    String?  @db.VarChar(128)
+  country   String?  @db.VarChar(8) // ISO 3166-1 alpha-2
+  postal    String?  @db.VarChar(32)
   latitude  Float?
   longitude Float?
-  timezone  String?
-  org       String? // e.g. "AS7018 AT&T Enterprises, LLC"
+  timezone  String?  @db.VarChar(64)
+  org       String?  @db.VarChar(256) // e.g. "AS7018 AT&T Enterprises, LLC"
   notFound  Boolean  @default(false)
   fetchedAt DateTime @default(now())
 
@@ -833,7 +833,7 @@ enum IssueStatus {
 }
 
 model WebhookReplay {
-  digest    String   @id
+  digest    String   @id @db.VarChar(64)
   expiresAt DateTime
 
   @@index([expiresAt])
