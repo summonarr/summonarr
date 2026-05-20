@@ -79,7 +79,24 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     return;
   }
 
-  const raw: RawItem = await res.json();
+  // Read as text first so we can log a diagnostic snippet if JSON parsing fails — `await res.json()`
+  // throws a SyntaxError whose message renders non-printable leading bytes invisibly ("Unexpected
+  // token '', \"\"..."), making the failure mode impossible to diagnose from the log alone.
+  const bodyText = await res.text();
+  let raw: RawItem;
+  try {
+    raw = JSON.parse(bodyText) as RawItem;
+  } catch (err) {
+    const head = bodyText.slice(0, 80);
+    const hex = Buffer.from(bodyText.slice(0, 16), "utf-8").toString("hex");
+    console.warn(
+      `[prewarm] TMDB ${type}:${tmdbId} JSON.parse failed (len=${bodyText.length}, ` +
+      `ce=${res.headers.get("content-encoding") ?? "none"}, ` +
+      `ct=${res.headers.get("content-type") ?? "none"}, head=${JSON.stringify(head)}, hex=${hex}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return;
+  }
   const rawDate = mediaType === "MOVIE" ? raw.release_date : raw.first_air_date;
 
   const seasons = mediaType === "TV"
