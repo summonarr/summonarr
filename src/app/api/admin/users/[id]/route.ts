@@ -101,6 +101,13 @@ export const PATCH = withAdmin(async (
     return NextResponse.json({ id, [notifKey]: body[notifKey] });
   }
 
+  // If we reached here, none of the typed-field branches (mediaServer/autoApprove/quotaExempt/notif*)
+  // matched. That means the caller either sent {} or only unrecognized keys. Surface that explicitly
+  // rather than falling through to the role validator (which would return a misleading "role must be
+  // …" for a body that had nothing to do with roles).
+  if (body.role === undefined) {
+    return NextResponse.json({ error: "No recognized fields in PATCH body" }, { status: 400 });
+  }
   if (body.role !== "ADMIN" && body.role !== "USER" && body.role !== "ISSUE_ADMIN") {
     return NextResponse.json({ error: "role must be ADMIN, ISSUE_ADMIN, or USER" }, { status: 400 });
   }
