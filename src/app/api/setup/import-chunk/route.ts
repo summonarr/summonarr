@@ -22,8 +22,18 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
 async function gate(): Promise<NextResponse | { password: string }> {
-  const userCount = await prisma.user.count();
-  if (userCount > 0) {
+  // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Mirroring the
+  // setup/import gate guarantees a racing register can't sneak between the freshness check and
+  // the eventual processBackupImport on the final chunk. processBackupImport re-takes the lock
+  // and re-checks the invariant for full safety; this gate provides fast-fail UX so a chunked
+  // uploader doesn't buffer hundreds of megabytes against an already-set-up server.
+  const closed = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+    const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
+    const userCount = await tx.user.count();
+    return setupCompleted !== null || userCount > 0;
+  });
+  if (closed) {
     return NextResponse.json(
       { error: "Setup import is only available on a fresh server with no users." },
       { status: 409 },
@@ -141,7 +151,7 @@ export async function POST(req: NextRequest) {
 
   let result;
   try {
-    result = await processBackupImport(stream, password);
+    result = await processBackupImport(stream, password, "setup");
   } finally {
     await clearSession(uploadId);
   }

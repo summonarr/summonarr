@@ -57,7 +57,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Empty request body" }, { status: 400 });
   }
 
-  const result = await processBackupImport(req.body, password);
+  const result = await processBackupImport(req.body, password, "setup");
 
   if (!result.ok) {
     if (result.errors) {
