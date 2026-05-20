@@ -37,7 +37,16 @@ export default function PlexDonePage() {
     }
 
     sessionStorage.removeItem("plex-redirect-auth");
-    const auth: RedirectAuth = JSON.parse(stored);
+    let auth: RedirectAuth;
+    try {
+      auth = JSON.parse(stored) as RedirectAuth;
+    } catch {
+      // Corrupted/tampered sessionStorage value would otherwise throw here and leave the user
+      // stuck on the loading spinner with no recovery path. Fall back to /login the same way the
+      // missing-key branch above does.
+      window.location.replace("/login");
+      return;
+    }
 
     // CSRF: state written to sessionStorage before redirect and compared after return.
     // Reject if state is missing from either side — an absent stored state means the

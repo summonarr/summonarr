@@ -11,6 +11,7 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 
@@ -725,9 +726,11 @@ async function handleComponent(interaction: any): Promise<void> {
       const adminName = adminUser.name ?? adminUser.email;
 
       if (action === "admin_approve") {
+        // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync orchestrator's
+        // 90s "not yet downloading" follow-up notifier fires for Discord-button approvals too.
         const claimed = await prisma.mediaRequest.updateMany({
           where: { id: requestId, status: "PENDING" },
-          data: { status: "APPROVED" },
+          data: { status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
         });
         if (claimed.count === 0) {
           const embed: Record<string, unknown> = {
@@ -749,9 +752,19 @@ async function handleComponent(interaction: any): Promise<void> {
           }
         } catch (err) {
           console.error("[interactions] admin_approve arr push failed:", err);
-          await prisma.mediaRequest.update({ where: { id: requestId }, data: { status: "PENDING" } });
+          await prisma.mediaRequest.update({ where: { id: requestId }, data: { status: "PENDING", pendingNotifyAt: null } });
           arrFailed = true;
         }
+        // Audit the Discord-driven approval the same way the HTTP /api/requests/[id] PATCH path does.
+        // Without this, an admin clicking "Approve" in Discord leaves no trace in the audit log.
+        void logAudit({
+          userId: adminUser.id,
+          userName: adminName,
+          action: "REQUEST_APPROVE",
+          target: `request:${request.id}`,
+          details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed },
+          provider: "discord",
+        });
         void notifyUserRequestApproved(request.requestedBy, request.title, request.mediaType);
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
@@ -778,6 +791,14 @@ async function handleComponent(interaction: any): Promise<void> {
           await editOriginal(appId, token, { embeds: [embed], components: [] });
           return;
         }
+        void logAudit({
+          userId: adminUser.id,
+          userName: adminName,
+          action: "REQUEST_DECLINE",
+          target: `request:${request.id}`,
+          details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord" },
+          provider: "discord",
+        });
         void notifyUserRequestDeclined(request.requestedBy, request.title, request.mediaType);
         const embed: Record<string, unknown> = {
           color: 0xED4245,

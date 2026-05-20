@@ -604,7 +604,11 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
   let currentDate = "";
 
   for (const log of logs) {
-    const dateStr = new Date(log.createdAt).toDateString();
+    // Bucket by UTC ISO date so server-rendered (server TZ) and client-rendered (browser TZ)
+    // group structures always agree. The previous toDateString() bucketing produced different
+    // group boundaries between SSR and hydration whenever a row landed near midnight in either
+    // TZ, triggering React #418 hydration mismatches on the keyed group divs.
+    const dateStr = log.createdAt.slice(0, 10);
     if (dateStr !== currentDate) {
       currentDate = dateStr;
       groups.push({ date: log.createdAt, logs: [] });

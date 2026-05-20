@@ -62,10 +62,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     create: { userId: session.user.id, discordId, code, expiresAt },
   });
 
-  const stubUser = alreadyLinked?.email.endsWith("@discord.local") ? alreadyLinked : null;
-  const pendingCount = stubUser
-    ? await prisma.mediaRequest.count({ where: { requestedBy: stubUser.id } })
-    : 0;
+  // Note: do NOT return a pendingCount for the stub user here. Returning it pre-confirmation lets
+  // any authenticated caller probe arbitrary Discord snowflakes for shadow-account activity counts
+  // (an enumeration oracle), since the response leaks information about a target the caller has
+  // not yet proven control of. The confirm-merge endpoint returns `migrated` post-verification,
+  // which conveys the same UX information only to a verified owner of the Discord account.
 
   const botToken = botTokenRow.value;
   try {
@@ -104,5 +105,5 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  return NextResponse.json({ ok: true, pendingCount });
+  return NextResponse.json({ ok: true });
 });

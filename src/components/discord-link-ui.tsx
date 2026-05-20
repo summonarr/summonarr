@@ -86,7 +86,6 @@ function WebMergeFlow() {
   const [step, setStep] = useState<MergeStep>("idle");
   const [discordId, setDiscordId] = useState("");
   const [code, setCode] = useState("");
-  const [pendingCount, setPendingCount] = useState(0);
   const [migrated, setMigrated] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +101,6 @@ function WebMergeFlow() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to send code");
-      setPendingCount(data.pendingCount ?? 0);
       setStep("code-sent");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -183,11 +181,6 @@ function WebMergeFlow() {
         <>
           <div className="rounded-md bg-zinc-800 border border-zinc-700 px-4 py-3 text-sm text-zinc-300 space-y-1">
             <p>A 6-digit code was sent to your Discord DMs.</p>
-            {pendingCount > 0 && (
-              <p className="text-indigo-400">
-                {pendingCount} existing Discord request{pendingCount !== 1 ? "s" : ""} will be merged into your account.
-              </p>
-            )}
           </div>
           <div className="flex gap-2">
             <input
