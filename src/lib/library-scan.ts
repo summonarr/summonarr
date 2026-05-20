@@ -34,7 +34,6 @@ const inFlight = new Map<ScanMediaType, Promise<void>>();
 export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): Promise<void> {
   const running = inFlight.get(mediaType);
   if (running) {
-    console.warn(`[library-scan] ${mediaType} scan already in flight, awaiting`);
     return running;
   }
 
@@ -51,7 +50,6 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): 
     } else if (tmdbId !== undefined) {
       existing.tmdbId = tmdbId;
     }
-    console.warn(`[library-scan] ${mediaType} debounced, firing in ${SCAN_DEBOUNCE_MS}ms`);
     return existing.promise;
   }
 
@@ -67,7 +65,6 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): 
     tmdbId,
   };
   pending.set(mediaType, entry);
-  console.warn(`[library-scan] ${mediaType} scheduled, firing in ${SCAN_DEBOUNCE_MS}ms`);
   return promise;
 }
 
@@ -128,10 +125,6 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
   const plexConfigured = !!(plexUrlRow?.value && plexTokenRow?.value);
   const jellyfinConfigured = !!(jellyfinUrlRow?.value && jellyfinKeyRow?.value);
 
-  console.warn(
-    `[library-scan] ${mediaType} start plex=${plexConfigured ? "yes" : "no"} jellyfin=${jellyfinConfigured ? "yes" : "no"}`,
-  );
-
   if (!plexConfigured && !jellyfinConfigured) {
     console.warn(`[library-scan] ${mediaType}: no backends configured, skipping`);
     return;
@@ -153,7 +146,6 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
           return;
         }
         await Promise.all(targets.map((s) => refreshPlexSection(serverUrl, token, s.key)));
-        console.warn(`[library-scan] plex ${mediaType} triggered sections=${targets.length}`);
       })().catch((err) => console.error(`[library-scan] plex ${mediaType}:`, err)),
     );
   }
@@ -162,9 +154,9 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
     const baseUrl = jellyfinUrlRow!.value!;
     const apiKey = jellyfinKeyRow!.value!;
     jobs.push(
-      refreshJellyfinLibrary(baseUrl, apiKey)
-        .then(() => console.warn(`[library-scan] jellyfin ${mediaType} triggered`))
-        .catch((err) => console.error(`[library-scan] jellyfin ${mediaType}:`, err)),
+      refreshJellyfinLibrary(baseUrl, apiKey).catch((err) =>
+        console.error(`[library-scan] jellyfin ${mediaType}:`, err),
+      ),
     );
   }
 
