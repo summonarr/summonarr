@@ -69,31 +69,44 @@ function resolveFromAddress(cfg: EmailConfig): string {
   return safeHeader(cfg.smtpFrom || cfg.smtpUser || "summonarr@localhost");
 }
 
-async function assertSafeSmtpHost(host: string): Promise<void> {
+// Resolves `host`, validates every address, and returns one to use as the connect target.
+// We hand the validated IP literal to nodemailer (instead of the hostname) so a malicious DNS
+// can't swap the answer between our pre-flight check and nodemailer's own connect-time lookup.
+async function resolveSafeSmtpHost(host: string): Promise<{ address: string; family: 4 | 6 }> {
   if (isIP(host)) {
     if (!isSafeAddrForAdmin(host)) {
       throw new Error(`Refusing SMTP host ${host} — address is not allowed`);
     }
-    return;
+    return { address: host, family: isIP(host) === 6 ? 6 : 4 };
   }
   const addrs = await dns.lookup(host, { all: true });
+  if (addrs.length === 0) {
+    throw new Error(`Refusing SMTP host ${host} — DNS returned no addresses`);
+  }
   for (const a of addrs) {
     if (!isSafeAddrForAdmin(a.address)) {
       throw new Error(`Refusing SMTP host ${host} — resolves to ${a.address} which is not allowed`);
     }
   }
+  const first = addrs[0];
+  return { address: first.address, family: first.family === 6 ? 6 : 4 };
 }
 
 async function createTransport(cfg: EmailConfig) {
   if (!cfg.smtpHost) throw new Error("SMTP host not configured");
-  await assertSafeSmtpHost(cfg.smtpHost);
+  const resolved = await resolveSafeSmtpHost(cfg.smtpHost);
   const port = parseInt(cfg.smtpPort ?? "587", 10);
+  const isLocalhost = /^localhost$/i.test(cfg.smtpHost);
   return nodemailer.createTransport({
-    host: cfg.smtpHost,
+    host: resolved.address,
     port,
     secure: port === 465,
     // requireTLS enforces STARTTLS on port 587 but must be skipped for localhost (plaintext dev/test relay)
-    requireTLS: !cfg.smtpHost?.match(/^localhost$/i) && port === 587,
+    requireTLS: !isLocalhost && port === 587,
+    // Hand TLS the original hostname for SNI + certificate-name validation, while the TCP layer
+    // connects to the validated IP. This closes the DNS-rebind window between resolveSafeSmtpHost
+    // and nodemailer's connect-time DNS lookup.
+    tls: { servername: cfg.smtpHost },
     auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPassword ?? "" } : undefined,
   });
 }

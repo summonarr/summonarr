@@ -690,9 +690,11 @@ export async function getPlexAccounts(
   const accounts: PlexAccountInfo[] = [];
 
   try {
-    // The server owner doesn't appear in the shared-users list, so fetch separately and assign a synthetic id of "1"
+    // The server owner doesn't appear in the shared-users list — fetch separately and use the real
+    // Plex account id as the provider-subject. A synthetic id would later get bound to User.plexUserId
+    // by the backfill and break (provider, sub)-keyed sign-in for the owner.
     const owner = await getPlexUser(adminToken);
-    accounts.push({ id: "1", name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true });
+    accounts.push({ id: owner.id, name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true });
   } catch (err) {
     console.warn("[plex] Failed to fetch server owner info:", err instanceof Error ? err.message : String(err));
   }

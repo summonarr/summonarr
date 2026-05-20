@@ -587,12 +587,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const headers = (req as Request).headers as Headers;
         const ip = getClientIp(headers);
         const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
-        const rateKey = ip === "unknown" ? "login-ip:unknown" : `login-ip:${ip}`;
-        const rateMax  = ip === "unknown" ? 5 : 20;
         const email = normalizeEmail(credentials.email as string);
 
+        // When TRUST_PROXY is unset (single-host deployments behind no reverse proxy), getClientIp
+        // returns the literal "unknown" — keying a single `login-ip:unknown` bucket would mean five
+        // typos from any one client locks out the whole instance for 5 minutes. Fall back to a
+        // per-email bucket so the attack surface is limited to the targeted account.
+        const emailHash = hashAuditEmail(email);
+        const rateKey = ip === "unknown" ? `login-email:${emailHash}` : `login-ip:${ip}`;
+        const rateMax  = ip === "unknown" ? 10 : 20;
+
         if (!checkRateLimit(rateKey, rateMax, 5 * 60 * 1000)) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash: hashAuditEmail(email) } });
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
           return null;
         }
 
@@ -602,7 +608,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const valid = await bcrypt.compare(credentials.password as string, hash);
 
         if (!valid || !user) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash: hashAuditEmail(email) } });
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
           return null;
         }
 
