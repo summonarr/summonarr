@@ -211,10 +211,20 @@ async function doFetch(
 
   if (res.body) {
     const limited = limitResponseBody(res.body, maxResponseBytes, targetUrl);
+    // Node 22's fetch transparently decompresses gzip/deflate/br responses — `res.body` already
+    // emits the decompressed bytes. But `res.headers` still carries the upstream Content-Encoding
+    // and the original (compressed) Content-Length. If we copy those headers verbatim onto the
+    // re-wrapped Response, downstream consumers can be misled into decompressing already-
+    // decompressed bytes (Response.json() then JSON.parses the gzip magic header and throws
+    // "Unexpected token '...' is not valid JSON"). Strip both headers so the new Response's
+    // metadata accurately describes its own body.
+    const sanitizedHeaders = new Headers(res.headers);
+    sanitizedHeaders.delete("content-encoding");
+    sanitizedHeaders.delete("content-length");
     return new Response(limited, {
       status: res.status,
       statusText: res.statusText,
-      headers: res.headers,
+      headers: sanitizedHeaders,
     });
   }
 
