@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { Popover } from "@base-ui/react/popover";
 import { ChevronDown, Globe, Loader2, MapPin, Network } from "lucide-react";
 
 type Lookup = {
@@ -37,8 +38,7 @@ export function IpInfo({ ip, inline = false }: Props) {
   });
   const fetchedRef = useRef(false);
 
-  function toggle() {
-    const next = !open;
+  function handleOpenChange(next: boolean) {
     setOpen(next);
     if (!next || fetchedRef.current || cache.has(ip)) return;
     fetchedRef.current = true;
@@ -62,72 +62,69 @@ export function IpInfo({ ip, inline = false }: Props) {
   }
 
   return (
-    <div className={inline ? "inline-flex flex-col" : "w-full"}>
-      <button
-        type="button"
-        onClick={toggle}
-        className="inline-flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors text-sm tabular-nums font-mono"
-        aria-expanded={open}
+    <Popover.Root open={open} onOpenChange={handleOpenChange}>
+      <Popover.Trigger
+        className={`${inline ? "inline-flex" : "flex"} items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors text-sm tabular-nums font-mono outline-none focus-visible:text-zinc-200`}
       >
         <Globe className="w-3.5 h-3.5 text-zinc-500" />
         <span>{ip}</span>
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+      </Popover.Trigger>
 
-      {open && (
-        <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-900/60 p-3 text-xs space-y-2 max-w-xs">
-          {loading && (
-            <div className="flex items-center gap-1.5 text-zinc-400">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span>Looking up…</span>
+      <Popover.Portal>
+        <Popover.Positioner side="bottom" align="start" sideOffset={6} className="isolate z-50 outline-none">
+          <Popover.Popup className="z-50 w-72 max-w-[calc(100vw-1rem)] rounded-md border border-zinc-800 bg-zinc-900/95 backdrop-blur p-3 text-xs shadow-lg ring-1 ring-foreground/10 origin-(--transform-origin) data-[side=bottom]:slide-in-from-top-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95 duration-100 outline-none">
+            <div className="space-y-2">
+              {loading && (
+                <div className="flex items-center gap-1.5 text-zinc-400">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Looking up…</span>
+                </div>
+              )}
+
+              {!loading && error && <div className="text-zinc-500">{error}</div>}
+
+              {!loading && !error && data && data.bogon && (
+                <div className="text-zinc-500">Local / private network — no public lookup.</div>
+              )}
+
+              {!loading && !error && data && !data.bogon && (
+                <>
+                  {(data.city || data.region || data.country) && (
+                    <div className="flex items-start gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-zinc-500 mt-0.5 shrink-0" />
+                      <div className="text-zinc-300 break-words">
+                        {[data.city, data.region, data.country].filter(Boolean).join(", ")}
+                        {data.postal && <span className="text-zinc-500"> · {data.postal}</span>}
+                      </div>
+                    </div>
+                  )}
+                  {data.org && (
+                    <div className="flex items-start gap-1.5">
+                      <Network className="w-3.5 h-3.5 text-zinc-500 mt-0.5 shrink-0" />
+                      <span className="text-zinc-300 break-words">{data.org}</span>
+                    </div>
+                  )}
+                  {data.hostname && (
+                    <div className="text-zinc-500 break-all">Host: {data.hostname}</div>
+                  )}
+                  {data.timezone && <div className="text-zinc-500">TZ: {data.timezone}</div>}
+                  {data.latitude != null && data.longitude != null && (
+                    <a
+                      href={`https://www.openstreetmap.org/?mlat=${data.latitude}&mlon=${data.longitude}&zoom=10`}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="inline-block text-indigo-400 hover:text-indigo-300 tabular-nums"
+                    >
+                      {data.latitude.toFixed(3)}, {data.longitude.toFixed(3)} ↗
+                    </a>
+                  )}
+                </>
+              )}
             </div>
-          )}
-
-          {!loading && error && (
-            <div className="text-zinc-500">{error}</div>
-          )}
-
-          {!loading && !error && data && data.bogon && (
-            <div className="text-zinc-500">Local / private network — no public lookup.</div>
-          )}
-
-          {!loading && !error && data && !data.bogon && (
-            <>
-              {(data.city || data.region || data.country) && (
-                <div className="flex items-start gap-1.5">
-                  <MapPin className="w-3.5 h-3.5 text-zinc-500 mt-0.5 shrink-0" />
-                  <div className="text-zinc-300">
-                    {[data.city, data.region, data.country].filter(Boolean).join(", ")}
-                    {data.postal && <span className="text-zinc-500"> · {data.postal}</span>}
-                  </div>
-                </div>
-              )}
-              {data.org && (
-                <div className="flex items-start gap-1.5">
-                  <Network className="w-3.5 h-3.5 text-zinc-500 mt-0.5 shrink-0" />
-                  <span className="text-zinc-300">{data.org}</span>
-                </div>
-              )}
-              {data.hostname && (
-                <div className="text-zinc-500 truncate">Host: {data.hostname}</div>
-              )}
-              {data.timezone && (
-                <div className="text-zinc-500">TZ: {data.timezone}</div>
-              )}
-              {data.latitude != null && data.longitude != null && (
-                <a
-                  href={`https://www.openstreetmap.org/?mlat=${data.latitude}&mlon=${data.longitude}&zoom=10`}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  className="inline-block text-indigo-400 hover:text-indigo-300 tabular-nums"
-                >
-                  {data.latitude.toFixed(3)}, {data.longitude.toFixed(3)} ↗
-                </a>
-              )}
-            </>
-          )}
-        </div>
-      )}
-    </div>
+          </Popover.Popup>
+        </Popover.Positioner>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
