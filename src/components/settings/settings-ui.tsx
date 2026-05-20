@@ -541,41 +541,15 @@ function WebhookSecretField({
 
 export function WebhookSecretForm({
   initialSecret,
-  initialPlexSecret,
-  initialJellyfinSecret,
   initialSonarrSecret,
   initialRadarrSecret,
 }: {
   initialSecret: string;
-  initialPlexSecret?: string;
-  initialJellyfinSecret?: string;
   initialSonarrSecret?: string;
   initialRadarrSecret?: string;
 }) {
   return (
     <div className="space-y-6">
-      <WebhookSecretField
-        id="webhook-secret-plex"
-        label="Plex webhook secret"
-        payloadKey="plexWebhookSecret"
-        initialSecret={initialPlexSecret ?? ""}
-        helpText={
-          <>
-            Used by the Plex webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
-      />
-      <WebhookSecretField
-        id="webhook-secret-jellyfin"
-        label="Jellyfin webhook secret"
-        payloadKey="jellyfinWebhookSecret"
-        initialSecret={initialJellyfinSecret ?? ""}
-        helpText={
-          <>
-            Used by the Jellyfin webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
-      />
       <WebhookSecretField
         id="webhook-secret-sonarr"
         label="Sonarr webhook secret"

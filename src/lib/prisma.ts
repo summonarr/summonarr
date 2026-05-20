@@ -15,8 +15,6 @@ const SENSITIVE_KEYS = new Set<string>([
   "jellyfinApiKey",
   "vapidPrivateKey",
   "webhookSecret",
-  "plexWebhookSecret",
-  "jellyfinWebhookSecret",
   "sonarrWebhookSecret",
   "radarrWebhookSecret",
   "discordBotToken",
