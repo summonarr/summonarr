@@ -37,6 +37,11 @@ export async function POST(request: NextRequest) {
       if (episodes.length > 0) {
         await prisma.$transaction(
           async (tx) => {
+            // Advisory lock 2002,1 serializes every wholesale Plex TVEpisodeCache rewrite — the
+            // orchestrator, this cron, the admin "Resync Plex" path, and sync/plex's recentOnly
+            // delete all share it. Without it, two concurrent runs can interleave delete/insert
+            // phases and leave the cache temporarily empty or with duplicate rows.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
             await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
           },
@@ -63,6 +68,8 @@ export async function POST(request: NextRequest) {
       if (episodes.length > 0) {
         await prisma.$transaction(
           async (tx) => {
+            // Advisory lock 2002,2 — Jellyfin counterpart to the Plex lock above.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
             await batchCreateMany(
               tx.tVEpisodeCache,

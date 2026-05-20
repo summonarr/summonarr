@@ -407,6 +407,9 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           if (episodes.length > 0) {
             const episodeRows = episodes.map((e) => ({ source: "plex" as const, ...e }));
             await prisma.$transaction(async (tx) => {
+              // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
+              // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
               await batchCreateMany(tx.tVEpisodeCache, episodeRows);
             }, { timeout: BATCH_TX_TIMEOUT });
@@ -454,6 +457,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           if (episodes.length > 0) {
             const episodeRows = episodes.map((e) => ({ source: "jellyfin" as const, ...e }));
             await prisma.$transaction(async (tx) => {
+              // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
               await batchCreateMany(tx.tVEpisodeCache, episodeRows);
             }, { timeout: BATCH_TX_TIMEOUT });

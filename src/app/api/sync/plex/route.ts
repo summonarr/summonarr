@@ -54,6 +54,9 @@ export async function POST(request: NextRequest) {
     .then(async (episodes) => {
       if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
+        // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
+        // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
         await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
       }, { timeout: BATCH_TX_TIMEOUT });

@@ -66,6 +66,10 @@ export async function POST(request: NextRequest) {
     .then(async (episodes) => {
       if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
+        // Advisory lock 2002,2 — Jellyfin TVEpisodeCache coordination. Shared with
+        // /api/sync/route and /api/sync/tv-episodes so a recentOnly tmdbId-scoped delete can't
+        // be interleaved with a wholesale rewrite from another runner.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
         if (episodeRecentOnly) {
           if (tmdbIdsBeingReplaced.length > 0) {
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: { in: tmdbIdsBeingReplaced } } });
