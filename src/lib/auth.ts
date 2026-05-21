@@ -1,6 +1,6 @@
 import NextAuth, { type Session } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { PrismaAdapter } from "@auth/prisma-adapter";
+import { prismaAuthAdapter } from "@/lib/auth-adapter";
 import { prisma } from "@/lib/prisma";
 import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
@@ -468,7 +468,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   // (account.create/update/upsert encrypt; findUnique/findFirst/findMany decrypt). Wrapping the
   // adapter with a second encrypt-on-linkAccount layer produced double-encrypted rows — see
   // guardrail #7a in CLAUDE.md.
-  adapter: PrismaAdapter(prisma),
+  adapter: prismaAuthAdapter(prisma),
   callbacks: {
     ...authConfig.callbacks,
     async jwt(params) {

@@ -14,7 +14,6 @@
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {
-    "@auth/prisma-adapter": "^2.11.2",
     "@base-ui/react": "^1.5.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
