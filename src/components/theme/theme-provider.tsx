@@ -72,7 +72,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const t = document.documentElement.getAttribute("data-theme");
     const a = document.documentElement.getAttribute("data-accent");
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (t === "light" || t === "dark") setThemeState(t);
     if (a && (ACCENTS as readonly string[]).includes(a)) {
       setAccentState(a as Accent);

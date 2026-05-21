@@ -21,7 +21,6 @@ export function MotdModal({ title, body }: MotdModalProps) {
   useEffect(() => {
     if (!body) return;
     if (sessionStorage.getItem(SESSION_KEY)) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setVisible(true);
   }, [body]);
 

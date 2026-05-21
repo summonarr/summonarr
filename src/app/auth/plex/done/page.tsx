@@ -28,43 +28,6 @@ export default function PlexDonePage() {
   const [message, setMessage] = useState("Completing Plex sign-in…");
   const searchParams = useSearchParams();
 
-  useEffect(() => {
-    const stored = sessionStorage.getItem("plex-redirect-auth");
-
-    if (!stored) {
-      window.location.replace("/login");
-      return;
-    }
-
-    sessionStorage.removeItem("plex-redirect-auth");
-    let auth: RedirectAuth;
-    try {
-      auth = JSON.parse(stored) as RedirectAuth;
-    } catch {
-      // Corrupted/tampered sessionStorage value would otherwise throw here and leave the user
-      // stuck on the loading spinner with no recovery path. Fall back to /login the same way the
-      // missing-key branch above does.
-      window.location.replace("/login");
-      return;
-    }
-
-    // CSRF: state written to sessionStorage before redirect and compared after return.
-    // Reject if state is missing from either side — an absent stored state means the
-    // session was tampered with; an absent URL state means the redirect was forged.
-    const urlState = searchParams.get("state");
-    if (!auth.state || !urlState || urlState !== auth.state) {
-      setMessage("Sign-in failed: state mismatch. Please try again.");
-      return;
-    }
-
-    if (auth.flow === "login") {
-      completeLogin(auth);
-    } else {
-      completeSettings(auth);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   async function completeLogin(auth: LoginAuth) {
     // Poll plex.tv directly (up to 120s) until the user approves the PIN in the Plex UI
     let authToken: string | null = null;
@@ -156,6 +119,43 @@ export default function PlexDonePage() {
 
     window.location.href = "/settings";
   }
+
+  useEffect(() => {
+    const stored = sessionStorage.getItem("plex-redirect-auth");
+
+    if (!stored) {
+      window.location.replace("/login");
+      return;
+    }
+
+    sessionStorage.removeItem("plex-redirect-auth");
+    let auth: RedirectAuth;
+    try {
+      auth = JSON.parse(stored) as RedirectAuth;
+    } catch {
+      // Corrupted/tampered sessionStorage value would otherwise throw here and leave the user
+      // stuck on the loading spinner with no recovery path. Fall back to /login the same way the
+      // missing-key branch above does.
+      window.location.replace("/login");
+      return;
+    }
+
+    // CSRF: state written to sessionStorage before redirect and compared after return.
+    // Reject if state is missing from either side — an absent stored state means the
+    // session was tampered with; an absent URL state means the redirect was forged.
+    const urlState = searchParams.get("state");
+    if (!auth.state || !urlState || urlState !== auth.state) {
+      setMessage("Sign-in failed: state mismatch. Please try again.");
+      return;
+    }
+
+    if (auth.flow === "login") {
+      completeLogin(auth);
+    } else {
+      completeSettings(auth);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-950 gap-3">

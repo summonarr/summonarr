@@ -27,7 +27,6 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   }, [service]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load, refreshKey]);
 

@@ -111,6 +111,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   const [jellyfinState, setJellyfinState] = useState<ServerState>({ status: "idle" });
   const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
   const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
+  const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -255,8 +256,6 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
       setJellyfinState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
   }
-
-  const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const anyFixDone = plexState.status === "done" || jellyfinState.status === "done";
 
