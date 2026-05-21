@@ -6,6 +6,11 @@ WORKDIR /app
 RUN apk upgrade --no-cache
 
 COPY package*.json ./
+# patch-eslint-plugin-react.mjs runs from package.json's postinstall hook
+# to fix the eslint-plugin-react / ESLint 10 incompatibility. It has to
+# exist on disk before `npm ci` triggers the hook, so copy it ahead of
+# the rest of the source tree.
+COPY scripts/patch-eslint-plugin-react.mjs ./scripts/patch-eslint-plugin-react.mjs
 # BuildKit cache mount keeps ~/.npm warm across builds — repeat installs
 # pull from local cache instead of re-downloading from the registry.
 # --prefer-offline forces use of the cache when present; --no-audit/--no-fund
