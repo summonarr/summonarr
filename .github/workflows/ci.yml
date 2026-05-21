@@ -96,7 +96,7 @@ jobs:
       # regenerate it ships the image without required attribution / the
       # LGPL libvips notice. Fix: npm run licenses:generate && commit.
       - name: Third-party license notices in sync
-        run: npx tsx scripts/generate-licenses.ts --check
+        run: node scripts/generate-licenses.mts --check
 
       # Dependency audit reports CVEs in the lockfile. Kept non-blocking
       # because upstream advisory churn shouldn't gate PRs — Dependabot

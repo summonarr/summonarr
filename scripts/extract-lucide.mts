@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * Inlines the subset of lucide-react icons used by the app as plain SVG
  * components under src/components/icons/.
@@ -17,7 +17,7 @@
  *     direct *Icon aliases that already exist in the upstream package) plus
  *     IconProps / IconComponent type aliases.
  *
- * Invoke with `npx tsx scripts/extract-lucide.ts`.
+ * Invoke with `node scripts/extract-lucide.mts`.
  */
 
 import { readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";

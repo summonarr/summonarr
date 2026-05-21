@@ -8,9 +8,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "audit:deps": "tsx scripts/audit-deps.ts",
-    "audit:routes": "tsx scripts/audit-routes.ts",
-    "licenses:generate": "tsx scripts/generate-licenses.ts",
+    "audit:deps": "node scripts/audit-deps.mts",
+    "audit:routes": "node scripts/audit-routes.mts",
+    "licenses:generate": "node scripts/generate-licenses.mts",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {
@@ -31,9 +31,7 @@
     "@hono/node-server": "^1.19.14",
     "brace-expansion@5": "^5.0.6",
     "hono": "^4.12.14",
-    "ip-address": "^10.1.1",
-    "postcss": "^8.5.10",
-    "svix": "^1.92.2"
+    "postcss": "^8.5.10"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.0",
@@ -45,7 +43,6 @@
     "eslint-config-next": "16.2.6",
     "eslint-plugin-react-hooks": "^7.1.1",
     "tailwindcss": "^4.3.0",
-    "tsx": "^4.22.3",
     "typescript": "^6"
   }
 }
