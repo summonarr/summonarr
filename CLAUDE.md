@@ -26,7 +26,7 @@ npm run lint        # eslint
 npm run audit:deps  # custom TypeScript dep audit
 ```
 
-There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There is **no** test suite (no vitest/jest/playwright configs, no `*.test.ts`). Do not claim "tests pass."
+There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There is **no** unit test suite (no vitest/jest, no `*.test.ts`) — do not claim "unit tests pass." CI does run a headless E2E route crawl ([.github/workflows/e2e.yml](.github/workflows/e2e.yml) → [scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)): it builds the app against a throwaway Postgres, seeds an admin via [scripts/e2e-seed.mts](scripts/e2e-seed.mts), signs in, and fails on any uncaught client error (React #418 hydration mismatches in particular — guardrail 16). It cannot run locally without the full stack; it has no Plex/Jellyfin/ARR/TMDB backends, so it gates hydration/runtime correctness only, not data-dependent behaviour.
 
 ## Directory map
 
