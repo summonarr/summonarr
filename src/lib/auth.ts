@@ -2,7 +2,7 @@ import NextAuth, { type Session } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
-import { dummyVerify, isLegacyHash, verifyAndMaybeRehash } from "@/lib/password-hash";
+import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { authConfig } from "@/lib/auth.config";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
@@ -604,9 +604,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const user = await prisma.user.findUnique({ where: { email } });
 
         let valid = false;
-        let rehashed: string | null = null;
         if (user?.passwordHash) {
-          ({ valid, rehashed } = await verifyAndMaybeRehash(credentials.password as string, user.passwordHash));
+          valid = await verifyPassword(credentials.password as string, user.passwordHash);
         } else {
           await dummyVerify();
         }
@@ -614,10 +613,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (!valid || !user) {
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
           return null;
-        }
-
-        if (rehashed && isLegacyHash(user.passwordHash ?? "")) {
-          await prisma.user.update({ where: { id: user.id }, data: { passwordHash: rehashed } }).catch(() => {});
         }
 
         const device = buildDeviceMeta(headers);
