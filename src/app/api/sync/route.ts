@@ -332,25 +332,6 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     inSonarrSet = new Set([...inSonarrAvail.map((r) => r.tmdbId), ...inSonarrWanted.map((r) => r.tmdbId)]);
   }
 
-  // C3: collapse the per-request revert loop into a single updateMany.
-  const toRevert = available.filter((req) => {
-    // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
-    // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
-    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
-    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
-    const stillInLibrary = req.mediaType === "MOVIE"
-      ? inRadarrSet.has(req.tmdbId)
-      : inSonarrSet.has(req.tmdbId);
-    return !stillInLibrary;
-  });
-  if (toRevert.length > 0) {
-    const result = await prisma.mediaRequest.updateMany({
-      where: { id: { in: toRevert.map((r) => r.id) } },
-      data: { status: "APPROVED" },
-    });
-    reverted = result.count;
-  }
-
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
@@ -475,6 +456,35 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     if (result.status === "rejected") {
       console.error("[sync] Unexpected top-level sync rejection:", result.reason);
     }
+  }
+
+  // Demote AVAILABLE requests that have dropped out of *both* the *arr caches and the
+  // Plex/Jellyfin library caches. Consulting the library caches here — not just *arr — is
+  // what stops a request present in Plex but absent from Radarr from being reverted to
+  // APPROVED and then immediately re-marked AVAILABLE by markLibraryRequests below: a
+  // same-run flap that rewrote availableAt and inflated the reverted counter every tick.
+  // Runs after the library sync so the maps are populated; library presence is only trusted
+  // when that source synced successfully (an empty map from a failed/disabled source falls
+  // back to the *arr-only decision).
+  const toRevert = available.filter((req) => {
+    // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
+    // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
+    const inArr = req.mediaType === "MOVIE"
+      ? inRadarrSet.has(req.tmdbId)
+      : inSonarrSet.has(req.tmdbId);
+    const inLibrary = req.mediaType === "MOVIE"
+      ? plexMovieIds.has(req.tmdbId) || jfMovieIds.has(req.tmdbId)
+      : plexTvIds.has(req.tmdbId)    || jfTvIds.has(req.tmdbId);
+    return !inArr && !inLibrary;
+  });
+  if (toRevert.length > 0) {
+    const result = await prisma.mediaRequest.updateMany({
+      where: { id: { in: toRevert.map((r) => r.id) } },
+      data: { status: "APPROVED" },
+    });
+    reverted = result.count;
   }
 
   // Snapshot taken once after both library writes complete; both marking passes share this exact set.
