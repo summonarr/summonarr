@@ -154,14 +154,16 @@ export function IssueThread({ issueId, initialCount, variant = "inline" }: Issue
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Write a message… (⌘↵ to send)"
+          aria-label="Message"
           maxLength={2000}
           rows={2}
           disabled={sending || loadState !== "ready"}
-          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 disabled:opacity-50"
+          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
         <Button
           type="submit"
           size="sm"
+          aria-label="Send message"
           disabled={!body.trim() || sending || loadState !== "ready"}
           className="h-9 px-3 shrink-0 bg-indigo-600 hover:bg-indigo-500 gap-1.5"
         >

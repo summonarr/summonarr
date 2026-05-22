@@ -309,8 +309,9 @@ function AuditLogFilters({
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1.5">
-          <label className="text-xs text-zinc-500">From</label>
+          <label htmlFor="audit-date-from" className="text-xs text-zinc-500">From</label>
           <input
+            id="audit-date-from"
             type="date"
             value={currentDateFrom}
             onChange={(e) => navigate({ dateFrom: e.target.value })}
@@ -318,8 +319,9 @@ function AuditLogFilters({
           />
         </div>
         <div className="flex items-center gap-1.5">
-          <label className="text-xs text-zinc-500">To</label>
+          <label htmlFor="audit-date-to" className="text-xs text-zinc-500">To</label>
           <input
+            id="audit-date-to"
             type="date"
             value={currentDateTo}
             onChange={(e) => navigate({ dateTo: e.target.value })}
@@ -328,12 +330,14 @@ function AuditLogFilters({
         </div>
         <Input
           placeholder="Search by user..."
+          aria-label="Search by user"
           value={userInput}
           onChange={(e) => setUserInput(e.target.value)}
           className="w-40 !h-[30px] !text-xs bg-zinc-800 border-zinc-700"
         />
         <Input
           placeholder="Search by target..."
+          aria-label="Search by target"
           value={targetInput}
           onChange={(e) => setTargetInput(e.target.value)}
           className="w-40 !h-[30px] !text-xs bg-zinc-800 border-zinc-700"

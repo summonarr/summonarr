@@ -315,7 +315,8 @@ export function IssueActions({
             value={resolution}
             onChange={(e) => setResolution(e.target.value)}
             placeholder="Resolution note (optional)"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-44"
+            aria-label="Resolution note"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
           />
           <Button
             size="sm"
@@ -396,7 +397,8 @@ export function IssueActions({
                       value={releaseFilter}
                       onChange={(e) => setReleaseFilter(e.target.value)}
                       placeholder="Filter releases…"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-9 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60"
+                      aria-label="Filter releases"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-9 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60 focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     {releaseFilter && (
                       <button

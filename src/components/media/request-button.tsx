@@ -223,9 +223,10 @@ export function RequestButton({
                 value={note}
                 onChange={(e) => setNote(e.target.value.slice(0, 500))}
                 placeholder="Add a note for the admin (optional)"
+                aria-label="Request note"
                 rows={3}
                 autoFocus
-                className="w-full resize-none focus:outline-none"
+                className="w-full resize-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 style={{
                   padding: "8px 12px",
                   fontSize: 13,

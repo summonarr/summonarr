@@ -292,6 +292,7 @@ export function CastSection({ cast }: CastSectionProps) {
               <button
                 type="button"
                 onClick={close}
+                aria-label="Close"
                 className="ds-tap rounded-full transition-colors shrink-0 inline-flex items-center justify-center"
                 style={{
                   width: 32,
