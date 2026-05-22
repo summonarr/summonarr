@@ -114,6 +114,15 @@ export async function POST(req: NextRequest) {
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
       await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId } });
+      // Backfill tvdbId on the matched request(s). A later Download webhook for the same
+      // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
+      // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
+      if (safeVdbId) {
+        await tx.mediaRequest.updateMany({
+          where: { tmdbId: safeMdbId, mediaType: "TV", tvdbId: null },
+          data: { tvdbId: safeVdbId },
+        });
+      }
     }, { timeout: 30_000 });
     if (updated.count > 0) effectiveMdbId = safeMdbId;
   }
