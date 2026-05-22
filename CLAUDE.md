@@ -26,7 +26,7 @@ npm run lint        # eslint
 npm run audit:deps  # custom TypeScript dep audit
 ```
 
-There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There is **no** test suite (no vitest/jest/playwright configs, no `*.test.ts`). Do not claim "tests pass."
+There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There is **no** unit test suite (no vitest/jest, no `*.test.ts`) — do not claim "unit tests pass." CI does run a headless E2E route crawl ([.github/workflows/e2e.yml](.github/workflows/e2e.yml) → [scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)): it builds the app against a throwaway Postgres, seeds an admin via [scripts/e2e-seed.mts](scripts/e2e-seed.mts), signs in, and fails on any uncaught client error (React #418 hydration mismatches in particular — guardrail 16). It cannot run locally without the full stack; it has no Plex/Jellyfin/ARR/TMDB backends, so it gates hydration/runtime correctness only, not data-dependent behaviour.
 
 ## Directory map
 
@@ -83,7 +83,7 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 ## Environment
 
 Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY`, `TMDB_READ_TOKEN`.
-Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`.
+Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
 
 ## Deployment
 
@@ -162,7 +162,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
       session,
     ) => { ... });
     ```
-    The handler only runs for an authorized session; `session` is always valid inside it. Keep the dynamic-route `ctx` param's `{ params: Promise<{...}> }` annotation — Next 16's build-time route-type checker needs it. Name unused params `_req`/`_ctx`/`_session`. Semantics: 401 for missing/expired session, 403 only for wrong role. `requireAuth` still exists and is what the wrappers call internally; call it directly **only** when the route legitimately can't use a wrapper — dual-auth routes that also accept a cron token (e.g. [check-schema](src/app/api/admin/check-schema/route.ts) wraps with `withAdmin` and keeps an inline `isCronAuthorized` check) and routes returning plain-text/binary/streaming responses (SSE, thumbnails: [/api/events](src/app/api/events/route.ts), [fix-match/thumb](src/app/api/admin/fix-match/thumb/route.ts), [play-history/export](src/app/api/play-history/export/route.ts)). Cron/sync routes use `isCronAuthorized`, not this. Two enforcement layers back this up: `npm run audit:routes` ([scripts/audit-routes.ts](scripts/audit-routes.ts)) fails CI if any route ships with no recognized guard (its `ROUTE_EXCEPTIONS` list documents every legitimate inline-auth/public route), and the `authorized()` callback in [src/lib/auth.config.ts](src/lib/auth.config.ts) returns a JSON 403 for any non-admin role hitting `/api/admin/*` as a defense-in-depth backstop — the per-route wrapper remains the source of truth for the exact ADMIN-vs-ISSUE_ADMIN decision, so the backstop can never wrongly deny a privileged caller.
+    The handler only runs for an authorized session; `session` is always valid inside it. Keep the dynamic-route `ctx` param's `{ params: Promise<{...}> }` annotation — Next 16's build-time route-type checker needs it. Name unused params `_req`/`_ctx`/`_session`. Semantics: 401 for missing/expired session, 403 only for wrong role. `requireAuth` still exists and is what the wrappers call internally; call it directly **only** when the route legitimately can't use a wrapper — dual-auth routes that also accept a cron token (e.g. [check-schema](src/app/api/admin/check-schema/route.ts) wraps with `withAdmin` and keeps an inline `isCronAuthorized` check) and routes returning plain-text/binary/streaming responses (SSE, thumbnails: [/api/events](src/app/api/events/route.ts), [fix-match/thumb](src/app/api/admin/fix-match/thumb/route.ts), [play-history/export](src/app/api/play-history/export/route.ts)). Cron/sync routes use `isCronAuthorized`, not this. Two enforcement layers back this up: `npm run audit:routes` ([scripts/audit-routes.mts](scripts/audit-routes.mts)) fails CI if any route ships with no recognized guard (its `ROUTE_EXCEPTIONS` list documents every legitimate inline-auth/public route), and the `authorized()` callback in [src/lib/auth.config.ts](src/lib/auth.config.ts) returns a JSON 403 for any non-admin role hitting `/api/admin/*` as a defense-in-depth backstop — the per-route wrapper remains the source of truth for the exact ADMIN-vs-ISSUE_ADMIN decision, so the backstop can never wrongly deny a privileged caller.
 
 7. **No success logs.** `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Silent success is the convention. Do not add `console.log` for happy-path events.
 
@@ -237,12 +237,12 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     Why:
     - The project is AGPL-3.0-only (`package.json` `license` field + [LICENSE](LICENSE)). The permissive deps (MIT/BSD/ISC/Apache-2.0) require their attribution notices to travel with any distribution, and `sharp`'s prebuilt libvips binaries are LGPL-3.0 and ship **no license file at all**.
     - The Docker image is built from Next.js standalone output, which traces only runtime JS and strips `node_modules` LICENSE/NOTICE files. [Dockerfile](Dockerfile) explicitly `COPY`s [LICENSE](LICENSE) + `THIRD_PARTY_LICENSES.txt` into the runner so the shipped artifact carries them.
-    - `THIRD_PARTY_LICENSES.txt` is generated from `package-lock.json` (not `npm ls` — its deduped tree hid the libvips subtree under `sharp`) by [scripts/generate-licenses.ts](scripts/generate-licenses.ts). It bundles canonical Apache-2.0 + LGPL-3.0 + GPL-3.0 text from [licenses/](licenses/) for deps that ship none.
+    - `THIRD_PARTY_LICENSES.txt` is generated from `package-lock.json` (not `npm ls` — its deduped tree hid the libvips subtree under `sharp`) by [scripts/generate-licenses.mts](scripts/generate-licenses.mts). It bundles canonical Apache-2.0 + LGPL-3.0 + GPL-3.0 text from [licenses/](licenses/) for deps that ship none.
     - **The output must be byte-identical on every OS.** Platform-gated optional binaries (lockfile entries with `os`/`cpu`/`libc`, e.g. `@img/sharp-*`) are installed by `npm ci` only for the host platform, so reading their on-disk LICENSE makes a macOS-generated file fail the Linux-CI `--check` (and vice versa — this is exactly how the check shipped broken in `dc965a1`). The generator therefore **never reads disk for gated packages** — it emits canonical text keyed off the lockfile `license` (SPDX `AND`/`OR` compounds decomposed via `canonicalFor`). Do not "optimize" this back to `readLicenseText` for gated packages, and do not key canonical lookup off the raw `CANONICAL[license]` map (it misses compounds).
 
     ```bash
     npm run licenses:generate          # after any prod dep add/remove/bump
-    npx tsx scripts/generate-licenses.ts --check   # what CI enforces (blocking)
+    node scripts/generate-licenses.mts --check   # what CI enforces (blocking)
     ```
 
     CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.

@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession, signOut } from "next-auth/react";
-import { LogOut, Bell, type LucideIcon } from "lucide-react";
+import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
 import {
   userNavItems,
   getVisibleAdminItems,
@@ -173,9 +173,26 @@ export function MobileNavDrawer({
                 paddingTop: 14,
                 borderTop: "1px solid var(--ds-border)",
                 display: "flex",
-                justifyContent: "center",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 10,
               }}
             >
+              <a
+                href="https://github.com/Summonarr/Summonarr"
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Summonarr is free software (AGPL-3.0). View the source and fork it on GitHub."
+                className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
+              >
+                <GitFork className="h-3 w-3 shrink-0" />
+                <span
+                  className="ds-mono"
+                  style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                >
+                  Fork me on GitHub
+                </span>
+              </a>
               <a
                 href="https://www.themoviedb.org"
                 target="_blank"
@@ -228,7 +245,7 @@ function NavLink({
   active: boolean;
   onClick: () => void;
 }) {
-  const Icon = item.icon as LucideIcon;
+  const Icon = item.icon as IconComponent;
   return (
     <Link
       href={item.href}

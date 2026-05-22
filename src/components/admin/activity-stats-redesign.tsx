@@ -23,9 +23,12 @@ import { KpiStrip, type Kpi } from "@/components/admin/activity-sections";
 const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 function shortDay(day: string): string {
-  return new Date(`${day}T00:00:00`).toLocaleDateString("en-US", {
+  // Parse explicitly as UTC and format in UTC so SSR (UTC) and client (local
+  // TZ) agree on the day label. Mirrors activity-calendar.tsx (guardrail 16).
+  return new Date(`${day.slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   });
 }
 

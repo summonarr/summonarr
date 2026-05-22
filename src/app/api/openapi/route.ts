@@ -1200,29 +1200,6 @@ const spec = {
       },
     },
 
-    "/webhooks/plex": {
-      post: {
-        tags: ["Webhooks"],
-        summary: "Plex media server webhook",
-        description: "Accepts `Authorization: Bearer <secret>` or `?token=<secret>`. No HMAC — timing-safe compare against stored secret.",
-        security: [],
-        parameters: [{ name: "token", in: "query", schema: { type: "string" }, description: "Webhook secret (alternative to Authorization header)" }],
-        requestBody: {
-          content: { "application/x-www-form-urlencoded": { schema: { type: "object", properties: { payload: { type: "string", description: "JSON payload from Plex" } } } } },
-        },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
-      },
-    },
-    "/webhooks/jellyfin": {
-      post: {
-        tags: ["Webhooks"],
-        summary: "Jellyfin media server webhook",
-        security: [],
-        parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
-        requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
-      },
-    },
     "/webhooks/radarr": {
       post: {
         tags: ["Webhooks"],

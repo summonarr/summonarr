@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { ExternalLink, Heart } from "lucide-react";
+import { ExternalLink, Heart } from "@/components/icons";
 import { requireFeature } from "@/lib/features";
 import { PageHeader } from "@/components/ui/design";
 

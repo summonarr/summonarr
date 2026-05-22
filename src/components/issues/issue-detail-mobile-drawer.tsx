@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Film, Tv2, X } from "lucide-react";
+import { Film, Tv2, X } from "@/components/icons";
 import {
   Drawer,
   DrawerPortal,
@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/drawer";
 import { Chip, type ChipTone } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 const STATUS_TONE: Record<string, ChipTone> = {
   OPEN: "declined",
@@ -68,6 +69,9 @@ interface Props {
 
 export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
   const router = useRouter();
+  // Gate every Date-in-render against post-mount so server-locale SSR doesn't disagree with
+  // the browser-locale hydration pass (guardrail 16 in CLAUDE.md).
+  const mounted = useHasMounted();
   const [isMobile, setIsMobile] = useState(false);
   const [stickyIssue, setStickyIssue] = useState<IssueDrawerPayload | null>(
     selectedIssue,
@@ -191,7 +195,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                         color: "var(--ds-fg-subtle)",
                       }}
                     >
-                      Reported {new Date(issue.createdAt).toLocaleDateString()}
+                      Reported {mounted ? new Date(issue.createdAt).toLocaleDateString() : ""}
                     </p>
                   </div>
                   <DrawerClose

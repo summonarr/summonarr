@@ -23,6 +23,37 @@ function unwrapV4Mapped(addr: string): string | null {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
+// Detect the IPv6 unspecified address (`::`) in any of its valid notations.
+// The previous regex `/^::?0?$/` only caught `::`, `::0`, and the bogus `:0`/`:`.
+// It missed the fully-expanded form (`0:0:0:0:0:0:0:0`), the zero-padded form
+// (`0000:0000:0000:0000:0000:0000:0000:0000`), and mixed-notation embedded IPv4
+// (`::0.0.0.0`, `::ffff:0.0.0.0`). All of these are valid representations of
+// `::` and must be blocked — letting any through means a user-controlled URL
+// can hit `0.0.0.0` (= "all local interfaces") via IPv6.
+function isUnspecifiedV6(addr: string): boolean {
+  // Reject anything with characters outside the IPv6 alphabet quickly
+  if (!/^[0-9a-f:.]+$/i.test(addr)) return false;
+
+  // Mixed notation: trailing dotted-quad embedded in IPv6 (e.g. `::0.0.0.0`)
+  // Split off the IPv4 portion and check both halves are all-zero.
+  const lastColon = addr.lastIndexOf(":");
+  if (lastColon !== -1 && /\./.test(addr.slice(lastColon + 1))) {
+    const v6Part = addr.slice(0, lastColon + 1); // includes trailing colon
+    const v4Part = addr.slice(lastColon + 1);
+    // v4 part must be 0.0.0.0
+    if (!/^0+\.0+\.0+\.0+$/.test(v4Part)) return false;
+    // v6 part must be all zeros / compressed — e.g. `::`, `::ffff:`, `0:0:0:0:0:0:`,
+    // `0:0:0:0:0:ffff:`. Strip colons and `ffff` (the IPv4-mapped marker) and zeros;
+    // anything left means it's not the unspecified address.
+    const stripped = v6Part.replace(/[:0]/g, "").toLowerCase();
+    return stripped === "" || stripped === "ffff";
+  }
+
+  // Pure IPv6 form. Strip colons; only zeros (or empty after `::`) means unspecified.
+  const stripped = addr.replace(/:/g, "");
+  return stripped === "" || /^0+$/.test(stripped);
+}
+
 function isSafeAddr(addr: string): boolean {
   // IPv4-mapped IPv6 — unwrap and recurse so IPv4 rules apply to both ::ffff:1.2.3.4 and ::ffff:0102:0304
   const v4 = unwrapV4Mapped(addr);
@@ -31,12 +62,14 @@ function isSafeAddr(addr: string): boolean {
   // Loopback
   if (/^127\./.test(addr)) return false;
   if (/^::1$/.test(addr)) return false;
-  // Unspecified / any-address — match `::` and `::0` (parses to all-zero IPv6)
+  // Unspecified / any-address
   if (/^0\./.test(addr)) return false;
-  if (/^::?0?$/.test(addr)) return false;
+  if (isUnspecifiedV6(addr)) return false;
   // Link-local (APIPA)
   if (/^fe80:/i.test(addr)) return false;
   if (/^169\.254\./.test(addr)) return false;
+  // Deprecated IPv6 site-local (fec0::/10) — still in some stacks; treat as private
+  if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
   // CGNAT shared address space (100.64/10) — also used for Docker internal ranges on some hosts
   if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) return false;
   // Multicast
@@ -64,8 +97,12 @@ export function isSafeAddrForAdmin(addr: string): boolean {
 
   if (/^169\.254\./.test(addr)) return false;
   if (/^fe80:/i.test(addr)) return false;
+  // Deprecated IPv6 site-local (fec0::/10) is treated as link-local by some
+  // stacks and could route off-LAN unexpectedly — keep it blocked even in
+  // admin mode (admins use RFC1918 or ULA for LAN servers, not fec0::/10).
+  if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
   if (/^0\./.test(addr)) return false;
-  if (/^::?0?$/.test(addr)) return false;
+  if (isUnspecifiedV6(addr)) return false;
   return true;
 }
 
@@ -131,4 +168,43 @@ export async function resolveToSafeUrl(
 ): Promise<string | null> {
   const r = await resolveToSafeUrlWithAddrs(raw, opts);
   return r ? r.url : null;
+}
+
+// Re-resolve `host` and verify (a) every currently-resolving address is still
+// safe under the chosen policy, and (b) the resolved address set has not
+// changed since `expectedAddrs` was captured. Returns true on success.
+//
+// This is the TOCTOU mitigation for the gap between the initial SSRF resolve
+// and the actual fetch() connect: `fetch()` hands the hostname to undici and
+// undici re-resolves at connect time, so a hostile DNS server can flip the
+// answer mid-request ("DNS rebinding"). We can't pin the IP at the dispatcher
+// layer without re-introducing the npm-undici-vs-Node-bundled-undici Dispatcher
+// incompatibility (see safe-fetch.ts), so we instead shrink the window to
+// milliseconds and refuse the request if the address set changed.
+//
+// The cache TTL on lookupHostCached is 5 minutes, so within that window this
+// hits the same cached answer; in the worst case (cache miss right before
+// fetch) we still see whatever undici will see milliseconds later.
+export async function verifyResolvedHost(
+  host: string,
+  expectedAddrs: readonly string[],
+  opts: ResolveSafeUrlOptions = {},
+): Promise<boolean> {
+  // Bracketed IPv6 literal — caller is responsible for unwrapping, but accept
+  // both forms defensively so callers don't have to special-case it.
+  const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+
+  const addrs = isIP(h) ? [h] : await lookupHostCached(h);
+  if (addrs.length === 0) return false;
+
+  const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
+  if (!addrs.every(check)) return false;
+
+  // Address-set equality (order-independent). A rebind from {1.2.3.4} to
+  // {1.2.3.4, 5.6.7.8} or vice-versa is just as suspicious as a full swap.
+  if (addrs.length !== expectedAddrs.length) return false;
+  const expectedSet = new Set(expectedAddrs);
+  for (const a of addrs) if (!expectedSet.has(a)) return false;
+
+  return true;
 }

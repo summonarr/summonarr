@@ -99,14 +99,26 @@ echo "Syncing database schema..."
 # Schema migration policy:
 #   1. Try `prisma db push` first. If it succeeds, done.
 #   2. If it fails because Prisma flagged data-loss warnings, inspect them.
-#      - "unique constraint covering [...]" warnings are SAFE to auto-retry:
-#        the underlying ALTER TABLE ADD UNIQUE is atomic — it fails loudly
-#        at SQL execution time if duplicates actually exist, so retrying
-#        with --accept-data-loss can't silently destroy data here.
-#        (Prisma flags these warnings whenever ANY existing rows are present
-#        in the table, even when the column is brand-new and all-NULL.)
-#      - Anything else (column drop, type narrow, etc.) is genuinely
-#        destructive. Refuse and require SUMMONARR_ACCEPT_DATA_LOSS=true.
+#      Three warning shapes are SAFE to auto-retry because the underlying
+#      Postgres operation is atomic — a real conflict fails loudly at SQL
+#      execution time, leaving the database untouched. Auto-retrying with
+#      --accept-data-loss therefore can't silently destroy data here:
+#
+#        a) "unique constraint covering the columns [...]" — ALTER TABLE
+#           ADD UNIQUE fails with 23505 if duplicates exist. (Prisma flags
+#           this whenever ANY rows are present, even on an all-NULL new
+#           column.)
+#        b) "cast from `Text` to `VarChar(N)`" — ALTER COLUMN ... TYPE
+#           varchar(N) fails with 22001 (value too long) if any row
+#           exceeds N. No silent truncation.
+#        c) "primary key for the `X` table will be changed" — fires as a
+#           side-effect when a PK column gets a varchar narrowing (Postgres
+#           rebuilds the PK index in the same transaction). When the only
+#           other warnings are (a) and (b), this is a cascade, not a
+#           standalone destructive change.
+#
+#      Anything else (column drop, table drop, enum value removal, etc.)
+#      is genuinely destructive. Refuse and require SUMMONARR_ACCEPT_DATA_LOSS=true.
 #   3. If SUMMONARR_ACCEPT_DATA_LOSS=true is set, skip the inspection and
 #      apply with --accept-data-loss directly (operator-acknowledged override).
 
@@ -126,14 +138,19 @@ else
   if [ "$push_exit" -ne 0 ] && echo "$push_output" | grep -q -- "--accept-data-loss"; then
     # Extract every "•"-prefixed warning line.
     warnings=$(echo "$push_output" | grep -E "^[[:space:]]*•")
-    # Are ANY warnings outside the safe "unique constraint covering" pattern?
-    unsafe=$(echo "$warnings" | grep -v "unique constraint covering the columns" || true)
+    # Strip the three auto-safe warning patterns. Anything left over is genuinely destructive.
+    unsafe=$(echo "$warnings" \
+      | grep -v "unique constraint covering the columns" \
+      | grep -v "will be cast from .Text. to .VarChar" \
+      | grep -v "primary key for the .* table will be changed" \
+      || true)
 
     if [ -n "$warnings" ] && [ -z "$unsafe" ]; then
       echo ""
-      echo "[entrypoint] All data-loss warnings are unique-constraint additions on existing tables."
-      echo "[entrypoint] Postgres ADD UNIQUE is atomic — if real duplicates existed it would fail"
-      echo "[entrypoint] loudly at SQL execution. Auto-retrying with --accept-data-loss."
+      echo "[entrypoint] All data-loss warnings are atomic Postgres operations (unique-constraint adds,"
+      echo "[entrypoint] text→varchar narrowing casts, or PK rebuilds cascading from those casts) —"
+      echo "[entrypoint] any real conflict would fail loudly with 23505 / 22001 and leave the DB"
+      echo "[entrypoint] unchanged. Auto-retrying with --accept-data-loss."
       node node_modules/prisma/build/index.js db push --accept-data-loss
     else
       echo ""

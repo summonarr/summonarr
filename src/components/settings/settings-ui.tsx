@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2, Copy, Check, RefreshCw, Unlink, Download, RefreshCcw, ChevronDown, ExternalLink } from "lucide-react";
+import { CheckCircle, XCircle, Loader2, Copy, Check, RefreshCw, Unlink, Download, RefreshCcw, ChevronDown, ExternalLink } from "@/components/icons";
 
 interface PlexSection {
   key: string;
@@ -541,41 +541,15 @@ function WebhookSecretField({
 
 export function WebhookSecretForm({
   initialSecret,
-  initialPlexSecret,
-  initialJellyfinSecret,
   initialSonarrSecret,
   initialRadarrSecret,
 }: {
   initialSecret: string;
-  initialPlexSecret?: string;
-  initialJellyfinSecret?: string;
   initialSonarrSecret?: string;
   initialRadarrSecret?: string;
 }) {
   return (
     <div className="space-y-6">
-      <WebhookSecretField
-        id="webhook-secret-plex"
-        label="Plex webhook secret"
-        payloadKey="plexWebhookSecret"
-        initialSecret={initialPlexSecret ?? ""}
-        helpText={
-          <>
-            Used by the Plex webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
-      />
-      <WebhookSecretField
-        id="webhook-secret-jellyfin"
-        label="Jellyfin webhook secret"
-        payloadKey="jellyfinWebhookSecret"
-        initialSecret={initialJellyfinSecret ?? ""}
-        helpText={
-          <>
-            Used by the Jellyfin webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
-      />
       <WebhookSecretField
         id="webhook-secret-sonarr"
         label="Sonarr webhook secret"
@@ -2884,6 +2858,110 @@ export function IpinfoForm({ initialApiKey }: { initialApiKey: string }) {
 type MediaSampleData = { mountPoint: string; samples: string[] };
 type ServerSamples   = { movie: MediaSampleData; tv: MediaSampleData };
 
+function applyPrefix(path: string, prefix: string): string {
+  if (!prefix) return path;
+  const p = prefix.endsWith("/") ? prefix : prefix + "/";
+  return path.startsWith(p) ? path.slice(p.length) : path;
+}
+
+function LibraryMatchMediaBlock({
+  mediaLabel, data, prefix, onChangePrefix, placeholder,
+}: {
+  mediaLabel: string; data: MediaSampleData | null;
+  prefix: string; onChangePrefix: (v: string) => void; placeholder: string;
+}) {
+  return (
+    <div className="space-y-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{mediaLabel}</p>
+
+      {data && (
+        <>
+          <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-0.5">
+            <p className="text-[10px] text-zinc-600 uppercase tracking-wide">Mount point (auto-stripped)</p>
+            <p className="text-xs text-zinc-300 font-mono">{data.mountPoint || "(none detected)"}</p>
+          </div>
+
+          <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
+            <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Sample relative paths</p>
+            {data.samples.length === 0
+              ? <p className="text-[11px] text-zinc-600 italic">No paths found</p>
+              : data.samples.map((s, i) => (
+                  <p key={i} className="text-[11px] text-zinc-400 font-mono truncate" title={s}>{s}</p>
+                ))
+            }
+          </div>
+        </>
+      )}
+
+      <div className="space-y-1">
+        <Label className="text-xs text-zinc-400">Additional prefix to strip</Label>
+        <Input
+          value={prefix}
+          onChange={(e) => onChangePrefix(e.target.value)}
+          placeholder={placeholder}
+          className="bg-zinc-800 border-zinc-700 font-mono text-sm h-8"
+        />
+      </div>
+
+      {data && prefix && (
+        <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
+          <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Preview after stripping</p>
+          {data.samples.map((s, i) => {
+            const after   = applyPrefix(s, prefix);
+            const changed = after !== s;
+            return (
+              <p key={i} className={`text-[11px] font-mono truncate ${changed ? "text-green-400" : "text-zinc-500"}`} title={after}>
+                {after}
+              </p>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LibraryMatchServerBlock({
+  label, accent, data, moviePrefix, tvPrefix,
+  onChangeMoviePrefix, onChangeTvPrefix, loading, loadError,
+}: {
+  label: string; accent: string; data: ServerSamples | null;
+  moviePrefix: string; tvPrefix: string;
+  onChangeMoviePrefix: (v: string) => void; onChangeTvPrefix: (v: string) => void;
+  loading: boolean; loadError: string;
+}) {
+  return (
+    <div className="space-y-4">
+      <p className={`text-xs font-semibold uppercase tracking-wide ${accent}`}>{label}</p>
+
+      {!data && !loading && (
+        <p className="text-xs text-zinc-600 italic">Click &quot;Load examples&quot; to see sample paths.</p>
+      )}
+      {loadError && <p className="text-xs text-red-400">{loadError}</p>}
+
+      {data && (
+        <div className="space-y-5">
+          <LibraryMatchMediaBlock
+            mediaLabel="Movies"
+            data={data.movie}
+            prefix={moviePrefix}
+            onChangePrefix={onChangeMoviePrefix}
+            placeholder="e.g. movies/"
+          />
+          <div className="border-t border-zinc-800" />
+          <LibraryMatchMediaBlock
+            mediaLabel="TV Shows"
+            data={data.tv}
+            prefix={tvPrefix}
+            onChangePrefix={onChangeTvPrefix}
+            placeholder="e.g. tv/"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface LibraryMatchFormProps {
   initialPlexMoviePrefix:     string;
   initialPlexTvPrefix:        string;
@@ -2941,107 +3019,10 @@ export function LibraryMatchForm({
     setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
-  function applyPrefix(path: string, prefix: string): string {
-    if (!prefix) return path;
-    const p = prefix.endsWith("/") ? prefix : prefix + "/";
-    return path.startsWith(p) ? path.slice(p.length) : path;
-  }
-
-  function MediaBlock({
-    mediaLabel, data, prefix, onChangePrefix, placeholder,
-  }: {
-    mediaLabel: string; data: MediaSampleData | null;
-    prefix: string; onChangePrefix: (v: string) => void; placeholder: string;
-  }) {
-    return (
-      <div className="space-y-2">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{mediaLabel}</p>
-
-        {data && (
-          <>
-            <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-0.5">
-              <p className="text-[10px] text-zinc-600 uppercase tracking-wide">Mount point (auto-stripped)</p>
-              <p className="text-xs text-zinc-300 font-mono">{data.mountPoint || "(none detected)"}</p>
-            </div>
-
-            <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
-              <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Sample relative paths</p>
-              {data.samples.length === 0
-                ? <p className="text-[11px] text-zinc-600 italic">No paths found</p>
-                : data.samples.map((s, i) => (
-                    <p key={i} className="text-[11px] text-zinc-400 font-mono truncate" title={s}>{s}</p>
-                  ))
-              }
-            </div>
-          </>
-        )}
-
-        <div className="space-y-1">
-          <Label className="text-xs text-zinc-400">Additional prefix to strip</Label>
-          <Input
-            value={prefix}
-            onChange={(e) => { onChangePrefix(e.target.value); setSaveStatus("idle"); }}
-            placeholder={placeholder}
-            className="bg-zinc-800 border-zinc-700 font-mono text-sm h-8"
-          />
-        </div>
-
-        {data && prefix && (
-          <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
-            <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Preview after stripping</p>
-            {data.samples.map((s, i) => {
-              const after   = applyPrefix(s, prefix);
-              const changed = after !== s;
-              return (
-                <p key={i} className={`text-[11px] font-mono truncate ${changed ? "text-green-400" : "text-zinc-500"}`} title={after}>
-                  {after}
-                </p>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  function ServerBlock({
-    label, accent, data, moviePrefix, tvPrefix, onChangeMoviePrefix, onChangeTvPrefix,
-  }: {
-    label: string; accent: string; data: ServerSamples | null;
-    moviePrefix: string; tvPrefix: string;
-    onChangeMoviePrefix: (v: string) => void; onChangeTvPrefix: (v: string) => void;
-  }) {
-    return (
-      <div className="space-y-4">
-        <p className={`text-xs font-semibold uppercase tracking-wide ${accent}`}>{label}</p>
-
-        {!data && !loading && (
-          <p className="text-xs text-zinc-600 italic">Click &quot;Load examples&quot; to see sample paths.</p>
-        )}
-        {loadError && <p className="text-xs text-red-400">{loadError}</p>}
-
-        {data && (
-          <div className="space-y-5">
-            <MediaBlock
-              mediaLabel="Movies"
-              data={data.movie}
-              prefix={moviePrefix}
-              onChangePrefix={onChangeMoviePrefix}
-              placeholder="e.g. movies/"
-            />
-            <div className="border-t border-zinc-800" />
-            <MediaBlock
-              mediaLabel="TV Shows"
-              data={data.tv}
-              prefix={tvPrefix}
-              onChangePrefix={onChangeTvPrefix}
-              placeholder="e.g. tv/"
-            />
-          </div>
-        )}
-      </div>
-    );
-  }
+  const onChangePlexMoviePrefix     = (v: string) => { setPlexMoviePrefix(v);     setSaveStatus("idle"); };
+  const onChangePlexTvPrefix        = (v: string) => { setPlexTvPrefix(v);        setSaveStatus("idle"); };
+  const onChangeJellyfinMoviePrefix = (v: string) => { setJellyfinMoviePrefix(v); setSaveStatus("idle"); };
+  const onChangeJellyfinTvPrefix    = (v: string) => { setJellyfinTvPrefix(v);    setSaveStatus("idle"); };
 
   return (
     <div className="space-y-6">
@@ -3062,17 +3043,19 @@ export function LibraryMatchForm({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <ServerBlock
+        <LibraryMatchServerBlock
           label="Plex" accent="text-yellow-400"
           data={plex}
           moviePrefix={plexMoviePrefix} tvPrefix={plexTvPrefix}
-          onChangeMoviePrefix={setPlexMoviePrefix} onChangeTvPrefix={setPlexTvPrefix}
+          onChangeMoviePrefix={onChangePlexMoviePrefix} onChangeTvPrefix={onChangePlexTvPrefix}
+          loading={loading} loadError={loadError}
         />
-        <ServerBlock
+        <LibraryMatchServerBlock
           label="Jellyfin" accent="text-purple-400"
           data={jellyfin}
           moviePrefix={jellyfinMoviePrefix} tvPrefix={jellyfinTvPrefix}
-          onChangeMoviePrefix={setJellyfinMoviePrefix} onChangeTvPrefix={setJellyfinTvPrefix}
+          onChangeMoviePrefix={onChangeJellyfinMoviePrefix} onChangeTvPrefix={onChangeJellyfinTvPrefix}
+          loading={loading} loadError={loadError}
         />
       </div>
 

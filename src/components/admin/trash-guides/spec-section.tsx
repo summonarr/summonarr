@@ -13,7 +13,7 @@ import {
   Shield,
   ShieldOff,
   XCircle,
-} from "lucide-react";
+} from "@/components/icons";
 import {
   formatRelative,
   type ApplyResult,
@@ -67,7 +67,6 @@ export function SpecSection({
   }, [service]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 

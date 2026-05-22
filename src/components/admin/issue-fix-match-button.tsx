@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Wrench, Search, X, Check, ChevronLeft } from "lucide-react";
+import { Wrench, Search, X, Check, ChevronLeft } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
@@ -111,6 +111,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   const [jellyfinState, setJellyfinState] = useState<ServerState>({ status: "idle" });
   const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
   const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
+  const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -255,8 +256,6 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
       setJellyfinState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
   }
-
-  const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const anyFixDone = plexState.status === "done" || jellyfinState.status === "done";
 

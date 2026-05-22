@@ -6,7 +6,7 @@ import type { TmdbMedia, Genre, WatchProvider } from "@/lib/tmdb-types";
 import { MediaCard } from "./media-card";
 import { FilterBar } from "./filter-bar";
 import { PaginationBar } from "./pagination-bar";
-import { Loader2, Filter, AlertTriangle } from "lucide-react";
+import { Loader2, Filter, AlertTriangle } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
 import { usePathname } from "next/navigation";
 

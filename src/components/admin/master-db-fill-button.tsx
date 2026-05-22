@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Database, Loader2, AlertTriangle } from "lucide-react";
+import { Database, Loader2, AlertTriangle } from "@/components/icons";
 
 type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "error";
 

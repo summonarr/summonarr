@@ -3,6 +3,12 @@ import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
+export function safeBigInt(x: unknown): bigint {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n)) return BigInt(0);
+  return BigInt(Math.max(0, Math.floor(n)));
+}
+
 const SETTING_KEYS = [
   "playHistoryEnabled",
   "playHistoryPlexEnabled",
@@ -215,10 +221,10 @@ export function applyFinalTick(
 }
 
 export async function recordCompletedSession(session: ActiveSession): Promise<void> {
-  // Jellyfin webhooks don't reliably accumulate playtimeMs (no Progress events for short watches,
-  // and pre-stop pauses leave state="paused" so applyFinalTick contributes 0). progressMs (playhead
-  // at stop) is always populated and is the v0.9.0 source of truth. Plex accumulates playtimeMs via
-  // its richer event stream, so the max of the two yields the right answer for both sources.
+  // The polling sync may leave playtimeMs at zero for short watches that disappear between two
+  // 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes 0.
+  // progressMs (playhead at stop) is always populated, so taking the max yields the right
+  // answer regardless of which signal is more accurate for a given session.
   const playDurationMs = Math.max(Number(session.playtimeMs), Number(session.progressMs));
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 

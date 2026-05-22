@@ -1,4 +1,4 @@
-import type { LucideIcon } from "lucide-react";
+import type { IconComponent } from "@/components/icons";
 import {
   Film,
   Tv2,
@@ -21,12 +21,12 @@ import {
   Trash2,
   Activity,
   Sparkles,
-} from "lucide-react";
+} from "@/components/icons";
 
 export interface NavItem {
   href: string;
   label: string;
-  icon: LucideIcon;
+  icon: IconComponent;
   exact?: boolean;
 
   mobileBottomBar?: boolean;

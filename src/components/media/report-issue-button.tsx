@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, Loader2, X, ChevronDown } from "lucide-react";
+import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";

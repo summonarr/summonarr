@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import Image from "next/image";
-import { Film, Tv2, Loader2, Check, X, ExternalLink } from "lucide-react";
+import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { Chip } from "@/components/ui/design";

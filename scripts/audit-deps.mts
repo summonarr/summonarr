@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * Dependency security & freshness auditor.
  *
@@ -7,10 +7,10 @@
  * the configured threshold are present, so this can be wired into CI.
  *
  * Usage:
- *   tsx scripts/audit-deps.ts                # default: fail on "high" or above
- *   tsx scripts/audit-deps.ts --min=moderate # fail on "moderate" or above
- *   tsx scripts/audit-deps.ts --json         # emit machine-readable JSON
- *   tsx scripts/audit-deps.ts --no-outdated  # skip the outdated check
+ *   node scripts/audit-deps.mts                # default: fail on "high" or above
+ *   node scripts/audit-deps.mts --min=moderate # fail on "moderate" or above
+ *   node scripts/audit-deps.mts --json         # emit machine-readable JSON
+ *   node scripts/audit-deps.mts --no-outdated  # skip the outdated check
  */
 
 import { spawnSync } from "node:child_process";
@@ -116,7 +116,7 @@ function parseArgs(argv: string[]): CliOptions {
       opts.minSeverity = value;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
-        "Usage: tsx scripts/audit-deps.ts [--min=low|moderate|high|critical] [--json] [--no-outdated]",
+        "Usage: node scripts/audit-deps.mts [--min=low|moderate|high|critical] [--json] [--no-outdated]",
       );
       process.exit(0);
     }

@@ -65,7 +65,12 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "guid is required" }, { status: 400 });
   }
 
-  if (guid.length > 500 || /[<>"';&|]/.test(guid)) {
+  // Allowlist GUID characters explicitly. Sonarr/Radarr release guids are opaque tokens from
+  // their indexers — typically URL-safe / base64-shaped — and never legitimately contain control
+  // chars, quotes, brackets, backticks, null bytes, or whitespace. An allowlist is safer than the
+  // previous denylist, which only blocked 7 characters and let backslashes, CRLF, and unicode
+  // bidi controls through.
+  if (guid.length === 0 || guid.length > 500 || !/^[A-Za-z0-9._:/+\-=?&%#@~,!*$]+$/.test(guid)) {
     return NextResponse.json({ error: "Invalid guid format" }, { status: 400 });
   }
   if (!Number.isInteger(indexerId) || (indexerId as number) <= 0) {

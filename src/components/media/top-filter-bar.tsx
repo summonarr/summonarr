@@ -2,7 +2,7 @@
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useMemo } from "react";
-import { X } from "lucide-react";
+import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as Segments } from "@/components/ui/design";
 

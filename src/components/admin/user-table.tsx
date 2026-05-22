@@ -26,7 +26,7 @@ import {
   MapPin,
   Clock,
   AlertTriangle,
-} from "lucide-react";
+} from "@/components/icons";
 
 interface User {
   id: string;
@@ -116,6 +116,27 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
     notifyOnIssue: u.notifyOnIssue,
   });
   const [saving, setSaving] = useState(false);
+  const titleId = `notif-modal-title-${u.id}`;
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Focus the close button on mount, return focus to the opener on unmount,
+  // and close on ESC. Minimal a11y trap (no Tab cycling — small panel, low
+  // risk of focus escape; can revisit if we adopt @base-ui/react Dialog).
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus?.();
+    };
+  }, [onClose]);
 
   async function toggle(key: NotifKey) {
     const newVal = !prefs[key];
@@ -146,15 +167,22 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+          <h3
+            id={titleId}
+            className="text-sm font-semibold text-white flex items-center gap-2"
+          >
             <Bell className="w-4 h-4 text-zinc-400" />
             Notification Settings
           </h3>
           <button
+            ref={closeBtnRef}
             type="button"
             aria-label="Close"
             onClick={onClose}
@@ -246,6 +274,25 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
   // Guardrail 16: timeAgo uses Date.now() and toLocaleDateString varies by locale
   const mounted = useHasMounted();
+  const titleId = `sessions-modal-title-${u.id}`;
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+
+  // Focus the close button on mount, return focus to opener on unmount, ESC closes.
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus?.();
+    };
+  }, [onClose]);
 
   useEffect(() => {
     fetch(`/api/admin/users/${u.id}/sessions`)
@@ -300,16 +347,23 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
       onClick={onClose}
     >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[460px] shadow-2xl flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {}
         <div className="flex items-center justify-between mb-1">
-          <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+          <h3
+            id={titleId}
+            className="text-sm font-semibold text-white flex items-center gap-2"
+          >
             <KeyRound className="w-4 h-4 text-zinc-400" />
             Active Sessions
           </h3>
           <button
+            ref={closeBtnRef}
             type="button"
             aria-label="Close"
             onClick={onClose}

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSession } from "next-auth/react";
-import { GitFork } from "lucide-react";
+import { GitFork } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import {
   userNavItems,

@@ -269,9 +269,12 @@ export type BackupImportResult =
   | { ok: true; status: 200; summary: BackupImportSummary; warning: string | null }
   | { ok: false; status: number; error: string; errors?: string[]; summary?: BackupImportSummary };
 
+export type BackupImportMode = "setup" | "admin";
+
 export async function processBackupImport(
   body: ReadableStream<Uint8Array>,
   password: string,
+  mode: BackupImportMode = "admin",
 ): Promise<BackupImportResult> {
   const sourceReader = body.getReader();
   let head = Buffer.alloc(0);
@@ -487,8 +490,26 @@ export async function processBackupImport(
   let executed = 0;
   const conflictSkippedByTable: Record<string, number> = {};
   let conflictSkippedTotal = 0;
+  let lockGateRejection: { status: number; error: string } | null = null;
   try {
     await prisma.$transaction(async (tx) => {
+      // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Holding it
+      // inside the TRUNCATE+INSERT transaction guarantees a racing register can't sneak a new
+      // user row between an outer freshness check and the truncate. In "setup" mode we also
+      // re-check the freshness invariant under the lock so an attacker can't pre-stage a
+      // chunked import and fire the final chunk after a legitimate admin completes setup.
+      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
+      if (mode === "setup") {
+        const setupCompleted = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
+        const userCount = await tx.user.count();
+        if (setupCompleted !== null || userCount > 0) {
+          lockGateRejection = {
+            status: 409,
+            error: "Setup import is only available on a fresh server with no users.",
+          };
+          return;
+        }
+      }
       await tx.$executeRawUnsafe(truncateStmt);
       for (const stmt of validatedStatements) {
         // Older exports (pre-snapshot fix) could emit duplicate rows when a
@@ -517,6 +538,11 @@ export async function processBackupImport(
       status: 500,
       error: `Restore failed and was rolled back — database is unchanged. Database error: ${msg}`,
     };
+  }
+
+  const rejection = lockGateRejection as { status: number; error: string } | null;
+  if (rejection) {
+    return { ok: false, status: rejection.status, error: rejection.error };
   }
 
   return {

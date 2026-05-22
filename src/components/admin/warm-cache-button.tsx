@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, Flame } from "lucide-react";
+import { Loader2, Flame } from "@/components/icons";
 
 interface WarmCacheButtonProps {
   uncachedCount: number;

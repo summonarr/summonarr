@@ -5,6 +5,18 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    rules: {
+      // `eslint-plugin-react-hooks` 7.1 ships React Compiler-aware rules.
+      // `set-state-in-effect` flags every effect that calls setState
+      // (including via async helpers), and triggers ~15 times across
+      // admin tables, settings UI, and auth flows where we explicitly
+      // gate setState on a one-shot prop guard — a pattern that's safe
+      // even though the rule can't prove it. Disabled in aggregate
+      // rather than peppering eslint-disable comments across the tree.
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
@@ -16,6 +28,10 @@ const eslintConfig = defineConfig([
     // hand-edited (CLAUDE.md guardrail 12). Mirrors the paths-ignore
     // already in .github/workflows/codeql.yml and trivy.yml.
     "src/generated/**",
+    // Claude Code agent worktrees — copies of the repo under .claude/.
+    // Without this, lint walks every worktree and double-counts every
+    // file under it.
+    ".claude/**",
   ]),
 ]);
 

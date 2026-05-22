@@ -1,8 +1,8 @@
 import NextAuth, { type Session } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import { PrismaAdapter } from "@auth/prisma-adapter";
+import { prismaAuthAdapter } from "@/lib/auth-adapter";
 import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
+import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { authConfig } from "@/lib/auth.config";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
@@ -11,8 +11,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 
-// Always run bcrypt even on missing accounts to prevent timing-based user enumeration
-const DUMMY_HASH = "$2a$12$K4v7Dp0.fiN0EKr9lUDBTeVrQBH1/6Mo3hVRfVIGdFJZQ6XH2GKGK";
+// Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
@@ -300,6 +299,11 @@ async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unk
     ttl = desktopDuration;
   }
   token.expiresAt = Math.floor(Date.now() / 1000) + ttl;
+  // Hard ceiling captured once at sign-in. refreshToken() bounds the sliding
+  // expiry against this value so non-admins can't be silently extended past
+  // the original session TTL (which is itself capped at MAX_ALLOWED_SESSION_SECONDS
+  // in getSessionDurations()). Server-side only — never exposed via session().
+  token.maxExpiresAt = token.expiresAt;
 
   const userId = user.id as string | undefined;
   if (!token.mediaServer && userId) {
@@ -374,7 +378,7 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
   const [dbUser, authSessionRow] = await Promise.all([
     prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true, mediaServer: true },
+      select: { role: true, mediaServer: true, sessionsRevokedAt: true, passwordChangedAt: true },
     }),
     prisma.authSession.findUnique({ where: { sessionId } }),
   ]);
@@ -383,6 +387,18 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
   // Cross-replica revocation: revokeAllUserSessions / revokeSessionById delete the
   // AuthSession row, and the next refreshToken() call on any replica fails here.
   if (!authSessionRow) return null;
+
+  // Defense-in-depth revocation backstop: even if an AuthSession row somehow
+  // survives a revoke (failed delete, replica lag, manual DB intervention),
+  // any JWT minted before sessionsRevokedAt / passwordChangedAt is refused.
+  // Existing flows (AuthSession deletion + in-memory force-revoke set) remain
+  // the primary path; this is the belt-and-suspenders timestamp check.
+  const revokedSec = dbUser.sessionsRevokedAt ? Math.floor(dbUser.sessionsRevokedAt.getTime() / 1000) : 0;
+  const passwordSec = dbUser.passwordChangedAt ? Math.floor(dbUser.passwordChangedAt.getTime() / 1000) : 0;
+  const cutoff = Math.max(revokedSec, passwordSec);
+  if (cutoff > 0 && typeof token.iat === "number" && token.iat < cutoff) {
+    return null;
+  }
 
   void prisma.authSession.update({
     where: { sessionId },
@@ -415,9 +431,31 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
   }
   token.dbCheckedAt = now;
 
-  // Non-admins get their token silently shortened to 1 h on each DB check to cap stale JWT lifetime
-  if (token.role !== "ADMIN" && (token.expiresAt as number) > now + 3600) {
-    token.expiresAt = now + 3600;
+  // Non-admins get their token silently shortened to 1 h on each DB check to
+  // cap stale JWT lifetime — but bounded by maxExpiresAt (set once at sign-in)
+  // so the sliding window can NEVER push the effective expiry past the original
+  // session TTL. Without that ceiling an actively-used session would be
+  // immortal: every refresh re-extended expiresAt to now+3600.
+  if (token.role !== "ADMIN") {
+    // Backfill for any pre-existing JWTs minted before maxExpiresAt was set.
+    // We anchor it to the token's current expiresAt — not "now + 3600" — so a
+    // missing column on an older token cannot itself create immortality.
+    if (typeof token.maxExpiresAt !== "number" && typeof token.expiresAt === "number") {
+      token.maxExpiresAt = token.expiresAt;
+    }
+    const maxExp = token.maxExpiresAt as number | undefined;
+    if (typeof maxExp === "number") {
+      if (now >= maxExp) {
+        return null;
+      }
+      if ((token.expiresAt as number) > now + 3600) {
+        token.expiresAt = Math.min(now + 3600, maxExp);
+      }
+    } else if ((token.expiresAt as number) > now + 3600) {
+      // No maxExpiresAt available at all — clamp to the absolute hard ceiling so
+      // a successful refresh still can't outlive MAX_ALLOWED_SESSION_SECONDS.
+      token.expiresAt = now + 3600;
+    }
   }
 
   return token;
@@ -430,7 +468,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   // (account.create/update/upsert encrypt; findUnique/findFirst/findMany decrypt). Wrapping the
   // adapter with a second encrypt-on-linkAccount layer produced double-encrypted rows — see
   // guardrail #7a in CLAUDE.md.
-  adapter: PrismaAdapter(prisma),
+  adapter: prismaAuthAdapter(prisma),
   callbacks: {
     ...authConfig.callbacks,
     async jwt(params) {
@@ -462,6 +500,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       }
 
       if (account?.provider && account.provider !== "credentials" && u.id) {
+        const signingInUserId = u.id;
         const promoted = await prisma.$transaction(async (tx) => {
           // Advisory lock prevents two concurrent first-time OAuth sign-ins both being promoted to ADMIN
           await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(1947888749)");
@@ -469,15 +508,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
           if (setupRow) return false;
           // Failsafe: promote whenever no ADMIN exists yet. Two concurrent first-time
-          // sign-ins create their User rows before entering this lock; a `totalUsers === 1`
-          // check would see 2 and promote neither, leaving the instance admin-less.
+          // sign-ins create their User rows before entering this lock; the lock
+          // serializes them, so the second to acquire it sees existingAdmin !== 0
+          // and skips promotion. The first acquirer always promotes ITSELF — never
+          // `findFirst(orderBy createdAt)`, which can return a different user that
+          // raced into the table first but isn't the one signing in right now.
           const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
           if (existingAdmin) return false;
-          const firstUser = await tx.user.findFirst({ orderBy: { createdAt: "asc" }, select: { id: true } });
-          if (!firstUser) return false;
-          await tx.user.update({ where: { id: firstUser.id }, data: { role: "ADMIN" } });
+          // Confirm the signing-in user still exists (e.g. wasn't deleted between
+          // adapter insert and event firing) before promoting.
+          const self = await tx.user.findUnique({ where: { id: signingInUserId }, select: { id: true } });
+          if (!self) return false;
+          await tx.user.update({ where: { id: signingInUserId }, data: { role: "ADMIN" } });
           await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
-          return firstUser.id === u.id;
+          return true;
         });
         if (promoted) u.role = "ADMIN";
       }
@@ -542,22 +586,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const headers = (req as Request).headers as Headers;
         const ip = getClientIp(headers);
         const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
-        const rateKey = ip === "unknown" ? "login-ip:unknown" : `login-ip:${ip}`;
-        const rateMax  = ip === "unknown" ? 5 : 20;
         const email = normalizeEmail(credentials.email as string);
 
+        // When TRUST_PROXY is unset (single-host deployments behind no reverse proxy), getClientIp
+        // returns the literal "unknown" — keying a single `login-ip:unknown` bucket would mean five
+        // typos from any one client locks out the whole instance for 5 minutes. Fall back to a
+        // per-email bucket so the attack surface is limited to the targeted account.
+        const emailHash = hashAuditEmail(email);
+        const rateKey = ip === "unknown" ? `login-email:${emailHash}` : `login-ip:${ip}`;
+        const rateMax  = ip === "unknown" ? 10 : 20;
+
         if (!checkRateLimit(rateKey, rateMax, 5 * 60 * 1000)) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash: hashAuditEmail(email) } });
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
           return null;
         }
 
         const user = await prisma.user.findUnique({ where: { email } });
 
-        const hash = user?.passwordHash ?? DUMMY_HASH;
-        const valid = await bcrypt.compare(credentials.password as string, hash);
+        let valid = false;
+        if (user?.passwordHash) {
+          valid = await verifyPassword(credentials.password as string, user.passwordHash);
+        } else {
+          await dummyVerify();
+        }
 
         if (!valid || !user) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash: hashAuditEmail(email) } });
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
           return null;
         }
 
@@ -619,7 +673,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             console.warn("[auth] Plex sign-in refused: plexServerUrl is not configured.");
             void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "plex_server_not_configured" } });
             // Fall through to the unified failure path below.
-            await bcrypt.compare("x", DUMMY_HASH);
+            await dummyVerify();
             return null;
           }
 
@@ -629,31 +683,40 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           let plexThumb: string = "";
 
           if (cached && cached.verifiedAt > cacheCutoff) {
-            // Cache stores email only — confirm we already have a (provider, sub)-
-            // bound row for this email so we can skip the /api/v2/user round-trip.
-            const stillValid = await pingPlexToken(plexToken, browserClientId);
-            if (stillValid) {
-              const existing = await prisma.user.findUnique({
-                where: { email: cached.email },
-                select: { plexUserId: true },
-              });
-              if (existing?.plexUserId) {
-                verifiedEmail = cached.email;
-                plexUserSub   = existing.plexUserId;
-                await prisma.plexTokenCache.update({
-                  where: { tokenHash },
-                  data: {
-                    lastUsedAt: new Date(),
-                    expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
-                  },
+            // Cache hit is only honored when the row carries the Plex
+            // subject id — looking the bound user up by email would let an
+            // attacker whose Plex account happens to share a stale cache
+            // row's email inherit that row's identity. Legacy rows
+            // (plexUserId === null, written before the column existed) fall
+            // through to the full /api/v2/user round-trip, which re-binds
+            // the cache row to the verified sub.
+            if (cached.plexUserId) {
+              const stillValid = await pingPlexToken(plexToken, browserClientId);
+              if (stillValid) {
+                const existing = await prisma.user.findUnique({
+                  where: { plexUserId: cached.plexUserId },
+                  select: { id: true, plexUserId: true, email: true },
                 });
+                if (existing?.plexUserId) {
+                  verifiedEmail = cached.email;
+                  plexUserSub   = existing.plexUserId;
+                  await prisma.plexTokenCache.update({
+                    where: { tokenHash },
+                    data: {
+                      lastUsedAt: new Date(),
+                      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+                    },
+                  });
+                }
+                // No bound row for this sub yet — fall through to the full
+                // lookup so we can properly bind plexUserId on first sign-in.
+              } else {
+                // Token was revoked in Plex — purge cache so next attempt re-validates from scratch
+                await prisma.plexTokenCache.delete({ where: { tokenHash } }).catch(() => {});
               }
-              // No bound row yet — fall through to the full lookup so we can
-              // properly bind plexUserId on first sign-in.
-            } else {
-              // Token was revoked in Plex — purge cache so next attempt re-validates from scratch
-              await prisma.plexTokenCache.delete({ where: { tokenHash } }).catch(() => {});
             }
+            // else: legacy row without plexUserId — skip the cache hit and
+            // let the round-trip below re-populate the column.
           }
 
           if (!verifiedEmail || !plexUserSub) {
@@ -666,8 +729,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             const plexCacheExpiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
             await prisma.plexTokenCache.upsert({
               where: { tokenHash },
-              create: { tokenHash, email: verifiedEmail, expiresAt: plexCacheExpiresAt },
-              update: { email: verifiedEmail, verifiedAt: new Date(), lastUsedAt: new Date(), expiresAt: plexCacheExpiresAt },
+              create: { tokenHash, email: verifiedEmail, plexUserId: plexUserSub, expiresAt: plexCacheExpiresAt },
+              update: { email: verifiedEmail, plexUserId: plexUserSub, verifiedAt: new Date(), lastUsedAt: new Date(), expiresAt: plexCacheExpiresAt },
             });
           }
 
@@ -705,7 +768,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         }
         if (!plexResult) {
           // Constant-time delay mirrors the credentials provider path to prevent timing oracle
-          await bcrypt.compare("x", DUMMY_HASH);
+          await dummyVerify();
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "invalid_credentials" } });
           return null;
         }
@@ -781,13 +844,13 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
                 );
               } catch (err) {
                 console.error("[jellyfin auth] authentication failed:", err);
-                await bcrypt.compare("x", DUMMY_HASH);
+                await dummyVerify();
                 void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "invalid_credentials" } });
                 return null;
               }
               const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
               if (jfDbUser === PROVIDER_REBIND_REQUIRED) {
-                await bcrypt.compare("x", DUMMY_HASH);
+                await dummyVerify();
                 void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "email_collision_needs_rebind" } });
                 return null;
               }

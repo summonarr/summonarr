@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.10.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.11.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,33 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.11.0
+
+**Breaking**
+
+- **Legacy bcrypt password hashes are no longer accepted.** Since v0.10.x the local-credentials provider transparently rehashed bcrypt logins to scrypt on every successful sign-in; this release removes the bcrypt verify fallback entirely. Any local account that has *not* signed in since the rehash shipped will be unable to log in after upgrading. **Before deploying**, run `node scripts/migrate-legacy-passwords.mjs` — it lists any remaining `$2`-prefixed rows and must report zero. If it does not, re-run it with `--nullify` to clear those hashes, which sends the affected users through the password-reset flow on next sign-in. Plex, Jellyfin, and OIDC accounts are unaffected.
+- The unused Plex and Jellyfin webhook routes (`/api/webhooks/plex`, `/api/webhooks/jellyfin`) and their `plexWebhookSecret` / `jellyfinWebhookSecret` settings have been removed. The settings UI never surfaced these URLs, and the 5-second play-history polling sync already ingests the same sessions (with richer transcode metadata), so no shipped install relied on them. Radarr and Sonarr webhooks are unchanged. Orphan `Setting` rows for the removed keys are harmless and may be deleted manually.
+
+**Added**
+
+- `SSE_MAX_LISTENERS` env var makes the SSE connection cap tunable (defaults to 500).
+- "Fork me on GitHub" link in the mobile navigation drawer footer.
+
+**Changed**
+
+- The admin API documentation page now renders through a lightweight in-tree OpenAPI viewer instead of the bundled `swagger-ui-react`.
+- Dependency-surface reduction: `bcryptjs`, `tsx`, `swagger-ui-react`, `shadcn`, `@auth/prisma-adapter`, `lucide-react`, and ~10 other packages dropped in favor of in-tree implementations — smaller image and less supply-chain surface, no behavior change.
+- Text columns across `MediaRequest`, `Issue`, `AuditLog`, `PlayHistory`, `ActiveSession`, and others are now length-capped (`@db.VarChar`). The Docker entrypoint's `db push` auto-retry was extended to apply the resulting text→varchar narrowing casts and cascading primary-key rebuilds without requiring `SUMMONARR_ACCEPT_DATA_LOSS`.
+
+**Fixed**
+
+- **Concurrency / correctness pass.** Advisory locks added to `TVEpisodeCache` rewrites and the full setup-restore transaction; the sync orchestrator gained advisory locks, batched compare-and-swap updates, and graceful fallback across stale sources.
+- **Security hardening.** `safe-fetch` closes a DNS-rebind window, SSRF-checks trusted hosts, and plugs IPv6 gaps; webhook routes gained a per-IP rate limit, tolerate malformed numerics, and return a unified 401 body; per-email auth rate-limit fallback; SMTP host pinned against DNS rebinding; non-admin session count capped; the Plex token cache is now bound by `plexUserId` rather than reassignable email.
+- **Hydration / accessibility.** `absTime` pinned to UTC and day labels made timezone-stable (guardrail 16); the IP-info panel is portaled so it escapes table-grid clipping; keyboard-navigable activity rows and modal a11y improvements.
+- `safe-fetch` strips stale `Content-Encoding` / `Content-Length` headers when re-wrapping a decompressed response body.
+- The audit-log export pre-writes its row and validates the requested date range.
+- Discord approval flow audited; issue GUID allowlist tightened; remaining hydration-unstable dates fixed.
 
 ### v0.10.4
 
@@ -324,7 +351,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.10.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.11.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

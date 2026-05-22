@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { MessageSquare } from "lucide-react";
+import { MessageSquare } from "@/components/icons";
 import { IssueThread } from "@/components/issues/issue-thread";
 
 interface IssueCardShellProps {

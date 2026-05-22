@@ -54,6 +54,9 @@ export async function POST(request: NextRequest) {
     .then(async (episodes) => {
       if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
+        // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
+        // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
         await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
       }, { timeout: BATCH_TX_TIMEOUT });
@@ -130,13 +133,28 @@ export async function POST(request: NextRequest) {
     finalMovieRows = finalMovieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
     finalTvRows    = finalTvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
 
+    // Clear stale plexRatingKey → tmdbId mappings for any ratingKey we're about to insert.
+    // Stays insert-only with respect to ratingKeys NOT in this batch (recentOnly contract).
+    const incomingRatingKeys = [
+      ...finalMovieRows.map((r) => r.plexRatingKey).filter((k): k is string => !!k),
+      ...finalTvRows.map((r) => r.plexRatingKey).filter((k): k is string => !!k),
+    ];
+
+    // Advisory lock 2001,1 — serializes Plex library writes against orchestrator + concurrent
+    // per-source invocations (admin "Resync Plex" while cron is mid-flight).
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+      if (incomingRatingKeys.length > 0) {
+        await tx.plexLibraryItem.deleteMany({ where: { plexRatingKey: { in: incomingRatingKeys } } });
+      }
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
+    // Advisory lock 2001,1 — see comment in the recentOnly branch above.
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
       await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE" } });
       await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV" } });
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);

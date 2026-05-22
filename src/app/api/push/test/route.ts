@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import webpush from "web-push";
+import { sendPushNotification } from "@/lib/web-push";
 
 export const POST = withAuth(async (_req, _ctx, session) => {
   const keys = await prisma.setting.findMany({
@@ -23,14 +23,17 @@ export const POST = withAuth(async (_req, _ctx, session) => {
     return NextResponse.json({ error: "No push subscription found for your account — try unsubscribing and re-subscribing" }, { status: 404 });
   }
 
-  webpush.setVapidDetails(vapidContact, cfg.vapidPublicKey, cfg.vapidPrivateKey);
-
   const results = await Promise.all(
     subs.map(async (sub) => {
       try {
-        await webpush.sendNotification(
+        await sendPushNotification(
           { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-          JSON.stringify({ title: "Summonarr", body: "Test notification — push is working!", url: "/" })
+          JSON.stringify({ title: "Summonarr", body: "Test notification — push is working!", url: "/" }),
+          {
+            contact: vapidContact,
+            vapidPublicKey: cfg.vapidPublicKey,
+            vapidPrivateKey: cfg.vapidPrivateKey,
+          },
         );
         return { endpoint: sub.endpoint.slice(0, 40) + "…", ok: true };
       } catch (err: unknown) {

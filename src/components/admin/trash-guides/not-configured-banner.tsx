@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle } from "@/components/icons";
 import type { TrashService } from "./types";
 
 export function NotConfiguredBanner({ service }: { service: TrashService }) {

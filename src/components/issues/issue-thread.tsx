@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Loader2, Send, ShieldCheck } from "lucide-react";
+import { Loader2, Send, ShieldCheck } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 

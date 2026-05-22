@@ -1,6 +1,12 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 
 /* Persisted appearance preferences.
    - theme  drives globals.css `[data-theme]` (ds-* tokens + legacy remap)
@@ -48,27 +54,29 @@ function applyAccent(accent: Accent) {
   document.documentElement.setAttribute("data-accent", accent);
 }
 
-// Read the values the inline script (src/app/layout.tsx) already applied to
-// <html> before paint, so the first client render matches the visible UI with
-// no toggle flicker. SSR has no document → falls back to the SSR defaults,
-// which match the hardcoded <html data-theme="dark" data-accent="indigo">.
-function initialTheme(): Theme {
-  if (typeof document === "undefined") return DEFAULT_THEME;
-  const t = document.documentElement.getAttribute("data-theme");
-  return t === "light" || t === "dark" ? t : DEFAULT_THEME;
-}
-
-function initialAccent(): Accent {
-  if (typeof document === "undefined") return DEFAULT_ACCENT;
-  const a = document.documentElement.getAttribute("data-accent");
-  return a && (ACCENTS as readonly string[]).includes(a)
-    ? (a as Accent)
-    : DEFAULT_ACCENT;
-}
-
+// Initial state mirrors the SSR defaults exactly so the first client paint
+// matches SSR (no hydration mismatch). A useEffect below then reads the
+// per-device persisted values from <html> (already applied by the inline
+// blocking script in src/app/layout.tsx) and reconciles state. Visual color
+// never flashes because the inline script set the CSS variables before paint.
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(initialTheme);
-  const [accent, setAccentState] = useState<Accent>(initialAccent);
+  const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
+  const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
+
+  // One-time post-mount reconciliation with values the inline blocking script
+  // already applied to <html data-theme/data-accent>. The set-state-in-effect
+  // rule is intentionally suppressed: this is exactly the "sync React state
+  // with an external system (DOM attribute set before hydration)" pattern that
+  // effects exist for. No subscription is needed — the attribute is owned by
+  // this provider after mount.
+  useEffect(() => {
+    const t = document.documentElement.getAttribute("data-theme");
+    const a = document.documentElement.getAttribute("data-accent");
+    if (t === "light" || t === "dark") setThemeState(t);
+    if (a && (ACCENTS as readonly string[]).includes(a)) {
+      setAccentState(a as Accent);
+    }
+  }, []);
 
   const setTheme = useCallback((t: Theme) => {
     setThemeState(t);

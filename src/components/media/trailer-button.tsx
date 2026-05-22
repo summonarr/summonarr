@@ -1,6 +1,6 @@
 "use client";
 
-import { Play } from "lucide-react";
+import { Play } from "@/components/icons";
 
 interface TrailerButtonProps {
   trailerKey?: string | null;

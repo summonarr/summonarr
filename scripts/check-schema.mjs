@@ -1,7 +1,6 @@
-// Run with: node scripts/check-schema.mjs
+// Run with: node --env-file=.env scripts/check-schema.mjs
 // Requires DATABASE_URL in environment (same as the app).
 
-import "dotenv/config";
 import pg from "pg";
 
 const { Client } = pg;

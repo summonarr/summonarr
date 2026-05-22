@@ -81,9 +81,13 @@ function relTime(iso: string): string {
 }
 
 function absTime(iso: string): string {
+  // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
+  // text — prevents the React #418 hydration mismatch for plays near UTC
+  // midnight when the relTime() path is gated behind useHasMounted.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
+    timeZone: "UTC",
   });
 }
 

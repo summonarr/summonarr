@@ -12,7 +12,7 @@ import {
   X,
   ExternalLink,
   AlertCircle,
-} from "lucide-react";
+} from "@/components/icons";
 import Link from "next/link";
 
 type State =

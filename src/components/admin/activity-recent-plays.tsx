@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from "react";
 import Link from "next/link";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import {
   ActivityCard,
@@ -373,9 +373,18 @@ export function ActivityRecentPlays({
                     <Fragment key={p.id}>
                       <tr
                         className="recent-row"
+                        role="button"
+                        tabIndex={0}
+                        aria-expanded={isExpanded}
                         onClick={() =>
                           setExpandedId(isExpanded ? null : p.id)
                         }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setExpandedId(isExpanded ? null : p.id);
+                          }
+                        }}
                         style={{
                           borderBottom:
                             i < plays.length - 1

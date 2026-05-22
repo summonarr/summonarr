@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Card } from "@/components/ui/card";
-import { AlertTriangle, XCircle } from "lucide-react";
+import { AlertTriangle, XCircle } from "@/components/icons";
 
 export function SchemaDiagnosticBanner({
   message,

@@ -11,7 +11,7 @@ import {
   Clock,
   Play,
   ChevronRight,
-} from "lucide-react";
+} from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";

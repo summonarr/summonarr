@@ -8,7 +8,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import {
   ArrowLeft, Film, Tv2, User, Monitor, Zap,
   Clock, CheckCircle2, Circle,
-} from "lucide-react";
+} from "@/components/icons";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 import { IpInfo } from "@/components/admin/ip-info";
 

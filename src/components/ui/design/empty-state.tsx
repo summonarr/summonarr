@@ -1,9 +1,9 @@
 import Link from "next/link";
-import type { LucideIcon } from "lucide-react";
+import type { IconComponent } from "@/components/icons";
 import type { ComponentType, SVGProps } from "react";
 
 type IconLike =
-  | LucideIcon
+  | IconComponent
   | ComponentType<SVGProps<SVGSVGElement>>
   | React.ReactNode;
 

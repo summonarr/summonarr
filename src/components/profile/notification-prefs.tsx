@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "lucide-react";
+import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/components/icons";
 
 interface NotificationPrefsProps {
   discordLinked: boolean;

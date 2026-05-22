@@ -1,4 +1,4 @@
-import { PlayCircle, MonitorPlay, Clock, CheckCircle } from "lucide-react";
+import { PlayCircle, MonitorPlay, Clock, CheckCircle } from "@/components/icons";
 import { cn } from "@/lib/utils";
 
 export interface AvailabilityBadgesProps {

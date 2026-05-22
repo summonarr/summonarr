@@ -12,7 +12,7 @@ import {
   RefreshCw,
   Sparkles,
   XCircle,
-} from "lucide-react";
+} from "@/components/icons";
 import {
   KIND_LABEL,
   type ActionState,
@@ -56,7 +56,6 @@ export function StarterPackCard({
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -72,7 +71,6 @@ export function StarterPackCard({
     const key = resolvedIds.slice().sort().join(",");
     if (key !== lastResolvedKeyRef.current) {
       lastResolvedKeyRef.current = key;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelected(new Set(recommendedIds));
     }
   }, [resolvedIds, recommendedIds]);

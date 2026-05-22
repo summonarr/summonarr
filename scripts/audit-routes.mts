@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env node
 /**
  * API route authorization auditor.
  *
@@ -11,8 +11,8 @@
  * Exit code is non-zero when any route fails, so this is wired into CI.
  *
  * Usage:
- *   tsx scripts/audit-routes.ts          # human report, fails build on any miss
- *   tsx scripts/audit-routes.ts --json   # machine-readable
+ *   node scripts/audit-routes.mts          # human report, fails build on any miss
+ *   node scripts/audit-routes.mts --json   # machine-readable
  */
 
 import { readdirSync, readFileSync, statSync } from "node:fs";

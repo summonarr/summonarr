@@ -6,7 +6,7 @@ import Image from "next/image";
 import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { Clock, Film, Tv2 } from "lucide-react";
+import { Clock, Film, Tv2 } from "@/components/icons";
 
 export const dynamic = "force-dynamic";
 

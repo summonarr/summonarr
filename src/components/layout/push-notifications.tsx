@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Bell, BellOff, Send, X } from "lucide-react";
+import { Bell, BellOff, Send, X } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 
 type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";

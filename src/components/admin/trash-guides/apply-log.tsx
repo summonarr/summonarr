@@ -1,7 +1,7 @@
 "use client";
 
 import { Card } from "@/components/ui/card";
-import { CheckCircle, XCircle } from "lucide-react";
+import { CheckCircle, XCircle } from "@/components/icons";
 import type { ApplyResult } from "./types";
 
 export function ApplyLog({

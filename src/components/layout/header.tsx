@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
-import { Search, Film, Tv2, Loader2, ChevronRight } from "lucide-react";
+import { Search, Film, Tv2, Loader2, ChevronRight } from "@/components/icons";
 import {
   DropdownMenu,
   DropdownMenuContent,

@@ -66,6 +66,10 @@ export async function POST(request: NextRequest) {
     .then(async (episodes) => {
       if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
+        // Advisory lock 2002,2 — Jellyfin TVEpisodeCache coordination. Shared with
+        // /api/sync/route and /api/sync/tv-episodes so a recentOnly tmdbId-scoped delete can't
+        // be interleaved with a wholesale rewrite from another runner.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
         if (episodeRecentOnly) {
           if (tmdbIdsBeingReplaced.length > 0) {
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: { in: tmdbIdsBeingReplaced } } });
@@ -102,13 +106,18 @@ export async function POST(request: NextRequest) {
     const existingTvSet    = new Set(existingTv.map((r) => r.tmdbId));
     const newMovieRows = movieRows.filter((r) => !existingMovieSet.has(r.tmdbId));
     const newTvRows    = tvRows.filter((r)    => !existingTvSet.has(r.tmdbId));
+    // Advisory lock 2001,2 — serializes Jellyfin library writes against orchestrator + concurrent
+    // per-source invocations (admin "Resync Jellyfin" while cron is mid-flight).
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
       if (newMovieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, newMovieRows);
       if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
+    // Advisory lock 2001,2 — see comment in the recentOnly branch above.
     await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
       await tx.jellyfinLibraryItem.deleteMany();
       if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
       if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);

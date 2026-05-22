@@ -1,11 +1,16 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23 AS deps
+FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
 
 COPY package*.json ./
+# patch-eslint-plugin-react.mjs runs from package.json's postinstall hook
+# to fix the eslint-plugin-react / ESLint 10 incompatibility. It has to
+# exist on disk before `npm ci` triggers the hook, so copy it ahead of
+# the rest of the source tree.
+COPY scripts/patch-eslint-plugin-react.mjs ./scripts/patch-eslint-plugin-react.mjs
 # BuildKit cache mount keeps ~/.npm warm across builds — repeat installs
 # pull from local cache instead of re-downloading from the registry.
 # --prefer-offline forces use of the cache when present; --no-audit/--no-fund
@@ -20,7 +25,7 @@ RUN --mount=type=cache,target=/root/.npm \
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
-FROM --platform=$BUILDPLATFORM node:26.1.0-alpine3.23 AS prisma-gen
+FROM --platform=$BUILDPLATFORM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS prisma-gen
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -53,7 +58,7 @@ ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23 AS builder
+FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -72,7 +77,7 @@ RUN npm run build
 # Install ONLY prisma + dotenv using exact versions from the lockfile.
 # npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:26.1.0-alpine3.23 AS migrate-deps
+FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -99,7 +104,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm install --legacy-peer-deps --no-audit --no-fund --prefer-offline
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23 AS runner
+FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).

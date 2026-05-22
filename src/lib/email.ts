@@ -1,15 +1,15 @@
-import nodemailer from "nodemailer";
-import { Resend } from "resend";
 import { promises as dns } from "dns";
 import { isIP } from "net";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
+import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { isSafeAddrForAdmin } from "@/lib/ssrf";
+import { sendMail, type SmtpConfig } from "@/lib/smtp";
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
-//   - "resend" → Resend HTTP API (`resend` npm package)
-//   - "smtp"   → nodemailer SMTP (legacy default when unset)
+//   - "resend" → Resend HTTP API (direct POST to api.resend.com via safeFetchTrusted)
+//   - "smtp"   → SMTP via the in-tree client in [src/lib/smtp.ts](src/lib/smtp.ts) (default when unset)
 // Resend sender falls back to smtpFrom so users sharing one from-address
 // don't have to enter it twice. siteUrl is read so CTAs can link to the app.
 const EMAIL_KEYS = [
@@ -69,33 +69,46 @@ function resolveFromAddress(cfg: EmailConfig): string {
   return safeHeader(cfg.smtpFrom || cfg.smtpUser || "summonarr@localhost");
 }
 
-async function assertSafeSmtpHost(host: string): Promise<void> {
+// Resolves `host`, validates every address, and returns one to use as the connect target.
+// We hand the validated IP literal to our SMTP client (instead of the hostname) so a malicious
+// DNS can't swap the answer between our pre-flight check and the connect-time lookup.
+async function resolveSafeSmtpHost(host: string): Promise<{ address: string; family: 4 | 6 }> {
   if (isIP(host)) {
     if (!isSafeAddrForAdmin(host)) {
       throw new Error(`Refusing SMTP host ${host} — address is not allowed`);
     }
-    return;
+    return { address: host, family: isIP(host) === 6 ? 6 : 4 };
   }
   const addrs = await dns.lookup(host, { all: true });
+  if (addrs.length === 0) {
+    throw new Error(`Refusing SMTP host ${host} — DNS returned no addresses`);
+  }
   for (const a of addrs) {
     if (!isSafeAddrForAdmin(a.address)) {
       throw new Error(`Refusing SMTP host ${host} — resolves to ${a.address} which is not allowed`);
     }
   }
+  const first = addrs[0];
+  return { address: first.address, family: first.family === 6 ? 6 : 4 };
 }
 
-async function createTransport(cfg: EmailConfig) {
+async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
   if (!cfg.smtpHost) throw new Error("SMTP host not configured");
-  await assertSafeSmtpHost(cfg.smtpHost);
+  const resolved = await resolveSafeSmtpHost(cfg.smtpHost);
   const port = parseInt(cfg.smtpPort ?? "587", 10);
-  return nodemailer.createTransport({
+  const isLocalhost = /^localhost$/i.test(cfg.smtpHost);
+  return {
+    // Hand TLS the original hostname for SNI + certificate-name validation, while the TCP layer
+    // connects to the validated IP. This closes the DNS-rebind window between resolveSafeSmtpHost
+    // and the connect-time DNS lookup.
     host: cfg.smtpHost,
+    resolvedAddress: resolved.address,
     port,
     secure: port === 465,
     // requireTLS enforces STARTTLS on port 587 but must be skipped for localhost (plaintext dev/test relay)
-    requireTLS: !cfg.smtpHost?.match(/^localhost$/i) && port === 587,
+    requireTLS: !isLocalhost && port === 587,
     auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPassword ?? "" } : undefined,
-  });
+  };
 }
 
 // Central send dispatcher — every notifier in this file funnels through it.
@@ -108,15 +121,25 @@ async function sendOne(cfg: EmailConfig, to: string, subject: string, html: stri
 
   if (cfg.backend === "resend") {
     if (!cfg.resendApiKey) throw new Error("Resend API key not configured");
-    const resend = new Resend(cfg.resendApiKey);
-    const { error } = await resend.emails.send({ from, to: safeTo, subject: safeSubjectText, html });
-    if (error) throw new Error(error.message ?? "Resend send failed");
+    const res = await safeFetchTrusted("https://api.resend.com/emails", {
+      allowedHosts: ["api.resend.com"],
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.resendApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ from, to: safeTo, subject: safeSubjectText, html }),
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { message?: string };
+      throw new Error(body.message ?? `Resend send failed (${res.status})`);
+    }
     return;
   }
 
   if (!cfg.smtpHost) throw new Error("SMTP host not configured");
-  const transport = await createTransport(cfg);
-  await transport.sendMail({ from, to: safeTo, subject: safeSubjectText, html });
+  const smtpConfig = await buildSmtpConfig(cfg);
+  await sendMail(smtpConfig, { from, to: safeTo, subject: safeSubjectText, html });
 }
 
 async function sendMany(cfg: EmailConfig, recipients: string[], subject: string, html: string): Promise<void> {

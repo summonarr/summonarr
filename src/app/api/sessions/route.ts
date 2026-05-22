@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import bcrypt from "bcryptjs";
+import { verifyPassword } from "@/lib/password-hash";
 import { withAuth } from "@/lib/api-auth";
 import { revokeSessionById } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -87,7 +87,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
           { status: 401 },
         );
       }
-      const ok = await bcrypt.compare(confirmPassword, user.passwordHash);
+      const ok = await verifyPassword(confirmPassword, user.passwordHash);
       if (!ok) {
         return NextResponse.json({ error: "invalid-password" }, { status: 401 });
       }

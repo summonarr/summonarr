@@ -24,8 +24,6 @@ const SETTINGS_SCHEMA = [
   ["sonarrRootFolder",              false],
   ["sonarrQualityProfileId",        false],
   ["webhookSecret",                 true ],
-  ["plexWebhookSecret",             true ],
-  ["jellyfinWebhookSecret",         true ],
   ["sonarrWebhookSecret",           true ],
   ["radarrWebhookSecret",           true ],
   ["plexAdminToken",                true ],

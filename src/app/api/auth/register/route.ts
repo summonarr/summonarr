@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import bcrypt from "bcryptjs";
+import { hashPassword } from "@/lib/password-hash";
 import { checkRateLimit, getClientIp, parseRateLimit } from "@/lib/rate-limit";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
   }
   registrationInFlight = true;
 
-  const passwordHash = await bcrypt.hash(password, 12);
+  const passwordHash = await hashPassword(password);
 
   let user: { id: string; email: string; name: string | null; role: string };
   try {
