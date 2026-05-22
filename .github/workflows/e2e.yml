@@ -83,7 +83,7 @@ jobs:
         run: npx prisma generate
 
       - name: Push schema to the throwaway database
-        run: npx prisma db push --skip-generate
+        run: npx prisma db push
 
       - name: Seed an admin user
         run: node scripts/e2e-seed.mts
