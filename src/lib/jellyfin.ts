@@ -817,8 +817,12 @@ export async function getJellyfinUserPlayHistory(
     total += items.length;
     await processItems(items);
 
-    startIndex += pageSize;
+    // Advance by the actual page size, not the requested size — a short non-final page
+    // (Jellyfin can return fewer than Limit mid-result on filtered queries) would otherwise
+    // skip every un-returned record. Mirrors fetchJellyfinPagesSequential.
+    startIndex += page.items.length;
     if (page.items.length === 0) break;
+    if (page.items.length < pageSize) break;
   }
 
   return total;
