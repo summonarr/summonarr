@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
@@ -201,22 +202,18 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
       </button>
 
       {dialogState !== "idle" && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: "rgba(0,0,0,0.7)" }}
-          onClick={(e) => {
-            if (e.target === e.currentTarget) closeDialog();
-          }}
-        >
-          <div
-            className="w-full max-w-md"
-            style={{
-              background: "var(--ds-bg-1)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 12,
-              boxShadow: "var(--ds-shadow-lg)",
-            }}
-          >
+        <Dialog open onOpenChange={(open) => { if (!open) closeDialog(); }}>
+          <DialogPortal>
+            <DialogBackdrop />
+            <DialogPopup
+              className="max-w-md overflow-y-auto"
+              style={{
+                background: "var(--ds-bg-1)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 12,
+                boxShadow: "var(--ds-shadow-lg)",
+              }}
+            >
             <div
               className="flex items-center justify-between"
               style={{
@@ -225,12 +222,12 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
               }}
             >
               <div>
-                <h2
+                <DialogTitle
                   className="font-semibold"
                   style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
                 >
                   Report an Issue
-                </h2>
+                </DialogTitle>
                 <p
                   className="ds-mono truncate max-w-72"
                   style={{
@@ -242,9 +239,8 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
                   {title}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={closeDialog}
+              <DialogClose
+                aria-label="Close"
                 disabled={
                   dialogState === "submitting" || dialogState === "loading"
                 }
@@ -258,7 +254,7 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
                 }}
               >
                 <X style={{ width: 14, height: 14 }} />
-              </button>
+              </DialogClose>
             </div>
 
             {dialogState === "loading" && (
@@ -486,8 +482,9 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
                 </div>
               </form>
             )}
-          </div>
-        </div>
+            </DialogPopup>
+          </DialogPortal>
+        </Dialog>
       )}
     </>
   );

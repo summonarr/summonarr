@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Wrench, Search, X, Check, ChevronLeft } from "@/components/icons";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { posterUrl } from "@/lib/tmdb-types";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
@@ -133,13 +133,6 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     setOpen(false);
     reset();
   }, [reset]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open, close]);
 
   useEffect(() => {
     if (!open) return;
@@ -299,12 +292,10 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
         Fix Match
       </button>
 
-      {open && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={(e) => { if (e.target === e.currentTarget && !busy) close(); }}
-        >
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+      <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) close(); }}>
+        <DialogPortal>
+          <DialogBackdrop />
+          <DialogPopup className="max-w-3xl" initialFocus={inputRef}>
 
             <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700 flex-shrink-0">
               <div className="flex items-center gap-3">
@@ -322,15 +313,15 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                     <ChevronLeft className="w-5 h-5" />
                   </button>
                 )}
-                <p className="text-base font-semibold text-zinc-100">
+                <DialogTitle className="text-base font-semibold text-zinc-100">
                   {phase === "search" && "Find correct match"}
                   {phase === "confirm" && "Apply fix"}
                   {phase === "plex-candidates" && "Select Plex item"}
-                </p>
+                </DialogTitle>
               </div>
-              <button onClick={close} disabled={busy} aria-label="Close" title="Close" className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
+              <DialogClose disabled={busy} aria-label="Close" title="Close" className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
                 <X className="w-5 h-5" />
-              </button>
+              </DialogClose>
             </div>
 
             <div className="px-6 py-3 border-b border-zinc-800 flex-shrink-0 space-y-2">
@@ -623,19 +614,17 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
             )}
 
             <div className="px-6 py-4 border-t border-zinc-700 flex justify-end flex-shrink-0">
-              <button
-                onClick={close}
+              <DialogClose
                 disabled={busy}
                 className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
                   hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50 transition-colors"
               >
                 Close
-              </button>
+              </DialogClose>
             </div>
-          </div>
-        </div>,
-        document.body,
-      )}
+          </DialogPopup>
+        </DialogPortal>
+      </Dialog>
     </>
   );
 }

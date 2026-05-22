@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import {
   Loader2, Check, RefreshCw, AlertTriangle, Clock, Trash2,
   Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X,
@@ -195,13 +195,6 @@ export function IssueActions({
     }
   }, [panel, releases.length, loading]);
 
-  useEffect(() => {
-    if (panel !== "replace") return;
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && loading !== "grab") setPanel(null); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [panel, loading]);
-
   const refetchLabel = mediaType === "MOVIE" ? "Refetch movie" : (REFETCH_LABEL[scope] ?? "Refetch");
   const canRefetch = mediaType === "MOVIE" || !!tvdbId;
 
@@ -353,26 +346,23 @@ export function IssueActions({
         </div>
       )}
 
-      {panel === "replace" && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={(e) => { if (e.target === e.currentTarget && loading !== "grab") setPanel(null); }}
-        >
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+      <Dialog open={panel === "replace"} onOpenChange={(o) => { if (!o && loading !== "grab") setPanel(null); }}>
+        <DialogPortal>
+          <DialogBackdrop />
+          <DialogPopup className="max-w-3xl">
 
             <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700 flex-shrink-0">
-              <p className="text-base font-semibold text-zinc-100">
+              <DialogTitle className="text-base font-semibold text-zinc-100">
                 {libraryConfirmed && scope === "EPISODE" ? "Replace episode" : "Replace"}
-              </p>
-              <button
-                onClick={() => setPanel(null)}
+              </DialogTitle>
+              <DialogClose
                 disabled={loading === "grab"}
                 aria-label="Close"
                 title="Close"
                 className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
               >
                 <X className="w-5 h-5" />
-              </button>
+              </DialogClose>
             </div>
 
             {loading === "releases" ? (
@@ -494,10 +484,9 @@ export function IssueActions({
                 </div>
               </>
             )}
-          </div>
-        </div>,
-        document.body,
-      )}
+          </DialogPopup>
+        </DialogPortal>
+      </Dialog>
 
       {panel === null && refetchOk && (
         <span className="flex items-center gap-1 text-[11px] text-green-400">
