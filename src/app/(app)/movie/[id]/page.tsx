@@ -59,7 +59,7 @@ export default async function MovieDetailPage({
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   const [suggestions, collectionItems] = await Promise.all([
-    attachAllAvailability(rawSuggestions, session?.user.id),
+    attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
     attachAllAvailability(rawCollection, session?.user.id, { skipRatings: true }),
   ]);
 
