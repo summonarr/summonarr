@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import {
   Loader2, Check, RefreshCw, AlertTriangle, Clock, Trash2,
   Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X,
@@ -14,7 +14,6 @@ interface IssueActionsProps {
   issueId: string;
   currentStatus: string;
   mediaType: string;
-  tmdbId: number;
   tvdbId: number | null;
   scope: string;
   seasonNumber: number | null;
@@ -45,7 +44,6 @@ export function IssueActions({
   issueId,
   currentStatus,
   mediaType,
-  tmdbId,
   tvdbId,
   scope,
   seasonNumber,
@@ -195,13 +193,6 @@ export function IssueActions({
     }
   }, [panel, releases.length, loading]);
 
-  useEffect(() => {
-    if (panel !== "replace") return;
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && loading !== "grab") setPanel(null); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [panel, loading]);
-
   const refetchLabel = mediaType === "MOVIE" ? "Refetch movie" : (REFETCH_LABEL[scope] ?? "Refetch");
   const canRefetch = mediaType === "MOVIE" || !!tvdbId;
 
@@ -322,7 +313,8 @@ export function IssueActions({
             value={resolution}
             onChange={(e) => setResolution(e.target.value)}
             placeholder="Resolution note (optional)"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 w-44"
+            aria-label="Resolution note"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
           />
           <Button
             size="sm"
@@ -353,26 +345,23 @@ export function IssueActions({
         </div>
       )}
 
-      {panel === "replace" && createPortal(
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-          onClick={(e) => { if (e.target === e.currentTarget && loading !== "grab") setPanel(null); }}
-        >
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+      <Dialog open={panel === "replace"} onOpenChange={(o) => { if (!o && loading !== "grab") setPanel(null); }}>
+        <DialogPortal>
+          <DialogBackdrop />
+          <DialogPopup className="max-w-3xl">
 
             <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700 flex-shrink-0">
-              <p className="text-base font-semibold text-zinc-100">
+              <DialogTitle className="text-base font-semibold text-zinc-100">
                 {libraryConfirmed && scope === "EPISODE" ? "Replace episode" : "Replace"}
-              </p>
-              <button
-                onClick={() => setPanel(null)}
+              </DialogTitle>
+              <DialogClose
                 disabled={loading === "grab"}
                 aria-label="Close"
                 title="Close"
                 className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
               >
                 <X className="w-5 h-5" />
-              </button>
+              </DialogClose>
             </div>
 
             {loading === "releases" ? (
@@ -406,7 +395,8 @@ export function IssueActions({
                       value={releaseFilter}
                       onChange={(e) => setReleaseFilter(e.target.value)}
                       placeholder="Filter releases…"
-                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-9 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60"
+                      aria-label="Filter releases"
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-9 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60 focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     {releaseFilter && (
                       <button
@@ -494,10 +484,9 @@ export function IssueActions({
                 </div>
               </>
             )}
-          </div>
-        </div>,
-        document.body,
-      )}
+          </DialogPopup>
+        </DialogPortal>
+      </Dialog>
 
       {panel === null && refetchOk && (
         <span className="flex items-center gap-1 text-[11px] text-green-400">

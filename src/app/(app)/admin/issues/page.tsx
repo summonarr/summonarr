@@ -361,7 +361,6 @@ export default async function AdminIssuesPage({
                           issueId={issue.id}
                           currentStatus={issue.status}
                           mediaType={issue.mediaType}
-                          tmdbId={issue.tmdbId}
                           tvdbId={issue.tvdbId}
                           scope={issue.scope}
                           seasonNumber={issue.seasonNumber}
@@ -550,7 +549,6 @@ export default async function AdminIssuesPage({
                       issueId={selectedIssue.id}
                       currentStatus={selectedIssue.status}
                       mediaType={selectedIssue.mediaType}
-                      tmdbId={selectedIssue.tmdbId}
                       tvdbId={selectedIssue.tvdbId}
                       scope={selectedIssue.scope}
                       seasonNumber={selectedIssue.seasonNumber}
@@ -559,7 +557,7 @@ export default async function AdminIssuesPage({
                     />
                   </div>
                 </div>
-                <IssueThread issueId={selectedIssue.id} initialCount={selectedIssue._count.messages} variant="panel" />
+                <IssueThread issueId={selectedIssue.id} variant="panel" />
               </div>
             ) : (
               <div

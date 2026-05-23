@@ -54,39 +54,68 @@ export default async function VotesPage({
   });
   const totalPages = Math.max(1, Math.ceil(totalGrouped.length / PAGE_SIZE));
 
-  const items = await Promise.all(
-    grouped.map(async (g) => {
-      const [representative, userVote, recentVotes] = await Promise.all([
-        prisma.deletionVote.findFirst({
-          where: { tmdbId: g.tmdbId, mediaType: g.mediaType },
-          select: { title: true, posterPath: true },
+  // Batched lookup: 2 queries total (was 3×PAGE_SIZE = up to 120 round-trips/render).
+  // Split by mediaType so each becomes a `tmdbId: { in: [...] }` predicate that
+  // the planner can serve from the composite (tmdbId, mediaType) PK efficiently.
+  const movieIds = grouped.filter((g) => g.mediaType === "MOVIE").map((g) => g.tmdbId);
+  const tvIds = grouped.filter((g) => g.mediaType === "TV").map((g) => g.tmdbId);
+  const groupWhere: Prisma.DeletionVoteWhereInput = {
+    OR: [
+      ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+      ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+    ],
+  };
+
+  const [allVotes, userVotes] = grouped.length === 0
+    ? [[], []]
+    : await Promise.all([
+        prisma.deletionVote.findMany({
+          where: groupWhere,
+          select: {
+            tmdbId: true,
+            mediaType: true,
+            title: true,
+            posterPath: true,
+            reason: true,
+            user: { select: { name: true } },
+          },
+          orderBy: { createdAt: "desc" },
         }),
         session
-          ? prisma.deletionVote.findFirst({
-              where: { tmdbId: g.tmdbId, mediaType: g.mediaType, userId: session.user.id },
-              select: { id: true },
+          ? prisma.deletionVote.findMany({
+              where: { ...groupWhere, userId: session.user.id },
+              select: { tmdbId: true, mediaType: true },
             })
-          : null,
-        prisma.deletionVote.findMany({
-          where: { tmdbId: g.tmdbId, mediaType: g.mediaType, reason: { not: null } },
-          select: { reason: true, user: { select: { name: true } } },
-          orderBy: { createdAt: "desc" },
-          take: 3,
-        }),
+          : Promise.resolve([] as Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }>),
       ]);
-      return {
-        tmdbId: g.tmdbId,
-        mediaType: g.mediaType as "MOVIE" | "TV",
-        title: representative?.title ?? "",
-        posterPath: representative?.posterPath ?? null,
-        voteCount: g._count.id,
-        userVoted: !!userVote,
-        reasons: recentVotes
-          .filter((v) => v.reason)
-          .map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
-      };
-    })
-  );
+
+  const byKey = new Map<string, typeof allVotes>();
+  for (const v of allVotes) {
+    const k = `${v.mediaType}:${v.tmdbId}`;
+    let arr = byKey.get(k);
+    if (!arr) {
+      arr = [];
+      byKey.set(k, arr);
+    }
+    arr.push(v);
+  }
+  const userVoteSet = new Set(userVotes.map((v) => `${v.mediaType}:${v.tmdbId}`));
+
+  const items = grouped.map((g) => {
+    const k = `${g.mediaType}:${g.tmdbId}`;
+    const votes = byKey.get(k) ?? [];
+    const representative = votes[0];
+    const reasons = votes.filter((v) => v.reason).slice(0, 3);
+    return {
+      tmdbId: g.tmdbId,
+      mediaType: g.mediaType as "MOVIE" | "TV",
+      title: representative?.title ?? "",
+      posterPath: representative?.posterPath ?? null,
+      voteCount: g._count.id,
+      userVoted: userVoteSet.has(k),
+      reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
+    };
+  });
 
   const isAdmin = session?.user.role === "ADMIN";
   const hasFilters = mine || sort !== "votes" || q !== "";

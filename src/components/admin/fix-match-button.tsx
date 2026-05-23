@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { createPortal } from "react-dom";
+import { useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { posterUrl } from "@/lib/tmdb-types";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
@@ -49,23 +49,19 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
   const plexFileName     = plexFilePath     ? plexFilePath.replace(/\\/g, "/").split("/").pop()     ?? plexFilePath     : null;
   const jellyfinFileName = jellyfinFilePath ? jellyfinFilePath.replace(/\\/g, "/").split("/").pop() ?? jellyfinFilePath : null;
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === "Escape" && !applying) onCancel(); };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [applying, onCancel]);
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
-      onClick={(e) => { if (e.target === e.currentTarget && !applying) onCancel(); }}
-    >
-      <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open && !applying) onCancel(); }}>
+      <DialogPortal>
+        <DialogBackdrop />
+        <DialogPopup className="max-w-3xl">
+          <DialogTitle className="sr-only">
+            Select the correct match for {targetTitle || `TMDB #${correctTmdbId}`}
+          </DialogTitle>
 
         <div className="px-6 pt-5 pb-4 border-b border-zinc-700 flex-shrink-0 flex gap-4 items-start">
           {tmdbPoster && (
             <div className="flex-shrink-0 w-16 h-[96px] rounded overflow-hidden">
-              {}
+              {/* eslint-disable-next-line @next/next/no-img-element -- tiny 64×96 modal thumbnail; next/image optimizer round-trip isn't worth it for a one-shot picker */}
               <img src={tmdbPoster} alt={targetTitle || "poster"} className="w-full h-full object-cover" />
             </div>
           )}
@@ -167,18 +163,17 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
         </div>
 
         <div className="px-6 py-4 border-t border-zinc-700 flex justify-end flex-shrink-0">
-          <button
-            onClick={onCancel}
+          <DialogClose
             disabled={applying}
             className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
               hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50 transition-colors"
           >
             Cancel
-          </button>
+          </DialogClose>
         </div>
-      </div>
-    </div>,
-    document.body,
+        </DialogPopup>
+      </DialogPortal>
+    </Dialog>
   );
 }
 

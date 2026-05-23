@@ -172,6 +172,7 @@ export function FilterBar({
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
+          aria-label="Filter by genre"
           value={activeGenreId ?? ""}
           onChange={(e) => push({ genreId: e.target.value || undefined })}
         >
@@ -183,6 +184,7 @@ export function FilterBar({
 
         {sortedProviders.length > 0 && (
           <StyledSelect
+            aria-label="Filter by streaming service"
             value={activeWatchProvider ?? ""}
             onChange={(e) => push({ watchProvider: e.target.value || undefined })}
           >
@@ -194,6 +196,7 @@ export function FilterBar({
         )}
 
         <StyledSelect
+          aria-label="Minimum rating"
           value={activeRatingValue}
           onChange={(e) => handleRatingChange(e.target.value)}
         >
@@ -203,6 +206,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="Minimum vote count"
           value={activeMinVoteCount ?? ""}
           onChange={(e) => push({ minVoteCount: e.target.value || undefined })}
         >
@@ -212,6 +216,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="From year"
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
@@ -222,6 +227,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="To year"
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >

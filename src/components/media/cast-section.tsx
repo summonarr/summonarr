@@ -292,6 +292,7 @@ export function CastSection({ cast }: CastSectionProps) {
               <button
                 type="button"
                 onClick={close}
+                aria-label="Close"
                 className="ds-tap rounded-full transition-colors shrink-0 inline-flex items-center justify-center"
                 style={{
                   width: 32,
@@ -383,7 +384,12 @@ export function CastSection({ cast }: CastSectionProps) {
                           onClick={() => handleCreditClick(credit)}
                           role="button"
                           tabIndex={0}
-                          onKeyDown={(e) => e.key === "Enter" && handleCreditClick(credit)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              handleCreditClick(credit);
+                            }
+                          }}
                           className="group flex flex-col overflow-hidden text-left cursor-pointer ds-card-lift focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
                           style={{
                             background: "var(--ds-bg-2)",

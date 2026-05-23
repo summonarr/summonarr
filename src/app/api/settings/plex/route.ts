@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexUser } from "@/lib/plex";
+import { logAudit } from "@/lib/audit";
+import { getClientIp } from "@/lib/rate-limit";
 
-export const POST = withAdmin(async (req, _ctx, _session) => {
+export const POST = withAdmin(async (req, _ctx, session) => {
   let body: { authToken?: string };
   try {
     body = await req.json();
@@ -35,16 +37,38 @@ export const POST = withAdmin(async (req, _ctx, _session) => {
   await prisma.plexTokenCache.deleteMany({});
   console.warn("[settings] plexAdminToken changed — cleared PlexTokenCache");
 
+  await logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email ?? null,
+    action: "SETTINGS_CHANGE",
+    target: "settings:plex",
+    details: { keys: ["plexAdminToken", "plexAdminEmail"], operation: "rotate" },
+    ipAddress: getClientIp(req.headers),
+    userAgent: req.headers.get("user-agent"),
+    provider: session.user.provider ?? null,
+  });
+
   return NextResponse.json({ email: plexUser.email, username: plexUser.username });
 });
 
-export const DELETE = withAdmin(async (_req, _ctx, _session) => {
+export const DELETE = withAdmin(async (req, _ctx, session) => {
   await prisma.setting.deleteMany({
     where: { key: { in: ["plexAdminToken", "plexAdminEmail"] } },
   });
 
   await prisma.plexTokenCache.deleteMany({});
   console.warn("[settings] plexAdminToken removed — cleared PlexTokenCache");
+
+  await logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email ?? null,
+    action: "SETTINGS_CHANGE",
+    target: "settings:plex",
+    details: { keys: ["plexAdminToken", "plexAdminEmail"], operation: "delete" },
+    ipAddress: getClientIp(req.headers),
+    userAgent: req.headers.get("user-agent"),
+    provider: session.user.provider ?? null,
+  });
 
   return NextResponse.json({ ok: true });
 });

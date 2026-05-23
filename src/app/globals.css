@@ -238,7 +238,8 @@
    Keep this section short — only the shades that legacy code actually uses.
    ──────────────────────────────────────────────────────────────────── */
 
-[data-theme="dark"] {
+[data-theme="dark"],
+[data-theme="light"] {
   /* Accent (was indigo): align every indigo shade to the DS accent.
      All `bg-indigo-*`, `text-indigo-*`, `border-indigo-*`, `ring-indigo-*`
      and opacity variants (`bg-indigo-600/10`, etc.) resolve to the
@@ -251,15 +252,16 @@
   --color-indigo-800:  var(--ds-accent-hover);
 
   /* Surfaces (legacy used zinc for dark surfaces; remap to DS surface stack).
-     The ds-bg stack is tuned to match zinc-950→zinc-700 closely, so this
-     is mostly a small oklch nudge + the project's purple-tinted neutrals. */
+     The ds-bg stack switches per theme via the [data-theme="light"] block
+     above, so `bg-zinc-900` resolves to a dark surface in dark mode and a
+     light surface in light mode automatically. */
   --color-zinc-950:  var(--ds-bg);
   --color-zinc-900:  var(--ds-bg-1);
   --color-zinc-800:  var(--ds-bg-2);
   --color-zinc-700:  var(--ds-bg-3);
-  --color-zinc-600:  oklch(0.36 0.006 275);
 
-  /* Text / muted foregrounds (legacy zinc-300..500 map to DS fg scale). */
+  /* Text / muted foregrounds (legacy zinc-300..500 map to DS fg scale).
+     --ds-fg / --ds-fg-muted / --ds-fg-subtle invert per theme. */
   --color-zinc-100:  var(--ds-fg);
   --color-zinc-200:  var(--ds-fg);
   --color-zinc-300:  var(--ds-fg-muted);
@@ -285,6 +287,11 @@
   --color-sky-400:     var(--ds-info);
   --color-sky-500:     var(--ds-info);
 }
+
+/* zinc-600 is a midtone "border-ish" shade. In dark mode it needs to be lighter
+   than the background; in light mode it needs to be darker. Split per theme. */
+[data-theme="dark"]  { --color-zinc-600: oklch(0.36 0.006 275); }
+[data-theme="light"] { --color-zinc-600: oklch(0.68 0.006 275); }
 
 /* Accent variants — pick via [data-accent="..."] on <html>. */
 [data-accent="indigo"]  { --ds-accent: oklch(0.58 0.21 275); --ds-accent-hover: oklch(0.64 0.21 275); --ds-accent-soft: oklch(0.58 0.21 275 / 0.14); --ds-accent-ring: oklch(0.58 0.21 275 / 0.35); }

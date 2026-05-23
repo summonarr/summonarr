@@ -238,18 +238,17 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
         <KeyVal
           k="Quality"
           v={
-            <>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span className="ds-mono">{s.resolution ?? "—"}</span>
               {bitrateMbps > 0 && (
                 <>
-                  {" "}
-                  ·{" "}
+                  <span style={{ color: "var(--ds-fg-disabled)" }}>·</span>
                   <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>
                     {bitrateMbps.toFixed(1)} Mbps
                   </span>
                 </>
               )}
-            </>
+            </span>
           }
         />
         <KeyVal

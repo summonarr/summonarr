@@ -112,6 +112,7 @@ export function TopFilterBar({
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
+          aria-label="Minimum IMDb rating"
           value={activeMinImdb ?? ""}
           onChange={(e) => push({ minImdb: e.target.value || undefined })}
         >
@@ -121,6 +122,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="Minimum vote count"
           value={activeMinVotes ?? ""}
           onChange={(e) => push({ minVotes: e.target.value || undefined })}
         >
@@ -130,6 +132,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="From year"
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
@@ -140,6 +143,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          aria-label="To year"
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >

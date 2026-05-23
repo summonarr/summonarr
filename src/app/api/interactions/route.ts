@@ -837,10 +837,13 @@ export async function POST(req: NextRequest) {
     return new NextResponse("Invalid request signature", { status: 401 });
   }
 
-  // Reject replayed requests: Discord requires servers to enforce a 5-second timestamp window
-  const requestAge = Math.abs(Date.now() / 1000 - Number(timestamp));
-  if (Number.isNaN(requestAge) || requestAge > 5) {
-    console.warn(`[interactions] Stale timestamp rejected: age=${requestAge.toFixed(1)}s`);
+  // Reject replayed requests: Discord requires servers to enforce a 5-second timestamp window.
+  // Asymmetric tolerance — past timestamps must be < 5s old (Discord's rule); future timestamps
+  // are accepted up to 2s for benign clock skew but anything beyond is rejected, since a future
+  // timestamp widens the replay window.
+  const requestAge = Date.now() / 1000 - Number(timestamp);
+  if (Number.isNaN(requestAge) || requestAge > 5 || requestAge < -2) {
+    console.warn(`[interactions] Stale or skewed timestamp rejected: age=${requestAge.toFixed(1)}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
 

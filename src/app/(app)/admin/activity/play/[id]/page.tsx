@@ -255,6 +255,7 @@ export default async function PlayDetailPage({
                 className="flex items-center gap-2 text-sm text-indigo-400 hover:text-indigo-300 transition-colors"
               >
                 {play.mediaServerUser.thumbUrl && /^https?:\/\//i.test(play.mediaServerUser.thumbUrl) && (
+                  // eslint-disable-next-line @next/next/no-img-element -- avatar URL is from an arbitrary upstream media-server host; can't be allowlisted in next.config remotePatterns
                   <img src={play.mediaServerUser.thumbUrl} alt="" className="w-5 h-5 rounded-full object-cover" />
                 )}
                 <User className="w-3.5 h-3.5" />

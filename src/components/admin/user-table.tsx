@@ -418,6 +418,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
                 type="button"
                 disabled={revoking === s.sessionId || revokingAll}
                 onClick={() => revoke(s.sessionId)}
+                aria-label="Revoke this session"
                 className="shrink-0 mt-0.5 text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
                 title="Revoke this session"
               >
@@ -523,6 +524,7 @@ function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
     <div ref={ref} className="relative shrink-0">
       <button
         onClick={() => setOpen((v) => !v)}
+        aria-label="User actions"
         className="h-7 w-7 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500 transition-colors"
       >
         <MoreHorizontal className="w-4 h-4" />

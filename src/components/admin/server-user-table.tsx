@@ -251,6 +251,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
             <div className="flex items-center gap-2.5 min-w-0">
               <div className={`w-7 h-7 shrink-0 rounded-full ${avatarColors[source] ?? "bg-zinc-700"} flex items-center justify-center`}>
                 {u.thumbUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- Plex/Jellyfin avatar URL comes from an arbitrary upstream host; can't be added to next/image remotePatterns up front
                   <img src={u.thumbUrl} alt={u.username} className="w-7 h-7 rounded-full object-cover" />
                 ) : (
                   <span className="text-[10px] font-bold text-white">{initials}</span>

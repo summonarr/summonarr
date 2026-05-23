@@ -75,13 +75,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Test events have a fixed payload shape — admins clicking "Test" twice within
+  // the 24h replay TTL would otherwise see the second click 409. Skip the digest
+  // check and short-circuit before recording.
+  if (payload.eventType === "Test") {
+    return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
+  }
+
   // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
   if (!await checkAndRecordWebhookJson("sonarr", secret, payload)) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
-  if (payload.eventType === "Test") {
-    return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
   }
 
   if (payload.eventType !== "Download" || !payload.series) {
@@ -114,6 +117,15 @@ export async function POST(req: NextRequest) {
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
       await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId } });
+      // Backfill tvdbId on the matched request(s). A later Download webhook for the same
+      // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
+      // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
+      if (safeVdbId) {
+        await tx.mediaRequest.updateMany({
+          where: { tmdbId: safeMdbId, mediaType: "TV", tvdbId: null },
+          data: { tvdbId: safeVdbId },
+        });
+      }
     }, { timeout: 30_000 });
     if (updated.count > 0) effectiveMdbId = safeMdbId;
   }

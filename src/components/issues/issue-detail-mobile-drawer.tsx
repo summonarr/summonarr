@@ -246,7 +246,6 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
               </div>
               <IssueThread
                 issueId={issue.id}
-                initialCount={issue.messageCount}
                 variant="panel"
               />
             </>

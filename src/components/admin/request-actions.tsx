@@ -209,7 +209,7 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
         </div>
       )}
       {replySaved && !showReply && (
-        <span className="flex items-center gap-1 text-[11px] text-green-400">
+        <span role="status" aria-live="polite" className="flex items-center gap-1 text-[11px] text-green-400">
           <Check className="w-3 h-3" />Reply saved
         </span>
       )}
@@ -280,12 +280,12 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
           </Button>
         </div>
         {retryOk && (
-          <span className="flex items-center gap-1 text-[11px] text-green-400">
+          <span role="status" aria-live="polite" className="flex items-center gap-1 text-[11px] text-green-400">
             <Check className="w-3 h-3" />Done
           </span>
         )}
         {arrError && (
-          <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
             <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
           </span>
         )}
@@ -308,7 +308,7 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
           Re-approve
         </Button>
         {arrError && (
-          <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
             <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
           </span>
         )}
@@ -447,7 +447,7 @@ export function SyncButton() {
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         {loading ? "Syncing…" : "Sync now"}
       </Button>
-      {result && <span className="text-xs text-zinc-400">{result}</span>}
+      {result && <span role="status" aria-live="polite" className="text-xs text-zinc-400">{result}</span>}
     </div>
   );
 }
@@ -491,7 +491,13 @@ export function SyncRolesButton() {
         {loading ? "Syncing…" : "Sync Discord Roles"}
       </Button>
       {result && (
-        <span className={`text-xs ${isError ? "text-red-400" : "text-zinc-400"}`}>{result}</span>
+        <span
+          role={isError ? "alert" : "status"}
+          aria-live={isError ? "assertive" : "polite"}
+          className={`text-xs ${isError ? "text-red-400" : "text-zinc-400"}`}
+        >
+          {result}
+        </span>
       )}
     </div>
   );

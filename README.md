@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.11.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.11.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,47 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.11.1
+
+**Added**
+
+- Loading skeletons for the Requests, Issues, Votes, Upcoming, Popular, and Top routes (paired with a shared `PosterGridSkeleton`). Route swaps now feel immediate while TMDB / Prisma queries warm up.
+- Skip-to-main-content link on every authenticated page so keyboard users can jump past the sidebar and header in one tab.
+- ARIA live regions on admin action buttons (Approve / Decline / Sync / Re-push / Discord role sync) so screen readers announce the result.
+- Activity heatmap is now screen-reader-readable (`role="img"` plus an aria-label summary with totals, active days, and peak-day plays).
+- Audit-log entry is now written when an admin rotates or removes the Plex admin token — previously the most security-sensitive `SETTINGS_CHANGE` operation was silently exempt from the audit pipeline.
+- New `PlayHistory` composite indexes on `(source, startedAt)` and `(mediaType, startedAt)` for filtered Activity-page queries. Applied automatically on container restart via the existing `prisma db push` entrypoint step.
+
+**Changed**
+
+- **Light mode now renders correctly.** Legacy Tailwind utilities (`bg-zinc-*`, `text-zinc-*`, `bg-indigo-*`, etc.) used across 64 files were only remapped under `[data-theme="dark"]`. Mirroring the remap to `[data-theme="light"]` routes them through the design-system token stack, which inverts per theme; zinc-600 is split per theme.
+- The cron purge job now sweeps stale rows from `PlexTokenCache` (including legacy-null rows older than 90 days), `WebhookReplay`, `TmdbMediaCore`, `IpLookupCache` (90-day cutoff), and `AuditLog` (365-day cutoff). The sweeper that the model comment in [prisma/schema.prisma](prisma/schema.prisma) promised never landed in `maintenance.ts`; it does its job now.
+- Discord webhook timestamp tolerance is asymmetric — future-dated interactions are rejected. Past timestamps still get the documented 5 s window; future timestamps get 2 s for benign clock skew and no more.
+- Concurrent in-flight Jellyfin QuickConnect long-polls are capped (3 per IP, 50 global). A single client can no longer hold every available socket for 25 s at a time.
+- `/api/push/vapid-key` now requires authentication; `/api/auth/setup-status` is rate-limited (30/min per IP). Both were anonymous probes.
+- Settings tab navigation carries `aria-label` and `aria-current="page"`; login credentials inputs declare `autoComplete="email"` / `autoComplete="current-password"`; cast-section credit cards activate on Space as well as Enter.
+
+**Fixed**
+
+- **Query performance.** Wide `OR: items.map(...)` clauses against composite primary keys (home rails, votes page, admin library, admin issues, ratings prewarm) are replaced with `tmdbId IN […]` split by media type — the planner serves these from the existing composite index. Votes-page renders dropped from ~120 round-trips to 2 batched queries; admin library no longer builds 25 000-disjunct queries Postgres can't optimise; the admin Activity dashboard no longer fires 4 redundant aggregates that `getPlayHistoryStats` already returned; the TRaSH-Guides starter-pack resolver now runs in parallel instead of a serial `for…of`.
+- **Webhook ergonomics.** Radarr and Sonarr **Test** buttons no longer return 409 when clicked twice within the 24-hour replay-digest TTL — the digest check now skips Test events entirely. Sonarr `Download` webhooks backfill `MediaRequest.tvdbId` when a `tmdbId`-matched event arrives, so a later `tvdbId`-only event can still evict its wanted-cache row.
+- Plex-only / Jellyfin-only library items no longer flap back to `AVAILABLE` after the next sync.
+- Jellyfin play-history pagination advances by the actual page count, not an assumed page size.
+- More Like This suggestions now block on TMDB rating enrichment before rendering.
+- Now Playing quality cell shows resolution and bitrate space-separated; plays-per-day chart pads empty days with zeros.
+- Auth fingerprint-mismatch redirect builds with mutable headers so the cookie-clear actually applies (the previous `Response.redirect(...)` form returned an immutable-headers response, swallowing the `Set-Cookie` append).
+- `arr-stats` disk-space lookups route through `arrFetch` — restores the 50 MB body cap (guardrail 5) and the consistent timeout/error handling that bare `safeFetchAdminConfigured` lacked here.
+- Modal dialogs route through the accessible `Dialog` primitive; form controls have labels and focus-visible rings; invalid `role="button"` on `<tr>` elements removed from the Activity history and recent-plays tables.
+- Plex and Jellyfin library cache lookup keys are now indexed.
+
+**Internal**
+
+- CI now runs `npm run audit:routes` as a blocking step (CLAUDE.md guardrail 6a was documented but not enforced before). 89 routes audited; every authenticated route carries a recognised guard.
+- ESLint `no-unused-vars` respects the `_`-prefix convention (`argsIgnorePattern: "^_"`) so `withAuth` / `withAdmin` handler signatures stop reporting ~70 noise warnings on every lint. Final lint count: 0 warnings, 0 errors.
+- CLAUDE.md updated to reflect Next 16's `middleware.ts` → `proxy.ts` rename (the previous note steered readers — and AI assistants — past `src/proxy.ts`).
+- Drop `as any` cast on the base `jwt` callback delegation in `src/lib/auth.ts` — typed local with a null check.
+- Type the client-side `fetch().then(r => r.json())` returns in `discord-link-ui`, `audit-log-table`, and `activity-recent-plays` so a server-shape change can no longer rot silently.
 
 ### v0.11.0
 
@@ -351,7 +392,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.11.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.11.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

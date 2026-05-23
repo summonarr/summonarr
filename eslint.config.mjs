@@ -15,6 +15,19 @@ const eslintConfig = defineConfig([
       // even though the rule can't prove it. Disabled in aggregate
       // rather than peppering eslint-disable comments across the tree.
       "react-hooks/set-state-in-effect": "off",
+      // `_`-prefixed args are intentional unused-param placeholders. The
+      // withAuth / withAdmin / withIssueAdmin handler wrappers pass req/ctx/
+      // session positionally, so handlers that only need `session` still have
+      // to declare `_req` and `_ctx` to maintain the positional contract.
+      // Standard TypeScript ESLint convention — silences ~70 noise warnings.
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
     },
   },
   // Override default ignores of eslint-config-next.

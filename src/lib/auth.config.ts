@@ -64,8 +64,13 @@ export const authConfig: NextAuthConfig = {
         // on the short lifetime (≤15 min) and CRON_SECRET to mint fresh tokens.
         if (storedFp && !storedFp.startsWith("machine:")) {
           if (currentFp !== storedFp) {
-            // UA fingerprint mismatch — redirect and clear both cookie variants (secure and non-secure)
-            const response = Response.redirect(loginUrl);
+            // UA fingerprint mismatch — redirect and clear both cookie variants (secure and non-secure).
+            // Build the redirect manually: Response.redirect() produces a response with immutable
+            // headers, so appending Set-Cookie to it throws `TypeError: immutable`.
+            const response = new Response(null, {
+              status: 302,
+              headers: { Location: loginUrl.toString() },
+            });
             response.headers.append(
               "Set-Cookie",
               "authjs.session-token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"

@@ -394,6 +394,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
                   onChange={(e) => setField("email", e.target.value)}
                   placeholder="you@example.com"
                   className="bg-zinc-800 border-zinc-700"
+                  autoComplete="email"
                   required
                 />
               </Field>
@@ -405,6 +406,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
                   onChange={(e) => setField("password", e.target.value)}
                   placeholder="••••••••"
                   className="bg-zinc-800 border-zinc-700"
+                  autoComplete="current-password"
                   required
                 />
               </Field>

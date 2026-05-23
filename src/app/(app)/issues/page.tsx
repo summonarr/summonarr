@@ -537,7 +537,6 @@ export default async function IssuesPage({
                 </div>
                 <IssueThread
                   issueId={selectedIssue.id}
-                  initialCount={selectedIssue._count.messages}
                   variant="panel"
                 />
               </div>

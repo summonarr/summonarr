@@ -472,8 +472,18 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     ...authConfig.callbacks,
     async jwt(params) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const token = await (authConfig.callbacks as any).jwt(params);
+      // Delegate to the base jwt callback in auth.config.ts so the provider
+      // wiring (mediaServer, role, sessionId, fingerprint) stays in one place.
+      // Typed local instead of `as any` — auth.config.ts always defines it,
+      // but the NextAuth config type marks `callbacks.jwt` optional.
+      const baseJwt = authConfig.callbacks?.jwt;
+      if (!baseJwt) throw new Error("auth.config.ts must define callbacks.jwt");
+      // NextAuth types baseJwt as returning `JWT | null`, but auth.config.ts's
+      // implementation always returns the mutated token object. Treat null as a
+      // hard failure rather than passing it through to the helpers.
+      const baseToken = await baseJwt(params);
+      if (!baseToken) throw new Error("base jwt callback returned null");
+      const token = baseToken as JwtToken;
       if (params.user) return initializeTokenOnSignIn(token, params.user as Record<string, unknown>);
       return refreshToken(token);
     },

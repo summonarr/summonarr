@@ -156,6 +156,8 @@ export function SearchBar({
         />
         <input
           ref={inputRef}
+          type="search"
+          aria-label="Search"
           placeholder="Search movies, TV, requests…"
           value={query}
           onChange={(e) => {
@@ -163,7 +165,7 @@ export function SearchBar({
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          className="flex-1 min-w-0 bg-transparent border-0 outline-none"
+          className="flex-1 min-w-0 bg-transparent border-0 outline-none rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
           style={{
             fontSize: variant === "full" ? 14 : 13,
             color: "var(--ds-fg)",

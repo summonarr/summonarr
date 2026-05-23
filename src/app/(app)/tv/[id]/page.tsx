@@ -83,7 +83,7 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
-  const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id);
+  const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");

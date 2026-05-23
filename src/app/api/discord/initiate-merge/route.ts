@@ -98,6 +98,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
     if (!msgRes.ok) throw new Error(`Could not send DM (${msgRes.status}): ${await msgRes.text()}`);
   } catch (err) {
+    console.warn("[discord/initiate-merge] DM failed:", err);
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
       { error: "Failed to send Discord DM. Make sure your DMs are open." },

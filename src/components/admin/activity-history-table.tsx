@@ -1016,7 +1016,6 @@ export function ActivityHistoryTable({
                     <Fragment key={r.id}>
                       <tr
                         className="history-row"
-                        role="button"
                         tabIndex={0}
                         aria-expanded={isExpanded}
                         onClick={() =>
