@@ -61,7 +61,7 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
         <div className="px-6 pt-5 pb-4 border-b border-zinc-700 flex-shrink-0 flex gap-4 items-start">
           {tmdbPoster && (
             <div className="flex-shrink-0 w-16 h-[96px] rounded overflow-hidden">
-              {}
+              {/* eslint-disable-next-line @next/next/no-img-element -- tiny 64×96 modal thumbnail; next/image optimizer round-trip isn't worth it for a one-shot picker */}
               <img src={tmdbPoster} alt={targetTitle || "poster"} className="w-full h-full object-cover" />
             </div>
           )}

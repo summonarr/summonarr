@@ -17,6 +17,15 @@ const QC_TTL = 15 * 60 * 1000;
 const LONG_POLL_MAX_MS = 25_000;
 const LONG_POLL_TICK_MS = 2_000;
 
+// Cap concurrent in-flight long-polls per IP. Each long-poll parks the connection
+// up to 25s, so without a cap a single attacker (or NAT'd pool) can hold every
+// available socket — the per-IP rate limit only protects against burst rates,
+// not concurrency. Pattern mirrors src/lib/sse-emitter.ts / /api/events.
+const LONG_POLL_PER_IP_CAP = 3;
+const LONG_POLL_GLOBAL_CAP = 50;
+const inflightByIp = new Map<string, number>();
+let globalInflight = 0;
+
 setInterval(() => {
   const now = Date.now();
   for (const [k, e] of pollCounts) if (e.expiresAt < now) pollCounts.delete(k);
@@ -76,29 +85,49 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ authenticated });
     }
 
-    // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
-    // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
-    const deadline = Date.now() + LONG_POLL_MAX_MS;
-    while (Date.now() < deadline) {
-      if (req.signal.aborted) {
-        return NextResponse.json({ authenticated: false }, { status: 499 });
-      }
-      const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
-      if (authenticated) {
-        pollCounts.delete(countKey);
-        return NextResponse.json({ authenticated: true });
-      }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(resolve, Math.min(LONG_POLL_TICK_MS, remaining));
-        req.signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(new Error("aborted"));
-        }, { once: true });
-      }).catch(() => { /* aborted — handled by the next loop-top check */ });
+    // Concurrent-long-poll cap (per-IP + global). Reject 503 if exceeded so the
+    // client can fall back to short-polling instead of stalling.
+    const ipKey = getClientIp(req.headers);
+    if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
+      return NextResponse.json({ error: "Server busy — retry shortly" }, { status: 503 });
     }
-    return NextResponse.json({ authenticated: false });
+    const ipCount = inflightByIp.get(ipKey) ?? 0;
+    if (ipCount >= LONG_POLL_PER_IP_CAP) {
+      return NextResponse.json({ error: "Too many concurrent polls — retry shortly" }, { status: 503 });
+    }
+    inflightByIp.set(ipKey, ipCount + 1);
+    globalInflight += 1;
+
+    try {
+      // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
+      // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
+      const deadline = Date.now() + LONG_POLL_MAX_MS;
+      while (Date.now() < deadline) {
+        if (req.signal.aborted) {
+          return NextResponse.json({ authenticated: false }, { status: 499 });
+        }
+        const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
+        if (authenticated) {
+          pollCounts.delete(countKey);
+          return NextResponse.json({ authenticated: true });
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(resolve, Math.min(LONG_POLL_TICK_MS, remaining));
+          req.signal.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new Error("aborted"));
+          }, { once: true });
+        }).catch(() => { /* aborted — handled by the next loop-top check */ });
+      }
+      return NextResponse.json({ authenticated: false });
+    } finally {
+      globalInflight = Math.max(0, globalInflight - 1);
+      const remaining = (inflightByIp.get(ipKey) ?? 1) - 1;
+      if (remaining <= 0) inflightByIp.delete(ipKey);
+      else inflightByIp.set(ipKey, remaining);
+    }
   } catch (err) {
     console.error("[jellyfin quickconnect] poll error:", err);
     return NextResponse.json({ error: "Failed to poll QuickConnect" }, { status: 502 });

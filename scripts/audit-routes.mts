@@ -64,10 +64,6 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
     route: "/api/events",
     reason: "SSE stream; inline auth() + isTokenExpired + per-role event filtering (guardrail 6a)",
   },
-  {
-    route: "/api/push/vapid-key",
-    reason: "intentionally public — returns the public VAPID key, no secret",
-  },
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */

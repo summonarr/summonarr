@@ -15,12 +15,10 @@ interface IssueMessageData {
 
 interface IssueThreadProps {
   issueId: string;
-  initialCount?: number;
-
   variant?: "inline" | "panel";
 }
 
-export function IssueThread({ issueId, initialCount, variant = "inline" }: IssueThreadProps) {
+export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [body, setBody] = useState("");

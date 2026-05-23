@@ -120,13 +120,17 @@ async function resolveCurated(item: StarterPackItem) {
 }
 
 export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
-  const results: StarterPackStatus[] = [];
   const curatedSpecIds = new Set<string>();
 
-  for (const item of STARTER_PACK) {
-    const spec = await resolveCurated(item);
+  // Resolve all starter-pack items in parallel — was a serial for-of loop that
+  // ran up to 3 queries per item back-to-back (12 serial round-trips for the
+  // current 4-item pack). Promise.all collapses the wall-clock to one slot.
+  const specs = await Promise.all(STARTER_PACK.map((item) => resolveCurated(item)));
+
+  const results: StarterPackStatus[] = STARTER_PACK.map((item, i) => {
+    const spec = specs[i];
     if (spec) curatedSpecIds.add(spec.id);
-    results.push({
+    return {
       item,
       spec: spec ? { id: spec.id, name: spec.name, trashId: spec.trashId } : null,
       application: spec?.application
@@ -136,8 +140,8 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
             lastError: spec.application.lastError,
           }
         : null,
-    });
-  }
+    };
+  });
 
   const others = await prisma.trashSpec.findMany({
     where: {

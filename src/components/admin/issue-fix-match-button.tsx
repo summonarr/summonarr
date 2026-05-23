@@ -462,7 +462,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                     const thumb = posterUrl(selected.posterPath, "w342");
                     return thumb
                       ? <div className="flex-shrink-0 w-16 h-[96px] rounded overflow-hidden">
-                          {}
+                          {/* eslint-disable-next-line @next/next/no-img-element -- tiny 64×96 picker thumbnail; next/image overhead isn't worth it here */}
                           <img src={thumb} alt={selected.title} className="w-full h-full object-cover" />
                         </div>
                       : <div className="flex-shrink-0 w-16 h-[96px] rounded bg-zinc-800" />;

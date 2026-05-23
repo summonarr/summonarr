@@ -75,13 +75,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Test events have a fixed payload shape — admins clicking "Test" twice within
+  // the 24h replay TTL would otherwise see the second click 409. Skip the digest
+  // check and short-circuit before recording.
+  if (payload.eventType === "Test") {
+    return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
+  }
+
   // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
   if (!await checkAndRecordWebhookJson("sonarr", secret, payload)) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
-  }
-
-  if (payload.eventType === "Test") {
-    return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
   }
 
   if (payload.eventType !== "Download" || !payload.series) {

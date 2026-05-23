@@ -661,6 +661,11 @@ model PlayHistory {
   // Powers the arc-detection window functions in getMostPopularOnServer — partition key
   // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.
   @@index([mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt])
+  // /admin/activity filters and getPlayHistoryStats both narrow by source+time
+  // range or mediaType+time range. Composite indexes let the planner serve the
+  // 30+ range-scoped aggregate queries from a smaller heap when filters are set.
+  @@index([source, startedAt(sort: Desc)])
+  @@index([mediaType, startedAt(sort: Desc)])
 }
 
 model ActiveSession {

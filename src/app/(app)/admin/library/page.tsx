@@ -50,9 +50,18 @@ async function enrichItems(
 ): Promise<LibraryItem[]> {
   if (items.length === 0) return [];
 
-  const orClause = items.map((i) => ({ tmdbId: i.tmdbId, mediaType: i.mediaType }));
+  // Split by mediaType so each predicate is `tmdbId IN [...]` against the composite
+  // (tmdbId, mediaType) index — at LIBRARY_ITEM_CAP=25_000 the prior wide OR clause
+  // was too large for the planner to optimize. Post-filter by mediaType in JS.
+  const movieIds = items.filter((i) => i.mediaType === "MOVIE").map((i) => i.tmdbId);
+  const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const allRequests = await prisma.mediaRequest.findMany({
-    where: { OR: orClause },
+    where: {
+      OR: [
+        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+      ],
+    },
     select: { tmdbId: true, mediaType: true, status: true },
     orderBy: { createdAt: "desc" },
   });

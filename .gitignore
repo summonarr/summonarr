@@ -58,3 +58,8 @@ docs/security-audit-technical.md
 docs/mobile-audit-iphone17pm.md
 docs/mobile-audit-screenshots/
 docs/mobile-audit-data/
+
+# manual hydration burn-test scripts — predecessors to the automated e2e crawl
+# in .github/workflows/e2e.yml; kept locally for ad-hoc debugging only.
+scripts/burn-*.ts
+/burn-test-output/

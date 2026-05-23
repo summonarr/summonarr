@@ -115,58 +115,39 @@ export default async function ActivityPage({
     getActivityCalendar(source, mediaType),
   ]);
 
-  const prevPeriodStart = new Date(periodCutoff.getTime() - days * 24 * 60 * 60 * 1000);
-
+  // Inline raw queries here used to re-compute uniqueViewers / totalWatchTimeHours
+  // and prevPeriod totals that getPlayHistoryStats already returns above. Removed
+  // the four duplicates — only the window-function leaderboard and the peak-day
+  // pick remain (genuinely unique to this page).
   const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
-  const fpp = appendPlayHistoryFilter([prevPeriodStart, periodCutoff], { source, mediaType });
   const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
 
-  const [uniqueUsersNd, totalWatchTimeNd, watchTimeLeaderboard, mostActiveDay, prevPlays, prevWatchTime] =
-    await Promise.all([
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count
-         FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}`,
-        ...fp.params,
-      ),
-      prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-        `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
-         FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}`,
-        ...fp.params,
-      ),
-      prisma.$queryRawUnsafe<
-        { id: string; username: string; source: string; hours: number | null }[]
-      >(
-        `WITH user_hours AS (
-           SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
-           FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-           WHERE p."startedAt" >= $1${fpJoin.sql}
-           GROUP BY m."id", m."username", m."source"
-         ), ranked AS (
-           SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
-           FROM user_hours
-         )
-         SELECT "id", "username", "source", "hours"
-         FROM ranked
-         WHERE rn <= 10
-         ORDER BY "hours" DESC`,
-        ...fpJoin.params,
-      ),
-      prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
-        `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-         FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}
-         GROUP BY day ORDER BY count DESC LIMIT 1`,
-        ...fp.params,
-      ),
-      prisma.$queryRawUnsafe<{ count: bigint }[]>(
-        `SELECT COUNT(*)::bigint AS count FROM "PlayHistory" WHERE "startedAt" >= $1 AND "startedAt" < $2${fpp.sql}`,
-        ...fpp.params,
-      ),
-      prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-        `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
-         FROM "PlayHistory" WHERE "startedAt" >= $1 AND "startedAt" < $2${fpp.sql}`,
-        ...fpp.params,
-      ),
-    ]);
+  const [watchTimeLeaderboard, mostActiveDay] = await Promise.all([
+    prisma.$queryRawUnsafe<
+      { id: string; username: string; source: string; hours: number | null }[]
+    >(
+      `WITH user_hours AS (
+         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
+         FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
+         WHERE p."startedAt" >= $1${fpJoin.sql}
+         GROUP BY m."id", m."username", m."source"
+       ), ranked AS (
+         SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
+         FROM user_hours
+       )
+       SELECT "id", "username", "source", "hours"
+       FROM ranked
+       WHERE rn <= 10
+       ORDER BY "hours" DESC`,
+      ...fpJoin.params,
+    ),
+    prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}
+       GROUP BY day ORDER BY count DESC LIMIT 1`,
+      ...fp.params,
+    ),
+  ]);
 
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
@@ -357,13 +338,14 @@ export default async function ActivityPage({
     userThumb: p.mediaServerUser.thumbUrl,
   }));
 
-  const prevPlaysNum = Number(prevPlays[0]?.count ?? 0);
-  const prevWatchTimeNum = Math.round(Number(prevWatchTime[0]?.hours ?? 0) * 10) / 10;
+  // prevPeriod and current-period totals come from stats (getPlayHistoryStats already computes them).
+  const prevPlaysNum = stats.prevPeriod?.totalPlays ?? 0;
+  const prevWatchTimeNum = stats.prevPeriod?.totalWatchTimeHours ?? 0;
 
   /* ── Derived props for the refined overview sections ──────────── */
 
-  const watchHoursNd = Math.round(Number(totalWatchTimeNd[0]?.hours ?? 0));
-  const activeUsersNd = Number(uniqueUsersNd[0]?.count ?? 0);
+  const watchHoursNd = Math.round(stats.totalWatchTimeHours);
+  const activeUsersNd = stats.uniqueViewers;
   const busiestDay = mostActiveDay[0];
 
   const kpis: Kpi[] = [

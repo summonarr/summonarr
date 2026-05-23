@@ -10,7 +10,6 @@ export function sanitizeText(input: string): string {
   return input
     .replace(/[<>]/g, "")
     .replace(/\0/g, "")
-    // eslint-disable-next-line no-control-regex
     .replace(/[\x01-\x08\x0B\x0C\x0E-\x1F]/g, "")
     // Unicode bidi-override characters can reverse displayed text in logs/UI — strip them
     .replace(/[\u202A-\u202E\u2066-\u2069]/g, "")

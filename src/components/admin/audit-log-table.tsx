@@ -750,7 +750,7 @@ export function AuditLogView({
 
       const res = await fetch(`/api/admin/audit-log?${params.toString()}`);
       if (!res.ok) return;
-      const data = await res.json();
+      const data = (await res.json()) as { logs: AuditRow[]; nextCursor: string | null; hasMore: boolean };
       setLogs((prev) => [...prev, ...data.logs]);
       setNextCursor(data.nextCursor);
       setHasMore(data.hasMore);

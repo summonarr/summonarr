@@ -90,6 +90,15 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Route auth audit: fails the build if any API route ships without a
+      # recognized auth guard. CLAUDE.md guardrail 6a — every authenticated
+      # route must wrap with withAuth/withAdmin/withIssueAdmin (or be listed
+      # in ROUTE_EXCEPTIONS in scripts/audit-routes.mts for legitimate
+      # dual-auth / public / streaming endpoints). Blocking — a route that
+      # ships unguarded is an auth bypass.
+      - name: Route auth audit
+        run: npm run audit:routes
+
       # License compliance: THIRD_PARTY_LICENSES.txt is generated from the
       # lockfile and shipped in the Docker image (Next standalone strips
       # node_modules notices). Blocking — a dependency change that doesn't

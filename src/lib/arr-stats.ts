@@ -1,5 +1,5 @@
 import { prisma } from "./prisma";
-import { safeFetchAdminConfigured } from "./safe-fetch";
+import { arrFetch, ArrResponseError } from "./arr";
 
 interface DiskSpaceEntry {
   path: string;
@@ -22,17 +22,17 @@ async function fetchDiskSpace(service: "radarr" | "sonarr"): Promise<DiskSpaceEn
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   if (!map[urlKey] || !map[keyKey]) return null;
 
-  const baseUrl = map[urlKey].replace(/\/$/, "");
-
   try {
-    const res = await safeFetchAdminConfigured(`${baseUrl}/api/v3/diskspace`, {
-      cache: "no-store",
-      timeoutMs: 30_000,
-      headers: { "X-Api-Key": map[keyKey] },
-    });
-    if (!res.ok) return null;
-    return await res.json() as DiskSpaceEntry[];
-  } catch {
+    // Route through arrFetch (guardrail 5): 50 MB response cap, 30s timeout,
+    // injects X-Api-Key, throws ArrResponseError on non-2xx.
+    return await arrFetch<DiskSpaceEntry[]>(
+      { url: map[urlKey].replace(/\/$/, ""), apiKey: map[keyKey] },
+      "/api/v3/diskspace",
+    );
+  } catch (err) {
+    if (!(err instanceof ArrResponseError)) {
+      console.warn(`[arr-stats] ${service} diskspace failed:`, err);
+    }
     return null;
   }
 }

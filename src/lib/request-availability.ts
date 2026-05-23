@@ -1,18 +1,29 @@
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+
+// Build a `tmdbId IN […]` clause per mediaType — replaces the prior wide `OR: items.map(...)`
+// pattern which the planner couldn't serve from the composite (tmdbId, mediaType) index.
+function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWhereInput | null {
+  const movieIds = items.filter((i) => i.mediaType === "movie").map((i) => i.id);
+  const tvIds = items.filter((i) => i.mediaType === "tv").map((i) => i.id);
+  if (movieIds.length === 0 && tvIds.length === 0) return null;
+  return {
+    OR: [
+      ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+      ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+    ],
+  };
+}
 
 // DECLINED requests are excluded so a re-requested item is correctly shown as un-requested
 export async function filterRequestedItems(items: TmdbMedia[]): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
+  const baseWhere = buildMediaTypeWhere(items);
+  if (!baseWhere) return items;
 
   const rows = await prisma.mediaRequest.findMany({
-    where: {
-      status: { not: "DECLINED" },
-      OR: items.map((item) => ({
-        tmdbId: item.id,
-        mediaType: item.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
-      })),
-    },
+    where: { status: { not: "DECLINED" }, ...baseWhere },
     select: { tmdbId: true, mediaType: true },
     distinct: ["tmdbId", "mediaType"],
   });
@@ -27,21 +38,18 @@ export async function filterRequestedItems(items: TmdbMedia[]): Promise<TmdbMedi
 
 export async function attachRequestedStatus(items: TmdbMedia[], userId?: string): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
-
-  const orClause = items.map((item) => ({
-    tmdbId: item.id,
-    mediaType: item.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
-  }));
+  const baseWhere = buildMediaTypeWhere(items);
+  if (!baseWhere) return items;
 
   const [globalRows, mineRows] = await Promise.all([
     prisma.mediaRequest.findMany({
-      where: { status: { not: "DECLINED" }, OR: orClause },
+      where: { status: { not: "DECLINED" }, ...baseWhere },
       select: { tmdbId: true, mediaType: true },
       distinct: ["tmdbId", "mediaType"],
     }),
     userId
       ? prisma.mediaRequest.findMany({
-          where: { status: { not: "DECLINED" }, requestedBy: userId, OR: orClause },
+          where: { status: { not: "DECLINED" }, requestedBy: userId, ...baseWhere },
           select: { tmdbId: true, mediaType: true },
           distinct: ["tmdbId", "mediaType"],
         })

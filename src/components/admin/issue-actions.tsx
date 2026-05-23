@@ -14,7 +14,6 @@ interface IssueActionsProps {
   issueId: string;
   currentStatus: string;
   mediaType: string;
-  tmdbId: number;
   tvdbId: number | null;
   scope: string;
   seasonNumber: number | null;
@@ -45,7 +44,6 @@ export function IssueActions({
   issueId,
   currentStatus,
   mediaType,
-  tmdbId,
   tvdbId,
   scope,
   seasonNumber,

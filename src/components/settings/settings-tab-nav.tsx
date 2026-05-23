@@ -21,6 +21,7 @@ export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
     // on narrow viewports and stays a single row when content fits naturally.
     // Removed `width: fit-content` so wrap can use the full container width.
     <nav
+      aria-label="Settings sections"
       className="flex flex-wrap gap-1 max-w-full"
       style={{
         padding: 2,
@@ -35,6 +36,7 @@ export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
           <Link
             key={id}
             href={`/settings?tab=${id}`}
+            aria-current={active ? "page" : undefined}
             className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
             style={{
               padding: "5px 14px",

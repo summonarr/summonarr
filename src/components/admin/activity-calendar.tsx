@@ -33,6 +33,8 @@ export function ActivityCalendar({
 }) {
   const countMap = new Map(data.map((d) => [d.day, d.count]));
   const max = Math.max(...data.map((d) => d.count), 1);
+  const totalPlays = data.reduce((sum, d) => sum + d.count, 0);
+  const activeDays = data.filter((d) => d.count > 0).length;
 
   const today = new Date(todayIso);
   const days: { date: string; dow: number }[] = [];
@@ -86,7 +88,11 @@ export function ActivityCalendar({
         ← swipe to see the full year →
       </p>
       <div className="overflow-x-auto">
-        <div style={{ minWidth: 700 }}>
+        <div
+          role="img"
+          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString()} total plays across ${activeDays} active days. Peak day: ${max} plays.`}
+          style={{ minWidth: 700 }}
+        >
           {/* Month labels */}
           <div style={{ display: "flex", marginLeft: 26, marginBottom: 6, gap: GAP }}>
             {weeks.map((_, wi) => {

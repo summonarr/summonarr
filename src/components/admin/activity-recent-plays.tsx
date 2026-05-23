@@ -186,45 +186,42 @@ export function ActivityRecentPlays({
       if (startDateIso) filterParams.set("startDate", startDateIso);
       const res = await fetch(`/api/play-history?${filterParams.toString()}`);
       if (!res.ok) return;
-      const data = await res.json();
-      const items: RecentPlay[] = data.items.map(
-        (p: Record<string, unknown>) => ({
-          id: p.id,
-          source: p.source,
-          title: p.title,
-          tmdbId: p.tmdbId,
-          mediaType: p.mediaType,
-          startedAt: p.startedAt,
-          stoppedAt: p.stoppedAt,
-          duration: p.duration,
-          playDuration: p.playDuration,
-          pausedDuration: p.pausedDuration,
-          watched: p.watched,
-          platform: p.platform,
-          player: p.player,
-          device: p.device,
-          ipAddress: p.ipAddress,
-          playMethod: p.playMethod,
-          resolution: p.resolution,
-          videoCodec: p.videoCodec,
-          audioCodec: p.audioCodec,
-          bitrate: p.bitrate,
-          container: p.container,
-          videoDecision: p.videoDecision,
-          audioDecision: p.audioDecision,
-          seasonNumber: p.seasonNumber,
-          episodeNumber: p.episodeNumber,
-          episodeTitle: p.episodeTitle,
-          mediaServerUserId: p.mediaServerUserId,
-          username:
-            (p.mediaServerUser as Record<string, unknown>)?.username ??
-            "Unknown",
-          userSource:
-            (p.mediaServerUser as Record<string, unknown>)?.source ?? "",
-          userThumb:
-            (p.mediaServerUser as Record<string, unknown>)?.thumbUrl ?? null,
-        }),
-      );
+      type PlayHistoryApiItem = Omit<RecentPlay, "username" | "userSource" | "userThumb"> & {
+        mediaServerUser?: { username?: string | null; source?: string | null; thumbUrl?: string | null } | null;
+      };
+      const data = (await res.json()) as { items: PlayHistoryApiItem[] };
+      const items: RecentPlay[] = data.items.map((p) => ({
+        id: p.id,
+        source: p.source,
+        title: p.title,
+        tmdbId: p.tmdbId,
+        mediaType: p.mediaType,
+        startedAt: p.startedAt,
+        stoppedAt: p.stoppedAt,
+        duration: p.duration,
+        playDuration: p.playDuration,
+        pausedDuration: p.pausedDuration,
+        watched: p.watched,
+        platform: p.platform,
+        player: p.player,
+        device: p.device,
+        ipAddress: p.ipAddress,
+        playMethod: p.playMethod,
+        resolution: p.resolution,
+        videoCodec: p.videoCodec,
+        audioCodec: p.audioCodec,
+        bitrate: p.bitrate,
+        container: p.container,
+        videoDecision: p.videoDecision,
+        audioDecision: p.audioDecision,
+        seasonNumber: p.seasonNumber,
+        episodeNumber: p.episodeNumber,
+        episodeTitle: p.episodeTitle,
+        mediaServerUserId: p.mediaServerUserId,
+        username: p.mediaServerUser?.username ?? "Unknown",
+        userSource: p.mediaServerUser?.source ?? "",
+        userThumb: p.mediaServerUser?.thumbUrl ?? null,
+      }));
       setPlays((prev) => [...prev, ...items]);
       setPage(nextPage);
       setHasMore(items.length >= 20);
@@ -373,7 +370,6 @@ export function ActivityRecentPlays({
                     <Fragment key={p.id}>
                       <tr
                         className="recent-row"
-                        role="button"
                         tabIndex={0}
                         aria-expanded={isExpanded}
                         onClick={() =>

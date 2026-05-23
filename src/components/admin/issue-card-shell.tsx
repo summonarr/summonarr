@@ -39,7 +39,7 @@ export function IssueCardShell({ issueId, messageCount, children }: IssueCardShe
       {}
       {threadOpen && (
         <div className="xl:hidden">
-          <IssueThread issueId={issueId} initialCount={messageCount} />
+          <IssueThread issueId={issueId} />
         </div>
       )}
     </div>

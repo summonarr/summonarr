@@ -23,8 +23,9 @@ function TokenLinkFlow() {
     setError(null);
     try {
       const res = await fetch("/api/discord/generate-link", { method: "POST" });
-      const data = await res.json();
+      const data = (await res.json()) as { token?: string; expiresAt?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "Failed to generate token");
+      if (!data.token || !data.expiresAt) throw new Error("Malformed server response");
       setToken(data.token);
       setExpiresAt(new Date(data.expiresAt));
     } catch (err) {
@@ -99,7 +100,7 @@ function WebMergeFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ discordId: discordId.trim() }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(data.error ?? "Failed to send code");
       setStep("code-sent");
     } catch (err) {
@@ -118,7 +119,7 @@ function WebMergeFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: code.trim() }),
       });
-      const data = await res.json();
+      const data = (await res.json()) as { migrated?: number; error?: string };
       if (!res.ok) throw new Error(data.error ?? "Verification failed");
       setMigrated(data.migrated ?? 0);
       setStep("done");

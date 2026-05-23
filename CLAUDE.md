@@ -36,7 +36,7 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 - [src/components/](src/components/) — feature components; primitives under `ui/`.
 - [prisma/schema.prisma](prisma/schema.prisma) — every model (User, Account, AuthSession, MediaRequest, Plex/JellyfinLibraryItem, Radarr/Sonarr{Wanted,Available}Item, TVEpisodeCache, TmdbCache, TmdbMediaCore, Issue, IssueMessage, IssueGrab, PlayHistory, ActiveSession, DeletionVote, PushSubscription, Setting, MediaServerUser, …).
 - [src/generated/prisma/](src/generated/prisma/) — generated client output. **Never edit by hand.**
-- There is **no** `middleware.ts`. Auth gating lives in NextAuth's `authConfig.callbacks.authorized()`.
+- There is **no** `middleware.ts` — Next 16 renamed it to `proxy.ts`. See [src/proxy.ts](src/proxy.ts), which wires `NextAuth(authConfig)` and runs CSRF + CSP nonce per request. Auth gating itself lives in `authConfig.callbacks.authorized()`.
 
 ## Core architecture
 

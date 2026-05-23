@@ -62,6 +62,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
     >
+      {/* Skip link: focusable on Tab from the page top, jumps past the sidebar/header to main content */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-2 focus:rounded focus:outline-none focus:ring-2 focus:ring-[var(--ds-accent-ring)]"
+        style={{ background: "var(--ds-bg-2)", color: "var(--ds-fg)", border: "1px solid var(--ds-border)" }}
+      >
+        Skip to main content
+      </a>
       <NavigationProgress />
       <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
@@ -73,7 +81,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         {discordInviteUrl && !userDiscordId && (
           <DiscordJoinModal inviteUrl={discordInviteUrl} />
         )}
-        <main className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-24 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
+        <main id="main-content" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-24 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
           {children}
         </main>
       </div>
