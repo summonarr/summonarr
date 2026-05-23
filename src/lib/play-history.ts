@@ -9,6 +9,25 @@ export function safeBigInt(x: unknown): bigint {
   return BigInt(Math.max(0, Math.floor(n)));
 }
 
+// Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
+// day in the window so gaps render as 0 instead of collapsing the x-axis.
+function padDailySeries<T extends { day: string }>(
+  rows: T[],
+  daysBack: number,
+  fill: (day: string) => T,
+): T[] {
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const out: T[] = [];
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  for (let i = daysBack - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+    const key = d.toISOString().slice(0, 10);
+    out.push(byDay.get(key) ?? fill(key));
+  }
+  return out;
+}
+
 const SETTING_KEYS = [
   "playHistoryEnabled",
   "playHistoryPlexEnabled",
@@ -462,7 +481,11 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
     recentPlays,
     topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, posterPath: r.posterPath, count: Number(r.count) })),
-    playsByDay: playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
+    playsByDay: padDailySeries(
+      playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
+      90,
+      (day) => ({ day, count: 0, hours: 0 }),
+    ),
     platformBreakdown: platformBreakdown.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
     activityCalendar: activityCalendar.map((r) => ({ day: r.day, count: Number(r.count) })),
     avgSessionDuration: Math.round(Number(avgSessionDurationRaw[0]?.avg_secs ?? 0)),
