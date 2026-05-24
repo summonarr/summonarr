@@ -187,7 +187,7 @@ export async function POST(req: NextRequest) {
 
     const pending = await prisma.mediaRequest.findMany({
       where: whereNotify,
-      select: { id: true, tmdbId: true, requestedBy: true, title: true, mediaType: true, user: { select: { mediaServer: true } } },
+      select: { id: true, tmdbId: true, requestedBy: true, title: true, mediaType: true, posterPath: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;
 
