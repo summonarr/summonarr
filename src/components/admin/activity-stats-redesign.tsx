@@ -72,19 +72,19 @@ export function ActivityStatsRedesign({
   const kpis: Kpi[] = [
     {
       label: "Plays",
-      value: stats.totalPlays.toLocaleString(),
+      value: stats.totalPlays.toLocaleString("en-US"),
       delta: delta(stats.totalPlays, stats.prevPeriod.totalPlays),
       spark: stats.playsByDay.map((d) => d.count),
     },
     {
       label: "Watch hours",
-      value: `${watchHours.toLocaleString()}h`,
+      value: `${watchHours.toLocaleString("en-US")}h`,
       delta: delta(watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours)),
       spark: stats.watchTimeByDay.map((d) => d.hours),
     },
     {
       label: "Unique viewers",
-      value: stats.uniqueViewers.toLocaleString(),
+      value: stats.uniqueViewers.toLocaleString("en-US"),
       delta: delta(stats.uniqueViewers, stats.prevPeriod.uniqueViewers),
       spark: stats.uniqueViewersByDay.map((d) => d.count),
     },
@@ -99,11 +99,11 @@ export function ActivityStatsRedesign({
     {
       label: "Repeat rate",
       value: `${repeatRate.toFixed(1)}×`,
-      sub: `${stats.uniqueTitles.toLocaleString()} unique titles`,
+      sub: `${stats.uniqueTitles.toLocaleString("en-US")} unique titles`,
     },
     {
       label: "Peak concurrency",
-      value: stats.peakConcurrent.toLocaleString(),
+      value: stats.peakConcurrent.toLocaleString("en-US"),
       sub: "max simultaneous streams",
     },
   ];
@@ -218,7 +218,7 @@ export function ActivityStatsRedesign({
               <ActivityCard key={t.label}>
                 <SectionHeader
                   label={t.label}
-                  sub={`last ${days}d · peak ${peak.toLocaleString()}${t.unit}`}
+                  sub={`last ${days}d · peak ${peak.toLocaleString("en-US")}${t.unit}`}
                   right={
                     <span
                       className="ds-mono"
@@ -432,7 +432,7 @@ export function ActivityStatsRedesign({
           <ActivityCard>
             <SectionHeader
               label="Why we're transcoding"
-              sub={`${transcodeTotal.toLocaleString()} transcoded sessions · ${transcodePct}% of plays`}
+              sub={`${transcodeTotal.toLocaleString("en-US")} transcoded sessions · ${transcodePct}% of plays`}
             />
             <HorizontalBars
               items={stats.transcodeReasons.map((r) => ({

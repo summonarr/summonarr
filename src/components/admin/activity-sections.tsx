@@ -559,13 +559,13 @@ export function CalendarSection({
       <ActivityCard>
         <SectionHeader
           label="365-day activity"
-          sub={`${activeDays.toLocaleString()} active days · always the last 365 days, independent of the period filter`}
+          sub={`${activeDays.toLocaleString("en-US")} active days · always the last 365 days, independent of the period filter`}
           right={
             <span
               className="ds-mono"
               style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
             >
-              Total {totalPlays.toLocaleString()} plays
+              Total {totalPlays.toLocaleString("en-US")} plays
             </span>
           }
         />

@@ -90,7 +90,7 @@ export function ActivityCalendar({
       <div className="overflow-x-auto">
         <div
           role="img"
-          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString()} total plays across ${activeDays} active days. Peak day: ${max} plays.`}
+          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString("en-US")} total plays across ${activeDays} active days. Peak day: ${max} plays.`}
           style={{ minWidth: 700 }}
         >
           {/* Month labels */}
