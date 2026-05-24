@@ -28,6 +28,12 @@ type Session = {
 };
 
 let active: Session | null = null;
+// Serializes startSession calls so the active-slot check + mkdtemp + assignment
+// run atomically. Without this, two concurrent first-chunk POSTs with different
+// uploadIds can both pass the `active` check (one synchronous, one before the
+// other's mkdtemp resolves), each mkdtemp their own dir, and the loser's tempDir
+// is leaked when `active = session` clobbers the winner.
+let startMutex: Promise<unknown> = Promise.resolve();
 
 // Per-session chained promise so concurrent appendChunk calls for the same
 // session serialize their reads/writes. Without this, two first-chunk POSTs
@@ -71,34 +77,47 @@ export async function startSession(
     return { ok: false, error: { kind: "size-too-large", max: MAX_CIPHERTEXT_BYTES } };
   }
 
-  if (active && !isExpired(active) && active.uploadId !== opts.uploadId) {
-    return { ok: false, error: { kind: "in-progress" } };
+  // Mutex: every concurrent startSession waits for the previous one to finish
+  // (whether it claimed the slot or rejected). The earlier check-then-mkdtemp
+  // shape let two callers each pass the `active` check before either's mkdtemp
+  // resolved, leaving the loser's tempDir orphaned.
+  const prev = startMutex;
+  let resolveMutex!: () => void;
+  startMutex = new Promise<void>((r) => { resolveMutex = r; });
+  await prev;
+
+  try {
+    if (active && !isExpired(active) && active.uploadId !== opts.uploadId) {
+      return { ok: false, error: { kind: "in-progress" } };
+    }
+
+    if (active && isExpired(active)) {
+      await cleanupSession(active);
+      active = null;
+    }
+
+    if (active && active.uploadId === opts.uploadId) {
+      return { ok: true, session: active };
+    }
+
+    const tempDir = await fs.mkdtemp(TEMP_PREFIX);
+    const filePath = path.join(tempDir, "upload.bin");
+
+    const session: Session = {
+      uploadId: opts.uploadId,
+      tempDir,
+      filePath,
+      totalSize: opts.totalSize,
+      totalChunks: opts.totalChunks,
+      receivedChunks: 0,
+      bytesWritten: 0,
+      expiresAt: Date.now() + SESSION_TTL_MS,
+    };
+    active = session;
+    return { ok: true, session };
+  } finally {
+    resolveMutex();
   }
-
-  if (active && isExpired(active)) {
-    await cleanupSession(active);
-    active = null;
-  }
-
-  if (active && active.uploadId === opts.uploadId) {
-    return { ok: true, session: active };
-  }
-
-  const tempDir = await fs.mkdtemp(TEMP_PREFIX);
-  const filePath = path.join(tempDir, "upload.bin");
-
-  const session: Session = {
-    uploadId: opts.uploadId,
-    tempDir,
-    filePath,
-    totalSize: opts.totalSize,
-    totalChunks: opts.totalChunks,
-    receivedChunks: 0,
-    bytesWritten: 0,
-    expiresAt: Date.now() + SESSION_TTL_MS,
-  };
-  active = session;
-  return { ok: true, session };
 }
 
 export type AppendError =

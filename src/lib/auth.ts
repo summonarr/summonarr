@@ -469,6 +469,11 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
   // so the sliding window can NEVER push the effective expiry past the original
   // session TTL. Without that ceiling an actively-used session would be
   // immortal: every refresh re-extended expiresAt to now+3600.
+  //
+  // ADMINs are also bounded — previously exempt, which meant any continuously
+  // active admin session became immortal in practice. On a multi-admin deployment
+  // that's a real risk: a forgotten admin session on an old laptop can persist
+  // indefinitely. Cap admins at 7 days from sign-in.
   if (token.role !== "ADMIN") {
     // Backfill for any pre-existing JWTs minted before maxExpiresAt was set.
     // We anchor it to the token's current expiresAt — not "now + 3600" — so a
@@ -488,6 +493,18 @@ async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
       // No maxExpiresAt available at all — clamp to the absolute hard ceiling so
       // a successful refresh still can't outlive MAX_ALLOWED_SESSION_SECONDS.
       token.expiresAt = now + 3600;
+    }
+  } else {
+    // ADMIN 7-day ceiling: derive from `iat` (sign-in timestamp baked into
+    // every JWT) so it survives any token-shape migration. If iat is missing
+    // (very old tokens), fall back to the existing expiresAt.
+    const ADMIN_MAX_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
+    const iat = typeof token.iat === "number" ? token.iat : null;
+    const adminHardExpiry = iat !== null
+      ? iat + ADMIN_MAX_LIFETIME_SECONDS
+      : (typeof token.expiresAt === "number" ? token.expiresAt : null);
+    if (adminHardExpiry !== null && now >= adminHardExpiry) {
+      return null;
     }
   }
 
