@@ -5,34 +5,26 @@ import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { PageHeader } from "@/components/ui/design";
+import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 
 export const dynamic = "force-dynamic";
 
 const PAGE_SIZE = 50;
 
-const VALID_ACTIONS: AuditAction[] = [
-  "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
-  "USER_ROLE_CHANGE", "USER_DELETE", "SETTINGS_CHANGE",
-  "LIBRARY_SYNC", "ISSUE_STATUS_CHANGE", "MAINTENANCE_TOGGLE",
-  "BACKUP_EXPORT", "BACKUP_IMPORT",
-  "AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT",
-];
+// Derived from the shared audit-actions module so the schema enum is the single
+// source of truth. Previously this page had its own hand-maintained list (16 of
+// 27 values) — a filter for any missing enum value silently returned the full
+// unfiltered set (audit-log H34 / S8-Pass3-F1).
+const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
-type AuditGroup = "auth" | "admin" | "system";
-
-// Coarser filter above per-action pills — server-side expansion to action IN-set
 const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
-  auth: ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT", "SESSION_REVOKE"],
-  admin: [
-    "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
-    "USER_ROLE_CHANGE", "USER_DELETE",
-    "SETTINGS_CHANGE", "MAINTENANCE_TOGGLE",
-    "BACKUP_EXPORT", "BACKUP_IMPORT",
-    "ISSUE_STATUS_CHANGE", "ISSUE_DELETE",
-    "RATINGS_CACHE_CLEAR",
-  ],
-  system: ["LIBRARY_SYNC", "CACHE_WARM"],
+  auth: [],
+  admin: [],
+  system: [],
 };
+for (const action of AUDIT_ACTIONS) {
+  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
+}
 
 export default async function AuditLogPage({
   searchParams,
