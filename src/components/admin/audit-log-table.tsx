@@ -6,6 +6,8 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { ACTION_LABELS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
+import type { AuditAction } from "@/generated/prisma";
 
 interface AuditRow {
   id: string;
@@ -19,57 +21,9 @@ interface AuditRow {
   provider: string | null;
 }
 
-const ACTION_LABELS: Record<string, { label: string; color: string; icon: string }> = {
-  REQUEST_APPROVE:    { label: "Request Approved",    color: "bg-green-900/50 text-green-400",   icon: "approve" },
-  REQUEST_DECLINE:    { label: "Request Declined",    color: "bg-red-900/50 text-red-400",       icon: "decline" },
-  REQUEST_DELETE:     { label: "Request Deleted",     color: "bg-red-900/50 text-red-400",       icon: "delete" },
-  USER_ROLE_CHANGE:   { label: "Role Changed",        color: "bg-blue-900/50 text-blue-400",     icon: "role" },
-  USER_DELETE:        { label: "User Deleted",        color: "bg-red-900/50 text-red-400",       icon: "delete" },
-  SETTINGS_CHANGE:    { label: "Settings Changed",    color: "bg-yellow-900/50 text-yellow-400", icon: "settings" },
-  LIBRARY_SYNC:       { label: "Library Synced",      color: "bg-purple-900/50 text-purple-400", icon: "sync" },
-  ISSUE_STATUS_CHANGE:{ label: "Issue Updated",       color: "bg-orange-900/50 text-orange-400", icon: "issue" },
-  ISSUE_CLAIM:        { label: "Issue Claimed",       color: "bg-orange-900/50 text-orange-400", icon: "issue" },
-  ISSUE_UNCLAIM:      { label: "Issue Unclaimed",     color: "bg-zinc-700/50 text-zinc-400",     icon: "issue" },
-  ISSUE_DELETE:       { label: "Issue Deleted",       color: "bg-red-900/50 text-red-400",       icon: "delete" },
-  MAINTENANCE_TOGGLE: { label: "Maintenance Toggle",  color: "bg-yellow-900/50 text-yellow-400", icon: "maintenance" },
-  BACKUP_EXPORT:      { label: "Backup Exported",     color: "bg-indigo-900/50 text-indigo-400", icon: "export" },
-  BACKUP_IMPORT:      { label: "Backup Imported",     color: "bg-indigo-900/50 text-indigo-400", icon: "import" },
-  AUTH_LOGIN:         { label: "Login",               color: "bg-emerald-900/50 text-emerald-400", icon: "login" },
-  AUTH_LOGIN_FAILED:  { label: "Login Failed",        color: "bg-red-900/50 text-red-400",       icon: "login_failed" },
-  AUTH_LOGOUT:        { label: "Logout",              color: "bg-zinc-700/50 text-zinc-400",     icon: "logout" },
-  SESSION_REVOKE:     { label: "Session Revoked",     color: "bg-orange-900/50 text-orange-400", icon: "revoke" },
-  CACHE_WARM:         { label: "Cache Warmed",        color: "bg-purple-900/50 text-purple-400", icon: "sync" },
-  RATINGS_CACHE_CLEAR:{ label: "Ratings Cache Cleared", color: "bg-purple-900/50 text-purple-400", icon: "sync" },
-  PLAY_HISTORY_BACKFILL: { label: "Play History Backfilled", color: "bg-purple-900/50 text-purple-400", icon: "sync" },
-};
-
+// ACTION_LABELS + ACTION_GROUP imported from @/lib/audit-actions — single source
+// of truth, typed as Record<AuditAction, ...> so the schema enum drives both.
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
-
-type AuditGroup = "auth" | "admin" | "system";
-
-const ACTION_GROUP: Record<string, AuditGroup> = {
-  AUTH_LOGIN: "auth",
-  AUTH_LOGIN_FAILED: "auth",
-  AUTH_LOGOUT: "auth",
-  SESSION_REVOKE: "auth",
-  REQUEST_APPROVE: "admin",
-  REQUEST_DECLINE: "admin",
-  REQUEST_DELETE: "admin",
-  USER_ROLE_CHANGE: "admin",
-  USER_DELETE: "admin",
-  SETTINGS_CHANGE: "admin",
-  MAINTENANCE_TOGGLE: "admin",
-  BACKUP_EXPORT: "admin",
-  BACKUP_IMPORT: "admin",
-  ISSUE_STATUS_CHANGE: "admin",
-  ISSUE_CLAIM: "admin",
-  ISSUE_UNCLAIM: "admin",
-  ISSUE_DELETE: "admin",
-  LIBRARY_SYNC: "system",
-  CACHE_WARM: "system",
-  RATINGS_CACHE_CLEAR: "system",
-  PLAY_HISTORY_BACKFILL: "system",
-};
 
 const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
   { value: "", label: "All" },
@@ -189,7 +143,7 @@ function AuditLogFilters({
 
   // When a group is selected, scope the per-action pills to that group
   const visibleActions = currentGroup
-    ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a] === currentGroup)
+    ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === currentGroup)
     : ALL_ACTIONS;
 
   useEffect(() => {
@@ -261,7 +215,7 @@ function AuditLogFilters({
                 currentAction === a ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"
               }`}
             >
-              {ACTION_LABELS[a].label}
+              {ACTION_LABELS[a as AuditAction].label}
             </button>
           ))}
         </div>
@@ -558,7 +512,7 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
           </thead>
           <tbody>
             {logs.map((log) => {
-              const actionInfo = ACTION_LABELS[log.action] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
+              const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
               return (
                 <tr key={log.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                   <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString() : undefined}>
@@ -632,7 +586,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
 
             <div className="space-y-3">
               {group.logs.map((log) => {
-                const actionInfo = ACTION_LABELS[log.action] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
+                const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
                 const dotColor = DOT_COLORS[log.action] ?? "bg-zinc-500";
 
                 return (

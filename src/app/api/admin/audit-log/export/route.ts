@@ -4,15 +4,9 @@ import { prisma } from "@/lib/prisma";
 import { auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
+import { AUDIT_ACTIONS } from "@/lib/audit-actions";
 
-const VALID_ACTIONS: AuditAction[] = [
-  "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
-  "USER_ROLE_CHANGE", "USER_DELETE", "SETTINGS_CHANGE",
-  "LIBRARY_SYNC", "ISSUE_STATUS_CHANGE", "MAINTENANCE_TOGGLE",
-  "BACKUP_EXPORT", "BACKUP_IMPORT",
-  "AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT",
-  "SESSION_REVOKE", "CACHE_WARM", "RATINGS_CACHE_CLEAR", "ISSUE_DELETE",
-];
+const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
 const CHUNK_SIZE = 1000;
 const MAX_EXPORT_RECORDS = 100_000;

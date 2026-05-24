@@ -232,6 +232,7 @@ model PlexLibraryItem {
 
   @@id([tmdbId, mediaType])
   @@index([plexRatingKey]) // play-history sync filters on plexRatingKey every poll
+  @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
 }
 
 // ─── Jellyfin Library Cache ───────────────────────────────────────────────────
@@ -250,6 +251,7 @@ model JellyfinLibraryItem {
 
   @@id([tmdbId, mediaType])
   @@index([jellyfinItemId]) // play-history sync filters on jellyfinItemId every poll
+  @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
 }
 
 // ─── TV Episode Cache ─────────────────────────────────────────────────────────
@@ -492,6 +494,7 @@ model IssueGrab {
 
   @@index([issueId])
   @@index([triggeredById])
+  @@index([tmdbId, mediaType, notifiedAt]) // every Radarr/Sonarr Download webhook does findMany(notifiedAt: null) by (tmdbId, mediaType) — without this it seq-scans on every grab
 }
 
 // ─── Deletion Votes ──────────────────────────────────────────────────────
