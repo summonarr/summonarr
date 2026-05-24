@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush } from "@/lib/push";
-import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
+import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
@@ -88,7 +88,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
   }
 
+  // Track whether the synchronous body completed; if it throws we roll back the
+  // replay digest so Sonarr's source-side retry can re-deliver.
+  let syncCompleted = false;
+  try {
+
   if (payload.eventType !== "Download" || !payload.series) {
+    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true });
   }
 
@@ -233,7 +239,7 @@ export async function POST(req: NextRequest) {
             seasonNumber: grab.seasonNumber,
             episodeNumber: grab.episodeNumber,
             issueId: grab.issueId,
-          }).then(() => true).catch((err) => { console.error("[webhook/sonarr] grab push error:", err); return false; });
+          });
           if (!sent) {
             await prisma.issueGrab.update({
               where: { id: grab.id, notifiedAt: now },
@@ -246,5 +252,11 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  syncCompleted = true;
   return NextResponse.json({ ok: true, marked: updated.count });
+  } finally {
+    if (!syncCompleted) {
+      await clearWebhookReplayDigestJson("sonarr", secret, payload);
+    }
+  }
 }

@@ -87,6 +87,22 @@ async function checkAndRecordDigest(key: string): Promise<boolean> {
   return true;
 }
 
+// Roll back a previously-recorded replay digest. Call this from a webhook handler
+// when the synchronous body fails AFTER checkAndRecordWebhookJson succeeded —
+// otherwise the digest blocks Sonarr/Radarr's source-side retry for the next 24h
+// and the work is permanently lost.
+//
+// Idempotent: a missing row is a no-op. Best-effort: swallows errors so the
+// caller can re-throw the original handler exception untouched.
+export async function clearWebhookReplayDigestJson(
+  source: string,
+  secret: string,
+  parsedJson: unknown,
+): Promise<void> {
+  const key = digestForJson(source, secret, parsedJson);
+  await prisma.webhookReplay.delete({ where: { digest: key } }).catch(() => {});
+}
+
 export function __resetWebhookReplayCacheForTests(): void {
   // No-op in DB-backed mode; kept for interface compatibility
 }
