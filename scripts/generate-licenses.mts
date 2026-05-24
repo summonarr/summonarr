@@ -59,6 +59,10 @@ interface LockEntry {
   os?: string[];
   cpu?: string[];
   libc?: string[];
+  // True for optional deps with no direct platform constraint of their own.
+  // npm may skip these on a platform where their consumer (a platform-gated
+  // parent) wasn't installed — also gate them out of disk reads.
+  optional?: boolean;
 }
 
 interface Pkg {
@@ -119,7 +123,14 @@ function productionPackages(): Pkg[] {
     // copy, so its on-disk LICENSE (and package.json) is absent on other
     // OSes. Never touch disk for these — the output must be byte-identical
     // whether generated on a dev macOS box or in Linux CI.
-    const gated = Boolean(e.os || e.cpu || e.libc);
+    //
+    // `optional: true` is treated the same. An optional dep with no os/cpu/
+    // libc of its own can still get skipped on a platform where its
+    // consumer (a platform-gated parent) wasn't installed — e.g.
+    // @emnapi/runtime is the runtime for @img/sharp-wasm32, present on Mac
+    // but absent on Linux CI. Reading its on-disk LICENSE makes the
+    // generator output OS-dependent.
+    const gated = Boolean(e.os || e.cpu || e.libc || e.optional);
     seen.set(key, {
       name,
       version: e.version,
