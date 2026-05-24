@@ -13,7 +13,7 @@ import { tmdbAuth } from "@/lib/tmdb-auth";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { checkBodySize } from "@/lib/body-size";
+import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 
 export const dynamic = "force-dynamic";
@@ -828,6 +828,10 @@ export async function POST(req: NextRequest) {
   if (tooLarge) return tooLarge;
 
   const body = await req.text();
+  // Post-read backstop for chunked-transfer clients that omit Content-Length
+  // (Discord doesn't, but a malicious proxy might rewrite headers).
+  const oversize = assertBodyBytesUnderCap(new TextEncoder().encode(body), 1_048_576);
+  if (oversize) return oversize;
 
   const publicKey = await getPublicKey();
   if (!publicKey) {
