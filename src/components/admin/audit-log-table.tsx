@@ -515,7 +515,7 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
               const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
               return (
                 <tr key={log.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString() : undefined}>
+                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                     {mounted ? relativeTime(log.createdAt) : ""}
                   </td>
                   <td className="px-4 py-3 text-white text-sm">{log.userName}</td>
@@ -602,7 +602,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                           </span>
                           <span className="text-xs text-zinc-500 font-mono">{log.target}</span>
                         </div>
-                        <span className="text-xs text-zinc-600" title={mounted ? new Date(log.createdAt).toLocaleString() : undefined}>
+                        <span className="text-xs text-zinc-600" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                           {mounted ? relativeTime(log.createdAt) : ""}
                         </span>
                       </div>

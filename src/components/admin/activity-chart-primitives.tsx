@@ -219,7 +219,7 @@ export function DistributionBars({
         const color = colorFor ? colorFor(r.label, i) : palette[i % palette.length];
         const display = formatValue
           ? formatValue(r.value, pct)
-          : `${r.value.toLocaleString()} (${pct}%)`;
+          : `${r.value.toLocaleString("en-US")} (${pct}%)`;
         return (
           <div key={`${r.label}-${i}`}>
             <div className="flex justify-between text-xs mb-1">

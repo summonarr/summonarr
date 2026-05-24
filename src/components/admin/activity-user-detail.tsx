@@ -197,12 +197,12 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
       >
         <MiniKpi
           label="Total plays"
-          value={s.totalPlays.toLocaleString()}
+          value={s.totalPlays.toLocaleString("en-US")}
           big
         />
         <MiniKpi
           label="Watch time"
-          value={`${s.totalWatchTimeHours.toLocaleString()}h`}
+          value={`${s.totalWatchTimeHours.toLocaleString("en-US")}h`}
           big
         />
         <MiniKpi label="Last active" value={when(s.lastActiveIso)} />

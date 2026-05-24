@@ -525,14 +525,25 @@ export function ActivityHistoryTable({
   ]);
 
   useEffect(() => {
-    fetch("/api/play-history?distinct=platforms")
-      .then((r) => r.json())
-      .then(setPlatforms)
+    // AbortController guards against unmount during the in-flight fetch + against
+    // a backend 4xx returning `{ error: "..." }` which (untyped) would crash the
+    // downstream .map/.filter in the dropdown render. Typed parsers narrow the
+    // payload to the array shape the setters expect; non-array responses are
+    // silently dropped (empty dropdown is preferable to a render crash).
+    const ac = new AbortController();
+    fetch("/api/play-history?distinct=platforms", { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: unknown) => {
+        if (Array.isArray(data)) setPlatforms(data as string[]);
+      })
       .catch(() => {});
-    fetch("/api/play-history?distinct=users")
-      .then((r) => r.json())
-      .then(setUsers)
+    fetch("/api/play-history?distinct=users", { signal: ac.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: unknown) => {
+        if (Array.isArray(data)) setUsers(data as MediaServerUserOption[]);
+      })
       .catch(() => {});
+    return () => ac.abort();
   }, []);
 
   const buildFilterParams = useCallback(() => {
@@ -799,7 +810,7 @@ export function ActivityHistoryTable({
                 whiteSpace: "nowrap",
               }}
             >
-              {total.toLocaleString()} total
+              {total.toLocaleString("en-US")} total
             </div>
 
             {hasFilter && (
@@ -1364,7 +1375,7 @@ export function ActivityHistoryTable({
               }}
             >
               {total > 0
-                ? `${startItem.toLocaleString()}–${endItem.toLocaleString()} of ${total.toLocaleString()}`
+                ? `${startItem.toLocaleString("en-US")}–${endItem.toLocaleString("en-US")} of ${total.toLocaleString("en-US")}`
                 : "0 results"}
             </span>
           </div>

@@ -40,7 +40,7 @@ export function SyncTVEpisodesButton() {
         if ((data.plex ?? 0) > 0) parts.push(`Plex ${data.plex}`);
         if ((data.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${data.jellyfin}`);
         setStatus("done");
-        setResult(parts.length > 0 ? `${total.toLocaleString()} episodes (${parts.join(", ")})` : "0 episodes");
+        setResult(parts.length > 0 ? `${total.toLocaleString("en-US")} episodes (${parts.join(", ")})` : "0 episodes");
         const search = searchParams.toString();
         router.push(pathname + (search ? `?${search}` : ""));
       }

@@ -388,7 +388,7 @@ export function Sparkline({
                 display: "inline-block",
               }}
             />
-            {data[hover.i].toLocaleString()}
+            {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
         </div>
@@ -575,7 +575,7 @@ export function AreaChart({
                 display: "inline-block",
               }}
             />
-            {data[hover.i].toLocaleString()}
+            {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
         </div>
@@ -976,7 +976,7 @@ export function HorizontalBars({
               flexShrink: 0,
             }}
           >
-            {it.count.toLocaleString()}
+            {it.count.toLocaleString("en-US")}
           </span>
         </div>
       ))}
@@ -1060,7 +1060,7 @@ export function StreamTypeBars({
                   whiteSpace: "nowrap",
                 }}
               >
-                {r.count.toLocaleString()}{" "}
+                {r.count.toLocaleString("en-US")}{" "}
                 <span style={{ color: "var(--ds-fg-disabled)" }}>· {pct}%</span>
               </span>
             </div>

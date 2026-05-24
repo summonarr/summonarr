@@ -240,10 +240,10 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
             paddingTop: 6,
           }}
         >
-          <HeaderStat label="Plays" value={s.totalPlays.toLocaleString()} />
+          <HeaderStat label="Plays" value={s.totalPlays.toLocaleString("en-US")} />
           <HeaderStat
             label="Viewers"
-            value={s.uniqueViewers.toLocaleString()}
+            value={s.uniqueViewers.toLocaleString("en-US")}
           />
           <HeaderStat
             label="Completion"

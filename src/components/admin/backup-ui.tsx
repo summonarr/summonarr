@@ -466,7 +466,7 @@ function DbImportSection() {
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {kpi.value.toLocaleString()}
+                  {kpi.value.toLocaleString("en-US")}
                 </div>
               </div>
             ))}

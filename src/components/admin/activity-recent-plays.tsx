@@ -75,7 +75,7 @@ function formatBitrate(raw: number | null): string {
 
 function formatTimestamp(dateStr: string | null): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString();
+  return new Date(dateStr).toLocaleString("en-US");
 }
 
 const TH: React.CSSProperties = {

@@ -59,15 +59,15 @@ export function MasterDbFillButton() {
         return;
       }
       const parts: string[] = [];
-      if (plexCount > 0) parts.push(`Plex ${plexCount.toLocaleString()} items`);
-      if (jellyCount > 0) parts.push(`Jellyfin ${jellyCount.toLocaleString()} items`);
+      if (plexCount > 0) parts.push(`Plex ${plexCount.toLocaleString("en-US")} items`);
+      if (jellyCount > 0) parts.push(`Jellyfin ${jellyCount.toLocaleString("en-US")} items`);
       const fetched    = warmData.fetched    ?? 0;
       const backfilled = warmData.backfilled ?? 0;
       const skipped    = warmData.skipped    ?? 0;
       const tmdbParts: string[] = [];
-      if (fetched    > 0) tmdbParts.push(`${fetched.toLocaleString()} fetched`);
-      if (backfilled > 0) tmdbParts.push(`${backfilled.toLocaleString()} backfilled`);
-      if (skipped    > 0) tmdbParts.push(`${skipped.toLocaleString()} already cached`);
+      if (fetched    > 0) tmdbParts.push(`${fetched.toLocaleString("en-US")} fetched`);
+      if (backfilled > 0) tmdbParts.push(`${backfilled.toLocaleString("en-US")} backfilled`);
+      if (skipped    > 0) tmdbParts.push(`${skipped.toLocaleString("en-US")} already cached`);
       parts.push(`TMDB: ${tmdbParts.join(", ") || "0 items"}`);
       setPhase("done");
       setSummary(parts.join(" · "));
