@@ -3,6 +3,17 @@ services:
     image: postgres:17-alpine
     container_name: summonarr-postgres
     restart: unless-stopped
+    # See docker-container/docker-compose.yml for the rationale on these.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
     environment:
       POSTGRES_DB: summonarr
       POSTGRES_USER: summonarr
@@ -23,6 +34,13 @@ services:
     image: summonarr:local
     container_name: summonarr
     restart: unless-stopped
+    # See docker-container/docker-compose.yml for the rationale on these.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     ports:
       - "3001:3000"
     environment:
