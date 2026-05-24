@@ -245,7 +245,10 @@ export function applyFinalTick(
   };
 }
 
-export async function recordCompletedSession(session: ActiveSession): Promise<void> {
+export async function recordCompletedSession(
+  session: ActiveSession,
+  opts: { skipSSE?: boolean } = {},
+): Promise<void> {
   // The polling sync may leave playtimeMs at zero for short watches that disappear between two
   // 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes 0.
   // progressMs (playhead at stop) is always populated, so taking the max yields the right
@@ -345,9 +348,14 @@ export async function recordCompletedSession(session: ActiveSession): Promise<vo
     await tx.activeSession.delete({ where: { id: session.id } }).catch(() => {});
   }, { timeout: 15_000 });
 
-  // Invalidate cached stats so the next page load reflects the new record
+  // Invalidate cached stats so the next page load reflects the new record.
+  // Callers that import many sessions in a tight loop (cron, sync) should pass
+  // skipSSE=true and fire a single SSE at the loop boundary to avoid N+1
+  // history-updated events triggering N refetches on every connected client.
   clearActivityCache();
-  emitSSE({ type: "activity:history-updated" });
+  if (!opts.skipSSE) {
+    emitSSE({ type: "activity:history-updated" });
+  }
 }
 
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
@@ -361,8 +369,14 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
   // Parallelized with allSettled so one failure doesn't abort the rest, and previously-silent
   // failures now surface as a single warn.
   const results = await Promise.allSettled(
-    stale.map((session) => recordCompletedSession(session)),
+    // Skip per-session SSE; cron callers fire a single activity:history-updated
+    // at the loop boundary so connected clients don't refetch N times per run.
+    stale.map((session) => recordCompletedSession(session, { skipSSE: true })),
   );
+  // If anything actually finalized, emit one SSE for the whole batch.
+  if (results.some((r) => r.status === "fulfilled")) {
+    emitSSE({ type: "activity:history-updated" });
+  }
   for (const r of results) {
     if (r.status === "rejected") {
       console.warn("[play-history] cleanupStaleSessions: recordCompletedSession failed:", r.reason);

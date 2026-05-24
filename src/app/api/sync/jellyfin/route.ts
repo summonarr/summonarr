@@ -129,6 +129,15 @@ async function syncJellyfin(request: NextRequest) {
     }, { timeout: BATCH_TX_TIMEOUT });
   }
 
+  // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
+  // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
+  // admin runs the per-source resync more recently than the orchestrator.
+  await prisma.setting.upsert({
+    where: { key: "lastJellyfinSyncSucceededAt" },
+    update: { value: String(Date.now()) },
+    create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
+  }).catch((err) => console.error("[sync/jellyfin] failed to stamp lastJellyfinSyncSucceededAt:", err));
+
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
     select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, notifiedAvailable: true },

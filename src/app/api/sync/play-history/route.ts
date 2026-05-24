@@ -184,7 +184,10 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const stale = activePlexSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
   const finalized = await Promise.all(
     stale.map((session) =>
-      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }))
+      // skipSSE: caller (syncPlayHistory POST) emits a single batched
+      // activity:history-updated after the full sync run completes, so we
+      // don't trigger N refetches per cron tick.
+      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
         .then(() => true)
         .catch(() => false),
     ),
@@ -401,7 +404,8 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const stale = activeJfSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
   const finalized = await Promise.all(
     stale.map((session) =>
-      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }))
+      // skipSSE: see Plex branch above; one batched SSE per cron run.
+      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
         .then(() => true)
         .catch((err) => {
           console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
@@ -477,6 +481,15 @@ async function syncPlayHistory(request: NextRequest) {
     }
 
     await Promise.all(syncPromises);
+
+    // Single batched activity:history-updated after both source loops complete.
+    // recordCompletedSession is called with skipSSE inside each loop to avoid
+    // N+1 events. Emit only when at least one session actually ended.
+    const totalEnded = (results.plex as { ended?: number } | undefined)?.ended ?? 0
+      + ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
+    if (totalEnded > 0) {
+      emitSSE({ type: "activity:history-updated" });
+    }
 
     const allSessions = await prisma.activeSession.findMany({
       orderBy: { startedAt: "desc" },
