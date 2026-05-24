@@ -181,6 +181,7 @@ export const PATCH = withAdmin(async (
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
     let arrError: string | null = null;
+    let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
         await addMovieToRadarr(updated.tmdbId);
@@ -188,12 +189,24 @@ export const PATCH = withAdmin(async (
         const tvdbId = await addSeriesToSonarr(updated.tmdbId);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
+      arrPushSucceeded = true;
     } catch (err) {
       console.error("[arr] Failed to push request:", err);
       arrError = arrErrorMessage(err);
+      // Roll status back to PENDING so the request isn't stuck APPROVED with no
+      // ARR backing — admin sees the failure in the response (`arrError`) and
+      // can retry. Matches the Discord interactions auto-approve rollback shape.
+      await prisma.mediaRequest.update({
+        where: { id, status: "APPROVED" },
+        data: { status: "PENDING", pendingNotifyAt: null },
+      }).catch((rbErr) => console.error("[requests] rollback to PENDING failed:", rbErr));
     }
 
-    notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+    // Only notify if ARR push actually succeeded — otherwise the user gets a
+    // misleading "Approved!" ping for a request that's actually back to PENDING.
+    if (arrPushSucceeded) {
+      notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+    }
 
     scheduleDelayed(90_000, async () => {
       try {

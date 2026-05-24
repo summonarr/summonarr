@@ -49,12 +49,26 @@ export const PATCH = withIssueAdmin(async (
           await searchSeriesInSonarr(issue.tvdbId);
         }
       }
-      const updated = await prisma.issue.update({
-        where: { id },
+      // CAS on status: don't clobber a RESOLVED issue if another admin closed it
+      // while the search was in flight. updateMany returns count=0 in that case
+      // so we just return the current (RESOLVED) issue without changing status.
+      const claimed = await prisma.issue.updateMany({
+        where: { id, status: { not: "RESOLVED" } },
         data: { status: "IN_PROGRESS" },
       });
-      emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
-      return NextResponse.json({ ...updated, arrError: null });
+      const updated = await prisma.issue.findUnique({ where: { id } });
+      if (claimed.count > 0) {
+        emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
+        void logAudit({
+          userId: session.user.id,
+          userName: session.user.name ?? session.user.email ?? null,
+          action: "ISSUE_STATUS_CHANGE",
+          target: `issue:${id}`,
+          details: { trigger: "refetch", before: { status: issue.status }, after: { status: "IN_PROGRESS" } },
+          ...auditContext(req, session),
+        });
+      }
+      return NextResponse.json({ ...(updated ?? issue), arrError: null });
     } catch (err) {
       console.error("[arr] Issue refetch failed:", err);
       arrError = "Arr service request failed";
