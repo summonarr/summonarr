@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
 
 export const POST = withAuth(async (_req, _ctx, session) => {
@@ -27,7 +28,13 @@ export const POST = withAuth(async (_req, _ctx, session) => {
     subs.map(async (sub) => {
       try {
         await sendPushNotification(
-          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          {
+            endpoint: sub.endpoint,
+            keys: {
+              p256dh: decryptToken(sub.p256dh, "PushSubscription.p256dh"),
+              auth: decryptToken(sub.auth, "PushSubscription.auth"),
+            },
+          },
           JSON.stringify({ title: "Summonarr", body: "Test notification — push is working!", url: "/" }),
           {
             contact: vapidContact,

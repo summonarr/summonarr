@@ -203,7 +203,7 @@ export function calculateWatched(
   return (playDurationMs / totalDurationMs) * 100 >= thresholdPercent;
 }
 
-const EXCLUDED_USERNAMES = new Set(["gadgetusaf_space"]);
+const EXCLUDED_USERNAMES = new Set<string>();
 const MIN_PLAY_DURATION_S = 90;
 // Cap any single accumulation delta. Protects against missed events, machine sleep, or clock skew
 // inflating playtime. cleanupStaleSessions(30) handles ghost sessions; this is the per-event guard.

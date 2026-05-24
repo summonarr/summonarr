@@ -10,12 +10,15 @@ import "server-only";
  *      provider already guaranteed a real email address on signup (credentials/Plex/OIDC)
  *      but whose notificationEmail hasn't been backfilled yet.
  *
- * Synthetic Jellyfin identities (`jellyfin-<id>@jellyfin.local`) are never used —
- * they are placeholders for the unique constraint on `User.email`, not delivery addresses.
+ * Synthetic identities (`jellyfin-<id>@jellyfin.local`, `discord_<id>@discord.local`)
+ * are never used — they are placeholders for the unique constraint on `User.email`,
+ * not delivery addresses. Handing them to SMTP would hard-bounce.
  *
  * Returns `null` when there is no deliverable address, signalling the caller to skip
- * sending. This is the correct behaviour for Jellyfin users who haven't set one yet.
+ * sending. This is the correct behaviour for Jellyfin/Discord users who haven't set one yet.
  */
+const SYNTHETIC_EMAIL_SUFFIXES = ["@jellyfin.local", "@discord.local"] as const;
+
 export function resolveUserNotificationEmail(user: {
   email: string;
   notificationEmail: string | null;
@@ -23,6 +26,7 @@ export function resolveUserNotificationEmail(user: {
   if (user.notificationEmail && user.notificationEmail.trim() !== "") {
     return user.notificationEmail;
   }
-  if (user.email.toLowerCase().endsWith("@jellyfin.local")) return null;
+  const lowered = user.email.toLowerCase();
+  if (SYNTHETIC_EMAIL_SUFFIXES.some((suffix) => lowered.endsWith(suffix))) return null;
   return user.email || null;
 }
