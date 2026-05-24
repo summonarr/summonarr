@@ -3,29 +3,21 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
+import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 
-const VALID_ACTIONS: AuditAction[] = [
-  "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
-  "USER_ROLE_CHANGE", "USER_DELETE", "SETTINGS_CHANGE",
-  "LIBRARY_SYNC", "ISSUE_STATUS_CHANGE", "MAINTENANCE_TOGGLE",
-  "BACKUP_EXPORT", "BACKUP_IMPORT",
-  "AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT",
-  "SESSION_REVOKE", "CACHE_WARM", "RATINGS_CACHE_CLEAR", "ISSUE_DELETE",
-];
+const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
-// Coarse group filter — keep in sync with audit-log/page.tsx
-const GROUP_ACTIONS: Record<"auth" | "admin" | "system", AuditAction[]> = {
-  auth: ["AUTH_LOGIN", "AUTH_LOGIN_FAILED", "AUTH_LOGOUT", "SESSION_REVOKE"],
-  admin: [
-    "REQUEST_APPROVE", "REQUEST_DECLINE", "REQUEST_DELETE",
-    "USER_ROLE_CHANGE", "USER_DELETE",
-    "SETTINGS_CHANGE", "MAINTENANCE_TOGGLE",
-    "BACKUP_EXPORT", "BACKUP_IMPORT",
-    "ISSUE_STATUS_CHANGE", "ISSUE_DELETE",
-    "RATINGS_CACHE_CLEAR",
-  ],
-  system: ["LIBRARY_SYNC", "CACHE_WARM"],
+// Coarse group filter — derived from the shared ACTION_GROUP so the schema enum
+// is the single source of truth. Adding a new enum value with a group assignment
+// in audit-actions.ts automatically populates the right bucket here.
+const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
+  auth: [],
+  admin: [],
+  system: [],
 };
+for (const action of AUDIT_ACTIONS) {
+  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
+}
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
   const url = req.nextUrl;
