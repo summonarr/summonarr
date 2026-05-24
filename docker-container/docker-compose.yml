@@ -3,6 +3,19 @@ services:
     image: postgres:17-alpine
     container_name: summonarr-postgres
     restart: unless-stopped
+    # Postgres needs CHOWN/SETUID/SETGID/DAC_OVERRIDE for its init scripts
+    # (running initdb as the postgres user inside the container). Drop ALL
+    # then re-add only those. no-new-privileges still applies.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
     environment:
       POSTGRES_DB: summonarr
       POSTGRES_USER: summonarr
@@ -20,6 +33,20 @@ services:
     image: ghcr.io/summonarr/summonarr:${SUMMONARR_VERSION:-latest}
     container_name: summonarr
     restart: unless-stopped
+    # Defense-in-depth hardening — see audit S10-F10.
+    # no-new-privileges blocks setuid/setgid escalation; cap_drop ALL strips
+    # every Linux capability (Node doesn't need any). tmpfs /tmp routes all
+    # short-lived temp writes (mkdtemp from import-session, upload buffers,
+    # libvips scratch) to RAM instead of the writable container layer.
+    # NOTE: read_only is NOT set — /data and /app/.next/cache need write
+    # access. Adding read_only requires per-path volume/tmpfs declarations
+    # which is an operator-visible breaking change; deferred to a follow-up.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:size=128m,mode=1777
     ports:
       - "3001:3000"
     environment:
