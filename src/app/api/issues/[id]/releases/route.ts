@@ -9,6 +9,7 @@ import {
   resolveTvdbIdFromTmdbId,
   arrErrorMessage,
 } from "@/lib/arr";
+import { logAudit, auditContext } from "@/lib/audit";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -87,18 +88,26 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId);
         if (!resolvedTvdbId) return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
       }
+      // SEASON scope also carries seasonNumber — passing null for SEASON releases
+      // sent the grab to the series default and lost the user-picked season.
+      // Only episodeNumber is EPISODE-scope-only.
       await grabSeriesRelease(
         resolvedTvdbId,
         guid,
         indexerId as number,
-        issue.scope === "EPISODE" ? issue.seasonNumber : null,
+        issue.scope === "EPISODE" || issue.scope === "SEASON" ? issue.seasonNumber : null,
         issue.scope === "EPISODE" ? issue.episodeNumber : null,
       );
     }
 
-    await prisma.$transaction([
-      prisma.issue.update({ where: { id }, data: { status: "IN_PROGRESS" } }),
-      prisma.issueGrab.create({
+    // CAS on issue status so we don't clobber a concurrent RESOLVED transition.
+    // Always create the IssueGrab row (it's an audit of what was attempted).
+    const result = await prisma.$transaction(async (tx) => {
+      const claimed = await tx.issue.updateMany({
+        where: { id, status: { not: "RESOLVED" } },
+        data: { status: "IN_PROGRESS" },
+      });
+      const grab = await tx.issueGrab.create({
         data: {
           issueId: id,
           triggeredById: session.user.id,
@@ -110,8 +119,23 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
           seasonNumber: issue.seasonNumber,
           episodeNumber: issue.episodeNumber,
         },
-      }),
-    ]);
+      });
+      return { statusChanged: claimed.count > 0, grabId: grab.id };
+    });
+
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? null,
+      action: "ISSUE_STATUS_CHANGE",
+      target: `issue:${id}`,
+      details: {
+        trigger: "grab",
+        grabId: result.grabId,
+        scope: issue.scope,
+        ...(result.statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
+      },
+      ...auditContext(req, session),
+    });
 
     return NextResponse.json({ ok: true });
   } catch (err) {

@@ -80,6 +80,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       where: { id: { in: [...pendingBeforeIds] }, status: "APPROVED" },
     });
 
+    const failedIds = new Set<string>();
     await Promise.allSettled(
       approved.map(async (r) => {
         try {
@@ -91,12 +92,26 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           }
         } catch (err) {
           console.error("[arr] Batch approve push failed for", r.id, err);
+          failedIds.add(r.id);
         }
       })
     );
 
-    notifyUsersRequestsApproved(approved).catch(() => {});
-    notifyUsersRequestsApprovedPush(approved).catch(() => {});
+    // Roll back rows whose ARR push failed so they aren't stuck APPROVED with no ARR backing.
+    if (failedIds.size > 0) {
+      await prisma.mediaRequest.updateMany({
+        where: { id: { in: [...failedIds] }, status: "APPROVED" },
+        data: { status: "PENDING", pendingNotifyAt: null },
+      }).catch((err) => console.error("[requests/batch] rollback to PENDING failed:", err));
+    }
+
+    // Notify only the ones that actually made it into ARR — otherwise users get
+    // a misleading "Approved!" ping for a request that's actually back to PENDING.
+    const notifyTargets = approved.filter((r) => !failedIds.has(r.id));
+    if (notifyTargets.length > 0) {
+      notifyUsersRequestsApproved(notifyTargets).catch(() => {});
+      notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
+    }
   }
 
   if (typedStatus === "DECLINED") {

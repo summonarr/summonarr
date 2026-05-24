@@ -9,6 +9,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeText } from "@/lib/sanitize";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -80,10 +81,25 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     include: { author: { select: { name: true, role: true } } },
   });
 
-  // Auto-transition to IN_PROGRESS when an admin first replies — signals the reporter their issue is seen
+  // Auto-transition to IN_PROGRESS when an admin first replies — signals the reporter
+  // their issue is seen. CAS on OPEN so a concurrent RESOLVED transition isn't
+  // clobbered, and only emit the SSE / log when we actually changed status.
   if (isAdmin && issue.status === "OPEN") {
-    await prisma.issue.update({ where: { id }, data: { status: "IN_PROGRESS" } });
-    emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
+    const claimed = await prisma.issue.updateMany({
+      where: { id, status: "OPEN" },
+      data: { status: "IN_PROGRESS" },
+    });
+    if (claimed.count > 0) {
+      emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
+      void logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? null,
+        action: "ISSUE_STATUS_CHANGE",
+        target: `issue:${id}`,
+        details: { trigger: "admin-reply-auto-promote", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } },
+        ...auditContext(req, session),
+      });
+    }
   }
 
   emitSSE({ type: "issuemessage:created", issueId: id, userId: issue.reportedBy });
