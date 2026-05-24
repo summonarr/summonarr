@@ -2,7 +2,7 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush } from "@/lib/push";
-import { checkAndRecordWebhookJson } from "@/lib/webhook-replay";
+import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
@@ -85,13 +85,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
   }
 
+  // Track whether the synchronous body completed; if it throws we roll back the
+  // replay digest so Radarr's source-side retry can re-deliver.
+  let syncCompleted = false;
+  try {
+
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
+    syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true });
   }
 
   const { tmdbId } = payload.movie;
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     console.warn("[webhook/radarr] 400 invalid tmdbId");
+    syncCompleted = true;  // Bad payload from Radarr; retry won't help.
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
@@ -163,7 +170,7 @@ export async function POST(req: NextRequest) {
           seasonNumber: grab.seasonNumber,
           episodeNumber: grab.episodeNumber,
           issueId: grab.issueId,
-        }).then(() => true).catch((err) => { console.error("[webhook/radarr] grab push error:", err); return false; });
+        });
         if (!sent) {
           await prisma.issueGrab.update({
             where: { id: grab.id, notifiedAt: now },
@@ -175,5 +182,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  syncCompleted = true;
   return NextResponse.json({ ok: true, marked: updated.count });
+  } finally {
+    if (!syncCompleted) {
+      await clearWebhookReplayDigestJson("radarr", secret, payload);
+    }
+  }
 }
