@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("auth-sessions:purge-expired", () => withAdvisoryLock(
     2001,
     async () => {
       const now = new Date();
@@ -53,6 +53,18 @@ export async function POST(request: NextRequest) {
         prisma.auditLog.deleteMany({ where: { createdAt: { lt: auditCutoff } } }),
       ]);
 
+      const allResults = [
+        authSessionResult, discordLinkTokenResult, discordMergeCodeResult,
+        discordSearchCacheResult, webhookReplayResult, plexTokenExpiredResult,
+        plexTokenLegacyResult, tmdbMediaCoreResult, ipLookupResult, auditLogResult,
+      ];
+      const failures = allResults
+        .map((r, i) => r.status === "rejected" ? { i, reason: r.reason instanceof Error ? r.reason.message : String(r.reason) } : null)
+        .filter((x): x is { i: number; reason: string } => x !== null);
+      for (const f of failures) {
+        console.error(`[cron/purge-auth-sessions] delete #${f.i} failed:`, f.reason);
+      }
+
       const deleted = {
         authSessions: authSessionResult.status === "fulfilled" ? authSessionResult.value.count : 0,
         discordLinkTokens: discordLinkTokenResult.status === "fulfilled" ? discordLinkTokenResult.value.count : 0,
@@ -71,15 +83,19 @@ export async function POST(request: NextRequest) {
         userName: "cron",
         action: "SETTINGS_CHANGE",
         target: "auth-sessions:purge-expired",
-        details: deleted,
+        details: { ...deleted, errorCount: failures.length },
       });
 
+      // Non-2xx on any failure so withCronRunRecording marks the run ok=false —
+      // the body still ships the per-table counts that did succeed.
+      const status = failures.length > 0 ? 500 : 200;
       return NextResponse.json({
-        ok: true,
+        ok: failures.length === 0,
         deleted,
+        errorCount: failures.length,
         timestamp: new Date().toISOString(),
-      });
+      }, { status });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }

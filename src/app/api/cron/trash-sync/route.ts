@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth, isTokenExpired } from "@/lib/auth";
-import { isCronAuthorized } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { runTrashSync } from "@/lib/trash";
@@ -23,7 +23,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("trash-sync", () => withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
     async () => {
       const startTime = Date.now();
@@ -49,13 +49,15 @@ export async function POST(request: NextRequest) {
         },
       });
 
+      // Non-2xx on errors so withCronRunRecording marks ok=false.
+      const status = result.errors.length > 0 ? 500 : 200;
       return NextResponse.json({
         ok: result.errors.length === 0,
         ...result,
         durationMs,
         timestamp: new Date().toISOString(),
-      });
+      }, { status });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }

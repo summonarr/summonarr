@@ -5,7 +5,7 @@ import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 
 export async function POST(request: NextRequest) {
@@ -13,6 +13,10 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
+  return withCronRunRecording("plex-sync", () => syncPlex(request));
+}
+
+async function syncPlex(request: NextRequest) {
   const rawBody = await request.json().catch(() => ({})) as Record<string, unknown>;
   const recentOnly = rawBody.full !== true;
 

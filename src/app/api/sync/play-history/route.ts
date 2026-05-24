@@ -17,7 +17,7 @@ import { getPlexSessions, extractTmdbIdFromGuids } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
 import { posterUrl } from "@/lib/tmdb-types";
-import { isCronAuthorized } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 
 type SyncResult = { started: number; updated: number; ended: number };
 
@@ -420,7 +420,10 @@ export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
+  return withCronRunRecording("play-history-sync", () => syncPlayHistory(request));
+}
 
+async function syncPlayHistory(request: NextRequest) {
   if (!checkRateLimit(`sync-ph:${getClientIp(request.headers)}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }

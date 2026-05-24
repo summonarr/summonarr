@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ skipped: true, reason: "no ratings API key configured" });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("ratings-sync", () => withAdvisoryLock(
     2008,
     async () => {
       const startTime = Date.now();
@@ -74,11 +74,8 @@ export async function POST(request: NextRequest) {
       const { warmed, skipped } = await warmBatch(all);
       const durationMs = Date.now() - startTime;
 
-      // `lastRunAt` observability — see /lib/cron-auth.ts:recordCronRun.
-      await recordCronRun("ratings-sync", durationMs);
-
       return NextResponse.json({ total: all.length, warmed, skipped, durationMs });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }

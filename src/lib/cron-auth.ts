@@ -103,6 +103,34 @@ export async function recordCronRun(
   }).catch(() => { /* observability write — never fail the caller */ });
 }
 
+// Wraps a cron/sync route body so a single recordCronRun call always fires on
+// completion — including thrown errors and 4xx/5xx responses — instead of every
+// route having to remember its own try/finally. Caller is still responsible for
+// the inner work; the wrapper just guarantees observability.
+//
+// ok is derived from: (a) whether the body threw → false, (b) response status
+// >= 400 → false, otherwise true. A status of 200 with a body indicating partial
+// failure (e.g. Promise.allSettled with rejections) should be handled by the
+// caller throwing or returning >=500, since the wrapper has no domain knowledge
+// of "skipped" vs "failed".
+export async function withCronRunRecording<T extends Response>(
+  target: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const start = Date.now();
+  let ok = true;
+  try {
+    const res = await fn();
+    if (res.status >= 400) ok = false;
+    return res;
+  } catch (err) {
+    ok = false;
+    throw err;
+  } finally {
+    await recordCronRun(target, Date.now() - start, ok);
+  }
+}
+
 export interface CronLastRun {
   at: string;
   durationMs: number;
