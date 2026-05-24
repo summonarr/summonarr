@@ -7,6 +7,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
+import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -100,6 +101,8 @@ export async function POST(req: NextRequest) {
 
   let effectiveMdbId: number | null = null;
   let effectiveVdbId: number | null = null;
+  // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
+  let tvdbPathTmdbId: number | null = null;
 
   // Try tmdbId first; fall back to tvdbId because Sonarr may not always send tmdbId
   if (safeMdbId) {
@@ -127,7 +130,10 @@ export async function POST(req: NextRequest) {
         });
       }
     }, { timeout: 30_000 });
-    if (updated.count > 0) effectiveMdbId = safeMdbId;
+    if (updated.count > 0) {
+      effectiveMdbId = safeMdbId;
+      void clearDeletionVotesForTmdbs([{ tmdbId: safeMdbId, mediaType: "TV" }]);
+    }
   }
 
   if (updated.count === 0 && safeVdbId) {
@@ -149,11 +155,17 @@ export async function POST(req: NextRequest) {
       updated = { count: resetNotify.count + alreadyAvailable.count };
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId } });
+        tvdbPathTmdbId = req.tmdbId;
       } else if (!req) {
         console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId ${sanitizeForLog(safeVdbId)}`);
       }
     }, { timeout: 30_000 });
-    if (updated.count > 0) effectiveVdbId = safeVdbId;
+    if (updated.count > 0) {
+      effectiveVdbId = safeVdbId;
+      if (tvdbPathTmdbId !== null) {
+        void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
+      }
+    }
   }
 
   // Deferred work runs after the response is sent; library scan and notification can be slow

@@ -6,7 +6,7 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
-import { claimAvailableNotificationWinners } from "@/lib/notify-available";
+import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -146,6 +146,7 @@ export async function POST(request: NextRequest) {
         }),
       );
       if (winners.length > 0) {
+        void clearDeletionVotesForTmdbs(winners);
         notifyUsersRequestsAvailable(winners).catch(() => {});
         notifyUsersRequestsAvailablePush(winners).catch(() => {});
       }
@@ -153,10 +154,11 @@ export async function POST(request: NextRequest) {
 
     const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
     if (alreadyNotified.length > 0) {
-      await prisma.mediaRequest.updateMany({
+      const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE" },
       });
+      if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }
   }
 
