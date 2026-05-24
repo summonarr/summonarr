@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import {
   getJellyfinUserPlayHistory,
@@ -235,7 +235,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("jellyfin-history", () => withAdvisoryLock(
     2011,
     async () => {
       const startTime = Date.now();
@@ -328,10 +328,10 @@ export async function POST(request: NextRequest) {
         emitSSE({ type: "activity:history-updated" });
       }
 
-      await recordCronRun("jellyfin-history", durationMs);
-
-      return NextResponse.json({ method, imported, errors, users: jellyfinUsers.length, durationMs });
+      // Non-2xx on error so withCronRunRecording marks ok=false.
+      const status = errors > 0 ? 500 : 200;
+      return NextResponse.json({ method, imported, errors, users: jellyfinUsers.length, durationMs }, { status });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }

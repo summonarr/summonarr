@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getUpcomingMovies, getUpcomingTV } from "@/lib/tmdb";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 
@@ -10,7 +10,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("upcoming-cache", () => withAdvisoryLock(
     2007,
     async () => {
       const startTime = Date.now();
@@ -78,5 +78,5 @@ export async function POST(request: NextRequest) {
       });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }

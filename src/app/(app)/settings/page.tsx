@@ -281,11 +281,15 @@ export default async function SettingsPage({
       const row = lastRunMap.get(target);
       if (!row) return { lastRun: null, lastDuration: null, lastStatus: null };
       let durationMs: number | null = null;
+      // ok=false marks the run as failed. Setting-row writes always include `ok`;
+      // legacy audit-log fallback rows don't, so default to "ok" when absent.
+      let lastStatus: "ok" | "error" = "ok";
       try {
         const d = row.details ? JSON.parse(row.details) : null;
         if (d?.durationMs != null) durationMs = d.durationMs;
+        if (d?.ok === false) lastStatus = "error";
       } catch { }
-      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus: "ok" };
+      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus };
     }
 
     return [

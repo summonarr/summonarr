@@ -17,7 +17,7 @@ import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
+import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -51,11 +51,11 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("sync:full", () => withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
     (signal: AbortSignal) => runSyncOrchestrator(signal),
     () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
-  );
+  ));
 }
 
 // Me-4: signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
@@ -682,12 +682,10 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
 
   const durationMs = Date.now() - startTime;
 
-  // `lastRunAt` observability for /settings?tab=system. Always written so that
-  // cron-triggered runs (which have no `session.user`) still surface their
-  // last-run timestamp, while the audit row stays scoped to admin-triggered
-  // runs to avoid hourly flooding of the audit table.
-  await recordCronRun("sync:full", durationMs);
-
+  // `lastRunAt` observability for /settings?tab=system. The outer withCronRunRecording
+  // wrapper writes the Setting row on every run (including throws + non-2xx). The audit
+  // row below stays scoped to admin-triggered runs to avoid hourly flooding of the
+  // audit table.
   const session = await auth();
   if (session?.user) {
     void logAudit({

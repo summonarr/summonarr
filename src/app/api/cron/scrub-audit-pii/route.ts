@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
@@ -9,7 +9,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  return withAdvisoryLock(
+  return withCronRunRecording("audit-log:pii-scrub", () => withAdvisoryLock(
     2002,
     async () => {
       const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
@@ -38,5 +38,5 @@ export async function POST(request: NextRequest) {
       });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
-  );
+  ));
 }
