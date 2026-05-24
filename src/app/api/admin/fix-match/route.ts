@@ -8,6 +8,7 @@ import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -452,6 +453,17 @@ async function fixJellyfinMatch(
 
 // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
 export const POST = withIssueAdmin(async (request, _ctx, session) => {
+  // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
+  // a rate limit, an admin loop (intentional or scripted) can saturate the
+  // upstream servers and pile up partial two-phase commits (remote rewrite
+  // succeeds, DB tx fails). 10/min/admin matches the broader admin-write cap.
+  if (!checkRateLimit(`fix-match:${session.user.id}`, 10, 60_000)) {
+    return NextResponse.json(
+      { error: "Too many fix-match operations — try again in a minute." },
+      { status: 429 },
+    );
+  }
+
   let body: FixMatchBody;
   try {
     body = await request.json() as FixMatchBody;

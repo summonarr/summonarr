@@ -137,6 +137,32 @@ const SENSITIVE_KEYS = new Set<string>(
   SETTINGS_SCHEMA.filter(([, sensitive]) => sensitive).map(([k]) => k)
 );
 
+// Keys whose value is a full URL pointing at an upstream service. PATCH validates
+// these (no embedded credentials, http/https only); GET strips any pre-existing
+// embedded credential before sending the value to the admin client.
+const URL_KEYS = new Set<string>([
+  "siteUrl",
+  "radarrUrl",
+  "sonarrUrl",
+  "plexServerUrl",
+  "jellyfinUrl",
+  "discordInviteUrl",
+]);
+
+function stripUrlUserinfo(value: string): string {
+  try {
+    const u = new URL(value);
+    if (u.username || u.password) {
+      u.username = "";
+      u.password = "";
+      return u.toString();
+    }
+  } catch {
+    // Not a parseable URL — let it through unchanged.
+  }
+  return value;
+}
+
 // Per-key write cooldown prevents rapid settings toggling (e.g. maintenanceEnabled spam)
 const KEY_COOLDOWN_MS = 10_000;
 const lastKeyWriteAt = new Map<string, number>();
@@ -160,7 +186,11 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   });
 
   const settings = Object.fromEntries(
-    rows.map((r) => [r.key, SENSITIVE_KEYS.has(r.key) ? (r.value ? "••••••••" : "") : r.value])
+    rows.map((r) => {
+      if (SENSITIVE_KEYS.has(r.key)) return [r.key, r.value ? "••••••••" : ""];
+      if (URL_KEYS.has(r.key) && r.value) return [r.key, stripUrlUserinfo(r.value)];
+      return [r.key, r.value];
+    })
   ) as Partial<Record<AllowedKey, string>>;
 
   return NextResponse.json(settings);
@@ -197,14 +227,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
   const USER_FACING_KEYS = new Set(["motdTitle", "motdBody", "siteTitle", "maintenanceMessage"]);
 
-  const URL_KEYS = new Set<string>([
-    "siteUrl",
-    "radarrUrl",
-    "sonarrUrl",
-    "plexServerUrl",
-    "jellyfinUrl",
-    "discordInviteUrl",
-  ]);
+  // URL_KEYS hoisted to module scope so GET masks userinfo too — see top of file.
 
   // Donation keys accept either a full http(s) URL or a plain handle (e.g. "@alice").
   // We must reject dangerous schemes (javascript:, data:, vbscript:, ftp:) on the URL form
@@ -236,6 +259,16 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
           return NextResponse.json(
             { error: `Setting "${key}" must be an http(s) URL` },
+            { status: 400 },
+          );
+        }
+        // Reject embedded credentials (user:pass@host) — the URL parser accepts
+        // them silently and the credential ships out as part of every safeFetch
+        // call (Plex/Jellyfin/Radarr/Sonarr server URLs). Operators should set
+        // credentials via the dedicated apiKey field instead.
+        if (parsed.username || parsed.password) {
+          return NextResponse.json(
+            { error: `Setting "${key}" must not contain embedded credentials` },
             { status: 400 },
           );
         }
