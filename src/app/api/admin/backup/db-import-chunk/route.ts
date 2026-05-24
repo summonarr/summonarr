@@ -1,10 +1,16 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { checkBodySize } from "@/lib/body-size";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
+
+// Per-chunk hard cap matches the sibling /api/setup/import-chunk route. Without
+// this an admin-or-attacker-with-admin-creds could send a single oversized chunk
+// and OOM Node before the arrayBuffer() resolved.
+const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 import {
   startSession,
   appendChunk,
@@ -85,7 +91,18 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
   }
 
+  const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
+  if (sizeCheck) return sizeCheck;
+
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
+  if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
+    // Belt-and-suspenders for transfer-encoding: chunked uploads where the
+    // Content-Length-based check above can't trigger.
+    return NextResponse.json(
+      { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
+      { status: 413 },
+    );
+  }
   const append = await appendChunk(uploadId, chunkIndex, chunkBytes);
   if (!append.ok) {
     const e = append.error;
