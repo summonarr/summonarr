@@ -4,6 +4,7 @@ import { notifyUserRequestApproved, notifyUserRequestAvailable, notifyUserReques
 import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUsersRequestsAvailablePush } from "./push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
+import { claimAvailableNotificationWinners } from "./notify-available";
 
 interface RequestInfo {
   requestedBy: string;
@@ -39,13 +40,17 @@ export async function notifyAvailablePerServer(
   });
   if (toNotify.length === 0) return;
 
-  // CAS on notifiedAvailable prevents duplicate "now available" notifications when Plex and Jellyfin both match the item
-  const cas = await prisma.mediaRequest.updateMany({
-    where: { id: { in: toNotify.map((r) => r.id) }, notifiedAvailable: false },
-    data: { notifiedAvailable: true },
-  });
-  if (cas.count > 0) {
-    const payload = toNotify.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType }));
+  // CAS on notifiedAvailable prevents duplicate "now available" notifications when Plex
+  // and Jellyfin both match the item; winner filter ensures we only notify on rows we
+  // actually flipped, not the full pre-CAS overlap set.
+  const winners = await claimAvailableNotificationWinners(toNotify, (ids) =>
+    prisma.mediaRequest.updateMany({
+      where: { id: { in: ids }, notifiedAvailable: false },
+      data: { notifiedAvailable: true },
+    }),
+  );
+  if (winners.length > 0) {
+    const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType }));
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
   }

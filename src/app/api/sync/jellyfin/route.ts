@@ -6,6 +6,7 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany } from "@/lib/cron-auth";
+import { claimAvailableNotificationWinners } from "@/lib/notify-available";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -136,14 +137,17 @@ export async function POST(request: NextRequest) {
   if (toMark.length > 0) {
     const toNotify = toMark.filter((r) => !r.notifiedAvailable);
     if (toNotify.length > 0) {
-      // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications
-      const updated = await prisma.mediaRequest.updateMany({
-        where: { id: { in: toNotify.map((r) => r.id) }, notifiedAvailable: false },
-        data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
-      });
-      if (updated.count > 0) {
-        notifyUsersRequestsAvailable(toNotify).catch(() => {});
-        notifyUsersRequestsAvailablePush(toNotify).catch(() => {});
+      // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
+      // winner filter ensures we only notify on rows we actually flipped.
+      const winners = await claimAvailableNotificationWinners(toNotify, (ids) =>
+        prisma.mediaRequest.updateMany({
+          where: { id: { in: ids }, notifiedAvailable: false },
+          data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
+        }),
+      );
+      if (winners.length > 0) {
+        notifyUsersRequestsAvailable(winners).catch(() => {});
+        notifyUsersRequestsAvailablePush(winners).catch(() => {});
       }
     }
 
