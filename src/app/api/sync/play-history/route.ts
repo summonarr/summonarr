@@ -13,7 +13,7 @@ import {
   applyFinalTick,
   MAX_PLAYTIME_DELTA_MS,
 } from "@/lib/play-history";
-import { getPlexSessions, extractTmdbIdFromGuids } from "@/lib/plex";
+import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -30,6 +30,14 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   if (valid.length === 0) {
     // Still need the cleanup sweep below to finalize any stale rows.
   }
+
+  // Resolve the admin's Plex user id once per run so we can mark
+  // MediaServerUser.isServerAdmin for the server-owner row (Plex sessions
+  // don't carry an admin flag; the owner is whoever owns the admin token).
+  // Best-effort: if the call fails, isServerAdmin stays unset on this run.
+  const plexAdminId = await getPlexUser(token)
+    .then((u) => u.id)
+    .catch(() => null);
 
   const seenSessionKeys = new Set<string>();
   for (const s of valid) seenSessionKeys.add(s.sessionKey);
@@ -54,6 +62,9 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const libMap = new Map(libRows.map((r) => [r.plexRatingKey, r]));
 
   // Resolve media server users in parallel — each upserts independently.
+  // isServerAdmin = accountId matches the admin token's plex user id. When
+  // plexAdminId couldn't be fetched, leave the flag undefined so the upsert
+  // doesn't blindly flip an existing true→false.
   const userIds = await Promise.all(
     valid.map((s) =>
       resolveMediaServerUser({
@@ -61,6 +72,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
         sourceUserId: s.accountId,
         username: s.accountName,
         thumbUrl: s.accountThumb || null,
+        ...(plexAdminId !== null ? { isServerAdmin: s.accountId === plexAdminId } : {}),
       }),
     ),
   );
