@@ -20,6 +20,7 @@ import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { claimAvailableNotificationWinners } from "@/lib/notify-available";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -534,13 +535,15 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       });
 
       if (toNotify.length > 0) {
-        const updated = await prisma.mediaRequest.updateMany({
-          where: { id: { in: toNotify.map((r) => r.id) }, notifiedAvailable: false },
-          data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
-        });
-        if (updated.count > 0) {
-          notifyUsersRequestsAvailable(toNotify).catch(() => {});
-          notifyUsersRequestsAvailablePush(toNotify).catch(() => {});
+        const winners = await claimAvailableNotificationWinners(toNotify, (ids) =>
+          prisma.mediaRequest.updateMany({
+            where: { id: { in: ids }, notifiedAvailable: false },
+            data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
+          }),
+        );
+        if (winners.length > 0) {
+          notifyUsersRequestsAvailable(winners).catch(() => {});
+          notifyUsersRequestsAvailablePush(winners).catch(() => {});
         }
       }
       if (toMarkOnly.length > 0) {
