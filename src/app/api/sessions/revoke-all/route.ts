@@ -76,20 +76,55 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (includeCurrent) {
     // Replica-safe full revoke: bump sessionsRevokedAt then delete all rows.
     // refreshToken() in src/lib/auth.ts rejects any JWT with iat < this timestamp.
-    await prisma.user.update({
-      where: { id: session.user.id },
-      data: { sessionsRevokedAt: new Date() },
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: session.user.id },
+        data: { sessionsRevokedAt: new Date() },
+      });
+      const result = await tx.authSession.deleteMany({ where: { userId: session.user.id } });
+      deletedCount = result.count;
     });
-    const result = await prisma.authSession.deleteMany({ where: { userId: session.user.id } });
-    deletedCount = result.count;
   } else {
-    const result = await prisma.authSession.deleteMany({
-      where: {
-        userId: session.user.id,
-        ...(session.sessionId ? { NOT: { sessionId: session.sessionId } } : {}),
-      },
+    // Delete every other session row AND bump sessionsRevokedAt to a value just
+    // before the current session's createdAt, so refreshToken() rejects any
+    // cached JWT for the deleted sessions on every replica within the next
+    // dbCheckedAt cycle (otherwise the cached state passes for up to 60s after
+    // row deletion). The current session survives because its iat > createdAt
+    // > new sessionsRevokedAt value.
+    await prisma.$transaction(async (tx) => {
+      const [callerRow, userRow] = await Promise.all([
+        session.sessionId
+          ? tx.authSession.findUnique({
+              where: { sessionId: session.sessionId },
+              select: { createdAt: true },
+            })
+          : Promise.resolve(null),
+        tx.user.findUnique({
+          where: { id: session.user.id },
+          select: { sessionsRevokedAt: true },
+        }),
+      ]);
+      const result = await tx.authSession.deleteMany({
+        where: {
+          userId: session.user.id,
+          ...(session.sessionId ? { NOT: { sessionId: session.sessionId } } : {}),
+        },
+      });
+      deletedCount = result.count;
+      if (callerRow) {
+        const cutoff = new Date(callerRow.createdAt.getTime() - 1000);
+        // Never DECREASE sessionsRevokedAt — a prior full revoke may have set it
+        // to a higher value, and overwriting would weaken that cutoff for any
+        // older JWT that's still in flight.
+        const existing = userRow?.sessionsRevokedAt;
+        if (!existing || cutoff > existing) {
+          await tx.user.update({
+            where: { id: session.user.id },
+            data: { sessionsRevokedAt: cutoff },
+          });
+        }
+      }
     });
-    deletedCount = result.count;
   }
 
   void logAudit({

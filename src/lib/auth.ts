@@ -222,26 +222,58 @@ const forceRevokeSessions = new Set<string>();
 export async function revokeSessionById(sessionId: string): Promise<void> {
   addBounded(forceRevokeSessions, sessionId, FORCE_REVOKE_MAX);
 
-  await prisma.authSession.delete({ where: { sessionId } }).catch(() => {});
+  // Bump sessionsRevokedAt to the revoked session's createdAt so refreshToken()'s
+  // cutoff check on OTHER replicas rejects the revoked session's JWT even within
+  // the 60s dbCheckedAt cache window (otherwise the cached token passes for up to
+  // 60s after row deletion). Newer sessions of the same user (iat > createdAt)
+  // survive; older sessions are caught — acceptable for an admin "revoke this
+  // device" action, since per-session granularity isn't expressible against a
+  // per-user timestamp anyway.
+  await prisma.$transaction(async (tx) => {
+    const row = await tx.authSession.findUnique({
+      where: { sessionId },
+      select: { userId: true, createdAt: true },
+    });
+    if (!row) return;
+    await tx.authSession.delete({ where: { sessionId } });
+    // Never DECREASE sessionsRevokedAt — a prior full-user revoke may have set it
+    // higher and overwriting would weaken that cutoff. Only bump forward.
+    const userRow = await tx.user.findUnique({
+      where: { id: row.userId },
+      select: { sessionsRevokedAt: true },
+    });
+    const existing = userRow?.sessionsRevokedAt;
+    if (!existing || row.createdAt > existing) {
+      await tx.user.update({
+        where: { id: row.userId },
+        data: { sessionsRevokedAt: row.createdAt },
+      });
+    }
+  }).catch(() => {});
 }
 
 export async function revokeAllUserSessions(userId: string): Promise<void> {
-  const sessions = await prisma.authSession.findMany({
-    where: { userId },
-    select: { sessionId: true },
+  // All three writes wrapped in a $transaction so a failed sessionsRevokedAt
+  // bump rolls back the AuthSession deletion — otherwise we'd end up with rows
+  // gone (primary path) but the cross-replica timestamp backstop never set, so
+  // a cached JWT on another replica would pass validation for up to 60s
+  // (refreshToken's dbCheckedAt window) by failing both the row-presence check
+  // AND the cutoff check.
+  const sessionIds = await prisma.$transaction(async (tx) => {
+    const sessions = await tx.authSession.findMany({
+      where: { userId },
+      select: { sessionId: true },
+    });
+    await tx.authSession.deleteMany({ where: { userId } });
+    await tx.user.update({
+      where: { id: userId },
+      data: { sessionsRevokedAt: new Date() },
+    });
+    return sessions.map((s) => s.sessionId);
   });
-  await prisma.authSession.deleteMany({ where: { userId } });
-  for (const s of sessions) addBounded(forceRevokeSessions, s.sessionId, FORCE_REVOKE_MAX);
 
+  for (const sessionId of sessionIds) addBounded(forceRevokeSessions, sessionId, FORCE_REVOKE_MAX);
   addBounded(forceRevalidateUserIds, userId, FORCE_REVOKE_MAX);
-
-  // Replica-safe revocation: refreshToken() compares this timestamp against the
-  // JWT's iat on every token refresh. The in-memory Set above is just a same-
-  // replica latency win (avoids the next DB read).
-  await prisma.user.update({
-    where: { id: userId },
-    data: { sessionsRevokedAt: new Date() },
-  }).catch((err) => console.error("[auth] sessionsRevokedAt write failed:", err instanceof Error ? err.message : err));
 }
 
 interface DeviceMeta {
