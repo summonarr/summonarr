@@ -135,6 +135,17 @@ export class MediaServerMismatchError extends Error {
   }
 }
 
+// FNV-1a 32-bit hash. Stable across runs; used to derive a Postgres advisory
+// lock id from a string key.
+function fnv1a32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
 export async function resolveMediaServerUser(params: {
   source: string;
   sourceUserId: string;
@@ -142,62 +153,76 @@ export async function resolveMediaServerUser(params: {
   email?: string | null;
   thumbUrl?: string | null;
   serverMachineId?: string | null;
+  isServerAdmin?: boolean;
 }): Promise<string> {
-  const { source, sourceUserId, username, thumbUrl, serverMachineId } = params;
+  const { source, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
   // Normalize once and use the same value for both lookup AND the upserted column,
   // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
   // emails that vary in case, and so we don't write mixed-case copies into
   // MediaServerUser.email that won't round-trip the User lookup later.
   const email = params.email ? normalizeEmail(params.email) : null;
 
-  let userId: string | null = null;
-  if (email) {
-    const user = await prisma.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
+  // Serialize concurrent calls for the same MediaServerUser via an advisory
+  // lock keyed on (source, sourceUserId). Two parallel webhook + sync paths
+  // for the same playback otherwise hit a find→upsert TOCTOU where a
+  // freshly-created User row falls into the gap and the MediaServerUser is
+  // bound to no User. The User lookup is re-done INSIDE the lock so a
+  // concurrent User.create is picked up.
+  const lockKey = fnv1a32(`mediaServerUser:${source}:${sourceUserId}`);
 
-    if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
-      userId = user.id;
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(2020, ${lockKey})`);
+
+    let userId: string | null = null;
+    if (email) {
+      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
+      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+        userId = user.id;
+      }
     }
-  }
 
-  // Defense-in-depth (H-3): if a row already exists with a recorded serverMachineId, refuse a
-  // mismatched incoming machineId. This guards against an attacker who knows the webhook secret
-  // but is sending events from a different server, attempting to impersonate a (source, userId)
-  // we have already pinned to a specific server.
-  if (serverMachineId) {
-    const existing = await prisma.mediaServerUser.findUnique({
+    // Defense-in-depth (H-3): if a row already exists with a recorded serverMachineId, refuse a
+    // mismatched incoming machineId. This guards against an attacker who knows the webhook secret
+    // but is sending events from a different server, attempting to impersonate a (source, userId)
+    // we have already pinned to a specific server.
+    if (serverMachineId) {
+      const existing = await tx.mediaServerUser.findUnique({
+        where: { source_sourceUserId: { source, sourceUserId } },
+        select: { id: true, serverMachineId: true },
+      });
+      if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
+        console.warn(
+          `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
+        );
+        throw new MediaServerMismatchError(source, sourceUserId);
+      }
+    }
+
+    const record = await tx.mediaServerUser.upsert({
       where: { source_sourceUserId: { source, sourceUserId } },
-      select: { id: true, serverMachineId: true },
+      create: {
+        source,
+        sourceUserId,
+        username,
+        email: email ?? null,
+        thumbUrl: thumbUrl ?? null,
+        userId,
+        serverMachineId: serverMachineId ?? null,
+        ...(isServerAdmin !== undefined ? { isServerAdmin } : {}),
+      },
+      update: {
+        username,
+        ...(email ? { email } : {}),
+        ...(thumbUrl ? { thumbUrl } : {}),
+        ...(userId ? { userId } : {}),
+        ...(serverMachineId ? { serverMachineId } : {}),
+        ...(isServerAdmin !== undefined ? { isServerAdmin } : {}),
+      },
+      select: { id: true },
     });
-    if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
-      console.warn(
-        `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
-      );
-      throw new MediaServerMismatchError(source, sourceUserId);
-    }
-  }
 
-  const record = await prisma.mediaServerUser.upsert({
-    where: { source_sourceUserId: { source, sourceUserId } },
-    create: {
-      source,
-      sourceUserId,
-      username,
-      email: email ?? null,
-      thumbUrl: thumbUrl ?? null,
-      userId,
-      serverMachineId: serverMachineId ?? null,
-    },
-    update: {
-      username,
-      ...(email ? { email } : {}),
-      ...(thumbUrl ? { thumbUrl } : {}),
-      ...(userId ? { userId } : {}),
-      ...(serverMachineId ? { serverMachineId } : {}),
-    },
-    select: { id: true },
-  });
-
-  return record.id;
+    return record.id;
+  }, { timeout: 15_000 });
 }
 
 export function calculateWatched(
@@ -345,7 +370,15 @@ export async function recordCompletedSession(
       update: {},
     });
 
-    await tx.activeSession.delete({ where: { id: session.id } }).catch(() => {});
+    // CAS on lastSeenAt: only delete if the row hasn't been touched since the
+    // caller read it. Without this, a concurrent activeSession update or
+    // re-create from sync/play-history could be silently deleted here when
+    // recordCompletedSession was triggered by a stale Stop webhook.
+    // updateMany returns 0 if the lastSeenAt timestamp shifted; in that case
+    // we leave the row alone (it's now part of a different playback session).
+    await tx.activeSession.deleteMany({
+      where: { id: session.id, lastSeenAt: session.lastSeenAt },
+    }).catch(() => {});
   }, { timeout: 15_000 });
 
   // Invalidate cached stats so the next page load reflects the new record.
