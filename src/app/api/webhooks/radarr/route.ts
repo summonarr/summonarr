@@ -7,6 +7,7 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
+import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
@@ -111,6 +112,10 @@ export async function POST(req: NextRequest) {
     updated = { count: resetNotify.count + alreadyAvailable.count };
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId } });
   }, { timeout: 30_000 });
+
+  if (updated.count > 0) {
+    void clearDeletionVotesForTmdbs([{ tmdbId, mediaType: "MOVIE" }]);
+  }
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {

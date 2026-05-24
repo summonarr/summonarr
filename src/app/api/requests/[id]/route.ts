@@ -9,6 +9,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
+import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 
@@ -255,9 +256,7 @@ export const PATCH = withAdmin(async (
       console.error("[requests] Failed to CAS notifiedAvailable:", err);
     }
     if (casCount === 1) {
-      void prisma.deletionVote.deleteMany({
-        where: { tmdbId: updated.tmdbId, mediaType: updated.mediaType },
-      }).catch(() => {});
+      void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
       notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
     }
   }

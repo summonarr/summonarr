@@ -14,6 +14,7 @@ import { scheduleDelayed } from "@/lib/delayed-jobs";
 import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
+import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 
 export const dynamic = "force-dynamic";
 
@@ -603,6 +604,7 @@ async function handleComponent(interaction: any): Promise<void> {
       try {
         if (alreadyAvailable) {
           await prisma.mediaRequest.create({ data: { ...baseData, status: "AVAILABLE", availableAt: new Date() } });
+          void clearDeletionVotesForTmdbs([{ tmdbId: selected.id, mediaType }]);
           note = "It's already in the library!";
           confirmEmbed.color = 0x57f287;
         } else if (canAutoApprove) {

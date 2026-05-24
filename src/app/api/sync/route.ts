@@ -20,7 +20,7 @@ import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, recordCronRun } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
-import { claimAvailableNotificationWinners } from "@/lib/notify-available";
+import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -542,6 +542,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           }),
         );
         if (winners.length > 0) {
+          void clearDeletionVotesForTmdbs(winners);
           notifyUsersRequestsAvailable(winners).catch(() => {});
           notifyUsersRequestsAvailablePush(winners).catch(() => {});
         }
@@ -549,20 +550,22 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       if (toMarkOnly.length > 0) {
         // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
         // otherwise every cron tick rewrites availableAt for the same request.
-        await prisma.mediaRequest.updateMany({
+        const flipped = await prisma.mediaRequest.updateMany({
           where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
           data: { status: "AVAILABLE", availableAt: new Date() },
         });
+        if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
       }
     }
     const alreadyNotified = toMark.filter((r) => alreadyNotifiedIds.has(r.id));
     if (alreadyNotified.length > 0) {
       // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
       // otherwise every cron tick rewrites availableAt for the same request.
-      await prisma.mediaRequest.updateMany({
+      const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
+      if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }
     return toMark.length;
   };
@@ -649,6 +652,10 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       if (updated.count > 0) {
         const notifyBatch = toNotify.filter((r) => stillUnnotifiedIds.has(r.id));
         if (notifyBatch.length > 0) {
+          // Backstop wipe: the original AVAILABLE transition (per-source mark pass,
+          // webhooks) should have wiped already, but a regression there is silent
+          // until threshold notifications fire on stale votes — wipe again here.
+          void clearDeletionVotesForTmdbs(notifyBatch);
           notifyUsersRequestsAvailable(notifyBatch).catch(() => {});
           notifyUsersRequestsAvailablePush(notifyBatch).catch(() => {});
         }
