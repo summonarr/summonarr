@@ -463,6 +463,42 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
   }
 
+  // Roll back the DB write when any connectivity test failed — otherwise the
+  // settings panel shows "save failed" 422 to the admin while the bad values
+  // remain durably persisted on disk. Restore the pre-write values for keys
+  // that existed before, delete keys we created.
+  if (testFailed) {
+    const preWriteByKey = new Map(oldRows.map((r) => [r.key, r.value]));
+    try {
+      await prisma.$transaction(async (tx) => {
+        for (const [key] of entries) {
+          const prior = preWriteByKey.get(key);
+          if (prior === undefined) {
+            await tx.setting.deleteMany({ where: { key } });
+          } else {
+            await tx.setting.update({ where: { key }, data: { value: prior } });
+          }
+        }
+        await tx.auditLog.create({
+          data: {
+            userId: session.user.id,
+            userName: sanitizeText(session.user.name ?? session.user.email ?? "unknown"),
+            action: "SETTINGS_CHANGE",
+            target: "settings:rollback",
+            details: JSON.stringify({ keys: changedKeys, reason: "connectivity test failed", testResults }),
+            ipAddress: auditIp,
+            userAgent: auditUa,
+            provider: session.user.provider ?? null,
+          },
+        });
+      });
+    } catch (err) {
+      console.error("[settings] rollback after test failure failed:", err);
+      // Best-effort: surface the test failure even when rollback didn't apply
+      // cleanly. The admin sees the 422 either way and can re-save manually.
+    }
+  }
+
   return NextResponse.json(
     { ok: !testFailed, ...testResults },
     testFailed ? { status: 422 } : undefined,

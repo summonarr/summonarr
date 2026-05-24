@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { logAuditOrFail, auditContext } from "@/lib/audit";
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const users = await prisma.mediaServerUser.findMany({
@@ -22,7 +23,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json(users);
 });
 
-export const PATCH = withAdmin(async (req, _ctx, _session) => {
+export const PATCH = withAdmin(async (req, _ctx, session) => {
   let body: { autoDisableNew?: boolean };
   try {
     body = await req.json();
@@ -34,10 +35,32 @@ export const PATCH = withAdmin(async (req, _ctx, _session) => {
     if (typeof body.autoDisableNew !== "boolean") {
       return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
     }
+    const newValue = body.autoDisableNew ? "true" : "false";
+
+    // Audit the privilege-relevant write — this Setting controls whether
+    // newly-discovered Jellyfin users are auto-restricted from downloads.
+    // The /api/settings audit trail doesn't see this write because it lives
+    // on a different route, so audit explicitly here.
+    const before = await prisma.setting.findUnique({
+      where: { key: "downloadAutoDisableNew" },
+      select: { value: true },
+    });
     await prisma.setting.upsert({
       where: { key: "downloadAutoDisableNew" },
-      create: { key: "downloadAutoDisableNew", value: body.autoDisableNew ? "true" : "false" },
-      update: { value: body.autoDisableNew ? "true" : "false" },
+      create: { key: "downloadAutoDisableNew", value: newValue },
+      update: { value: newValue },
+    });
+    await logAuditOrFail({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? null,
+      action: "SETTINGS_CHANGE",
+      target: "settings:downloadAutoDisableNew",
+      details: {
+        key: "downloadAutoDisableNew",
+        before: { value: before?.value ?? null },
+        after: { value: newValue },
+      },
+      ...auditContext(req, session),
     });
   }
 
