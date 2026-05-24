@@ -1,6 +1,7 @@
 import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
+import { normalizeEmail } from "./email-normalize";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 export function safeBigInt(x: unknown): bigint {
@@ -142,7 +143,12 @@ export async function resolveMediaServerUser(params: {
   thumbUrl?: string | null;
   serverMachineId?: string | null;
 }): Promise<string> {
-  const { source, sourceUserId, username, email, thumbUrl, serverMachineId } = params;
+  const { source, sourceUserId, username, thumbUrl, serverMachineId } = params;
+  // Normalize once and use the same value for both lookup AND the upserted column,
+  // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
+  // emails that vary in case, and so we don't write mixed-case copies into
+  // MediaServerUser.email that won't round-trip the User lookup later.
+  const email = params.email ? normalizeEmail(params.email) : null;
 
   let userId: string | null = null;
   if (email) {

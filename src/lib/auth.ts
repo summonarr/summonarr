@@ -18,9 +18,10 @@ import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "
 // revokeAllUserSessions(userId) so the AuthSession rows are deleted and stale
 // JWTs cannot refresh on any replica. This file does not write passwordHash directly.
 
-export function normalizeEmail(email: string): string {
-  return email.toLowerCase().trim();
-}
+import { normalizeEmail } from "@/lib/email-normalize";
+// Re-exported so existing imports of `normalizeEmail` from "@/lib/auth"
+// continue to work.
+export { normalizeEmail };
 
 // Hashes the lowercased email for audit storage. Truncated to 16 hex chars so a
 // password accidentally typed in the email field can't be recovered from logs while

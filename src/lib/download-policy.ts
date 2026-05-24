@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { getJellyfinAllUsers, setJellyfinDownloadPolicy } from "./jellyfin";
+import { normalizeEmail } from "./email-normalize";
 
 interface PolicySyncResult {
   source: string;
@@ -59,7 +60,9 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   }
 
   // Batch-load all existing records and all potentially-linked Summonarr accounts
-  // in two queries instead of 2×N individual lookups.
+  // in two queries instead of 2×N individual lookups. Both sides of the join
+  // normalize before comparing so Jellyfin's raw email (which may differ in
+  // case from the local user's lowercase-stored email) still matches.
   const [existingRows, linkedUsers] = await Promise.all([
     prisma.mediaServerUser.findMany({
       where: { source: "jellyfin" },
@@ -68,7 +71,7 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
     prisma.user.findMany({
       where: {
         email: {
-          in: users.flatMap((u) => (u.email ? [u.email] : [])),
+          in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])),
         },
       },
       select: { id: true, email: true, mediaServer: true },
@@ -81,7 +84,7 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   for (const u of users) {
     try {
       const existing = existingMap.get(u.id) ?? null;
-      const linked = u.email ? (linkedMap.get(u.email) ?? null) : null;
+      const linked = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
       const userId =
         linked && (!linked.mediaServer || linked.mediaServer.toLowerCase() === "jellyfin")
           ? linked.id

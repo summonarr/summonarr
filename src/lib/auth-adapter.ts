@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@/generated/prisma";
 import type { Adapter, AdapterAccount, AdapterUser } from "next-auth/adapters";
+import { normalizeEmail } from "./email-normalize";
 
 /**
  * Minimal Prisma adapter for Auth.js — vendored in place of `@auth/prisma-adapter`.
@@ -21,12 +22,20 @@ export function prismaAuthAdapter(
   const p = prisma as PrismaClient;
   return {
     // Drop any incoming id so the schema's default (uuid) wins.
-    createUser: ({ id: _id, ...data }) =>
-      p.user.create({ data }) as unknown as Promise<AdapterUser>,
+    // Normalize email on create so the row matches subsequent lookups
+    // (auth.ts always normalizes on its read side).
+    createUser: ({ id: _id, email, ...data }) =>
+      p.user.create({
+        data: { ...data, email: email ? normalizeEmail(email) : email },
+      }) as unknown as Promise<AdapterUser>,
     getUser: (id) =>
       p.user.findUnique({ where: { id } }) as unknown as Promise<AdapterUser | null>,
+    // Normalize the lookup email — OIDC IdPs sometimes return mixed-case
+    // emails and our stored values are always lowercase. Without this, an
+    // existing user signing in via OIDC could get a duplicate-user create
+    // attempt and a unique-violation crash.
     getUserByEmail: (email) =>
-      p.user.findUnique({ where: { email } }) as unknown as Promise<AdapterUser | null>,
+      p.user.findUnique({ where: { email: normalizeEmail(email) } }) as unknown as Promise<AdapterUser | null>,
     async getUserByAccount(provider_providerAccountId) {
       const account = await p.account.findUnique({
         where: { provider_providerAccountId },

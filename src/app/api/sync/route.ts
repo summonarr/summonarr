@@ -60,6 +60,15 @@ export async function POST(request: NextRequest) {
 // Me-4: signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
 // Prisma 7's $transaction(fn, opts) does not accept an AbortSignal, so abortion is best-effort —
 // long-running outbound HTTP (Plex/Jellyfin/ARR fetches) can observe it; Prisma queries cannot.
+// Strips angle brackets and null bytes, caps length. Shared between the
+// orchestrator and the per-source /api/sync/{plex,jellyfin} routes so the
+// PlexLibraryItem / JellyfinLibraryItem content is identical regardless of
+// which path most recently wrote the row.
+const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null => {
+  if (s == null) return null;
+  return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
+};
+
 async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> {
   // signal is wired through so callers (e.g. arrFetch) can opt in later; currently unobserved.
   void signal;
@@ -367,8 +376,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           getPlexTmdbIds(serverUrl, token, "MOVIE", false, undefined, sections),
           getPlexTmdbIds(serverUrl, token, "TV", false, undefined, sections),
         ]);
-        const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, addedAt: d.addedAt }));
-        const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, addedAt: d.addedAt }));
+        const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+        const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
         // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the same write.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
@@ -412,8 +421,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE"),
           getJellyfinTmdbIds(baseUrl, apiKey, "TV"),
         ]);
-        const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, communityRating: d.communityRating, addedAt: d.addedAt }));
-        const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: d.title, year: d.year, overview: d.overview, contentRating: d.contentRating, communityRating: d.communityRating, addedAt: d.addedAt }));
+        const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+        const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
         // Advisory lock 2001,2 — matches /api/sync/jellyfin so the two callers can't race the same write.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
