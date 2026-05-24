@@ -237,6 +237,31 @@ if (process.argv.includes("--check")) {
     console.error(
       "[licenses] THIRD_PARTY_LICENSES.txt is stale. Run: npm run licenses:generate",
     );
+    // Print the first hunk of divergence so CI failures are debuggable without
+    // round-tripping through a manual rerun. Cheap to compute; bounded output.
+    const aLines = current.split("\n");
+    const bLines = content.split("\n");
+    const max = Math.min(aLines.length, bLines.length);
+    let firstDiff = -1;
+    for (let i = 0; i < max; i++) {
+      if (aLines[i] !== bLines[i]) { firstDiff = i; break; }
+    }
+    if (firstDiff === -1 && aLines.length !== bLines.length) firstDiff = max;
+    if (firstDiff >= 0) {
+      const start = Math.max(0, firstDiff - 2);
+      const end = Math.min(Math.max(aLines.length, bLines.length), firstDiff + 8);
+      console.error(`[licenses] first divergence at line ${firstDiff + 1}:`);
+      for (let i = start; i < end; i++) {
+        const a = aLines[i] ?? "<EOF>";
+        const b = bLines[i] ?? "<EOF>";
+        if (a === b) console.error(`  ${i + 1}  ${a}`);
+        else {
+          console.error(`- ${i + 1}  ${a}`);
+          console.error(`+ ${i + 1}  ${b}`);
+        }
+      }
+      console.error(`[licenses] on-disk: ${aLines.length} lines, generated: ${bLines.length} lines`);
+    }
     process.exit(1);
   }
   process.exit(0);
