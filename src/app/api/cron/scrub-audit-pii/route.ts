@@ -14,12 +14,29 @@ export async function POST(request: NextRequest) {
     async () => {
       const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
-      const result = await prisma.auditLog.updateMany({
+      // Match the admin DELETE /api/admin/audit-log handler so the cron actually
+      // fulfills the documented 90-day PII promise (previously this only nulled
+      // ipAddress/userAgent and left userName + login-event details intact
+      // forever unless an admin clicked the manual scrub button).
+      const piiResult = await prisma.auditLog.updateMany({
         where: {
           createdAt: { lt: cutoff },
-          OR: [{ ipAddress: { not: null } }, { userAgent: { not: null } }],
+          OR: [
+            { ipAddress: { not: null } },
+            { userAgent: { not: null } },
+            { userName: { not: "[redacted]" } },
+          ],
         },
-        data: { ipAddress: null, userAgent: null },
+        data: { ipAddress: null, userAgent: null, userName: "[redacted]" },
+      });
+
+      const detailsResult = await prisma.auditLog.updateMany({
+        where: {
+          createdAt: { lt: cutoff },
+          action: { in: ["AUTH_LOGIN_FAILED", "AUTH_LOGIN", "AUTH_LOGOUT"] },
+          details: { not: null },
+        },
+        data: { details: null },
       });
 
       await logAudit({
@@ -27,12 +44,17 @@ export async function POST(request: NextRequest) {
         userName: "cron",
         action: "SETTINGS_CHANGE",
         target: "audit-log:pii-scrub",
-        details: { scrubbed: result.count, cutoff: cutoff.toISOString() },
+        details: {
+          scrubbed: piiResult.count,
+          authDetailsCleared: detailsResult.count,
+          cutoff: cutoff.toISOString(),
+        },
       });
 
       return NextResponse.json({
         ok: true,
-        scrubbed: result.count,
+        scrubbed: piiResult.count,
+        authDetailsCleared: detailsResult.count,
         cutoff: cutoff.toISOString(),
         timestamp: new Date().toISOString(),
       });

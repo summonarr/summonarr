@@ -256,10 +256,18 @@ export async function addMovieToRadarr(tmdbId: number): Promise<void> {
     : movie.year > 0 && movie.year < now.getFullYear();
 
   try {
+    // Explicit allowlist of the Radarr POST body fields we own — previous code
+    // spread the entire lookup row (~30 fields, untyped) which would silently
+    // forward whatever Radarr returned at lookup time, exposing us to a
+    // future Radarr API tightening that rejects unexpected fields on add.
     await arrFetch<unknown>(cfg, "/api/v3/movie", {
       method: "POST",
       body: JSON.stringify({
-        ...movie,
+        tmdbId: movie.tmdbId,
+        title: movie.title,
+        year: movie.year,
+        titleSlug: movie.titleSlug,
+        images: movie.images,
         rootFolderPath,
         qualityProfileId,
         monitored: true,
@@ -657,10 +665,18 @@ export async function addSeriesToSonarr(tmdbId: number): Promise<number> {
   const qualityProfileId = cfg.qualityProfileId ?? profiles[0].id;
 
   try {
+    // Explicit allowlist of POST body fields — previous code spread the entire
+    // lookup row (~30 fields, untyped) which silently forwarded whatever Sonarr
+    // returned, exposing us to a future Sonarr API tightening that rejects
+    // unexpected fields on add.
     await arrFetch<unknown>(cfg, "/api/v3/series", {
       method: "POST",
       body: JSON.stringify({
-        ...series,
+        tvdbId: series.tvdbId,
+        title: series.title,
+        year: series.year,
+        titleSlug: series.titleSlug,
+        images: series.images,
         seasons: series.seasons.map((s) => ({ ...s, monitored: s.seasonNumber > 0 })),
         rootFolderPath,
         qualityProfileId,
