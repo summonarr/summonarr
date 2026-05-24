@@ -282,6 +282,9 @@ export async function fetchMdblistBatch(
   return result;
 }
 
+// Coalesce concurrent cold-miss callers — see omdb.ts inflightCold rationale.
+const mdblistInflightCold = new Map<string, Promise<MdblistResult>>();
+
 export async function getMdblistRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
@@ -307,7 +310,12 @@ export async function getMdblistRatingsForTmdb(
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
-  return fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate);
+  const existing = mdblistInflightCold.get(cacheKey);
+  if (existing) return existing;
+  const p = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate)
+    .finally(() => mdblistInflightCold.delete(cacheKey));
+  mdblistInflightCold.set(cacheKey, p);
+  return p;
 }
 
 export async function testMdblistConnection(): Promise<string> {

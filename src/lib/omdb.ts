@@ -164,6 +164,13 @@ export async function fetchAndCacheOmdbForTmdb(
   }
 }
 
+// In-flight cold-miss fetches keyed by cacheKey. Concurrent callers for the same
+// (mediaType, tmdbId) reuse the existing promise instead of fanning out a herd
+// of upstream requests when the cache is cold. The pre-existing `revalidating`
+// Set only covered the SWR-revalidation path, leaving cold-miss susceptible to
+// a stampede when many pages load simultaneously.
+const inflightCold = new Map<string, Promise<OmdbResult>>();
+
 export async function getOmdbRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
@@ -189,5 +196,10 @@ export async function getOmdbRatingsForTmdb(
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
 
-  return fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate);
+  const existing = inflightCold.get(cacheKey);
+  if (existing) return existing;
+  const p = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate)
+    .finally(() => inflightCold.delete(cacheKey));
+  inflightCold.set(cacheKey, p);
+  return p;
 }
