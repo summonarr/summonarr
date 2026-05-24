@@ -616,8 +616,11 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
       const videoStream = np.MediaStreams?.find((ms) => ms.Type === "Video");
       const audioStream = np.MediaStreams?.find((ms) => ms.Type === "Audio");
 
-      // Jellyfin's PlayState.PlayMethod can be stale; TranscodingInfo is the authoritative source
-      let playMethod = ps?.PlayMethod ?? "DirectPlay";
+      // Jellyfin's PlayState.PlayMethod can be stale; TranscodingInfo is the authoritative source.
+      // Don't default to "DirectPlay" when PlayMethod is absent — that mis-categorizes sessions
+      // in the activity stats. Fall through to whatever TranscodingInfo says, or leave null
+      // (consumers tolerate null as "unknown").
+      let playMethod: string | null = ps?.PlayMethod ?? null;
       if (ti) {
         if (!ti.IsVideoDirect || !ti.IsAudioDirect) playMethod = "Transcode";
         else if (ti.IsVideoDirect && ti.IsAudioDirect && playMethod !== "DirectPlay") playMethod = "DirectStream";
@@ -644,7 +647,7 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
         durationTicks: np.RunTimeTicks ?? 0,
         positionTicks: ps?.PositionTicks ?? 0,
         providerIds: np.ProviderIds,
-        playMethod,
+        playMethod: playMethod ?? undefined,
         client: s.Client,
         deviceName: s.DeviceName,
         deviceId: s.DeviceId,
