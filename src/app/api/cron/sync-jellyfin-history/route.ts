@@ -8,7 +8,7 @@ import {
   getJellyfinEpisodeSeriesIds,
   getJellyfinAllUsers,
 } from "@/lib/jellyfin";
-import { resolveShowTmdbId, resolveMediaServerUser, clearActivityCache } from "@/lib/play-history";
+import { resolveShowTmdbId, resolveMediaServerUser, clearActivityCache, MediaServerMismatchError } from "@/lib/play-history";
 import { emitSSE } from "@/lib/sse-emitter";
 import type { MediaType } from "@/generated/prisma";
 
@@ -259,15 +259,29 @@ export async function POST(request: NextRequest) {
 
       // Always fetch the server user list so new Jellyfin users are discovered every run.
       // resolveMediaServerUser is idempotent — existing users get a no-op upsert.
+      // Only swallow generic upsert failures; surface MediaServerMismatchError so the
+      // H-3 defense-in-depth check (refuses an incoming Jellyfin machineId that
+      // doesn't match the pinned one on the row) is actually visible in logs
+      // instead of being silently dropped.
       const serverUsers = await getJellyfinAllUsers(baseUrl, apiKey).catch(() => [] as Awaited<ReturnType<typeof getJellyfinAllUsers>>);
       for (const u of serverUsers) {
-        await resolveMediaServerUser({
-          source: "jellyfin",
-          sourceUserId: u.id,
-          username: u.name,
-          email: u.email,
-          ...(serverMachineId ? { serverMachineId } : {}),
-        }).catch(() => null);
+        try {
+          await resolveMediaServerUser({
+            source: "jellyfin",
+            sourceUserId: u.id,
+            username: u.name,
+            email: u.email,
+            ...(serverMachineId ? { serverMachineId } : {}),
+          });
+        } catch (err) {
+          if (err instanceof MediaServerMismatchError) {
+            console.error(
+              `[cron/sync-jellyfin-history] machineId mismatch refusing upsert for jellyfin user ${u.id} — investigate which server is delivering the webhook/sync`,
+              err,
+            );
+          }
+          // Other errors are best-effort — next sync run retries.
+        }
       }
 
       const jellyfinUsers = await prisma.mediaServerUser.findMany({
