@@ -269,6 +269,35 @@ function createPrismaClient() {
           encryptAccountTokensInPlace(args.update as Record<string, unknown> | undefined);
           return query(args);
         },
+        // updateMany/createMany/deleteMany aren't wrapped by the extension's encrypt path:
+        // they accept arrays of rows or a single `data` payload applied to many. Funnel
+        // callers to the wrapped surface (create / update / upsert) so the encryption
+        // step can't be silently bypassed for an OAuth token refresh batch.
+        // Guards mirror setting.updateMany above. See guardrail 7a.
+        async updateMany({ args, query }) {
+          const data = (args as { data?: Record<string, unknown> }).data;
+          if (data && (data.access_token !== undefined || data.refresh_token !== undefined || data.id_token !== undefined)) {
+            throw new Error(
+              "[prisma] account.updateMany with access_token/refresh_token/id_token is forbidden — use account.update or account.upsert so the encryption extension runs",
+            );
+          }
+          return query(args);
+        },
+        async createMany({ args, query }) {
+          const rows = (args as { data?: Record<string, unknown> | Record<string, unknown>[] }).data;
+          const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
+          for (const row of list) {
+            if (row && (row.access_token !== undefined || row.refresh_token !== undefined || row.id_token !== undefined)) {
+              throw new Error(
+                "[prisma] account.createMany with access_token/refresh_token/id_token is forbidden — use account.create or account.upsert so the encryption extension runs",
+              );
+            }
+          }
+          return query(args);
+        },
+        async deleteMany({ args, query }) {
+          return query(args);
+        },
       },
     },
   });
