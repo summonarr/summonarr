@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { getPlexAccounts } from "./plex";
+import { normalizeEmail } from "./email-normalize";
 
 // Boot-time self-heal for the C-1 / Item 4 SSO migration.
 //
@@ -31,7 +32,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
 
     const idByEmail = new Map<string, string>();
     for (const a of accounts) {
-      if (a.email && a.id) idByEmail.set(a.email.toLowerCase(), a.id);
+      if (a.email && a.id) idByEmail.set(normalizeEmail(a.email), a.id);
     }
 
     const users = await prisma.user.findMany({
@@ -42,7 +43,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
     let bound = 0;
     let skipped = 0;
     for (const u of users) {
-      const plexId = idByEmail.get(u.email.toLowerCase());
+      const plexId = idByEmail.get(normalizeEmail(u.email));
       if (!plexId) {
         skipped++;
         continue;

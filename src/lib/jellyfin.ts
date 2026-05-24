@@ -745,8 +745,11 @@ export async function getJellyfinUserCount(baseUrl: string, apiKey: string): Pro
     timeoutMs: 10_000,
   });
   if (!res.ok) throw new Error(`Jellyfin users: ${res.status}`);
-  const raw = (await res.json()) as unknown[];
-  return raw.length;
+  // Jellyfin 10.9+ returns a QueryResult wrapper { Items: [...] } rather than a
+  // plain array — same patch already applied to getJellyfinAllUsers above.
+  const body = (await res.json()) as unknown[] | { Items?: unknown[] };
+  if (Array.isArray(body)) return body.length;
+  return Array.isArray(body.Items) ? body.Items.length : 0;
 }
 
 export interface JellyfinPlayedItem {
