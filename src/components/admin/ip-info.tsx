@@ -28,6 +28,10 @@ interface Props {
 
 export function IpInfo({ ip, inline = false }: Props) {
   const [open, setOpen] = useState(false);
+  // Initialize from cache at mount AND re-read on open: a sibling IpInfo for the
+  // same IP may have populated the cache after this instance mounted, in which
+  // case the useState initializer would have returned null and `cache.has(ip)`
+  // would short-circuit the popover fetch — leaving the popover blank.
   const [data, setData] = useState<Lookup | null>(() => {
     const c = cache.get(ip);
     return c && c !== "missing" ? c : null;
@@ -40,7 +44,20 @@ export function IpInfo({ ip, inline = false }: Props) {
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
-    if (!next || fetchedRef.current || cache.has(ip)) return;
+    if (!next) return;
+    // Re-read from cache on every open so a sibling-populated entry is reflected
+    // even if this instance's useState initializer saw an empty cache at mount.
+    const cached = cache.get(ip);
+    if (cached === "missing") {
+      setError("Not available");
+      return;
+    }
+    if (cached) {
+      setData(cached);
+      setError(null);
+      return;
+    }
+    if (fetchedRef.current) return;
     fetchedRef.current = true;
     setLoading(true);
     fetch(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`)

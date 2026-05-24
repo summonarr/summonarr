@@ -156,22 +156,30 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     if (!open || phase !== "search") return;
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (!query.trim()) { setSearchResults([]); setSearchError(""); return; }
+    // AbortController in addition to the debounce timer: cancels the in-flight
+    // fetch when the query changes mid-request OR the popover closes, so stale
+    // results from a previous keystroke can't overwrite the current ones.
+    const ac = new AbortController();
     searchTimer.current = setTimeout(async () => {
       setSearching(true);
       setSearchError("");
       try {
         const type = mediaType === "MOVIE" ? "movie" : "tv";
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`);
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`, { signal: ac.signal });
         const json = await res.json() as TmdbMedia[] | { error: string };
         if (!res.ok || "error" in json) throw new Error("error" in json ? json.error : `HTTP ${res.status}`);
         setSearchResults(json as TmdbMedia[]);
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
         setSearchError(err instanceof Error ? err.message : "Search failed");
       } finally {
         setSearching(false);
       }
     }, 350);
-    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+      ac.abort();
+    };
   }, [query, open, phase, mediaType]);
 
   function pickResult(result: TmdbMedia) {
