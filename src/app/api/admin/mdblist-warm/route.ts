@@ -14,23 +14,39 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     force = body.force === true;
   } catch { }
 
-  const row = await prisma.setting.findUnique({ where: { key: COOLDOWN_KEY } });
-  const lastMs = row ? parseInt(row.value, 10) || 0 : 0;
   const now = Date.now();
-  const remaining = COOLDOWN_MS - (now - lastMs);
 
-  if (!force && remaining > 0) {
-    return NextResponse.json(
-      { error: `Triggered too recently — wait ${Math.ceil(remaining / 1000)}s` },
-      { status: 429 }
-    );
+  if (force) {
+    // Force bypasses the cooldown — write timestamp unconditionally so the next
+    // non-force click still gets a fresh 5-minute window.
+    await prisma.setting.upsert({
+      where: { key: COOLDOWN_KEY },
+      create: { key: COOLDOWN_KEY, value: String(now) },
+      update: { value: String(now) },
+    });
+  } else {
+    // Atomic CAS: only succeeds if the cooldown window has elapsed. Matches the
+    // sibling activity-warm / omdb-warm / library-warm pattern — the previous
+    // check-then-update shape let two simultaneous admin clicks both pass the
+    // cooldown read and double the API quota burn.
+    const claimed = await prisma.$executeRaw`
+      INSERT INTO "Setting" (key, value, "updatedAt")
+      VALUES (${COOLDOWN_KEY}, ${String(now)}, NOW())
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value, "updatedAt" = NOW()
+      WHERE "Setting".value !~ '^[0-9]+$'
+         OR CAST("Setting".value AS BIGINT) + ${COOLDOWN_MS}::bigint <= ${now}::bigint
+    `;
+    if (claimed === 0) {
+      const row = await prisma.setting.findUnique({ where: { key: COOLDOWN_KEY } });
+      const lastMs = row ? parseInt(row.value, 10) || 0 : 0;
+      const remaining = COOLDOWN_MS - (now - lastMs);
+      return NextResponse.json(
+        { error: `Triggered too recently — wait ${Math.ceil(remaining / 1000)}s` },
+        { status: 429 }
+      );
+    }
   }
-
-  await prisma.setting.upsert({
-    where: { key: COOLDOWN_KEY },
-    create: { key: COOLDOWN_KEY, value: String(now) },
-    update: { value: String(now) },
-  });
 
   const startTime = Date.now();
   const result = await prewarmMdblistCache({ force });
