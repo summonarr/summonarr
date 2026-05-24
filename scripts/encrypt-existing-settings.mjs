@@ -21,11 +21,15 @@ import { Client } from "pg";
 import { createCipheriv, randomBytes } from "node:crypto";
 
 // MUST match SENSITIVE_KEYS in src/lib/prisma.ts and src/app/api/settings/route.ts
+// Drift in this list means the listed keys stay plaintext on disk after running
+// the one-shot migration (the extension only encrypts on subsequent updates).
 const SENSITIVE_KEYS = [
   "plexAdminToken",
   "jellyfinApiKey",
   "vapidPrivateKey",
   "webhookSecret",
+  "sonarrWebhookSecret",
+  "radarrWebhookSecret",
   "discordBotToken",
   "radarrApiKey",
   "sonarrApiKey",
@@ -34,11 +38,14 @@ const SENSITIVE_KEYS = [
   "omdbApiKey",
   "mdblistApiKey",
   "traktApiKey",
+  "traktClientId",
   "traktClientSecret",
+  "ipinfoToken",
   "resendApiKey",
   "smtpPassword",
   "discordClientSecret",
   "oidcClientSecret",
+  "trashGithubToken",
 ];
 
 const ENC_PREFIX = "enc:v1:";
