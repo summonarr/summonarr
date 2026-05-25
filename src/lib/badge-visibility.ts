@@ -1,9 +1,9 @@
-import type { Session } from "next-auth";
+import type { SummonarrSession } from "@/lib/api-auth";
 
 // Admins see both badges regardless of their own mediaServer preference; regular users only see
 // the badge for the server they authenticated with.  ISSUE_ADMIN is intentionally included here
 // because issue triage needs full availability context across both backends.
-export function getBadgeVisibility(session: Session | null): {
+export function getBadgeVisibility(session: SummonarrSession | null): {
   showPlex: boolean;
   showJellyfin: boolean;
 } {

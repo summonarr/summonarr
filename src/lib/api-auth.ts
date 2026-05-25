@@ -1,7 +1,34 @@
-import type { Session } from "next-auth";
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import {
+  getSessionCookieName,
+  parseSessionCookie,
+  serializeSessionCookie,
+} from "@/lib/session-cookie";
+import {
+  verifyAndRefreshSession,
+  type RefreshedToken,
+  type VerifyAndRefreshResult,
+} from "@/lib/session-refresh";
+import type { SessionClaims } from "@/lib/session-jwt";
+
+// The session passed to authenticated handlers. Shaped to match what
+// next-auth's Session was — `user.{id,role,provider,mediaServer}`,
+// `sessionId`, `tokenExpiresAt` — so handler bodies didn't have to change
+// when next-auth went away.
+export interface SummonarrSession {
+  user: {
+    id: string;
+    role: string;
+    email?: string | null;
+    name?: string | null;
+    provider?: string;
+    mediaServer?: string | null;
+  };
+  sessionId?: string;
+  tokenExpiresAt?: number;
+}
 
 export type RequireAuthRole = "ADMIN" | "ISSUE_ADMIN";
 
@@ -10,28 +37,46 @@ type RequireAuthOptions = {
   role?: RequireAuthRole;
 };
 
-/**
- * Returns the authenticated Session, or a NextResponse that the caller must return.
- * 401 for missing/expired session, 403 only for wrong role.
- *
- * Usage:
- *   const session = await requireAuth({ role: "ADMIN" });
- *   if (session instanceof NextResponse) return session;
- */
-export async function requireAuth(
-  opts: RequireAuthOptions = {}
-): Promise<Session | NextResponse> {
-  const session = await auth();
+function claimsToSession(claims: SessionClaims): SummonarrSession {
+  return {
+    user: {
+      id: claims.id,
+      role: claims.role,
+      email: claims.email ?? null,
+      name: claims.name ?? null,
+      provider: claims.provider,
+      mediaServer: claims.mediaServer ?? null,
+    },
+    sessionId: claims.sessionId,
+    tokenExpiresAt: claims.expiresAt,
+  };
+}
 
-  if (!session || isTokenExpired(session)) {
+// Verifies the Summonarr session cookie, runs the refresh logic, and applies
+// the role check. Returns either the session, or a NextResponse the caller
+// must return.
+//
+// IMPORTANT: when called outside the withAuth wrapper, any refreshed JWT
+// produced by the refresh logic is silently DISCARDED — the caller has no
+// response object to attach the Set-Cookie to. This is fine for the rare
+// direct callers (dual-auth routes, the play-history export) because the
+// next withAuth-wrapped request will re-run the slide.
+export async function requireAuth(
+  opts: RequireAuthOptions = {},
+): Promise<SummonarrSession | NextResponse> {
+  const cookieStore = await cookies();
+  const token = cookieStore.get(getSessionCookieName())?.value;
+  if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-
-  if (opts.role && !hasRole(session.user.role, opts.role)) {
+  const result = await verifyAndRefreshSession(token);
+  if (!result) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (opts.role && !hasRole(result.claims.role, opts.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-
-  return session;
+  return claimsToSession(result.claims);
 }
 
 function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
@@ -42,8 +87,31 @@ function hasRole(actual: string | undefined, required: RequireAuthRole): boolean
 type AuthedHandler<Ctx> = (
   req: NextRequest,
   ctx: Ctx,
-  session: Session
+  session: SummonarrSession,
 ) => Response | Promise<Response>;
+
+// Internal: full verify+refresh starting from a NextRequest. Returns either
+// the session + maybe-refreshed token, or a NextResponse to return verbatim.
+async function authenticateRequest(
+  req: NextRequest,
+  opts: RequireAuthOptions,
+): Promise<{ session: SummonarrSession; refreshed?: RefreshedToken } | NextResponse> {
+  const token = parseSessionCookie(req.headers.get("cookie"));
+  if (!token) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token);
+  if (!result) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (opts.role && !hasRole(result.claims.role, opts.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+  return {
+    session: claimsToSession(result.claims),
+    refreshed: result.refreshed,
+  };
+}
 
 /**
  * Wraps a route handler so the auth check runs before the body and can never
@@ -54,6 +122,10 @@ type AuthedHandler<Ctx> = (
  * `isCronAuthorized`) or plain-text/binary responses (SSE, thumbnails) which
  * stay inline.
  *
+ * If verifyAndRefreshSession produces a refreshed JWT (sliding window or
+ * sessionId rotation), the wrapper appends Set-Cookie to the handler's
+ * response so the client gets the fresh token transparently.
+ *
  * Usage:
  *   export const GET = withAdmin(async (req, ctx, session) => { ... });
  *   export const POST = withAuth(async (req, ctx, session) => { ... });
@@ -63,12 +135,21 @@ type AuthedHandler<Ctx> = (
  */
 export function withAuth<Ctx = unknown>(
   handler: AuthedHandler<Ctx>,
-  opts: RequireAuthOptions = {}
+  opts: RequireAuthOptions = {},
 ): (req: NextRequest, ctx: Ctx) => Promise<Response> {
   return async (req, ctx) => {
-    const session = await requireAuth(opts);
-    if (session instanceof NextResponse) return session;
-    return handler(req, ctx, session);
+    const result = await authenticateRequest(req, opts);
+    if (result instanceof NextResponse) return result;
+    const response = await handler(req, ctx, result.session);
+    if (result.refreshed) {
+      response.headers.append(
+        "Set-Cookie",
+        serializeSessionCookie(result.refreshed.token, {
+          maxAgeSeconds: result.refreshed.expiresInSeconds,
+        }),
+      );
+    }
+    return response;
   };
 }
 

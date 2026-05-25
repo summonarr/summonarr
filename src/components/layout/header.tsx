@@ -12,8 +12,17 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { signOut, useSession } from "next-auth/react";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { PushNotifications } from "@/components/layout/push-notifications";
+
+async function signOutAndRedirect(callbackUrl: string) {
+  try {
+    await fetch("/api/auth/sign-out", { method: "POST", credentials: "include" });
+  } catch {
+    // ignore — best-effort
+  }
+  window.location.href = callbackUrl;
+}
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
@@ -338,7 +347,7 @@ export function SearchBar({
 export function Header() {
   const pathname = usePathname();
   const router = useRouter();
-  const { data: session } = useSession();
+  const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const provider = session?.user?.provider;
   const showPlex =
@@ -348,9 +357,13 @@ export function Header() {
     role === "ISSUE_ADMIN" ||
     provider === "jellyfin" ||
     provider === "jellyfin-quickconnect";
+  // `image` isn't part of SummonarrSession yet — claims are kept slim. Avatar
+  // falls back to initials when image is absent, which is the existing
+  // behaviour for credentials/plex/jellyfin users who never had it set anyway.
+  const sessionUserImage = (session?.user as { image?: string | null } | undefined)?.image;
   const initials = session?.user?.name
     ?.split(" ")
-    .map((n) => n[0])
+    .map((n: string) => n[0])
     .join("")
     .toUpperCase();
 
@@ -437,8 +450,8 @@ export function Header() {
                 fires `onerror` immediately, switching to the fallback before
                 hydration completes.
               */}
-              {session?.user?.image ? (
-                <AvatarImage src={session.user.image} />
+              {sessionUserImage ? (
+                <AvatarImage src={sessionUserImage} />
               ) : null}
               <AvatarFallback
                 className="font-semibold"
@@ -475,7 +488,7 @@ export function Header() {
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="text-red-400"
-              onClick={() => signOut({ callbackUrl: "/login" })}
+              onClick={() => signOutAndRedirect("/login")}
             >
               Sign out
             </DropdownMenuItem>

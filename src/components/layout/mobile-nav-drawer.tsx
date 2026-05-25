@@ -3,8 +3,17 @@
 import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useSession, signOut } from "next-auth/react";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
+
+async function signOutAndRedirect(callbackUrl: string) {
+  try {
+    await fetch("/api/auth/sign-out", { method: "POST", credentials: "include" });
+  } catch {
+    // ignore — best-effort
+  }
+  window.location.href = callbackUrl;
+}
 import {
   userNavItems,
   getVisibleAdminItems,
@@ -35,7 +44,7 @@ export function MobileNavDrawer({
   featureFlags,
 }: MobileNavDrawerProps) {
   const pathname = usePathname();
-  const { data: session } = useSession();
+  const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const adminItems = filterNavByFeatures(
     getVisibleAdminItems(role),
@@ -144,7 +153,7 @@ export function MobileNavDrawer({
               <AppearanceMenu />
               <button
                 type="button"
-                onClick={() => signOut({ callbackUrl: "/login" })}
+                onClick={() => signOutAndRedirect("/login")}
                 className="flex items-center gap-3 w-full font-medium transition-colors"
                 style={{
                   padding: "10px 12px",

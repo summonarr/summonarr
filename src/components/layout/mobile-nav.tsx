@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import {
   LayoutDashboard,
   Film,
@@ -33,7 +33,7 @@ type Tab = {
 
 export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const pathname = usePathname();
-  const { data: session } = useSession();
+  const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const provider = session?.user?.provider;
   const showPlex =

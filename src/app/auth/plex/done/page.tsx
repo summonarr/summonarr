@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { signIn } from "next-auth/react";
 import { Loader2 } from "@/components/icons";
 
 interface LoginAuth {
@@ -57,14 +56,18 @@ export default function PlexDonePage() {
     }
 
     setMessage("Signing in…");
-    const result = await signIn("plex", {
-      plexToken: authToken,
-      plexClientId: auth.clientId,
-      rememberMe: String(auth.rememberMe),
-      redirect: false,
+    const result = await fetch("/api/auth/sign-in/plex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        plexToken: authToken,
+        plexClientId: auth.clientId,
+        rememberMe: String(auth.rememberMe),
+      }),
     });
 
-    if (result?.error) {
+    if (!result.ok) {
       setMessage("You don't have access. Contact the server owner.");
       return;
     }

@@ -1,16 +1,14 @@
-import NextAuth, { type Session } from "next-auth";
-import Credentials from "next-auth/providers/credentials";
-import { prismaAuthAdapter } from "@/lib/auth-adapter";
 import { prisma } from "@/lib/prisma";
 import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
-import { authConfig } from "@/lib/auth.config";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 import { signSessionJwt } from "@/lib/session-jwt";
+import type { SummonarrSession } from "@/lib/api-auth";
+import { readSummonarrSession } from "@/lib/session-server";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -287,9 +285,30 @@ export async function getSessionDurations(): Promise<SessionDurations> {
   return value;
 }
 
-export function isTokenExpired(session: Session | null): boolean {
+export function isTokenExpired(session: SummonarrSession | null): boolean {
   if (!session) return false;
   return !!session.tokenExpiresAt && Math.floor(Date.now() / 1000) > session.tokenExpiresAt;
+}
+
+// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
+// exported — synchronous-looking API that returns SummonarrSession | null.
+// Routes that need 401/403 semantics should use requireAuth/withAuth from
+// @/lib/api-auth instead.
+export async function auth(): Promise<SummonarrSession | null> {
+  const claims = await readSummonarrSession();
+  if (!claims) return null;
+  return {
+    user: {
+      id: claims.id,
+      role: claims.role,
+      email: claims.email ?? null,
+      name: claims.name ?? null,
+      provider: claims.provider,
+      mediaServer: claims.mediaServer ?? null,
+    },
+    sessionId: claims.sessionId,
+    tokenExpiresAt: claims.expiresAt,
+  };
 }
 
 // In-memory revoke sets are a single-replica fast path — the AuthSession row
@@ -464,147 +483,6 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   return token;
 }
 
-async function rotateSessionIdOnRoleChange(oldSessionId: string): Promise<string | null> {
-  // Rotate sessionId when role changes so the old token cannot be replayed after a role change
-  const newSessionId = crypto.randomUUID();
-  addBounded(forceRevokeSessions, oldSessionId, FORCE_REVOKE_MAX);
-  const rotated = await prisma.authSession.update({
-    where: { sessionId: oldSessionId },
-    data:  { sessionId: newSessionId },
-  }).catch(() => null);
-  return rotated ? newSessionId : null;
-}
-
-async function refreshToken(token: JwtToken): Promise<JwtToken | null> {
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (token.expiresAt && nowSec > (token.expiresAt as number)) {
-    return null;
-  }
-
-  const userId = token.id as string | undefined;
-  if (!userId) return null;
-
-  const sessionId = token.sessionId as string | undefined;
-  if (!sessionId) return null;
-
-  if (forceRevokeSessions.has(sessionId)) {
-    forceRevokeSessions.delete(sessionId);
-    return null;
-  }
-
-  const now         = Math.floor(Date.now() / 1000);
-  const lastChecked = token.dbCheckedAt as number | undefined;
-  const forceCheck  = forceRevalidateUserIds.has(userId);
-  if (forceCheck) forceRevalidateUserIds.delete(userId);
-  // Admins/issue-admins recheck DB every 10 s so role demotions propagate quickly
-  const checkInterval = (token.role === "ADMIN" || token.role === "ISSUE_ADMIN") ? 10 : 60;
-
-  if (!forceCheck && lastChecked && now - lastChecked <= checkInterval) {
-    return token;
-  }
-
-  const [dbUser, authSessionRow] = await Promise.all([
-    prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true, mediaServer: true, sessionsRevokedAt: true, passwordChangedAt: true },
-    }),
-    prisma.authSession.findUnique({ where: { sessionId } }),
-  ]);
-
-  if (!dbUser) return null;
-  // Cross-replica revocation: revokeAllUserSessions / revokeSessionById delete the
-  // AuthSession row, and the next refreshToken() call on any replica fails here.
-  if (!authSessionRow) return null;
-
-  // Defense-in-depth revocation backstop: even if an AuthSession row somehow
-  // survives a revoke (failed delete, replica lag, manual DB intervention),
-  // any JWT minted before sessionsRevokedAt / passwordChangedAt is refused.
-  // Existing flows (AuthSession deletion + in-memory force-revoke set) remain
-  // the primary path; this is the belt-and-suspenders timestamp check.
-  const revokedSec = dbUser.sessionsRevokedAt ? Math.floor(dbUser.sessionsRevokedAt.getTime() / 1000) : 0;
-  const passwordSec = dbUser.passwordChangedAt ? Math.floor(dbUser.passwordChangedAt.getTime() / 1000) : 0;
-  const cutoff = Math.max(revokedSec, passwordSec);
-  if (cutoff > 0 && typeof token.iat === "number" && token.iat < cutoff) {
-    return null;
-  }
-
-  void prisma.authSession.update({
-    where: { sessionId },
-    data: { lastSeenAt: new Date() },
-  }).catch(() => {});
-
-  if (!token.uaFingerprint) {
-    // OIDC sign-ins skip authorize(), so the fingerprint is derived from the current request's UA on first refresh
-    try {
-      const { headers: getHeaders } = await import("next/headers");
-      const h = await getHeaders();
-      const ua = h.get("user-agent") ?? "";
-      if (ua) token.uaFingerprint = serializeFingerprint(extractUaFingerprint(ua));
-    } catch {
-      // jwt() invoked outside request context — fingerprint stays unset, populated on next request
-    }
-  }
-
-  if (dbUser.role !== token.role) {
-    const newSessionId = await rotateSessionIdOnRoleChange(sessionId);
-    if (!newSessionId) return null;
-    token.sessionId = newSessionId;
-  }
-
-  token.role = dbUser.role;
-
-  const provider = token.provider as string | null;
-  if (provider !== "plex" && provider !== "jellyfin" && provider !== "jellyfin-quickconnect") {
-    token.mediaServer = dbUser.mediaServer ?? null;
-  }
-  token.dbCheckedAt = now;
-
-  // Non-admins get their token silently shortened to 1 h on each DB check to
-  // cap stale JWT lifetime — but bounded by maxExpiresAt (set once at sign-in)
-  // so the sliding window can NEVER push the effective expiry past the original
-  // session TTL. Without that ceiling an actively-used session would be
-  // immortal: every refresh re-extended expiresAt to now+3600.
-  //
-  // ADMINs are also bounded — previously exempt, which meant any continuously
-  // active admin session became immortal in practice. On a multi-admin deployment
-  // that's a real risk: a forgotten admin session on an old laptop can persist
-  // indefinitely. Cap admins at 7 days from sign-in.
-  if (token.role !== "ADMIN") {
-    // Backfill for any pre-existing JWTs minted before maxExpiresAt was set.
-    // We anchor it to the token's current expiresAt — not "now + 3600" — so a
-    // missing column on an older token cannot itself create immortality.
-    if (typeof token.maxExpiresAt !== "number" && typeof token.expiresAt === "number") {
-      token.maxExpiresAt = token.expiresAt;
-    }
-    const maxExp = token.maxExpiresAt as number | undefined;
-    if (typeof maxExp === "number") {
-      if (now >= maxExp) {
-        return null;
-      }
-      if ((token.expiresAt as number) > now + 3600) {
-        token.expiresAt = Math.min(now + 3600, maxExp);
-      }
-    } else if ((token.expiresAt as number) > now + 3600) {
-      // No maxExpiresAt available at all — clamp to the absolute hard ceiling so
-      // a successful refresh still can't outlive MAX_ALLOWED_SESSION_SECONDS.
-      token.expiresAt = now + 3600;
-    }
-  } else {
-    // ADMIN 7-day ceiling: derive from `iat` (sign-in timestamp baked into
-    // every JWT) so it survives any token-shape migration. If iat is missing
-    // (very old tokens), fall back to the existing expiresAt.
-    const ADMIN_MAX_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
-    const iat = typeof token.iat === "number" ? token.iat : null;
-    const adminHardExpiry = iat !== null
-      ? iat + ADMIN_MAX_LIFETIME_SECONDS
-      : (typeof token.expiresAt === "number" ? token.expiresAt : null);
-    if (adminHardExpiry !== null && now >= adminHardExpiry) {
-      return null;
-    }
-  }
-
-  return token;
-}
 
 export async function authorizeWithCredentials(
   credentials: Partial<Record<string, unknown>>,
@@ -875,204 +753,6 @@ export async function authorizeWithJellyfinQuickConnect(
   return { ...qcDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
 }
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
-  ...authConfig,
-  trustHost: !!(process.env.AUTH_URL || process.env.NEXTAUTH_URL || process.env.AUTH_TRUST_HOST === "true"),
-  // Account OAuth tokens are encrypted/decrypted by the Prisma extension in src/lib/prisma.ts
-  // (account.create/update/upsert encrypt; findUnique/findFirst/findMany decrypt). Wrapping the
-  // adapter with a second encrypt-on-linkAccount layer produced double-encrypted rows — see
-  // guardrail #7a in CLAUDE.md.
-  adapter: prismaAuthAdapter(prisma),
-  callbacks: {
-    ...authConfig.callbacks,
-    async jwt(params) {
-      // Delegate to the base jwt callback in auth.config.ts so the provider
-      // wiring (mediaServer, role, sessionId, fingerprint) stays in one place.
-      // Typed local instead of `as any` — auth.config.ts always defines it,
-      // but the NextAuth config type marks `callbacks.jwt` optional.
-      const baseJwt = authConfig.callbacks?.jwt;
-      if (!baseJwt) throw new Error("auth.config.ts must define callbacks.jwt");
-      // NextAuth types baseJwt as returning `JWT | null`, but auth.config.ts's
-      // implementation always returns the mutated token object. Treat null as a
-      // hard failure rather than passing it through to the helpers.
-      const baseToken = await baseJwt(params);
-      if (!baseToken) throw new Error("base jwt callback returned null");
-      const token = baseToken as JwtToken;
-      if (params.user) return initializeTokenOnSignIn(token, params.user as Record<string, unknown>);
-      return refreshToken(token);
-    },
-  },
-  events: {
-    async signIn({ user, account, profile }) {
-      const u = user as { _auditIp?: string; _auditUa?: string; id?: string; name?: string | null; email?: string | null; role?: string };
-
-      // OIDC: keep notificationEmail in lock-step with the OIDC provider's current email claim.
-      // Prefer the fresh `profile.email` over `user.email` — the adapter-returned user is
-      // the stored DB row and can lag behind OIDC email changes.
-      if (account?.provider === "oidc" && u.id) {
-        const oidcEmail = typeof profile?.email === "string"
-          ? normalizeEmail(profile.email)
-          : u.email
-            ? normalizeEmail(u.email)
-            : null;
-        if (oidcEmail) {
-          await prisma.user.update({
-            where: { id: u.id },
-            data: { notificationEmail: oidcEmail },
-          }).catch((err) => console.error("[auth] notificationEmail sync (oidc) failed:", err instanceof Error ? err.message : err));
-        }
-      }
-
-      if (account?.provider && account.provider !== "credentials" && u.id) {
-        const signingInUserId = u.id;
-        const promoted = await prisma.$transaction(async (tx) => {
-          // Advisory lock prevents two concurrent first-time OAuth sign-ins both being promoted to ADMIN
-          await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(1947888749)");
-
-          const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
-          if (setupRow) return false;
-          // Failsafe: promote whenever no ADMIN exists yet. Two concurrent first-time
-          // sign-ins create their User rows before entering this lock; the lock
-          // serializes them, so the second to acquire it sees existingAdmin !== 0
-          // and skips promotion. The first acquirer always promotes ITSELF — never
-          // `findFirst(orderBy createdAt)`, which can return a different user that
-          // raced into the table first but isn't the one signing in right now.
-          const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
-          if (existingAdmin) return false;
-          // Confirm the signing-in user still exists (e.g. wasn't deleted between
-          // adapter insert and event firing) before promoting.
-          const self = await tx.user.findUnique({ where: { id: signingInUserId }, select: { id: true } });
-          if (!self) return false;
-          await tx.user.update({ where: { id: signingInUserId }, data: { role: "ADMIN" } });
-          await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
-          return true;
-        });
-        if (promoted) u.role = "ADMIN";
-      }
-
-      void logAudit({
-        userId: u.id ?? "unknown",
-        userName: u.name ?? u.email ?? "unknown",
-        action: "AUTH_LOGIN",
-        target: "auth:login",
-        ipAddress: u._auditIp ?? null,
-        userAgent: u._auditUa ?? null,
-        provider: account?.provider ?? null,
-        details: {
-          provider: account?.provider,
-          email: u.email,
-          role: u.role,
-          ip: u._auditIp,
-          browser: u._auditUa?.slice(0, 100),
-        },
-      });
-    },
-    async signOut(message) {
-      if ("token" in message && message.token) {
-        const t = message.token;
-
-        const sessionId = t.sessionId as string | undefined;
-        if (sessionId) {
-          void prisma.authSession.delete({ where: { sessionId } }).catch(() => {});
-        }
-
-        void logAudit({
-          userId: (t.id as string) ?? "unknown",
-          userName: (t.name as string) ?? (t.email as string) ?? "unknown",
-          action: "AUTH_LOGOUT",
-          target: "auth:logout",
-          provider: (t.provider as string) ?? null,
-          details: {
-            provider: (t.provider as string) ?? null,
-            email: t.email,
-            role: t.role,
-          },
-        });
-      }
-    },
-  },
-  providers: [
-    Credentials({
-      id: "credentials",
-      name: "credentials",
-      credentials: {
-        email: { label: "Email", type: "email" },
-        password: { label: "Password", type: "password" },
-        rememberMe: { label: "Remember me", type: "text" },
-      },
-      authorize: authorizeWithCredentials,
-    }),
-
-    Credentials({
-      id: "plex",
-      name: "Plex",
-      credentials: {
-        plexToken: { label: "Plex Token", type: "text" },
-        plexClientId: { label: "Plex Client ID", type: "text" },
-        rememberMe: { label: "Remember me", type: "text" },
-      },
-      authorize: authorizeWithPlex,
-    }),
-
-    ...(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET
-      ? [
-          {
-            id: "oidc",
-            name: process.env.OIDC_DISPLAY_NAME || "SSO",
-            type: "oidc" as const,
-            issuer: process.env.OIDC_ISSUER,
-            clientId: process.env.OIDC_CLIENT_ID,
-            clientSecret: process.env.OIDC_CLIENT_SECRET,
-            profile(profile: { sub: string; email?: string; email_verified?: boolean; name?: string; picture?: string; preferred_username?: string }) {
-              if (!profile.sub || typeof profile.sub !== "string" || profile.sub.trim() === "") {
-                throw new Error("[auth/oidc] OIDC profile missing required subject identifier (sub)");
-              }
-
-              if (profile.email_verified !== true) {
-                throw new Error("OIDC account email is not verified");
-              }
-              if (!profile.email) {
-                console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", profile.sub);
-                throw new Error("[auth/oidc] provider returned no email");
-              }
-              const email = normalizeEmail(profile.email);
-              return {
-                id: profile.sub,
-                email,
-                name: profile.name ?? profile.preferred_username ?? null,
-                image: profile.picture ?? null,
-
-              };
-            },
-          },
-        ]
-      : []),
-
-    ...(process.env.JELLYFIN_URL
-      ? [
-          Credentials({
-            id: "jellyfin",
-            name: "Jellyfin",
-            credentials: {
-              username: { label: "Username", type: "text" },
-              password: { label: "Password", type: "password" },
-              rememberMe: { label: "Remember me", type: "text" },
-            },
-            authorize: authorizeWithJellyfin,
-          }),
-          Credentials({
-            id: "jellyfin-quickconnect",
-            name: "Jellyfin QuickConnect",
-            credentials: {
-              secret: { label: "QuickConnect Secret", type: "text" },
-              rememberMe: { label: "Remember me", type: "text" },
-            },
-            authorize: authorizeWithJellyfinQuickConnect,
-          }),
-        ]
-      : []),
-  ],
-});
 
 // ────────────────────────────────────────────────────────────────────────────
 // Summonarr-native sign-in flow (parallel to next-auth)
@@ -1186,6 +866,8 @@ export async function signInAndMintSession(params: {
     {
       id: token.id as string,
       role: token.role as string,
+      email: (user.email as string | null) ?? null,
+      name: (user.name as string | null) ?? null,
       provider: token.provider as string,
       mediaServer: (token.mediaServer as string | null | undefined) ?? null,
       sessionId: token.sessionId as string,

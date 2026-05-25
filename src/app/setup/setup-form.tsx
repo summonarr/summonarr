@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { signIn } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,13 +43,17 @@ export function SetupForm({ variant = "setup" }: Props) {
         return;
       }
 
-      const result = await signIn("credentials", {
-        email: form.email,
-        password: form.password,
-        redirect: false,
+      const result = await fetch("/api/auth/sign-in/credentials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          email: form.email,
+          password: form.password,
+        }),
       });
 
-      if (result?.error) {
+      if (!result.ok) {
         setError("Account created — please sign in");
         window.location.href = "/login";
         return;

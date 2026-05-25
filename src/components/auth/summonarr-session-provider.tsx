@@ -6,6 +6,8 @@ export interface SummonarrSession {
   user: {
     id: string;
     role: string;
+    email?: string | null;
+    name?: string | null;
     provider?: string;
     mediaServer?: string | null;
   };
