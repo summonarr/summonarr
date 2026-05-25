@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS deps
+FROM node:26.2.0-alpine3.23@sha256:7c6af15abe4e3de859690e7db171d0d711bf37d27528eddfe625b2fe89e097f8 AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.npm \
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
-FROM --platform=$BUILDPLATFORM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS prisma-gen
+FROM --platform=$BUILDPLATFORM node:26.2.0-alpine3.23@sha256:7c6af15abe4e3de859690e7db171d0d711bf37d27528eddfe625b2fe89e097f8 AS prisma-gen
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -58,7 +58,7 @@ ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS builder
+FROM node:26.2.0-alpine3.23@sha256:7c6af15abe4e3de859690e7db171d0d711bf37d27528eddfe625b2fe89e097f8 AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -77,7 +77,7 @@ RUN npm run build
 # Install ONLY prisma + dotenv using exact versions from the lockfile.
 # npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS migrate-deps
+FROM node:26.2.0-alpine3.23@sha256:7c6af15abe4e3de859690e7db171d0d711bf37d27528eddfe625b2fe89e097f8 AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -104,7 +104,7 @@ RUN --mount=type=cache,target=/root/.npm \
     npm install --legacy-peer-deps --no-audit --no-fund --prefer-offline
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:26.1.0-alpine3.23@sha256:e71ac5e964b9201072425d59d2e876359efa25dc96bb1768cb73295728d6e4ea AS runner
+FROM node:26.2.0-alpine3.23@sha256:7c6af15abe4e3de859690e7db171d0d711bf37d27528eddfe625b2fe89e097f8 AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).
