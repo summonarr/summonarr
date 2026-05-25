@@ -113,7 +113,6 @@ export async function verifyAndRefreshSession(
     ...claims,
     dbCheckedAt: now,
   };
-  let mustResign = false;
 
   // Role change → rotate sessionId so a leaked pre-change token cannot be replayed
   if (dbUser.role !== claims.role) {
@@ -126,7 +125,6 @@ export async function verifyAndRefreshSession(
       .catch(() => null);
     if (!rotated) return null;
     workingClaims = { ...workingClaims, sessionId: newSessionId, role: dbUser.role };
-    mustResign = true;
   }
 
   // mediaServer refresh for credentials/oidc — plex/jellyfin/jellyfin-qc are pinned at sign-in
@@ -139,7 +137,6 @@ export async function verifyAndRefreshSession(
     const dbMediaServer = dbUser.mediaServer ?? null;
     if ((workingClaims.mediaServer ?? null) !== dbMediaServer) {
       workingClaims = { ...workingClaims, mediaServer: dbMediaServer };
-      mustResign = true;
     }
   }
 
@@ -156,13 +153,9 @@ export async function verifyAndRefreshSession(
       if (typeof currentExp === "number" && currentExp > now + NON_ADMIN_SLIDE_WINDOW_SECONDS) {
         const newExp = Math.min(now + NON_ADMIN_SLIDE_WINDOW_SECONDS, sessionDeadline);
         resignExpiresIn = newExp - now;
-        mustResign = true;
       }
     }
   }
-
-  // Always re-sign on a DB check so dbCheckedAt advances even when nothing else changed.
-  mustResign = true;
 
   if (resignExpiresIn === null) {
     const currentExp = workingClaims.exp;
@@ -170,6 +163,8 @@ export async function verifyAndRefreshSession(
       typeof currentExp === "number" ? Math.max(60, currentExp - now) : 3600;
   }
 
+  // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
+  // changed; the fast path at the top of the function still skips this entirely.
   const newToken = await signSessionJwt(
     {
       id: workingClaims.id,
@@ -191,6 +186,6 @@ export async function verifyAndRefreshSession(
 
   return {
     claims: workingClaims,
-    refreshed: mustResign ? { token: newToken, expiresInSeconds: resignExpiresIn } : undefined,
+    refreshed: { token: newToken, expiresInSeconds: resignExpiresIn },
   };
 }
