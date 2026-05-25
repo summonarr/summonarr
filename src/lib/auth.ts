@@ -158,6 +158,100 @@ export async function findOrCreateJellyfinUser(
   return created;
 }
 
+export interface OidcUserClaims {
+  sub: string;
+  email: string | null;
+  emailVerified: boolean;
+  name: string | null;
+  preferredUsername: string | null;
+  picture: string | null;
+  accessToken: string | null;
+  refreshToken: string | null;
+  idToken: string;
+  expiresAt: number | null;
+}
+
+// Finds or creates a User for an OIDC sub. Replaces next-auth's adapter
+// flow (getUserByAccount → getUserByEmail → linkAccount + maybe create) for
+// the Summonarr-native OIDC callback. The Prisma extension auto-encrypts
+// Account.{access_token,refresh_token,id_token} on write per guardrail 7a —
+// callers must pass raw tokens.
+export async function findOrCreateOidcUser(
+  claims: OidcUserClaims,
+): Promise<AuthorizedDbUser> {
+  if (!claims.emailVerified) {
+    throw new Error("OIDC account email is not verified");
+  }
+  if (!claims.email) {
+    console.error("[auth/oidc] provider returned no email — rejecting sign-in for sub:", claims.sub);
+    throw new Error("[auth/oidc] provider returned no email");
+  }
+  const normalizedEmail = normalizeEmail(claims.email);
+
+  const accountTokens = {
+    access_token: claims.accessToken,
+    refresh_token: claims.refreshToken,
+    id_token: claims.idToken,
+    expires_at: claims.expiresAt,
+  };
+
+  const byAccount = await prisma.account.findUnique({
+    where: { provider_providerAccountId: { provider: "oidc", providerAccountId: claims.sub } },
+    include: { user: true },
+  });
+  if (byAccount?.user) {
+    // Refresh the stored OAuth tokens — extension handles encryption
+    await prisma.account
+      .update({ where: { id: byAccount.id }, data: accountTokens })
+      .catch((err) => console.error("[auth/oidc] account token refresh failed:", err instanceof Error ? err.message : err));
+    return {
+      id: byAccount.user.id,
+      email: byAccount.user.email,
+      name: byAccount.user.name,
+      role: byAccount.user.role,
+    };
+  }
+
+  const byEmail = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (byEmail) {
+    await prisma.account.create({
+      data: {
+        userId: byEmail.id,
+        type: "oidc",
+        provider: "oidc",
+        providerAccountId: claims.sub,
+        ...accountTokens,
+      },
+    });
+    return {
+      id: byEmail.id,
+      email: byEmail.email,
+      name: byEmail.name,
+      role: byEmail.role,
+    };
+  }
+
+  const created = await prisma.user.create({
+    data: {
+      email: normalizedEmail,
+      name: claims.name ?? claims.preferredUsername ?? null,
+      image: claims.picture,
+      role: "USER",
+      notificationEmail: normalizedEmail,
+      accounts: {
+        create: {
+          type: "oidc",
+          provider: "oidc",
+          providerAccountId: claims.sub,
+          ...accountTokens,
+        },
+      },
+    },
+    select: { id: true, email: true, name: true, role: true },
+  });
+  return created;
+}
+
 const DEFAULT_SESSION_SECONDS        = 3_600;
 const DEFAULT_MOBILE_SESSION_SECONDS = 604_800;
 const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
