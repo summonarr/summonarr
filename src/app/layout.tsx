@@ -4,6 +4,8 @@ import { headers } from "next/headers";
 import "./globals.css";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/lib/auth";
+import { readSummonarrSession } from "@/lib/session-server";
+import { SummonarrSessionProvider } from "@/components/auth/summonarr-session-provider";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 
 // Runs before first paint: applies the user's persisted theme/accent so there
@@ -50,6 +52,23 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const session = await auth();
+  // Parallel to the next-auth session above. Reads the Summonarr session
+  // cookie (set by /api/auth/me's backfill during the migration). Both
+  // providers are mounted concurrently so consumers can move over one at a
+  // time; the next-auth provider goes away in PR 5.
+  const summonarrSessionClaims = await readSummonarrSession();
+  const summonarrInitialSession = summonarrSessionClaims
+    ? {
+        user: {
+          id: summonarrSessionClaims.id,
+          role: summonarrSessionClaims.role,
+          provider: summonarrSessionClaims.provider,
+          mediaServer: summonarrSessionClaims.mediaServer ?? null,
+        },
+        sessionId: summonarrSessionClaims.sessionId,
+        expiresAt: summonarrSessionClaims.expiresAt,
+      }
+    : null;
   // Reading headers() opts this layout into per-request rendering, which causes
   // Next.js 16 to read the `x-nonce` request header set by src/proxy.ts and stamp
   // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
@@ -77,7 +96,9 @@ export default async function RootLayout({
         style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
       >
         <SessionProvider session={session}>
-          <ThemeProvider>{children}</ThemeProvider>
+          <SummonarrSessionProvider initialSession={summonarrInitialSession}>
+            <ThemeProvider>{children}</ThemeProvider>
+          </SummonarrSessionProvider>
         </SessionProvider>
       </body>
     </html>
