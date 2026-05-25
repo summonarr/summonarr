@@ -16,8 +16,9 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 8. [Connecting external services](#connecting-external-services)
 9. [Backups & restore](#backups--restore)
 10. [Health, observability, troubleshooting](#health-observability-troubleshooting)
-11. [Upgrading](#upgrading)
-12. [Common commands](#common-commands)
+11. [Recovery — admin locked out](#recovery--admin-locked-out)
+12. [Upgrading](#upgrading)
+13. [Common commands](#common-commands)
 
 > **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
 
@@ -321,6 +322,137 @@ docker compose exec -T postgres psql -U summonarr -d summonarr < summonarr.sql
 - **Debug endpoint** — admin-only. `GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv` dumps cache rows, `attachArrPending` output, a live Radarr/Sonarr probe, the tvdb→tmdb mapping, wanted-table counts, and the most recent `LIBRARY_SYNC` audit row. **Start here** when a request is "stuck pending" or a badge looks wrong.
 - **Audit log** — **Admin → Audit Log** surfaces every sync run, webhook delivery, admin mutation, and webhook auth failure. PII is scrubbed on `SCRUB_AUDIT_PII_INTERVAL`.
 - **Logging convention** — `console.error` and `console.warn` only, namespaced with a `[scope]` prefix. Happy-path success is deliberately silent. If you see nothing in the logs, that's usually good news.
+
+## Recovery — admin locked out
+
+If you've lost access to the only admin account (forgotten password, OIDC provider broke, Plex/Jellyfin OAuth misconfigured, etc.), Summonarr ships a recovery script in the image. It runs against the running database with **shell access to the host** as the only prerequisite — no app login required.
+
+> **What this script can and can't do.** It resets the password (and optionally promotes to ADMIN) for a **local-credentials account** — accounts that log in with email + password against Summonarr's own user table. **It does not work for Plex / Jellyfin / OIDC users**, because their passwords live on the upstream identity provider, not in Summonarr's database. For those, you'd recover by fixing the OAuth/OIDC side and (if needed) creating a fresh local account first via the steps below.
+
+### When to use this
+
+- You've forgotten the password for a local admin account.
+- Your OIDC IdP is misconfigured / unreachable and every admin signs in through it.
+- A Plex token rotation locked out the only admin who had Plex-based access.
+- You're recovering from a botched setup and want to force a fresh admin.
+
+### What the script does
+
+1. Generates a fresh scrypt hash for the password you provide (same parameters as the live app — see [`src/lib/password-hash.ts`](https://github.com/summonarr/summonarr/blob/main/src/lib/password-hash.ts)).
+2. Updates the `User.passwordHash` column for the row matching your email (**case-insensitive**).
+3. Sets `User.passwordChangedAt = NOW()` — this **invalidates every existing JWT for that user**. Every device they were signed in on gets logged out immediately.
+4. Optionally promotes that user to `role = 'ADMIN'` if you pass `--admin`.
+
+If no row matches the email, the script exits with code `2` and **no changes are made** to the database.
+
+### Prerequisites
+
+- The `summonarr` container is **running and healthy** (check with `docker ps`).
+- You're on a Summonarr image **≥ `v0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=v0.11.1` in `.env`, or run `:latest`.
+- You can run `docker exec` against the container — usually means root or membership in the `docker` group.
+- The new password is **at least 8 characters**. The script refuses anything shorter with exit code `1`.
+
+### Step 1 — Confirm the email you'll reset
+
+Open a psql session on the Postgres container and list every account so you pick the right email:
+
+```bash
+sudo docker exec -it summonarr-postgres \
+  psql -U summonarr -d summonarr \
+  -c 'SELECT email, role, "passwordHash" IS NOT NULL AS has_local_password FROM "User" ORDER BY "createdAt";'
+```
+
+Look for the row where `has_local_password` is `t` (true). If your row shows `f` (false), the account is OAuth-only — see the [No local password yet](#no-local-password-yet) section below.
+
+### Step 2 — Reset the password
+
+Run this from anywhere on the host (no compose file needed — the container is targeted by name):
+
+```bash
+sudo docker exec -w /app \
+  -e PGHOST=postgres \
+  -e PGUSER=summonarr \
+  -e PGDATABASE=summonarr \
+  summonarr \
+  sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" node scripts/reset-password.mjs YOUR_EMAIL YOUR_NEW_PASSWORD'
+```
+
+Replace **`YOUR_EMAIL`** with the email from Step 1 and **`YOUR_NEW_PASSWORD`** with the password you want to set. Wrap the password in single quotes if it contains spaces or shell metacharacters (`$`, `!`, `&`, `` ` ``, `*`, `(`, `)`).
+
+**To promote to ADMIN at the same time**, add `--admin`:
+
+```bash
+sudo docker exec -w /app \
+  -e PGHOST=postgres -e PGUSER=summonarr -e PGDATABASE=summonarr \
+  summonarr \
+  sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" node scripts/reset-password.mjs YOUR_EMAIL YOUR_NEW_PASSWORD --admin'
+```
+
+On success, the script prints:
+
+```
+Password reset for you@example.com (ADMIN) [id: <cuid>]. All existing sessions invalidated.
+```
+
+The role in parentheses is the role **after** the update, so it should show `ADMIN` if you used `--admin`.
+
+### Stdin variant (recommended for production)
+
+Keeps the password out of your shell history, `ps`, and `docker inspect`:
+
+```bash
+echo -n 'YOUR_NEW_PASSWORD' | sudo docker exec -i -w /app \
+  -e PGHOST=postgres -e PGUSER=summonarr -e PGDATABASE=summonarr \
+  summonarr \
+  sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" node scripts/reset-password.mjs YOUR_EMAIL --stdin --admin'
+```
+
+The `-i` flag attaches stdin to the container. `echo -n` avoids appending a trailing newline (the script also strips one defensively, but explicit is better).
+
+### Step 3 — Sign in
+
+1. Open Summonarr in your browser and sign out if you're somehow still signed in (close any cached tabs).
+2. Sign in with the **email** from Step 1 and the **new password** you just set.
+3. The new session bumps `User.passwordChangedAt` already happened in Step 2, so **every other device that was signed in is now logged out** — you'll need to re-sign-in on phones, tablets, other browsers, etc.
+
+### Why a docker-compose form isn't shown
+
+`docker compose exec` only works from a directory containing your `docker-compose.yml`. The plain `docker exec` form above works from anywhere because it targets the container by name (`summonarr`, which you can see in `docker ps`). If you'd rather use compose, `cd` to your compose directory first and replace `docker exec` with `docker compose exec` — every other flag is identical.
+
+The compose file isn't strictly required for this operation: the script needs the database, not the compose project metadata.
+
+### Why these `-e` flags
+
+The recovery script reads either four `PG*` environment variables **or** a `DATABASE_URL` to find the database. The live app constructs `DATABASE_URL` inside `docker-entrypoint.sh` at startup, **but that export does not propagate to `docker exec`** (exec gets a fresh shell from the docker daemon, not a child of the entrypoint). Passing the four `PG*` vars explicitly is the cleanest way to give the script what it needs:
+
+| Flag | Value | Why |
+|---|---|---|
+| `PGHOST=postgres` | DNS name of the Postgres service inside the docker network | This is what the app entrypoint also points at; `localhost` from inside the app container is **not** Postgres. |
+| `PGUSER=summonarr` | Database user the app uses | Created automatically by the Postgres container's init from `POSTGRES_USER`. |
+| `PGDATABASE=summonarr` | Database name the app uses | Same — from `POSTGRES_DB`. |
+| `PGPASSWORD="$POSTGRES_PASSWORD"` (resolved by `sh -c` inside the container) | The password the Postgres container booted with | `POSTGRES_PASSWORD` is in the container's env (from `env_file: .env` in your compose), so we resolve it **inside** the container via `sh -c` rather than leaking it on the host. |
+
+If you've changed `POSTGRES_USER` or `POSTGRES_DB` in your `.env` away from the defaults (`summonarr` / `summonarr`), substitute the values you used.
+
+### Troubleshooting
+
+**`ECONNREFUSED ::1:5432 / 127.0.0.1:5432`** — The script ran without database connection info and fell through to `pg`'s localhost defaults. Either you ran the script on the host directly (run it inside the container with `docker exec`), or one of the `PG*` flags is missing. Re-check the command — all four `-e PG*` flags are required.
+
+**`No user found with email ...`** — The email isn't in the `User` table, or it has a different case than you typed (the script normalises both sides to lowercase, so case shouldn't matter — double-check spelling). Re-run Step 1 to list every account.
+
+**`Password must be at least 8 characters.`** — Exactly that. Use ≥ 8.
+
+**`Cannot parse DATABASE_URL`** (only seen when overriding) — If you bypassed the `PG*` flags and passed your own `DATABASE_URL`, it doesn't match `postgres://user:pass@host:port/db`. Either fix the URL or switch back to the four `PG*` flags.
+
+**It worked but I still can't sign in** — Hard-refresh the login page (your browser may still have an old, now-invalid session cookie). If the form rejects the password, run the reset again with a simpler password (no shell-sensitive chars) to rule out quoting issues.
+
+### No local password yet
+
+If your only admin account is a Plex / Jellyfin / OIDC user — that is, `passwordHash IS NULL` for every row — there's no `passwordHash` column for the script to update. You'll need to give that account a local password first by setting `passwordHash` directly via `psql` (then run the script to re-hash with proper scrypt params), or run the script with a non-existent email argument **after** manually inserting a fresh local user row. Both routes require comfort with raw SQL; if neither sounds safe, file a GitHub issue with the details of your setup before changing anything.
+
+### Audit-log trail
+
+Resetting a password via this script does **not** currently write an entry to `AuditLog` — the script bypasses the application layer entirely. If you want a record, note the action in your own ops journal. (Improving this is a known follow-up; the existing `SETTINGS_CHANGE` action would be the natural fit.)
 
 ## Upgrading
 
