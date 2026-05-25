@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.11.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.11.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,53 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.11.3
+
+This release consolidates a multi-pass security and correctness audit (24 merged PRs, #73–#96). No breaking changes — primarily defense-in-depth, race-condition fixes, and observability.
+
+**Added**
+
+- Email notifications now fire on `AVAILABLE` transitions from both the sync orchestrator and the Sonarr/Radarr webhook paths (previously push-only).
+- Settings observability panel surfaces per-cron `ok`/`error` outcomes from the most recent run.
+- Container hardening in both compose files: `no-new-privileges`, `cap_drop: ALL` (Postgres re-adds only `CHOWN/SETUID/SETGID/DAC_OVERRIDE/FOWNER`), and a 128 MiB tmpfs `/tmp` for the app.
+- `engines.node = ">=22 <27"` declared in `package.json` so `npm ci` fails fast on unsupported Node versions.
+- Three new hot-path Prisma indexes: `PlexLibraryItem(addedAt)`, `JellyfinLibraryItem(addedAt)`, and `IssueGrab(tmdbId, mediaType, notifiedAt)`. Applied automatically on container restart via `prisma db push`.
+
+**Changed**
+
+- ADMIN sessions are now capped at a 7-day ceiling derived from `iat`, regardless of activity. Non-admin sessions are unchanged.
+- Radarr/Sonarr add-payloads use an explicit allowlist of forwarded fields instead of spreading the upstream response — defends against the upstream injecting unexpected fields into the POST body.
+- Database-import chunks are now hard-capped at 32 MiB so backup-restore can't be used as a memory-pressure vector.
+- Number formatting across the admin dashboard forces `en-US` locale so SSR and hydration agree (guardrail 16).
+- Settings PATCH rolls back field writes when the upstream service test fails inside the same transaction — partial saves are no longer possible.
+- Per-source sync success is now stamped (`lastPlexSyncSucceededAt` / `lastJellyfinSyncSucceededAt`) so the orchestrator's mixed `Promise.allSettled` outcome is observable.
+- `mdblist-warm` uses atomic `INSERT … ON CONFLICT` CAS for winner-takes-all coordination.
+- Cold-miss fetches for OMDB and MDBList are now coalesced — concurrent lookups for the same key share one upstream call.
+- CI Node version aligned with the production runtime (Node 26).
+
+**Fixed**
+
+- `AVAILABLE` notifications are filtered to the actual compare-and-swap winners — no more duplicate push/email when Plex and Jellyfin sync runs overlap on the same title.
+- `DeletionVote` rows are wiped on every `AVAILABLE`-transition site (sync, webhooks, interactions, request mutations) — stale votes no longer survive a request re-becoming available.
+- Webhook grab-notification reset is now reachable; the replay-digest now rolls back when the handler body throws (so a transient handler failure no longer silently blackholes subsequent identical webhooks).
+- Session revocation closes a cross-replica 60-second window by bumping `sessionsRevokedAt` inside the same transaction, with a monotonic guard.
+- `MediaRequest.status` rolls back to `PENDING` on Radarr/Sonarr push failure (both single-request and batch endpoints); issue-status transitions use CAS.
+- Email is normalized at four cross-boundary sites (download-policy, play-history, plex-user-backfill, auth-adapter) so case/whitespace variants no longer create duplicate `MediaServerUser` rows.
+- Two encryption regression gaps closed: `encryptToken` is now idempotent when called on already-`enc:v1:`-prefixed input, and `account.updateMany`/`createMany` throw if a token field is set — both prevent the double-encrypted `enc:v1:<enc:v1:…>` rows that broke OAuth sign-in in earlier releases.
+- `MediaServerMismatchError` is surfaced from the Jellyfin play-history sync instead of being swallowed.
+- IP-info popup re-reads the cache when re-opened (no stale entries); issue-fix-match search aborts the prior fetch on debounce.
+- `fix-match` lookups are rate-limited to 10/min/user.
+- Settings URLs containing `username:password@` are rejected on write and stripped from `GET` responses.
+- Three play-history races: `ActiveSession` lifecycle CAS, `MediaServerUser` upsert serialized via a Postgres advisory lock, and Plex `isServerAdmin` derived from the actual server-owner account (not just any present admin).
+- **Hotfix.** The advisory-lock key above used an unsigned 32-bit FNV-1a hash; values ≥ 2³¹ were typed as `bigint` by Postgres and missed the `pg_advisory_xact_lock(int, int)` overload. Now masked with `& 0x7fffffff` so play-history polls stop crashing for ~half of `MediaServerUser` rows.
+- `THIRD_PARTY_LICENSES.txt` generator now treats `optional: true` lockfile entries (with no os/cpu/libc) as platform-gated, so on-disk LICENSE reads no longer differ between a macOS dev box and Linux CI.
+
+**Internal**
+
+- Three audit quick-wins: hardcoded `EXCLUDED_USERNAMES` cleared, synthetic `@discord.local` email suffix added, push-test handler decrypts `p256dh`/`auth` before sending.
+- License-check CI failure now prints the first divergence hunk so a stale `THIRD_PARTY_LICENSES.txt` is debuggable without a manual re-run.
+- `AuditAction` enum derived from `Object.values(AuditAction)` (single source of truth) instead of the duplicated string arrays the admin UI used to carry.
 
 ### v0.11.1
 
@@ -392,7 +439,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.11.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.11.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
