@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.11.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.12.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,27 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.12.0
+
+NextAuth v5 is removed. Authentication, session management, and OIDC are now served by a Summonarr-native stack built directly on `jose` and `openid-client`. Net diff is roughly -600 lines across the auth subsystem; the new path is smaller, fully owned by this repo, and behaves the same to users.
+
+**Changed**
+
+- Sessions, sign-in routes, and OIDC code-exchange are now handled by Summonarr directly. JWT cookies are issued and verified via `jose`; OIDC discovery/code-exchange runs through `openid-client`. Existing `AuthSession` rows continue to work — no re-login required.
+- `verifyAndRefreshSession` mirrors the load-bearing behaviour of the old NextAuth `refreshToken` callback: cross-replica `AuthSession` revocation, `sessionsRevokedAt` / `passwordChangedAt` cutoffs, role refresh with `sessionId` rotation, non-ADMIN sliding window (now+3600 capped at the original session deadline), and ADMIN 7-day hard ceiling. `dbCheckedAt` keeps the hot path off Postgres (10 s for ADMIN/ISSUE_ADMIN, 60 s for others) — same performance shape as before.
+- `withAuth` / `withAdmin` / `withIssueAdmin` transparently append `Set-Cookie` to the handler's response when a refresh produces a new JWT, so slides and rotations land without a client round-trip.
+- New `/api/auth/me` endpoint plus `SummonarrSessionProvider` replace `useSession` from `next-auth/react` across all client components.
+
+**Fixed**
+
+- Admin sidebar now appears immediately after sign-in — the client refreshes the session and routes in the same tick instead of waiting for a manual reload.
+- Plex-user backfill on boot now targets only Plex-only users (no `passwordHash`, no `jellyfinUserId`, no OIDC `Account` row) and logs the affected users by email + ID when an admin token can't resolve them. Local/Jellyfin/OIDC accounts with a null `plexUserId` are no longer scanned on every boot.
+
+**Internal**
+
+- `authorize()` helpers extracted from the credentials provider into reusable modules so each provider has a single audited entry point.
+- Trivial `@base-ui/react` wrappers (button, input, badge, avatar) collapsed to direct primitives — fewer indirection layers, no behavior change.
 
 ### v0.11.3
 
@@ -439,7 +460,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.11.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.12.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

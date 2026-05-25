@@ -11,6 +11,8 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 export interface SessionClaims extends JWTPayload {
   id: string;
   role: string;
+  email?: string | null;
+  name?: string | null;
   provider?: string;
   mediaServer?: string | null;
   sessionId?: string;

@@ -2,8 +2,6 @@ import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Playfair_Display } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
-import { SessionProvider } from "next-auth/react";
-import { auth } from "@/lib/auth";
 import { readSummonarrSession } from "@/lib/session-server";
 import { SummonarrSessionProvider } from "@/components/auth/summonarr-session-provider";
 import { ThemeProvider } from "@/components/theme/theme-provider";
@@ -51,17 +49,16 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const session = await auth();
-  // Parallel to the next-auth session above. Reads the Summonarr session
-  // cookie (set by /api/auth/me's backfill during the migration). Both
-  // providers are mounted concurrently so consumers can move over one at a
-  // time; the next-auth provider goes away in PR 5.
+  // Server-side reads the Summonarr session cookie so SummonarrSessionProvider's
+  // initial value matches the cookie state on first paint (no loading flash).
   const summonarrSessionClaims = await readSummonarrSession();
   const summonarrInitialSession = summonarrSessionClaims
     ? {
         user: {
           id: summonarrSessionClaims.id,
           role: summonarrSessionClaims.role,
+          email: summonarrSessionClaims.email ?? null,
+          name: summonarrSessionClaims.name ?? null,
           provider: summonarrSessionClaims.provider,
           mediaServer: summonarrSessionClaims.mediaServer ?? null,
         },
@@ -95,11 +92,9 @@ export default async function RootLayout({
         className="min-h-full"
         style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
       >
-        <SessionProvider session={session}>
-          <SummonarrSessionProvider initialSession={summonarrInitialSession}>
-            <ThemeProvider>{children}</ThemeProvider>
-          </SummonarrSessionProvider>
-        </SessionProvider>
+        <SummonarrSessionProvider initialSession={summonarrInitialSession}>
+          <ThemeProvider>{children}</ThemeProvider>
+        </SummonarrSessionProvider>
       </body>
     </html>
   );

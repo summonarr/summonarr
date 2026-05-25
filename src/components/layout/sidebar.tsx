@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { GitFork } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import {
@@ -21,7 +21,7 @@ export function Sidebar({
   featureFlags?: FeatureFlags;
 }) {
   const pathname = usePathname();
-  const { data: session } = useSession();
+  const { session } = useSummonarrSession();
   const role = session?.user?.role;
 
   const visibleUserItems = filterNavByFeatures(userNavItems, featureFlags);

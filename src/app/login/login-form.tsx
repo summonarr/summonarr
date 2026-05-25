@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { signIn } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -20,9 +20,35 @@ interface Props {
   siteUrl: string;
 }
 
+async function signInWithFetch(
+  provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
+  payload: Record<string, unknown>,
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/auth/sign-in/${provider}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    let error = "Sign-in failed";
+    try {
+      const body = await res.json();
+      if (typeof body?.error === "string") error = body.error;
+    } catch {}
+    return { ok: false, error };
+  }
+  return { ok: true };
+}
+
 export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName, localLoginDisabled, siteUrl }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  // Sidebar/header read role from this context; refresh after sign-in so
+  // admin nav appears without a hard reload. router.refresh() then re-runs
+  // the (app)/layout server component (which gates maintenance-mode bypass
+  // on session.role === "ADMIN").
+  const { refresh: refreshSession } = useSummonarrSession();
 
   const rawCallback = searchParams.get("callbackUrl") ?? "/";
   const callbackUrl = rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/";
@@ -179,9 +205,11 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
         ? { email: fields.email, password: fields.password, rememberMe: String(rememberMe) }
         : { username: fields.username, password: fields.password, rememberMe: String(rememberMe) };
 
-    const res = await signIn(provider, { ...payload, redirect: false });
+    // OIDC is handled via window.location.href below; this branch only fires for credentials/jellyfin.
+    const fetchProvider = provider as "credentials" | "jellyfin";
+    const res = await signInWithFetch(fetchProvider, payload);
 
-    if (res?.error) {
+    if (!res.ok) {
       setError(
         provider === "credentials"
           ? "Invalid email or password."
@@ -189,6 +217,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       );
       setLoading(false);
     } else {
+      await refreshSession();
+      router.refresh();
       router.push(callbackUrl);
     }
   }
@@ -250,12 +280,14 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       return;
     }
 
-    const result = await signIn("jellyfin-quickconnect", { secret, rememberMe: String(rememberMe), redirect: false });
-    if (result?.error) {
+    const result = await signInWithFetch("jellyfin-quickconnect", { secret, rememberMe: String(rememberMe) });
+    if (!result.ok) {
       setError("QuickConnect approved but sign-in failed. Contact the server owner.");
       setLoading(false);
       setQcCode(null);
     } else {
+      await refreshSession();
+      router.refresh();
       router.push(callbackUrl);
     }
   }
@@ -302,7 +334,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
             onClick={() => {
               setLoading(true);
               setError("");
-              signIn("oidc", { callbackUrl: callbackUrl });
+              window.location.href = "/api/auth/oidc/start";
             }}
             disabled={loading}
             className="w-full min-h-11"

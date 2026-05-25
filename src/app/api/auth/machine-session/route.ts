@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { encode } from "next-auth/jwt";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
+import { signSessionJwt } from "@/lib/session-jwt";
+import { serializeSessionCookie } from "@/lib/session-cookie";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -35,7 +36,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // C-4: do not let the caller pick a userId. Always issue for the first ADMIN.
   let expiresIn = DEFAULT_EXPIRES_IN;
   try {
     const body = await req.json().catch(() => ({}));
@@ -56,38 +56,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "No admin user found" }, { status: 404 });
   }
 
-  // Cookie name must match what NextAuth expects; the __Secure- prefix is mandatory for HTTPS deployments
-  const authUrl = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
-  const isSecure = authUrl.startsWith("https://");
-  const cookieName = isSecure
-    ? "__Secure-authjs.session-token"
-    : "authjs.session-token";
-
-  const sessionId = crypto.randomUUID();
+  const sessionId = randomUUID();
   const nowSec = Math.floor(Date.now() / 1000);
   const expiresAt = nowSec + expiresIn;
   const callerIp = getClientIp(req.headers);
 
   // Bind the JWT to a stable fingerprint so a stolen cookie can't be replayed
-  // from a different caller; auth.config.ts:55-74 compares this on every request.
+  // from a different caller. proxy.ts skips the browser-style fingerprint
+  // check for any value starting with "machine:" — replay defense relies on
+  // the short lifetime and CRON_SECRET to mint fresh tokens.
   const uaFingerprint =
     "machine:" + createHash("sha256").update(cronSecret).digest("hex").slice(0, 12);
-
-  const jwtPayload = {
-    sub: user.id,
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    provider: "machine",
-    mediaServer: user.mediaServer ?? null,
-    sessionId,
-    expiresAt,
-    dbCheckedAt: nowSec,
-    isMobile: false,
-    deviceLabel: "Machine (API)",
-    uaFingerprint,
-  };
 
   await prisma.authSession.create({
     data: {
@@ -100,12 +79,22 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const token = await encode({
-    token: jwtPayload,
-    secret: process.env.NEXTAUTH_SECRET!,
-    maxAge: expiresIn,
-    salt: cookieName,
-  });
+  const token = await signSessionJwt(
+    {
+      id: user.id,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+      provider: "machine",
+      mediaServer: user.mediaServer ?? null,
+      sessionId,
+      uaFingerprint,
+      isMobile: false,
+      deviceLabel: "Machine (API)",
+      expiresAt,
+    },
+    { expiresInSeconds: expiresIn },
+  );
 
   void logAudit({
     userId: user.id,
@@ -119,17 +108,11 @@ export async function POST(req: NextRequest) {
     details: { kind: "machine-session", expiresIn, expiresAt },
   });
 
-  const cookieAttribs = [
-    `${cookieName}=${token}`,
-    "Path=/",
-    `Max-Age=${expiresIn}`,
-    "HttpOnly",
-    "SameSite=Lax",
-    ...(isSecure ? ["Secure"] : []),
-  ].join("; ");
-
   // C-4: do NOT return the token in the JSON body. Cookie-only delivery.
   const response = NextResponse.json({ ok: true, expiresAt });
-  response.headers.set("Set-Cookie", cookieAttribs);
+  response.headers.set(
+    "Set-Cookie",
+    serializeSessionCookie(token, { maxAgeSeconds: expiresIn }),
+  );
   return response;
 }

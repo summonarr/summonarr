@@ -10,13 +10,23 @@ import { normalizeEmail } from "./email-normalize";
 // is backfilled. This helper runs once per boot, queries plex.tv for the
 // admin's account list, and matches by email so the next sign-in succeeds.
 //
-// Idempotent: counts pending rows first and exits if zero, so it's a single
-// cheap query when there's nothing to do.
+// Candidate filter: only "Plex-only" users — no passwordHash, no jellyfinUserId,
+// no OIDC Account row. These are the rows that will ACTUALLY be locked out
+// without a backfill; local/Jellyfin/OIDC users whose plexUserId happens to be
+// null have another way in and shouldn't generate noise on every boot.
 
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {
-    const pending = await prisma.user.count({ where: { plexUserId: null } });
-    if (pending === 0) return;
+    const candidates = await prisma.user.findMany({
+      where: {
+        plexUserId: null,
+        jellyfinUserId: null,
+        passwordHash: null,
+        accounts: { none: { provider: "oidc" } },
+      },
+      select: { id: true, email: true },
+    });
+    if (candidates.length === 0) return;
 
     const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
     if (!tokenRow?.value) return; // Plex not configured — nothing to do
@@ -35,17 +45,12 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       if (a.email && a.id) idByEmail.set(normalizeEmail(a.email), a.id);
     }
 
-    const users = await prisma.user.findMany({
-      where: { plexUserId: null },
-      select: { id: true, email: true },
-    });
-
     let bound = 0;
-    let skipped = 0;
-    for (const u of users) {
+    const unmatched: { id: string; email: string }[] = [];
+    for (const u of candidates) {
       const plexId = idByEmail.get(normalizeEmail(u.email));
       if (!plexId) {
-        skipped++;
+        unmatched.push({ id: u.id, email: u.email });
         continue;
       }
       try {
@@ -66,10 +71,15 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       update: { value: new Date().toISOString() },
     });
 
-    if (bound > 0 || skipped > 0) {
+    if (bound > 0) {
+      console.warn(`[plex-backfill] bound ${bound} existing Plex user(s) to their plex.tv account id.`);
+    }
+    if (unmatched.length > 0) {
+      const affected = unmatched.map((u) => `${u.email} (${u.id})`).join(", ");
       console.warn(
-        `[plex-backfill] bound=${bound} skipped=${skipped}` +
-          (skipped > 0 ? " (skipped users have a different email on Plex; bind manually if needed)" : ""),
+        `[plex-backfill] ${unmatched.length} Plex-only user(s) could NOT be bound — their User.email does not ` +
+          "match any email returned by plex.tv for this admin token. They will be REFUSED on next Plex sign-in " +
+          `until an admin updates their email (or sets plexUserId manually). Affected: ${affected}`,
       );
     }
   } catch (err) {
