@@ -224,7 +224,12 @@ export async function resolveMediaServerUser(params: {
         ...(thumbUrl ? { thumbUrl } : {}),
         ...(userId ? { userId } : {}),
         ...(serverMachineId ? { serverMachineId } : {}),
-        ...(isServerAdmin !== undefined ? { isServerAdmin } : {}),
+        // Set-only on existing rows: a transient mismatch between the admin
+        // token's plex user id and the row we're upserting (e.g. token
+        // rotation, OIDC-linked admin re-key, multi-user server with the
+        // admin signed in from a fresh client) must NEVER demote
+        // isServerAdmin true→false. Only ever upgrade false→true here.
+        ...(isServerAdmin === true ? { isServerAdmin: true } : {}),
       },
       select: { id: true },
     });
@@ -289,12 +294,21 @@ export async function recordCompletedSession(
   const playDurationMs = Math.max(Number(session.playtimeMs), Number(session.progressMs));
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
+  // Both short-circuits use the same lastSeenAt CAS the post-transaction
+  // delete below uses (line 387). A blind delete here can stomp a row the
+  // sync just rewrote (same `id`, new `lastSeenAt`, new `startedAt`) for a
+  // fresh playback, leaving the new watch with no ActiveSession — its
+  // trailing time and finalize then never fire.
   if (EXCLUDED_USERNAMES.has(session.serverUsername)) {
-    await prisma.activeSession.delete({ where: { id: session.id } }).catch(() => {});
+    await prisma.activeSession
+      .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
+      .catch(() => {});
     return;
   }
   if (playDurationS < MIN_PLAY_DURATION_S) {
-    await prisma.activeSession.delete({ where: { id: session.id } }).catch(() => {});
+    await prisma.activeSession
+      .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
+      .catch(() => {});
     return;
   }
 

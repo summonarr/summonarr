@@ -114,15 +114,40 @@ export async function verifyAndRefreshSession(
     dbCheckedAt: now,
   };
 
-  // Role change → rotate sessionId so a leaked pre-change token cannot be replayed
+  // Role change → rotate sessionId so a leaked pre-change token cannot be replayed.
+  // ALSO bump sessionsRevokedAt so the old JWT's iat now falls below the cutoff and
+  // refreshToken() on OTHER replicas rejects it within their own dbCheckedAt window.
+  // Without this bump, the rotation only protects requests that go through THIS
+  // replica's verifyAndRefreshSession after the rotation — a cached old token can
+  // keep refreshing on a different replica for up to 60s (10s for admin) and would
+  // pass the new sessionId check (which the row carries) because we don't verify
+  // the JWT's sessionId against anything beyond cryptographic integrity.
   if (dbUser.role !== claims.role) {
     const newSessionId = randomUUID();
-    const rotated = await prisma.authSession
-      .update({
-        where: { sessionId: claims.sessionId },
-        data: { sessionId: newSessionId },
-      })
-      .catch(() => null);
+    const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
+    const cutoffMs = (oldIatSec + 1) * 1000;
+    const rotated = await prisma.$transaction(async (tx) => {
+      const row = await tx.authSession
+        .update({
+          where: { sessionId: claims.sessionId },
+          data: { sessionId: newSessionId },
+        })
+        .catch(() => null);
+      if (!row) return false;
+      const userRow = await tx.user.findUnique({
+        where: { id: claims.id },
+        select: { sessionsRevokedAt: true },
+      });
+      const existing = userRow?.sessionsRevokedAt;
+      // Never decrease — a prior full-user revoke may have set it higher.
+      if (!existing || existing.getTime() < cutoffMs) {
+        await tx.user.update({
+          where: { id: claims.id },
+          data: { sessionsRevokedAt: new Date(cutoffMs) },
+        });
+      }
+      return true;
+    }).catch(() => false);
     if (!rotated) return null;
     workingClaims = { ...workingClaims, sessionId: newSessionId, role: dbUser.role };
   }

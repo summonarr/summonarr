@@ -1,5 +1,6 @@
 import * as client from "openid-client";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
 // Summonarr-native OIDC client. Runs in parallel with next-auth's OIDC
 // provider during the migration window — both can be enabled by the same
@@ -9,6 +10,12 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 // (5 min) signed JWT cookie between the /start and /callback requests, so
 // the server stays stateless. The cookie is httpOnly+SameSite=Lax+Secure
 // in production.
+//
+// SSRF: all outbound OIDC traffic (discovery, token, JWKS, userinfo) is
+// routed through safeFetchAdminConfigured so a misconfigured OIDC_ISSUER
+// that resolves to a link-local / metadata-service IP can't be reached.
+// Private IPs (RFC1918) remain allowed because self-hosted IdPs like
+// Authelia/Keycloak on the operator's LAN are a common deployment.
 
 export const OIDC_STATE_COOKIE = "summonarr-oidc-flow";
 const OIDC_STATE_TTL_SECONDS = 5 * 60;
@@ -23,6 +30,12 @@ export function isOidcConfigured(): boolean {
 
 let configPromise: Promise<client.Configuration> | null = null;
 
+// safeFetchAdminConfigured matches openid-client's CustomFetch signature
+// (url: string, options) => Promise<Response>. SafeFetchOptions accepts the
+// same RequestInit superset, so passing the options straight through works.
+const oidcCustomFetch: client.CustomFetch = (url, options) =>
+  safeFetchAdminConfigured(url, options as Parameters<typeof safeFetchAdminConfigured>[1]);
+
 // Discovery is cached process-wide. If the IdP changes its metadata the
 // process needs to restart — this matches next-auth's behaviour and the
 // realistic ops shape (env-var-driven config + container restart).
@@ -32,12 +45,17 @@ function getOidcConfig(): Promise<client.Configuration> {
       const issuer = new URL(process.env.OIDC_ISSUER!);
       const clientId = process.env.OIDC_CLIENT_ID!;
       const clientSecret = process.env.OIDC_CLIENT_SECRET!;
-      return client.discovery(
+      const config = await client.discovery(
         issuer,
         clientId,
         undefined,
         client.ClientSecretPost(clientSecret),
+        { [client.customFetch]: oidcCustomFetch },
       );
+      // Belt-and-suspenders: ensure post-discovery requests (token, JWKS,
+      // userinfo) also go through the SSRF-guarded fetch.
+      config[client.customFetch] = oidcCustomFetch;
+      return config;
     })().catch((err) => {
       // Reset so a later attempt can re-discover after a transient failure
       configPromise = null;
@@ -52,6 +70,9 @@ interface OidcFlowState {
   nonce: string;
   codeVerifier: string;
   redirectUri: string;
+  // Optional same-site post-login destination. Must be validated by the
+  // caller before being stamped here — the callback route trusts this value.
+  returnTo?: string;
 }
 
 const ENCODER = new TextEncoder();
@@ -89,6 +110,7 @@ export async function verifyOidcStateCookie(token: string): Promise<OidcFlowStat
       nonce: payload.nonce,
       codeVerifier: payload.codeVerifier,
       redirectUri: payload.redirectUri,
+      returnTo: typeof payload.returnTo === "string" ? payload.returnTo : undefined,
     };
   } catch {
     return null;
@@ -102,6 +124,7 @@ export interface OidcAuthorizationStart {
 
 export async function buildOidcAuthorization(
   redirectUri: string,
+  returnTo?: string,
 ): Promise<OidcAuthorizationStart> {
   const config = await getOidcConfig();
   const codeVerifier = client.randomPKCECodeVerifier();
@@ -119,7 +142,7 @@ export async function buildOidcAuthorization(
   });
   return {
     url,
-    state: { state, nonce, codeVerifier, redirectUri },
+    state: { state, nonce, codeVerifier, redirectUri, returnTo },
   };
 }
 

@@ -32,5 +32,6 @@ export async function POST(req: NextRequest) {
   for (const cookie of serializeClearedSessionCookies()) {
     res.headers.append("Set-Cookie", cookie);
   }
+  res.headers.set("Cache-Control", "no-store, private");
   return res;
 }

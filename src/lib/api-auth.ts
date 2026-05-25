@@ -12,6 +12,10 @@ import {
   type VerifyAndRefreshResult,
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
+import {
+  extractUaFingerprint,
+  serializeFingerprint,
+} from "@/lib/ua-fingerprint";
 
 // The session passed to authenticated handlers. Shaped to match what
 // next-auth's Session was — `user.{id,role,provider,mediaServer}`,
@@ -103,6 +107,21 @@ async function authenticateRequest(
   const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token);
   if (!result) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // UA-fingerprint check. Belt-and-suspenders with proxy.ts — the proxy's
+  // matcher excludes `next-router-prefetch` / `purpose: prefetch` requests
+  // entirely, so a POST that smuggles those headers can bypass the proxy.
+  // Re-checking here ensures every API call enforces the binding.
+  // "machine:" prefixed fingerprints (issued by /api/auth/machine-session)
+  // are bound to CRON_SECRET, not a browser UA, so skip the UA compare.
+  const storedFp = result.claims.uaFingerprint;
+  if (storedFp && !storedFp.startsWith("machine:")) {
+    const currentFp = serializeFingerprint(
+      extractUaFingerprint(req.headers.get("user-agent") ?? ""),
+    );
+    if (currentFp !== storedFp) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

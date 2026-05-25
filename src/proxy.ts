@@ -100,9 +100,20 @@ export async function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl;
+  // Auth routes that legitimately have no Origin header:
+  //   - oidc/callback: top-level redirect initiated by the IdP.
+  //   - oidc/start: same-site top-level navigation (no Origin sent by browsers
+  //     on top-level navigations).
+  //   - machine-session: server-to-server caller with Bearer CRON_SECRET.
+  // Browser-facing sign-in/sign-out/register POSTs DO send Origin and SHOULD
+  // be Origin-checked to defend against login-CSRF and forced-logout-CSRF.
+  const isAuthRouteExemptFromCsrf =
+    pathname === "/api/auth/oidc/callback" ||
+    pathname === "/api/auth/oidc/start" ||
+    pathname === "/api/auth/machine-session";
   const isProtectedApi =
     pathname.startsWith("/api/") &&
-    !pathname.startsWith("/api/auth/") &&
+    !isAuthRouteExemptFromCsrf &&
     !pathname.startsWith("/api/webhooks/") &&
     pathname !== "/api/sync" &&
     !pathname.startsWith("/api/sync/") &&

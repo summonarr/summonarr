@@ -63,6 +63,7 @@ export default function PlexDonePage() {
       body: JSON.stringify({
         plexToken: authToken,
         plexClientId: auth.clientId,
+        pinId: auth.pinId,
         rememberMe: String(auth.rememberMe),
       }),
     });

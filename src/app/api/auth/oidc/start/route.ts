@@ -21,15 +21,28 @@ function isSecureCookieContext(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+// Validates a callbackUrl query param so an attacker can't smuggle an open
+// redirect through the OIDC state cookie. Same rules as login-form.tsx
+// (must start with "/", not "//"). Returns undefined for missing or invalid
+// input — the callback then falls back to "/".
+function safeCallbackUrl(raw: string | null): string | undefined {
+  if (!raw) return undefined;
+  if (!raw.startsWith("/") || raw.startsWith("//")) return undefined;
+  // Reject `\` which Internet Explorer / older browsers historically treated as `/`.
+  if (raw.includes("\\")) return undefined;
+  return raw;
+}
+
 export async function GET(req: NextRequest) {
   if (!isOidcConfigured()) {
     return NextResponse.json({ error: "OIDC sign-in is not configured" }, { status: 503 });
   }
 
   const redirectUri = getRedirectUri(req);
+  const returnTo = safeCallbackUrl(req.nextUrl.searchParams.get("callbackUrl"));
   let auth;
   try {
-    auth = await buildOidcAuthorization(redirectUri);
+    auth = await buildOidcAuthorization(redirectUri, returnTo);
   } catch (err) {
     console.error("[oidc/start] discovery or URL build failed:", err);
     return NextResponse.json({ error: "OIDC sign-in is unavailable" }, { status: 503 });

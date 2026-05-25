@@ -176,7 +176,7 @@ export interface OidcUserClaims {
 // callers must pass raw tokens.
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
-): Promise<AuthorizedDbUser> {
+): Promise<AuthorizedDbUser | ProviderRebindRequired> {
   if (!claims.emailVerified) {
     throw new Error("OIDC account email is not verified");
   }
@@ -210,23 +210,15 @@ export async function findOrCreateOidcUser(
     };
   }
 
+  // C-1 parity with Plex/Jellyfin: an existing user with this email but no
+  // (provider=oidc, sub=...) Account row is the SSO-takeover attack vector.
+  // Any IdP under attacker control that vouches `email_verified=true` for the
+  // victim's email would otherwise auto-link and inherit role (incl. ADMIN).
+  // Refuse — an admin must rebind via a logged-in "Link account" flow.
   const byEmail = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   if (byEmail) {
-    await prisma.account.create({
-      data: {
-        userId: byEmail.id,
-        type: "oidc",
-        provider: "oidc",
-        providerAccountId: claims.sub,
-        ...accountTokens,
-      },
-    });
-    return {
-      id: byEmail.id,
-      email: byEmail.email,
-      name: byEmail.name,
-      role: byEmail.role,
-    };
+    console.warn(`[auth/oidc] Refused sign-in: ${normalizedEmail} matches an existing user with no oidc account binding. Manual rebind required.`);
+    return PROVIDER_REBIND_REQUIRED;
   }
 
   const created = await prisma.user.create({
@@ -785,9 +777,16 @@ async function runFirstAdminPromotion(
   userId: string,
   providerId: string,
 ): Promise<boolean> {
-  if (providerId === "credentials") return false;
+  // Bootstrap promotion only fires for the credentials path (matched against
+  // /api/auth/register, which is the only sanctioned setup flow). OAuth/OIDC
+  // first-sign-in cannot grant ADMIN — defends against an attacker reaching
+  // /api/auth/oidc/start (or completing a Plex PIN) before the operator has
+  // run setup, where any IdP-vouched user would otherwise inherit ADMIN.
+  // Opt-in escape hatch for OAuth-only deployments via env var.
+  const allowOauthBootstrap = process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true";
+  if (providerId !== "credentials" && !allowOauthBootstrap) return false;
   return prisma.$transaction(async (tx) => {
-    // Advisory lock prevents two concurrent first-time OAuth sign-ins both being promoted to ADMIN
+    // Advisory lock prevents two concurrent first-time sign-ins both being promoted to ADMIN
     await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(1947888749)");
     const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
     if (setupRow) return false;

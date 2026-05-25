@@ -152,12 +152,7 @@ async function syncJellyfin(request: NextRequest) {
     if (toNotify.length > 0) {
       // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
       // winner filter ensures we only notify on rows we actually flipped.
-      const winners = await claimAvailableNotificationWinners(toNotify, (ids) =>
-        prisma.mediaRequest.updateMany({
-          where: { id: { in: ids }, notifiedAvailable: false },
-          data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
-        }),
-      );
+      const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
       if (winners.length > 0) {
         void clearDeletionVotesForTmdbs(winners);
         notifyUsersRequestsAvailable(winners).catch(() => {});

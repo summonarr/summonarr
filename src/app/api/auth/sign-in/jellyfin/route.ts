@@ -1,15 +1,27 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithJellyfin, signInAndMintSession } from "@/lib/auth";
 import { serializeSessionCookie } from "@/lib/session-cookie";
+import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
+
+// Jellyfin sign-in body carries username/password/rememberMe — 16 KB cap
+// protects this unauthenticated surface against memory-exhaustion DoS.
+const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
   if (!process.env.JELLYFIN_URL) {
     return NextResponse.json({ error: "Jellyfin sign-in is not configured" }, { status: 503 });
   }
 
+  const headerCheck = checkBodySize(req, MAX_SIGNIN_BODY_BYTES);
+  if (headerCheck) return headerCheck;
+
+  const raw = new Uint8Array(await req.arrayBuffer());
+  const sizeCheck = assertBodyBytesUnderCap(raw, MAX_SIGNIN_BODY_BYTES);
+  if (sizeCheck) return sizeCheck;
+
   let body: Record<string, unknown>;
   try {
-    body = (await req.json()) as Record<string, unknown>;
+    body = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }

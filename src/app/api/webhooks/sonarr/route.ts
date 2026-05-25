@@ -232,7 +232,7 @@ export async function POST(req: NextRequest) {
           });
           if (claimed.count === 0) return;
 
-          const sent = await notifyAdminGrabCompletedPush({
+          const outcome = await notifyAdminGrabCompletedPush({
             userId: grab.triggeredById,
             title: grab.title,
             scope: grab.scope,
@@ -240,12 +240,17 @@ export async function POST(req: NextRequest) {
             episodeNumber: grab.episodeNumber,
             issueId: grab.issueId,
           });
-          if (!sent) {
+          // "failed" → reset notifiedAt for retry. "skipped-no-subs" /
+          // "skipped-no-keys" → leave notifiedAt set, but log so an operator
+          // can wire up email/Discord backstop notification.
+          if (outcome === "failed") {
             await prisma.issueGrab.update({
               where: { id: grab.id, notifiedAt: now },
               data: { notifiedAt: null },
             }).catch(() => {});
             console.warn("[webhook/sonarr] grab notification failed, reset for retry");
+          } else if (outcome === "skipped-no-subs" || outcome === "skipped-no-keys") {
+            console.warn(`[webhook/sonarr] grab push skipped (${outcome}) for user=${grab.triggeredById} issue=${grab.issueId}`);
           }
         })
       );

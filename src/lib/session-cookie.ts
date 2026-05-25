@@ -46,14 +46,45 @@ export function serializeSessionCookie(
   return parts.join("; ");
 }
 
-// Returns both cookie variants cleared so callers can issue them regardless
-// of which name was set at sign-in (handles AUTH_URL flips between deploys).
-export function serializeClearedSessionCookies(): [string, string] {
+// Legacy next-auth cookies left over from < v0.12.0 deployments. The custom
+// session JWT replaced them, but a user who upgraded with these cookies set
+// on their device keeps the orphan rows in their cookie jar. They don't
+// authenticate anyone (the new flow doesn't honor them), but clearing them
+// on every sign-out / clearedCookieResponse path lets browsers tidy up.
+const LEGACY_NEXT_AUTH_COOKIE_NAMES = [
+  "next-auth.session-token",
+  "__Secure-next-auth.session-token",
+  "__Host-next-auth.session-token",
+  "authjs.session-token",
+  "__Secure-authjs.session-token",
+  "next-auth.csrf-token",
+  "__Host-next-auth.csrf-token",
+  "authjs.csrf-token",
+  "__Host-authjs.csrf-token",
+  "next-auth.callback-url",
+  "__Secure-next-auth.callback-url",
+  "authjs.callback-url",
+  "__Secure-authjs.callback-url",
+] as const;
+
+// Returns the Summonarr cookie variants plus the legacy next-auth cookie
+// names, all cleared. Handles AUTH_URL flips between deploys (both prefixed
+// and unprefixed Summonarr variants) and migration cleanup (legacy cookies
+// expired so browser cookie jars stop replaying them).
+export function serializeClearedSessionCookies(): string[] {
   const base = "Max-Age=0; Path=/; HttpOnly; SameSite=Lax";
-  return [
+  const out: string[] = [
     `${COOKIE_NAME_SECURE}=; ${base}; Secure`,
     `${COOKIE_NAME_INSECURE}=; ${base}`,
   ];
+  for (const name of LEGACY_NEXT_AUTH_COOKIE_NAMES) {
+    // Some legacy cookies were set with the __Secure- prefix and Secure flag;
+    // we emit both with and without Secure so the browser matches whatever's
+    // actually in the jar without us having to special-case each one.
+    out.push(`${name}=; ${base}`);
+    out.push(`${name}=; ${base}; Secure`);
+  }
+  return out;
 }
 
 export function parseSessionCookie(cookieHeader: string | null): string | null {
