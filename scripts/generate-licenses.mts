@@ -59,6 +59,10 @@ interface LockEntry {
   os?: string[];
   cpu?: string[];
   libc?: string[];
+  // True for optional deps with no direct platform constraint of their own.
+  // npm may skip these on a platform where their consumer (a platform-gated
+  // parent) wasn't installed — also gate them out of disk reads.
+  optional?: boolean;
 }
 
 interface Pkg {
@@ -119,7 +123,14 @@ function productionPackages(): Pkg[] {
     // copy, so its on-disk LICENSE (and package.json) is absent on other
     // OSes. Never touch disk for these — the output must be byte-identical
     // whether generated on a dev macOS box or in Linux CI.
-    const gated = Boolean(e.os || e.cpu || e.libc);
+    //
+    // `optional: true` is treated the same. An optional dep with no os/cpu/
+    // libc of its own can still get skipped on a platform where its
+    // consumer (a platform-gated parent) wasn't installed — e.g.
+    // @emnapi/runtime is the runtime for @img/sharp-wasm32, present on Mac
+    // but absent on Linux CI. Reading its on-disk LICENSE makes the
+    // generator output OS-dependent.
+    const gated = Boolean(e.os || e.cpu || e.libc || e.optional);
     seen.set(key, {
       name,
       version: e.version,
@@ -237,6 +248,31 @@ if (process.argv.includes("--check")) {
     console.error(
       "[licenses] THIRD_PARTY_LICENSES.txt is stale. Run: npm run licenses:generate",
     );
+    // Print the first hunk of divergence so CI failures are debuggable without
+    // round-tripping through a manual rerun. Cheap to compute; bounded output.
+    const aLines = current.split("\n");
+    const bLines = content.split("\n");
+    const max = Math.min(aLines.length, bLines.length);
+    let firstDiff = -1;
+    for (let i = 0; i < max; i++) {
+      if (aLines[i] !== bLines[i]) { firstDiff = i; break; }
+    }
+    if (firstDiff === -1 && aLines.length !== bLines.length) firstDiff = max;
+    if (firstDiff >= 0) {
+      const start = Math.max(0, firstDiff - 2);
+      const end = Math.min(Math.max(aLines.length, bLines.length), firstDiff + 8);
+      console.error(`[licenses] first divergence at line ${firstDiff + 1}:`);
+      for (let i = start; i < end; i++) {
+        const a = aLines[i] ?? "<EOF>";
+        const b = bLines[i] ?? "<EOF>";
+        if (a === b) console.error(`  ${i + 1}  ${a}`);
+        else {
+          console.error(`- ${i + 1}  ${a}`);
+          console.error(`+ ${i + 1}  ${b}`);
+        }
+      }
+      console.error(`[licenses] on-disk: ${aLines.length} lines, generated: ${bLines.length} lines`);
+    }
     process.exit(1);
   }
   process.exit(0);

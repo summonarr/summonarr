@@ -168,7 +168,15 @@ export async function resolveMediaServerUser(params: {
   // freshly-created User row falls into the gap and the MediaServerUser is
   // bound to no User. The User lookup is re-done INSIDE the lock so a
   // concurrent User.create is picked up.
-  const lockKey = fnv1a32(`mediaServerUser:${source}:${sourceUserId}`);
+  //
+  // Mask to 31 bits (signed int32 positive range) so Postgres reads the value
+  // as `int` and matches the pg_advisory_xact_lock(int, int) overload — there
+  // is no (int, bigint) overload, so an unmasked uint32 > 2^31 fails with
+  // "function pg_advisory_xact_lock(integer, bigint) does not exist". The
+  // 1-bit entropy loss is acceptable: collisions across distinct
+  // (source, sourceUserId) pairs serialize unrelated upserts on the same
+  // lock — a tiny throughput cost, not a correctness issue.
+  const lockKey = fnv1a32(`mediaServerUser:${source}:${sourceUserId}`) & 0x7fffffff;
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(2020, ${lockKey})`);
