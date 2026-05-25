@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -43,6 +44,11 @@ async function signInWithFetch(
 export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName, localLoginDisabled, siteUrl }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  // Sidebar/header read role from this context; refresh after sign-in so
+  // admin nav appears without a hard reload. router.refresh() then re-runs
+  // the (app)/layout server component (which gates maintenance-mode bypass
+  // on session.role === "ADMIN").
+  const { refresh: refreshSession } = useSummonarrSession();
 
   const rawCallback = searchParams.get("callbackUrl") ?? "/";
   const callbackUrl = rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/";
@@ -211,6 +217,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       );
       setLoading(false);
     } else {
+      await refreshSession();
+      router.refresh();
       router.push(callbackUrl);
     }
   }
@@ -278,6 +286,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       setLoading(false);
       setQcCode(null);
     } else {
+      await refreshSession();
+      router.refresh();
       router.push(callbackUrl);
     }
   }
