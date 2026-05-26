@@ -403,6 +403,15 @@ async function handleCommand(interaction: any): Promise<void> {
 
     else if (commandName === "link") {
 
+      // Rate-limit per Discord user. Token entropy makes brute-force impractical
+      // (32 hex chars = 128 bits), but parity with /request + defense-in-depth
+      // if entropy is ever lowered. Also caps audit-log noise and Discord
+      // rate-limit budget burn from a guild member spamming /link FOOBAR.
+      if (!checkRateLimit(`discord-link:${discordUserId}`, 10, 60_000)) {
+        await editOriginal(appId, token, { content: "Too many link attempts — try again in a minute." });
+        return;
+      }
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tokenValue = (data.options?.find((o: any) => o.name === "token")?.value as string ?? "").trim().toUpperCase();
       if (!tokenValue) {
@@ -516,13 +525,16 @@ async function handleComponent(interaction: any): Promise<void> {
         }
         dbUser = linked;
       } else {
-        // Create a shadow user with a synthetic email; they can merge into a real account via /link
+        // Create a shadow user with a synthetic email; they can merge into a real account via /link.
+        // Use the LIVE username from the component interaction rather than the cached
+        // `pending.discordUsername` (which was captured at /request time and may be stale).
+        const liveUsername = (discordUser.username as string | undefined) ?? pending.discordUsername;
         dbUser = await prisma.user.upsert({
           where: { discordId: discordUserId },
-          update: { name: pending.discordUsername },
+          update: { name: liveUsername },
           create: {
             discordId: discordUserId,
-            name: pending.discordUsername,
+            name: liveUsername,
             email: `discord_${discordUserId}@discord.local`,
           },
         });

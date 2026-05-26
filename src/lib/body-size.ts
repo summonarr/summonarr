@@ -1,5 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 
+// Picks the right unit so a 16 KB cap doesn't render as "max 0MB". MB for
+// >=1 MiB, KB otherwise. Output is intentionally an integer + unit suffix —
+// 413 message strings need to be terse, not precise.
+function formatByteCap(maxBytes: number): string {
+  const ONE_MB = 1024 * 1024;
+  if (maxBytes >= ONE_MB) {
+    return `${Math.round(maxBytes / ONE_MB)}MB`;
+  }
+  return `${Math.max(1, Math.round(maxBytes / 1024))}KB`;
+}
+
 // Header-only fast path. Rejects pre-read when the client honestly declared
 // Content-Length. Returns null for missing/non-numeric headers (e.g.
 // Transfer-Encoding: chunked) — callers MUST follow up with
@@ -15,7 +26,7 @@ export function checkBodySize(
     const size = parseInt(contentLength, 10);
     if (!isNaN(size) && size > maxBytes) {
       return NextResponse.json(
-        { error: `Request body too large (max ${Math.round(maxBytes / (1024 * 1024))}MB)` },
+        { error: `Request body too large (max ${formatByteCap(maxBytes)})` },
         { status: 413 },
       );
     }
@@ -40,7 +51,7 @@ export function assertBodyBytesUnderCap(
 ): NextResponse | null {
   if (bytes.byteLength > maxBytes) {
     return NextResponse.json(
-      { error: `Request body too large (max ${Math.round(maxBytes / (1024 * 1024))}MB)` },
+      { error: `Request body too large (max ${formatByteCap(maxBytes)})` },
       { status: 413 },
     );
   }

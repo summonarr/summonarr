@@ -36,9 +36,15 @@ function getSecret(): Uint8Array {
 
 export async function signSessionJwt(
   claims: Omit<SessionClaims, "iat" | "exp">,
-  options: { expiresInSeconds: number },
+  options: { expiresInSeconds: number; iat?: number },
 ): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
+  // iat override exists for the role-rotation path in verifyAndRefreshSession:
+  // it bumps sessionsRevokedAt to oldIat+1 to invalidate the old token, then
+  // mints a new one — the new one MUST carry iat >= cutoff or it'll fail its
+  // own cutoff check on the next request. Wall-clock seconds-resolution
+  // arithmetic means a rotation in the same second as original sign-in needs
+  // the override to land at oldIat+1 instead of now.
+  const now = typeof options.iat === "number" ? options.iat : Math.floor(Date.now() / 1000);
   return new SignJWT({ ...claims })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt(now)
