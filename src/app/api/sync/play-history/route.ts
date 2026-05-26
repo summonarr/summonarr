@@ -18,32 +18,15 @@ import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
 import { posterUrl } from "@/lib/tmdb-types";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import {
+  PLEX_STALL_THRESHOLD_MS,
+  isPlexSessionRecentlyFinalized,
+  markPlexSessionFinalized,
+  pruneRecentlyFinalized,
+  reconcilePlexEventStream,
+} from "@/lib/plex-events";
 
 type SyncResult = { started: number; updated: number; ended: number };
-
-// Plex sometimes keeps a quit session in /status/sessions for up to 30 min
-// (mobile/TV clients that close without a clean Stop). When the playhead has
-// not advanced for this long while state still reports "playing", treat it as
-// a quit and finalize early.
-const PLEX_STALL_THRESHOLD_MS = 60_000;
-
-// In-memory ledger of Plex sessions finalized via the stall path or the stale
-// loop. Keyed by ActiveSession.id ("plex:<sessionKey>"). Lets the next polls
-// skip re-creating the row while Plex's /status/sessions still includes the
-// ghost. Persists across polls inside the same Node process (single
-// long-lived server per guardrail 17); a restart loses the ledger but Plex
-// has usually dropped the session by then, and the stall detector re-fires
-// otherwise.
-const recentlyFinalizedPlexSessions = new Map<string, number>();
-const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
-
-function pruneRecentlyFinalized(nowMs: number): void {
-  for (const [id, finalizedAt] of recentlyFinalizedPlexSessions) {
-    if (nowMs - finalizedAt > RECENTLY_FINALIZED_TTL_MS) {
-      recentlyFinalizedPlexSessions.delete(id);
-    }
-  }
-}
 
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
   const sessions = await getPlexSessions(serverUrl, token);
@@ -53,9 +36,10 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
 
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
   // Skip sessions Plex is still reporting after we've already finalized them via
-  // stall detection or the stale loop — they'd otherwise be re-created on every poll.
+  // SSE stop, stall detection, or the stale loop — they'd otherwise be re-created
+  // on every poll.
   const valid = sessions.filter(
-    (s) => s.sessionKey && s.accountId && !recentlyFinalizedPlexSessions.has(`plex:${s.sessionKey}`),
+    (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(`plex:${s.sessionKey}`),
   );
   if (valid.length === 0) {
     // Still need the cleanup sweep below to finalize any stale rows.
@@ -165,8 +149,10 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
         if (stalled) {
           // Ghost session: Plex still reports it but the playhead has been frozen for
           // PLEX_STALL_THRESHOLD_MS while state="playing". Finalize now and gate
-          // re-create so subsequent polls don't resurrect it.
-          recentlyFinalizedPlexSessions.set(sessionId, nowMs);
+          // re-create so subsequent polls don't resurrect it. SSE feed normally
+          // catches this faster; this is the fallback when SSE is down or the
+          // client never sent a state="stopped" notification.
+          markPlexSessionFinalized(sessionId, nowMs);
           try {
             await recordCompletedSession(
               applyFinalTick(existing, now, { stoppedAt: now }),
@@ -252,7 +238,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
     stale.map((session) => {
       // Gate re-create against a racey Plex /status/sessions reappearance,
       // same as the stall path above.
-      recentlyFinalizedPlexSessions.set(session.id, nowMs);
+      markPlexSessionFinalized(session.id, nowMs);
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
@@ -504,6 +490,14 @@ async function syncPlayHistory(request: NextRequest) {
   if (!(await isPlayHistoryEnabled())) {
     return NextResponse.json({ message: "Play history tracking is disabled" });
   }
+
+  // Fire-and-forget: idempotently keep the Plex SSE connection in sync with
+  // current Settings. If the URL/token didn't change and the connection is up,
+  // this is a near-no-op; if settings were edited via the admin UI we pick up
+  // the change within one poll tick.
+  reconcilePlexEventStream().catch((err) => {
+    console.warn("[plex-events] reconcile failed:", err);
+  });
 
   const results: Record<string, unknown> = {};
 

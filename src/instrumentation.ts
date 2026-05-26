@@ -108,5 +108,13 @@ export async function register() {
     import("@/lib/plex-user-backfill")
       .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
       .catch((err) => console.error("[plex-backfill] startup error:", err));
+
+    // Open the Plex SSE notifications stream so we get real-time "session
+    // stopped" events instead of waiting on the 5s poller's stale-detection.
+    // Idempotent and self-healing — the sync route also calls reconcile() so
+    // settings edits propagate even if this initial attempt fails.
+    import("@/lib/plex-events")
+      .then(({ reconcilePlexEventStream }) => reconcilePlexEventStream())
+      .catch((err) => console.error("[plex-events] startup error:", err));
   }
 }
