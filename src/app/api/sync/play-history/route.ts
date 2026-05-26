@@ -20,6 +20,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import {
   PLEX_STALL_THRESHOLD_MS,
+  clearFinalizedNotInCurrentSnapshot,
   isPlexSessionRecentlyFinalized,
   markPlexSessionFinalized,
   pruneRecentlyFinalized,
@@ -33,6 +34,16 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const now = new Date();
   const nowMs = now.getTime();
   pruneRecentlyFinalized(nowMs);
+
+  // Release ledger entries Plex has stopped reporting before the create-gate
+  // checks it. The ledger exists to suppress re-creation while Plex keeps a
+  // ghost in /status/sessions; once Plex drops the key, a new play reusing it
+  // (rare, but possible after a Plex server restart) shouldn't be blocked.
+  const allReportedKeys = new Set<string>();
+  for (const s of sessions) {
+    if (s.sessionKey) allReportedKeys.add(s.sessionKey);
+  }
+  clearFinalizedNotInCurrentSnapshot(allReportedKeys);
 
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
   // Skip sessions Plex is still reporting after we've already finalized them via
@@ -165,8 +176,12 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
         }
 
         const increment = computePlaytimeIncrement(existing, now);
-        await prisma.activeSession.update({
-          where: { id: sessionId },
+        // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the
+        // row between our prefetch and this write, updateMany returns 0 and we
+        // silently skip instead of throwing P2025 and aborting the whole
+        // Promise.all batch. The next poll re-reads state and resumes.
+        await prisma.activeSession.updateMany({
+          where: { id: sessionId, lastSeenAt: existing.lastSeenAt },
           data: {
             lastSeenAt: now,
             state: s.state,

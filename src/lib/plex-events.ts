@@ -50,6 +50,26 @@ export function pruneRecentlyFinalized(nowMs: number): void {
   }
 }
 
+// Drop ledger entries for sessionKeys Plex no longer reports in /status/sessions.
+// The ledger exists to gate re-creation while Plex keeps a ghost session in its
+// snapshot after the user quit; once Plex actually drops the key, the ghost is
+// gone and the entry is just suppressing future plays that happen to reuse the
+// key. Pair with the 1h TTL backstop in case Plex never drops a ghost.
+//
+// Edge case (acknowledged, not addressed): if the Plex server itself restarts
+// (sessionKey counter resets to 1) within the 1h TTL of a finalize, the first
+// new play in the post-restart server can land on a key we've ledger-blocked.
+// Detection would require persisting machineIdentifier across Node restarts.
+export function clearFinalizedNotInCurrentSnapshot(currentPlexSessionKeys: ReadonlySet<string>): void {
+  for (const id of recentlyFinalizedPlexSessions.keys()) {
+    if (!id.startsWith("plex:")) continue;
+    const sessionKey = id.slice(5);
+    if (!currentPlexSessionKeys.has(sessionKey)) {
+      recentlyFinalizedPlexSessions.delete(id);
+    }
+  }
+}
+
 // SSE frame parse target. Plex's "playing" event payload wraps a single
 // notification under PlaySessionStateNotification. Tautulli's WebSocket
 // payload encodes it as an array; the SSE feed emits a single object. Handle
@@ -86,8 +106,31 @@ class PlexEventStreamManager {
   private backoffMs = INITIAL_BACKOFF_MS;
   private running = false;
   private loopPromise: Promise<void> | null = null;
+  // Coalesce concurrent reconcile() callers (boot + sync route + future paths)
+  // so they can't both pass the "is anything changing?" check and end up each
+  // calling stop() + start a new runLoop, leaving two SSE connections alive.
+  // While one reconcile is in flight, subsequent callers set `pending`; the
+  // in-flight call re-runs once after it finishes to pick up the latest state.
+  private reconciling = false;
+  private reconcilePending = false;
 
   async reconcile(): Promise<void> {
+    if (this.reconciling) {
+      this.reconcilePending = true;
+      return;
+    }
+    this.reconciling = true;
+    try {
+      do {
+        this.reconcilePending = false;
+        await this.doReconcile();
+      } while (this.reconcilePending);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private async doReconcile(): Promise<void> {
     const [phEnabled, plexSourceEnabled, settings] = await Promise.all([
       isPlayHistoryEnabled(),
       isSourceEnabled("plex"),
@@ -162,8 +205,13 @@ class PlexEventStreamManager {
     // stall detector caught up. Runs once per (re)connect.
     await this.bootstrapReconcile(url, token);
 
-    this.abortController = new AbortController();
-    const recycleTimer = setTimeout(() => this.abortController?.abort(), PERIODIC_RECYCLE_MS);
+    // Capture the AbortController in a local const so the recycle timer can't
+    // later end up aborting a *different* connection (e.g. a settings-change
+    // restart that swapped `this.abortController` for a fresh one). The
+    // recycle timer must only fire against the connection it was paired with.
+    const localAbort = new AbortController();
+    this.abortController = localAbort;
+    const recycleTimer = setTimeout(() => localAbort.abort(), PERIODIC_RECYCLE_MS);
 
     try {
       const sseUrl = `${url}/:/eventsource/notifications?filters=playing&X-Plex-Token=${encodeURIComponent(token)}`;
@@ -174,7 +222,7 @@ class PlexEventStreamManager {
           "X-Plex-Product": "Summonarr",
           "X-Plex-Version": "1.0",
         },
-        signal: this.abortController.signal,
+        signal: localAbort.signal,
         // SSE is a long-lived stream. The default 15s timeout would abort it
         // after one quiet minute; the default 10 MB cap would trip after a few
         // days of ping accumulation. Periodic reconnect (PERIODIC_RECYCLE_MS)
@@ -204,6 +252,10 @@ class PlexEventStreamManager {
           firstRead = false;
         }
         buffer += decoder.decode(value, { stream: true });
+        // SSE spec allows either LF or CRLF line endings; Plex currently emits
+        // LF, but normalize defensively so the frame-boundary indexOf below
+        // doesn't desync if a future Plex build switches conventions.
+        if (buffer.includes("\r")) buffer = buffer.replace(/\r\n/g, "\n");
 
         let boundary = buffer.indexOf("\n\n");
         while (boundary !== -1) {
@@ -215,6 +267,11 @@ class PlexEventStreamManager {
       }
     } finally {
       clearTimeout(recycleTimer);
+      // Clear `this.abortController` only if it still points at our local one.
+      // A concurrent reconcile may have swapped it for a fresh connection's
+      // controller; in that case we leave it alone so the new connection can
+      // still be stopped.
+      if (this.abortController === localAbort) this.abortController = null;
     }
   }
 
@@ -238,6 +295,11 @@ class PlexEventStreamManager {
     for (const s of plexSessions) {
       if (s.sessionKey) seenKeys.add(s.sessionKey);
     }
+
+    // Release ledger entries Plex is no longer reporting — the ghost they were
+    // suppressing is actually gone, and a future play reusing the key should
+    // not be invisible.
+    clearFinalizedNotInCurrentSnapshot(seenKeys);
 
     const stale = activeDbRows.filter((r) => !seenKeys.has(r.sessionKey));
     if (stale.length === 0) return;
@@ -321,6 +383,14 @@ class PlexEventStreamManager {
       });
 
       await recordCompletedSession(finalized);
+
+      // SSE is the authoritative stop signal. recordCompletedSession's CAS on
+      // lastSeenAt may have left the ActiveSession row in place if the poller
+      // bumped lastSeenAt between our findUnique and the upsert. The
+      // PlayHistory row is already written; force-clean the ActiveSession so
+      // the now-playing UI clears on the next sessions snapshot. The ledger
+      // entry above prevents a re-create race with the concurrent poller.
+      await prisma.activeSession.deleteMany({ where: { id } }).catch(() => {});
     } catch (err) {
       console.warn(`[plex-events] finalize stop failed for ${id}:`, err);
     }
