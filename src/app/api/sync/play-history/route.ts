@@ -21,12 +21,42 @@ import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 
 type SyncResult = { started: number; updated: number; ended: number };
 
+// Plex sometimes keeps a quit session in /status/sessions for up to 30 min
+// (mobile/TV clients that close without a clean Stop). When the playhead has
+// not advanced for this long while state still reports "playing", treat it as
+// a quit and finalize early.
+const PLEX_STALL_THRESHOLD_MS = 60_000;
+
+// In-memory ledger of Plex sessions finalized via the stall path or the stale
+// loop. Keyed by ActiveSession.id ("plex:<sessionKey>"). Lets the next polls
+// skip re-creating the row while Plex's /status/sessions still includes the
+// ghost. Persists across polls inside the same Node process (single
+// long-lived server per guardrail 17); a restart loses the ledger but Plex
+// has usually dropped the session by then, and the stall detector re-fires
+// otherwise.
+const recentlyFinalizedPlexSessions = new Map<string, number>();
+const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
+
+function pruneRecentlyFinalized(nowMs: number): void {
+  for (const [id, finalizedAt] of recentlyFinalizedPlexSessions) {
+    if (nowMs - finalizedAt > RECENTLY_FINALIZED_TTL_MS) {
+      recentlyFinalizedPlexSessions.delete(id);
+    }
+  }
+}
+
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
   const sessions = await getPlexSessions(serverUrl, token);
   const now = new Date();
+  const nowMs = now.getTime();
+  pruneRecentlyFinalized(nowMs);
 
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
-  const valid = sessions.filter((s) => s.sessionKey && s.accountId);
+  // Skip sessions Plex is still reporting after we've already finalized them via
+  // stall detection or the stale loop — they'd otherwise be re-created on every poll.
+  const valid = sessions.filter(
+    (s) => s.sessionKey && s.accountId && !recentlyFinalizedPlexSessions.has(`plex:${s.sessionKey}`),
+  );
   if (valid.length === 0) {
     // Still need the cleanup sweep below to finalize any stale rows.
   }
@@ -120,12 +150,34 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
 
   // Run per-session writes in parallel.
   const writeResults = await Promise.all(
-    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
+    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated" | "ended"> => {
       const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
       const posterPath = tmdbId != null && mediaType ? posterMap.get(`${tmdbId}:${mediaType}`) ?? null : null;
 
       const existing = existingMap.get(sessionId);
       if (existing) {
+        const advanced = s.viewOffset > Number(existing.progressMs);
+        const stalled =
+          s.state === "playing"
+          && !advanced
+          && nowMs - existing.progressUpdatedAt.getTime() >= PLEX_STALL_THRESHOLD_MS;
+
+        if (stalled) {
+          // Ghost session: Plex still reports it but the playhead has been frozen for
+          // PLEX_STALL_THRESHOLD_MS while state="playing". Finalize now and gate
+          // re-create so subsequent polls don't resurrect it.
+          recentlyFinalizedPlexSessions.set(sessionId, nowMs);
+          try {
+            await recordCompletedSession(
+              applyFinalTick(existing, now, { stoppedAt: now }),
+              { skipSSE: true },
+            );
+          } catch (err) {
+            console.warn(`[play-history] stall-finalize failed for ${sessionId}:`, err);
+          }
+          return "ended";
+        }
+
         const increment = computePlaytimeIncrement(existing, now);
         await prisma.activeSession.update({
           where: { id: sessionId },
@@ -134,6 +186,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
             state: s.state,
             progressPercent,
             progressMs: BigInt(s.viewOffset),
+            ...(advanced ? { progressUpdatedAt: now } : {}),
             playMethod: s.playMethod,
             resolution: s.resolution,
             transcodeReason: s.transcodeReason ?? null,
@@ -188,6 +241,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
 
   const started = writeResults.filter((r) => r === "started").length;
   const updated = writeResults.filter((r) => r === "updated").length;
+  const stallEnded = writeResults.filter((r) => r === "ended").length;
 
   const activePlexSessions = await prisma.activeSession.findMany({
     where: { source: "plex" },
@@ -195,16 +249,19 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
 
   const stale = activePlexSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
   const finalized = await Promise.all(
-    stale.map((session) =>
+    stale.map((session) => {
+      // Gate re-create against a racey Plex /status/sessions reappearance,
+      // same as the stall path above.
+      recentlyFinalizedPlexSessions.set(session.id, nowMs);
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
-      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
+      return recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
         .then(() => true)
-        .catch(() => false),
-    ),
+        .catch(() => false);
+    }),
   );
-  const ended = finalized.filter(Boolean).length;
+  const ended = finalized.filter(Boolean).length + stallEnded;
 
   return { started, updated, ended };
 }

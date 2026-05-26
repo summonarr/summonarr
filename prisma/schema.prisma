@@ -700,6 +700,12 @@ model ActiveSession {
   // Progress
   progressPercent Float  @default(0)
   progressMs      BigInt @default(0) // Playhead position in the file (last known viewOffset / PlaybackPositionTicks). Drives PlayHistory.completed.
+  // Wall-clock timestamp of the last poll that observed progressMs increasing. Drives Plex
+  // stall detection: when Plex keeps a session in /status/sessions after the client quit
+  // (mobile/TV especially, up to 30 min), the playhead freezes while state still reports
+  // "playing". progressUpdatedAt aging past STALL_THRESHOLD_MS in that state finalizes the
+  // session early instead of waiting on cleanupStaleSessions(30).
+  progressUpdatedAt DateTime @default(now())
   playtimeMs      BigInt @default(0) // Accumulated wall-clock ms spent in the "playing" state. Drives PlayHistory.playDuration / watched.
   durationMs      BigInt @default(0)
 
