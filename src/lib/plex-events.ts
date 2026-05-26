@@ -18,6 +18,7 @@
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled } from "./play-history";
+import { getPlexSessions } from "./plex";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
 // (mobile/TV clients that close without a clean Stop). When the playhead has
@@ -153,6 +154,14 @@ class PlexEventStreamManager {
     const token = this.currentToken;
     if (!url || !token) throw new Error("not configured");
 
+    // Safe-start reconcile: SSE is a "from-now" feed — events that fired while
+    // we were disconnected (process restart, network blip, settings change) are
+    // gone forever. Before subscribing, snapshot /status/sessions and finalize
+    // any DB rows Plex no longer reports. Closes the post-restart window in
+    // which a ghost "PLAYING" card could linger until the 5s poller or 60s
+    // stall detector caught up. Runs once per (re)connect.
+    await this.bootstrapReconcile(url, token);
+
     this.abortController = new AbortController();
     const recycleTimer = setTimeout(() => this.abortController?.abort(), PERIODIC_RECYCLE_MS);
 
@@ -207,6 +216,45 @@ class PlexEventStreamManager {
     } finally {
       clearTimeout(recycleTimer);
     }
+  }
+
+  private async bootstrapReconcile(url: string, token: string): Promise<void> {
+    let plexSessions;
+    let activeDbRows;
+    try {
+      [plexSessions, activeDbRows] = await Promise.all([
+        getPlexSessions(url, token),
+        prisma.activeSession.findMany({ where: { source: "plex" } }),
+      ]);
+    } catch (err) {
+      // Don't block the SSE connect on a transient Plex or DB hiccup — the 5s
+      // poller will reconcile within one tick.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] bootstrap reconcile failed: ${msg}`);
+      return;
+    }
+
+    const seenKeys = new Set<string>();
+    for (const s of plexSessions) {
+      if (s.sessionKey) seenKeys.add(s.sessionKey);
+    }
+
+    const stale = activeDbRows.filter((r) => !seenKeys.has(r.sessionKey));
+    if (stale.length === 0) return;
+
+    const now = new Date();
+    const nowMs = now.getTime();
+
+    await Promise.all(
+      stale.map(async (session) => {
+        markPlexSessionFinalized(session.id, nowMs);
+        try {
+          await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
+        } catch (err) {
+          console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
+        }
+      }),
+    );
   }
 
   private handleFrame(frame: string): void {
