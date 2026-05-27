@@ -810,9 +810,11 @@ export async function getMostPopularOnServer(
 
   const trendArcFilter = trendingIdx ? `FILTER (WHERE arc_started_at >= $${trendingIdx})` : "";
   const trendRawFilter = trendingIdx ? `FILTER (WHERE "startedAt" >= $${trendingIdx})` : "";
-  const episodesFilter = trendingIdx
-    ? `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL AND "startedAt" >= $${trendingIdx})`
-    : `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL)`;
+  // Episodes badge counts only episodes that have at least one completed arc, so a half-watched
+  // pilot no longer pads the "5 eps" count. Pulled from completed_arcs (ca.*), filtered to TV.
+  const episodesArcFilter = trendingIdx
+    ? `FILTER (WHERE ca."mediaType"::text = 'TV' AND ca."seasonNumber" IS NOT NULL AND ca."episodeNumber" IS NOT NULL AND ca.arc_started_at >= $${trendingIdx})`
+    : `FILTER (WHERE ca."mediaType"::text = 'TV' AND ca."seasonNumber" IS NOT NULL AND ca."episodeNumber" IS NOT NULL)`;
   const havingSql = trendingIdx ? `HAVING COUNT(*) ${trendArcFilter} > 0` : "";
 
   const orderBy =
@@ -875,7 +877,6 @@ export async function getMostPopularOnServer(
       SELECT "tmdbId", "mediaType"::text AS "mediaType",
              MAX("title") AS title,
              MAX("year") AS year,
-             (COUNT(DISTINCT ("seasonNumber", "episodeNumber")) ${episodesFilter})::bigint AS episodes,
              (COALESCE(SUM("playDuration") ${trendRawFilter}, 0) / 3600.0)::float8 AS "totalHours"
       FROM "PlayHistory"
       WHERE ${baseWhere}
@@ -883,14 +884,15 @@ export async function getMostPopularOnServer(
     ),
     popular AS (
       SELECT ca."tmdbId", ca."mediaType"::text AS "mediaType",
-             sa.title, sa.year, sa.episodes, sa."totalHours",
+             sa.title, sa.year, sa."totalHours",
+             (COUNT(DISTINCT (ca."seasonNumber", ca."episodeNumber")) ${episodesArcFilter})::bigint AS episodes,
              (COUNT(*) ${trendArcFilter})::bigint AS plays,
              COUNT(*)::bigint AS "allTimePlays",
              (COUNT(DISTINCT ca."mediaServerUserId") ${trendArcFilter})::bigint AS viewers
       FROM completed_arcs ca
       JOIN session_aggregates sa
         ON sa."tmdbId" = ca."tmdbId" AND sa."mediaType" = ca."mediaType"::text
-      GROUP BY ca."tmdbId", ca."mediaType", sa.title, sa.year, sa.episodes, sa."totalHours"
+      GROUP BY ca."tmdbId", ca."mediaType", sa.title, sa.year, sa."totalHours"
       ${havingSql}
     )
     SELECT *,
@@ -1161,6 +1163,58 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   }
   const prevWhere = prevConditions.join(" AND ");
 
+  // Arc-grouped completion: three sittings of one movie should count as one completion, not
+  // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
+  // sessions on the same (user, tmdbId, season, episode) split by playHistoryArcGapDays or by a
+  // prior `completed=true` row (rewatch boundary). The arc query needs two extra params on top
+  // of `where`'s params; build a separate array so we don't shift the $-indices of every other
+  // query in this Promise.all.
+  const [completionPct, arcGapDays] = await Promise.all([
+    getCompletionThreshold(),
+    getArcGapDays(),
+  ]);
+  const arcParams = [...params, arcGapDays * 24 * 60 * 60, completionPct / 100];
+  const arcGapIdx = params.length + 1;
+  const completionIdx = params.length + 2;
+  const arcCte = `WITH base AS (
+       SELECT "mediaServerUserId", "tmdbId", "mediaType",
+              "seasonNumber", "episodeNumber",
+              "startedAt", "playDuration", "duration", "completed"
+       FROM "PlayHistory" WHERE ${where}
+     ),
+     arc_flags AS (
+       SELECT *,
+         CASE
+           WHEN LAG("startedAt") OVER w IS NULL
+             OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
+             OR LAG("completed") OVER w = true
+           THEN 1 ELSE 0
+         END AS arc_start
+       FROM base
+       WINDOW w AS (
+         PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                      COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+         ORDER BY "startedAt"
+       )
+     ),
+     arc_ids AS (
+       SELECT *,
+         SUM(arc_start) OVER (
+           PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                        COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+           ORDER BY "startedAt"
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS arc_id
+       FROM arc_flags
+     ),
+     arcs AS (
+       SELECT SUM("playDuration") AS arc_play,
+              MAX("duration") AS arc_dur
+       FROM arc_ids
+       GROUP BY "mediaServerUserId", "tmdbId", "mediaType",
+                COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1), arc_id
+     )`;
+
   const [
     totalPlays,
     totalWatchTime,
@@ -1274,21 +1328,23 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ watched: bigint; total: bigint }[]>(
-      `SELECT COUNT(*) FILTER (WHERE "watched" = true)::bigint AS watched,
+      `${arcCte}
+       SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx})::bigint AS watched,
               COUNT(*)::bigint AS total
-       FROM "PlayHistory" WHERE ${where}`,
-      ...params,
+       FROM arcs`,
+      ...arcParams,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN ("playDuration"::float / "duration") < 0.25 THEN '0-25%'
-         WHEN ("playDuration"::float / "duration") < 0.50 THEN '25-50%'
-         WHEN ("playDuration"::float / "duration") < 0.75 THEN '50-75%'
+      `${arcCte}
+       SELECT CASE
+         WHEN (arc_play::float / arc_dur) < 0.25 THEN '0-25%'
+         WHEN (arc_play::float / arc_dur) < 0.50 THEN '25-50%'
+         WHEN (arc_play::float / arc_dur) < 0.75 THEN '50-75%'
          ELSE '75-100%'
        END AS bucket, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where} AND "duration" > 0
+       FROM arcs WHERE arc_dur > 0
        GROUP BY bucket ORDER BY bucket`,
-      ...params,
+      ...arcParams,
     ),
 
     prisma.$queryRawUnsafe<{ avg_mbps: number | null; total_gb: number | null }[]>(
