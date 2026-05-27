@@ -1166,14 +1166,17 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   // Arc-grouped completion: three sittings of one movie should count as one completion, not
   // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
   // sessions on the same (user, tmdbId, season, episode) split by playHistoryArcGapDays or by a
-  // prior `completed=true` row (rewatch boundary). The arc query needs two extra params on top
-  // of `where`'s params; build a separate array so we don't shift the $-indices of every other
-  // query in this Promise.all.
+  // prior `completed=true` row (rewatch boundary). The arc CTE needs one extra param (arcGap)
+  // on top of `where`'s params; the rate query needs a second (completionRatio), but the
+  // histogram uses fixed bucket thresholds so it must NOT receive completionRatio — Postgres
+  // rejects prepared statements with unused binds ("bind message supplies N parameters, but
+  // prepared statement requires M"). Keep arcHistogramParams and arcRateParams separate.
   const [completionPct, arcGapDays] = await Promise.all([
     getCompletionThreshold(),
     getArcGapDays(),
   ]);
-  const arcParams = [...params, arcGapDays * 24 * 60 * 60, completionPct / 100];
+  const arcHistogramParams = [...params, arcGapDays * 24 * 60 * 60];
+  const arcRateParams = [...arcHistogramParams, completionPct / 100];
   const arcGapIdx = params.length + 1;
   const completionIdx = params.length + 2;
   const arcCte = `WITH base AS (
@@ -1332,7 +1335,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx})::bigint AS watched,
               COUNT(*)::bigint AS total
        FROM arcs`,
-      ...arcParams,
+      ...arcRateParams,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
       `${arcCte}
@@ -1344,7 +1347,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        END AS bucket, COUNT(*)::bigint AS count
        FROM arcs WHERE arc_dur > 0
        GROUP BY bucket ORDER BY bucket`,
-      ...arcParams,
+      ...arcHistogramParams,
     ),
 
     prisma.$queryRawUnsafe<{ avg_mbps: number | null; total_gb: number | null }[]>(
