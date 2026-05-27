@@ -2,7 +2,7 @@ import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
-import { Prisma, type ActiveSession, type MediaType } from "@/generated/prisma";
+import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 export function safeBigInt(x: unknown): bigint {
   const n = typeof x === "number" ? x : Number(x);
@@ -382,30 +382,18 @@ export async function recordCompletedSession(
     transcodeReason: session.transcodeReason,
   };
 
-  // Prisma's upsert is SELECT-then-INSERT, not atomic — under concurrent finalize paths
-  // (SSE stop + 5s poller stall + webhook can all fire for the same sessionKey) two callers
-  // race the existence check and the loser hits P2002 even though `update: {}` already
-  // means "first writer wins". The row exists, which is exactly what we wanted; treat the
-  // conflict as success. Wrapping in a $transaction would just amplify the failure — Postgres
-  // aborts the surrounding transaction on the unique-violation, so the deleteMany below
-  // wouldn't run either. Both ops are idempotent on their own, so the transaction added no
-  // correctness — the deleteMany's CAS on lastSeenAt is what keeps it safe to retry.
-  try {
-    await prisma.playHistory.upsert({
-      where: {
-        source_sourceSessionId: { source: session.source, sourceSessionId: uniqueSourceSessionId },
-      },
-      create: historyData,
-      update: {},
-    });
-  } catch (err) {
-    if (
-      !(err instanceof Prisma.PrismaClientKnownRequestError) ||
-      err.code !== "P2002"
-    ) {
-      throw err;
-    }
-  }
+  // recordCompletedSession runs from three paths that can fire concurrently for the same
+  // sessionKey: SSE 'stopped' notification, 5s poller stall detection, and webhook handlers.
+  // Prisma's upsert is SELECT-then-INSERT (not atomic) — under that race the loser hits P2002
+  // even though `update: {}` already means "first writer wins". Catching P2002 in JS works but
+  // still leaves a Postgres ERROR and a `prisma:error` log per collision because the INSERT
+  // reaches the DB before failing. createMany({ skipDuplicates: true }) compiles to
+  // INSERT ... ON CONFLICT DO NOTHING, which resolves the race inside Postgres with no error
+  // emitted. Single-row createMany is the idiomatic Prisma way to express this.
+  await prisma.playHistory.createMany({
+    data: [historyData],
+    skipDuplicates: true,
+  });
 
   // CAS on lastSeenAt: only delete if the row hasn't been touched since the
   // caller read it. Without this, a concurrent activeSession update or
