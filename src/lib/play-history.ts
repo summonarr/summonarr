@@ -2,7 +2,7 @@ import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
-import type { ActiveSession, MediaType } from "@/generated/prisma";
+import { Prisma, type ActiveSession, type MediaType } from "@/generated/prisma";
 
 export function safeBigInt(x: unknown): bigint {
   const n = typeof x === "number" ? x : Number(x);
@@ -382,26 +382,40 @@ export async function recordCompletedSession(
     transcodeReason: session.transcodeReason,
   };
 
-  await prisma.$transaction(async (tx) => {
-    // update:{} means a duplicate webhook replay is a no-op — the first write wins
-    await tx.playHistory.upsert({
+  // Prisma's upsert is SELECT-then-INSERT, not atomic — under concurrent finalize paths
+  // (SSE stop + 5s poller stall + webhook can all fire for the same sessionKey) two callers
+  // race the existence check and the loser hits P2002 even though `update: {}` already
+  // means "first writer wins". The row exists, which is exactly what we wanted; treat the
+  // conflict as success. Wrapping in a $transaction would just amplify the failure — Postgres
+  // aborts the surrounding transaction on the unique-violation, so the deleteMany below
+  // wouldn't run either. Both ops are idempotent on their own, so the transaction added no
+  // correctness — the deleteMany's CAS on lastSeenAt is what keeps it safe to retry.
+  try {
+    await prisma.playHistory.upsert({
       where: {
         source_sourceSessionId: { source: session.source, sourceSessionId: uniqueSourceSessionId },
       },
       create: historyData,
       update: {},
     });
+  } catch (err) {
+    if (
+      !(err instanceof Prisma.PrismaClientKnownRequestError) ||
+      err.code !== "P2002"
+    ) {
+      throw err;
+    }
+  }
 
-    // CAS on lastSeenAt: only delete if the row hasn't been touched since the
-    // caller read it. Without this, a concurrent activeSession update or
-    // re-create from sync/play-history could be silently deleted here when
-    // recordCompletedSession was triggered by a stale Stop webhook.
-    // updateMany returns 0 if the lastSeenAt timestamp shifted; in that case
-    // we leave the row alone (it's now part of a different playback session).
-    await tx.activeSession.deleteMany({
-      where: { id: session.id, lastSeenAt: session.lastSeenAt },
-    }).catch(() => {});
-  }, { timeout: 15_000 });
+  // CAS on lastSeenAt: only delete if the row hasn't been touched since the
+  // caller read it. Without this, a concurrent activeSession update or
+  // re-create from sync/play-history could be silently deleted here when
+  // recordCompletedSession was triggered by a stale Stop webhook.
+  // deleteMany returns 0 if the lastSeenAt timestamp shifted; in that case
+  // we leave the row alone (it's now part of a different playback session).
+  await prisma.activeSession.deleteMany({
+    where: { id: session.id, lastSeenAt: session.lastSeenAt },
+  }).catch(() => {});
 
   // Invalidate cached stats so the next page load reflects the new record.
   // Callers that import many sessions in a tight loop (cron, sync) should pass
