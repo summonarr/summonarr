@@ -293,11 +293,21 @@ export async function recordCompletedSession(
   session: ActiveSession,
   opts: { skipSSE?: boolean; stoppedAt?: Date } = {},
 ): Promise<void> {
-  // The polling sync may leave playtimeMs at zero for short watches that disappear between two
-  // 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes 0.
-  // progressMs (playhead at stop) is always populated, so taking the max yields the right
-  // answer regardless of which signal is more accurate for a given session.
-  const playDurationMs = Math.max(Number(session.playtimeMs), Number(session.progressMs));
+  // Take `now` once so every downstream timestamp/elapsed calc agrees on the same reference.
+  const now = new Date();
+
+  // The polling sync may leave playtimeMs at zero for short watches that disappear between
+  // two 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes
+  // 0. progressMs (playhead at stop) is always populated, so falling back to it covers those
+  // gaps. BUT progressMs is the playhead POSITION in the file, not elapsed wall-clock time:
+  // a user who seeks to the credits and quits at five seconds has progressMs ≈ totalDuration
+  // even though they only watched five seconds. Cap by the actual wall-clock window so the
+  // fallback can't credit more time than physically elapsed.
+  const stoppedAt =
+    opts.stoppedAt ?? (session.lastSeenAt > session.startedAt ? session.lastSeenAt : now);
+  const wallElapsedMs = Math.max(0, stoppedAt.getTime() - session.startedAt.getTime());
+  const cappedProgressMs = Math.min(Number(session.progressMs), wallElapsedMs);
+  const playDurationMs = Math.max(Number(session.playtimeMs), cappedProgressMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
   // Both short-circuits use the same lastSeenAt CAS the post-transaction
@@ -323,13 +333,8 @@ export async function recordCompletedSession(
   const totalDurationMs = Number(session.durationMs);
   const watched = calculateWatched(playDurationMs, totalDurationMs, threshold);
 
-  const now = new Date();
-  // Explicit stoppedAt from the caller (SSE stop event, poll stall/stale detection) wins; otherwise
-  // fall back to the row's lastSeenAt for paths that don't synthesize a stop time
-  // (cleanupStaleSessions).
-  const stoppedAt =
-    opts.stoppedAt ?? (session.lastSeenAt > session.startedAt ? session.lastSeenAt : now);
-
+  // `now` and `stoppedAt` were already established at the top so the cap on
+  // cappedProgressMs and the historyData.stoppedAt agree on the same instant.
   const totalElapsedS = Math.max(0, Math.floor((stoppedAt.getTime() - session.startedAt.getTime()) / 1000));
   const durationS = Math.max(0, Math.floor(totalDurationMs / 1000));
   const pausedDurationS = Math.max(0, totalElapsedS - playDurationS);

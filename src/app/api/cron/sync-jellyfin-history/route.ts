@@ -6,9 +6,17 @@ import {
   getJellyfinUserPlayHistory,
   getJellyfinPlaybackReporting,
   getJellyfinEpisodeSeriesIds,
+  getJellyfinItemRuntimes,
   getJellyfinAllUsers,
 } from "@/lib/jellyfin";
-import { resolveShowTmdbId, resolveMediaServerUser, clearActivityCache, MediaServerMismatchError } from "@/lib/play-history";
+import {
+  resolveShowTmdbId,
+  resolveMediaServerUser,
+  clearActivityCache,
+  calculateWatched,
+  getWatchedThreshold,
+  MediaServerMismatchError,
+} from "@/lib/play-history";
 import { emitSSE } from "@/lib/sse-emitter";
 import type { MediaType } from "@/generated/prisma";
 
@@ -45,6 +53,16 @@ async function importFromPlaybackReporting(
   const seriesInfoMap = episodeItemIds.length > 0
     ? await getJellyfinEpisodeSeriesIds(baseUrl, apiKey, episodeItemIds)
     : new Map();
+
+  // Batch-fetch RunTimeTicks for every distinct item. PlaybackReporting only reports
+  // PlayDuration (time spent playing); without the item's runtime we can't compute the
+  // completion ratio. Before this fetch we wrote duration = playDuration on every row,
+  // which made every imported play look like a 100% completion.
+  const allItemIds = [...new Set(rows.map((r) => r.itemId))];
+  const runtimeMap = allItemIds.length > 0
+    ? await getJellyfinItemRuntimes(baseUrl, apiKey, allItemIds)
+    : new Map<string, number>();
+  const watchedThreshold = await getWatchedThreshold();
 
   // Cache TMDB lookups: seriesId → tmdbId, movieItemId → tmdbId
   const tmdbCache = new Map<string, number | null>();
@@ -101,6 +119,15 @@ async function importFromPlaybackReporting(
       const playDurationS = Math.max(0, Math.floor(row.playDuration));
       const stoppedAt = new Date(playedAt.getTime() + playDurationS * 1000);
 
+      // Use the real runtime where Jellyfin gave us one; otherwise 0 means "unknown"
+      // and the row is honestly not credited toward completion stats.
+      const durationMs = runtimeMap.get(row.itemId) ?? 0;
+      const durationS = Math.floor(durationMs / 1000);
+      const playDurationMs = playDurationS * 1000;
+      const watched = calculateWatched(playDurationMs, durationMs, watchedThreshold);
+      // 0.95 matches recordCompletedSession's per-arc completed boundary.
+      const completed = durationMs > 0 && playDurationMs / durationMs >= 0.95;
+
       // Unique key: one row per session (date+user+item combination)
       const sourceSessionId = `jf-pr:${row.userId}:${row.itemId}:${row.date}`;
 
@@ -110,11 +137,11 @@ async function importFromPlaybackReporting(
           source: "jellyfin",
           startedAt: playedAt,
           stoppedAt,
-          duration: playDurationS,
+          duration: durationS,
           playDuration: playDurationS,
           pausedDuration: 0,
-          watched: playDurationS >= 90,
-          completed: false, // can't compute without total duration from reporting API
+          watched,
+          completed,
           mediaServerUserId: msUserId,
           tmdbId,
           mediaType,

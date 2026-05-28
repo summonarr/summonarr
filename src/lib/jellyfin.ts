@@ -515,6 +515,43 @@ export async function getJellyfinEpisodeSeriesIds(
   return result;
 }
 
+// Batch-fetch RunTimeTicks for a set of item IDs. PlaybackReporting's PlayActivity
+// endpoint doesn't include the item runtime, so callers that need real completion
+// ratios (playDuration / totalDuration) have to look it up separately. Returns
+// itemId → durationMs; missing items are absent from the map.
+export async function getJellyfinItemRuntimes(
+  baseUrl: string,
+  apiKey: string,
+  itemIds: string[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (itemIds.length === 0) return result;
+
+  const base = baseUrl.replace(/\/$/, "");
+  const CHUNK = 100;
+  for (let i = 0; i < itemIds.length; i += CHUNK) {
+    const chunk = itemIds.slice(i, i + CHUNK);
+    const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=RunTimeTicks&Recursive=true`;
+    try {
+      const res = await safeFetchAdminConfigured(url, {
+        headers: jellyfinAdminHeaders(apiKey),
+        timeoutMs: FETCH_TIMEOUT_MS,
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as { Items?: { Id?: string; RunTimeTicks?: number }[] };
+      for (const item of data.Items ?? []) {
+        if (item.Id && typeof item.RunTimeTicks === "number" && item.RunTimeTicks > 0) {
+          // RunTimeTicks are 100-ns ticks; /10_000 → ms.
+          result.set(item.Id, Math.floor(item.RunTimeTicks / 10_000));
+        }
+      }
+    } catch (err) {
+      console.warn("[jellyfin] Failed to fetch item runtimes page:", err);
+    }
+  }
+  return result;
+}
+
 export interface JellyfinSessionData {
   sessionId: string;
   playSessionId: string;
