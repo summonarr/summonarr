@@ -2,6 +2,7 @@ import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
+import { posterUrl } from "./tmdb-types";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 export function safeBigInt(x: unknown): bigint {
@@ -421,7 +422,109 @@ export async function recordCompletedSession(
   clearActivityCache();
   if (!opts.skipSSE) {
     emitSSE({ type: "activity:history-updated" });
+    // Also push a fresh sessions snapshot. recordCompletedSession is the moment a
+    // session leaves ActiveSession; the now-playing UI listens for activity:sessions
+    // (history-updated only refreshes the history table). Without this emit the SSE
+    // finalize paths cleared the row in the DB but the now-playing card stayed up for
+    // up to 5 seconds until the next poll re-snapshotted — defeating the purpose of
+    // subscribing to Plex SSE for instant stop detection.
+    await emitActiveSessionsSnapshot();
   }
+}
+
+// Build an activity:sessions SSE payload from current ActiveSession rows and emit it.
+// Used after SSE-driven finalize (plex-events) to push an immediate now-playing update,
+// and reused by the 5s poll route so the wire format stays in one place.
+export async function emitActiveSessionsSnapshot(): Promise<void> {
+  const allSessions = await prisma.activeSession.findMany({
+    orderBy: { startedAt: "desc" },
+    select: {
+      id: true,
+      source: true,
+      state: true,
+      mediaServerUserId: true,
+      serverUsername: true,
+      title: true,
+      tmdbId: true,
+      mediaType: true,
+      year: true,
+      seasonNumber: true,
+      episodeNumber: true,
+      episodeTitle: true,
+      progressPercent: true,
+      progressMs: true,
+      durationMs: true,
+      platform: true,
+      player: true,
+      device: true,
+      ipAddress: true,
+      startedAt: true,
+      playMethod: true,
+      videoCodec: true,
+      audioCodec: true,
+      resolution: true,
+      bitrate: true,
+      videoDecision: true,
+      audioDecision: true,
+      container: true,
+    },
+  });
+
+  const sessionPosterMap: Record<number, string | null> = {};
+  const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
+  if (tmdbIds.length > 0) {
+    const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
+    const cacheRows = await prisma.tmdbCache.findMany({
+      where: { key: { in: cacheKeys } },
+      select: { key: true, data: true },
+    });
+    for (const row of cacheRows) {
+      try {
+        const parsed = JSON.parse(row.data) as { posterPath?: string | null };
+        if (parsed.posterPath) {
+          const id = parseInt(row.key.split(":")[1] ?? "", 10);
+          if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) {
+            sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
+          }
+        }
+      } catch { }
+    }
+  }
+
+  emitSSE({
+    type: "activity:sessions",
+    sessions: allSessions.map((s) => ({
+      id: s.id,
+      source: s.source,
+      state: s.state,
+      mediaServerUserId: s.mediaServerUserId,
+      serverUsername: s.serverUsername,
+      title: s.title,
+      tmdbId: s.tmdbId,
+      mediaType: s.mediaType,
+      year: s.year,
+      seasonNumber: s.seasonNumber,
+      episodeNumber: s.episodeNumber,
+      episodeTitle: s.episodeTitle,
+      progressPercent: s.progressPercent,
+      progressMs: Number(s.progressMs),
+      durationMs: Number(s.durationMs),
+      platform: s.platform,
+      player: s.player,
+      device: s.device,
+      ipAddress: s.ipAddress,
+      startedAt: s.startedAt.toISOString(),
+      playMethod: s.playMethod,
+      videoCodec: s.videoCodec,
+      audioCodec: s.audioCodec,
+      resolution: s.resolution,
+      bitrate: s.bitrate,
+      videoDecision: s.videoDecision,
+      audioDecision: s.audioDecision,
+      container: s.container,
+      posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
+    })),
+  });
 }
 
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
@@ -1674,6 +1777,10 @@ function setCached<T>(key: string, data: T, ttlMs: number): void {
 
 export function clearActivityCache(): void {
   activityCache.clear();
+  // popularCache lives in the same module with its own 5-min TTL but is fed by the same
+  // PlayHistory rows. Without flushing it here a freshly-finalized session can take up to
+  // 5 minutes to surface on /popular, and deletions take 5 minutes to drop a title out.
+  popularCache.clear();
 }
 
 export async function warmActivityCache(): Promise<{ warmed: number }> {

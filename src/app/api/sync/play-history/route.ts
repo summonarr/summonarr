@@ -11,12 +11,11 @@ import {
   resolveShowTmdbId,
   computePlaytimeIncrement,
   applyFinalTick,
-  MAX_PLAYTIME_DELTA_MS,
+  emitActiveSessionsSnapshot,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
-import { posterUrl } from "@/lib/tmdb-types";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import {
   PLEX_STALL_THRESHOLD_MS,
@@ -400,11 +399,12 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         fallbackMap.get(`${msUserId}:${s.itemId ?? ""}`);
 
       if (existing) {
-        const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
-        const posDelta = positionMs - Number(existing.progressMs);
-        const increment = (posDelta > 0 || s.state === "playing")
-          ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
-          : BigInt(0);
+        // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
+        // hand-rolled version below used to gate on s.state — the new state — so a
+        // session that was paused all interval and started playing in the final ms
+        // got the full wall-clock interval credited. Plex uses the helper at line 178;
+        // align Jellyfin to it for consistency and correctness.
+        const increment = computePlaytimeIncrement(existing, now);
         await prisma.activeSession.update({
           where: { id: existing.id },
           data: {
@@ -563,99 +563,17 @@ async function syncPlayHistory(request: NextRequest) {
     // Single batched activity:history-updated after both source loops complete.
     // recordCompletedSession is called with skipSSE inside each loop to avoid
     // N+1 events. Emit only when at least one session actually ended.
-    const totalEnded = (results.plex as { ended?: number } | undefined)?.ended ?? 0
-      + ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
+    // Parens are load-bearing: `+` binds tighter than `??`, so without them
+    // `a?.x ?? 0 + b?.y ?? 0` parses as `a?.x ?? (0 + (b?.y ?? 0))` and a
+    // defined `plex.ended = 0` would short-circuit, silently dropping Jellyfin's count.
+    const totalEnded =
+      ((results.plex as { ended?: number } | undefined)?.ended ?? 0) +
+      ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
     if (totalEnded > 0) {
       emitSSE({ type: "activity:history-updated" });
     }
 
-    const allSessions = await prisma.activeSession.findMany({
-      orderBy: { startedAt: "desc" },
-      select: {
-        id: true,
-        source: true,
-        state: true,
-        mediaServerUserId: true,
-        serverUsername: true,
-        title: true,
-        tmdbId: true,
-        mediaType: true,
-        year: true,
-        seasonNumber: true,
-        episodeNumber: true,
-        episodeTitle: true,
-        progressPercent: true,
-        progressMs: true,
-        durationMs: true,
-        platform: true,
-        player: true,
-        device: true,
-        ipAddress: true,
-        startedAt: true,
-        playMethod: true,
-        videoCodec: true,
-        audioCodec: true,
-        resolution: true,
-        bitrate: true,
-        videoDecision: true,
-        audioDecision: true,
-        container: true,
-      },
-    });
-
-    const sessionPosterMap: Record<number, string | null> = {};
-    const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
-    if (tmdbIds.length > 0) {
-      const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
-      const cacheRows = await prisma.tmdbCache.findMany({
-        where: { key: { in: cacheKeys } },
-        select: { key: true, data: true },
-      });
-      for (const row of cacheRows) {
-        try {
-          const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-          if (parsed.posterPath) {
-            const id = parseInt(row.key.split(":")[1] ?? "", 10);
-            if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
-          }
-        } catch { }
-      }
-    }
-
-    emitSSE({
-      type: "activity:sessions",
-      sessions: allSessions.map((s) => ({
-        id: s.id,
-        source: s.source,
-        state: s.state,
-        mediaServerUserId: s.mediaServerUserId,
-        serverUsername: s.serverUsername,
-        title: s.title,
-        tmdbId: s.tmdbId,
-        mediaType: s.mediaType,
-        year: s.year,
-        seasonNumber: s.seasonNumber,
-        episodeNumber: s.episodeNumber,
-        episodeTitle: s.episodeTitle,
-        progressPercent: s.progressPercent,
-        progressMs: Number(s.progressMs),
-        durationMs: Number(s.durationMs),
-        platform: s.platform,
-        player: s.player,
-        device: s.device,
-        ipAddress: s.ipAddress,
-        startedAt: s.startedAt.toISOString(),
-        playMethod: s.playMethod,
-        videoCodec: s.videoCodec,
-        audioCodec: s.audioCodec,
-        resolution: s.resolution,
-        bitrate: s.bitrate,
-        videoDecision: s.videoDecision,
-        audioDecision: s.audioDecision,
-        container: s.container,
-        posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
-      })),
-    });
+    await emitActiveSessionsSnapshot();
 
     await cleanupStaleSessions(30);
 
