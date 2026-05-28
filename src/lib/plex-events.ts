@@ -311,7 +311,7 @@ class PlexEventStreamManager {
       stale.map(async (session) => {
         markPlexSessionFinalized(session.id, nowMs);
         try {
-          await recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }));
+          await recordCompletedSession(applyFinalTick(session, now), { stoppedAt: now });
         } catch (err) {
           console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
         }
@@ -376,13 +376,12 @@ class PlexEventStreamManager {
 
       const now = new Date();
       const finalized = applyFinalTick(existing, now, {
-        stoppedAt: now,
         ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
           ? { progressMs: BigInt(Math.floor(viewOffset)) }
           : {}),
       });
 
-      await recordCompletedSession(finalized);
+      await recordCompletedSession(finalized, { stoppedAt: now });
 
       // SSE is the authoritative stop signal. recordCompletedSession's CAS on
       // lastSeenAt may have left the ActiveSession row in place if the poller

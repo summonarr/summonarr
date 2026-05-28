@@ -269,23 +269,28 @@ export function computePlaytimeIncrement(
 // (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt
 // and the close event is counted. cleanupStaleSessions does not use this — a stale session has no
 // signal it was still playing.
+//
+// Do NOT overwrite session.lastSeenAt here. recordCompletedSession's deleteMany uses lastSeenAt
+// as the CAS reference against the DB row; mutating it would compare the row to a fabricated
+// "now" rather than the value we read, the CAS would never match, and finalized sessions would
+// stay in the ActiveSession table until cleanupStaleSessions(30) caught them 30 minutes later.
+// Pass stoppedAt via recordCompletedSession's opts instead.
 export function applyFinalTick(
   session: ActiveSession,
   now: Date,
-  override?: { progressMs?: bigint; stoppedAt?: Date },
+  override?: { progressMs?: bigint },
 ): ActiveSession {
   const increment = computePlaytimeIncrement(session, now);
   return {
     ...session,
     playtimeMs: session.playtimeMs + increment,
     ...(override?.progressMs !== undefined ? { progressMs: override.progressMs } : {}),
-    ...(override?.stoppedAt ? { lastSeenAt: override.stoppedAt } : {}),
   };
 }
 
 export async function recordCompletedSession(
   session: ActiveSession,
-  opts: { skipSSE?: boolean } = {},
+  opts: { skipSSE?: boolean; stoppedAt?: Date } = {},
 ): Promise<void> {
   // The polling sync may leave playtimeMs at zero for short watches that disappear between two
   // 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes 0.
@@ -318,7 +323,11 @@ export async function recordCompletedSession(
   const watched = calculateWatched(playDurationMs, totalDurationMs, threshold);
 
   const now = new Date();
-  const stoppedAt = session.lastSeenAt > session.startedAt ? session.lastSeenAt : now;
+  // Explicit stoppedAt from the caller (SSE stop event, poll stall/stale detection) wins; otherwise
+  // fall back to the row's lastSeenAt for paths that don't synthesize a stop time
+  // (cleanupStaleSessions).
+  const stoppedAt =
+    opts.stoppedAt ?? (session.lastSeenAt > session.startedAt ? session.lastSeenAt : now);
 
   const totalElapsedS = Math.max(0, Math.floor((stoppedAt.getTime() - session.startedAt.getTime()) / 1000));
   const durationS = Math.max(0, Math.floor(totalDurationMs / 1000));
