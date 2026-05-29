@@ -16,6 +16,8 @@ import {
   clearActivityCache,
   calculateWatched,
   getWatchedThreshold,
+  isPlayHistoryEnabled,
+  isSourceEnabled,
   MediaServerMismatchError,
 } from "@/lib/play-history";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -36,6 +38,70 @@ async function resolveTmdbForMovie(itemId: string, providerIds?: Record<string, 
   return { tmdbId: lib?.tmdbId ?? null, mediaType: (lib?.mediaType as MediaType) ?? null };
 }
 
+// ── Live-vs-cron dedup ───────────────────────────────────────────────────────
+// The 5s live poller (src/app/api/sync/play-history) is the canonical, metadata-
+// rich writer for Jellyfin completed sessions — it captures codec/transcode/
+// resolution/device/IP that PlaybackReporting and IsPlayed don't. This cron is a
+// *backfill* that must only insert plays the live poller never saw (server
+// downtime, history that predates install). Without this guard the same watch
+// lands twice: once live (`sessionKey:startedAt`) and once here (`jf-pr:`/
+// `jf-hist:`), inflating play counts and watch hours on admin/activity.
+//
+// Margin absorbs the gap between when the poller first *saw* the session
+// (ActiveSession.startedAt ≈ first-poll observation) and PlaybackReporting's
+// recorded start, plus clock skew between Summonarr and the Jellyfin host.
+const LIVE_DEDUP_MARGIN_MS = 10 * 60 * 1000;
+
+type LiveInterval = { startMs: number; endMs: number };
+
+// Load live-origin (non-cron) Jellyfin PlayHistory intervals, keyed
+// `${mediaServerUserId}:${sourceItemId}`. Cron-written rows (jf-pr:/jf-hist:)
+// are excluded so a prior backfill can't suppress a later one.
+async function loadLiveJellyfinIntervals(
+  msUserIds: string[],
+  itemIds: string[] | null,
+): Promise<Map<string, LiveInterval[]>> {
+  const map = new Map<string, LiveInterval[]>();
+  if (msUserIds.length === 0) return map;
+  const rows = await prisma.playHistory.findMany({
+    where: {
+      source: "jellyfin",
+      mediaServerUserId: { in: msUserIds },
+      ...(itemIds && itemIds.length > 0
+        ? { sourceItemId: { in: itemIds } }
+        : { sourceItemId: { not: null } }),
+      NOT: [
+        { sourceSessionId: { startsWith: "jf-pr:" } },
+        { sourceSessionId: { startsWith: "jf-hist:" } },
+      ],
+    },
+    select: { mediaServerUserId: true, sourceItemId: true, startedAt: true, stoppedAt: true },
+  }).catch(() => [] as { mediaServerUserId: string; sourceItemId: string | null; startedAt: Date; stoppedAt: Date }[]);
+  for (const r of rows) {
+    if (!r.sourceItemId) continue;
+    const key = `${r.mediaServerUserId}:${r.sourceItemId}`;
+    const arr = map.get(key) ?? [];
+    arr.push({ startMs: r.startedAt.getTime(), endMs: r.stoppedAt.getTime() });
+    map.set(key, arr);
+  }
+  return map;
+}
+
+// True when a live row's [start, end] window overlaps the imported play's
+// [start, end] window once both are widened by LIVE_DEDUP_MARGIN_MS.
+function liveCovers(
+  intervals: LiveInterval[] | undefined,
+  playStartMs: number,
+  playEndMs: number,
+): boolean {
+  if (!intervals) return false;
+  return intervals.some(
+    (iv) =>
+      iv.startMs <= playEndMs + LIVE_DEDUP_MARGIN_MS &&
+      iv.endMs >= playStartMs - LIVE_DEDUP_MARGIN_MS,
+  );
+}
+
 // ── PlaybackReporting plugin path ────────────────────────────────────────────
 // Requires the Jellyfin PlaybackReporting plugin. Returns every individual
 // play session with accurate play durations. When the plugin is absent the
@@ -45,7 +111,7 @@ async function importFromPlaybackReporting(
   apiKey: string,
   userMap: Map<string, string>,  // jellyfin userId → mediaServerUser.id
   lastSyncDate?: string,
-): Promise<{ imported: number; errors: number } | null> {
+): Promise<{ imported: number; errors: number; deduped: number } | null> {
   const rows = await getJellyfinPlaybackReporting(baseUrl, apiKey, lastSyncDate);
   if (!rows) return null; // plugin absent
 
@@ -136,8 +202,15 @@ async function importFromPlaybackReporting(
     return tmdbCache.get(key) ?? null;
   };
 
+  // Prefetch live-captured rows for the (user, item) pairs in this import batch
+  // so we can skip any play the canonical live poller already recorded.
+  const importMsUserIds = [...new Set(rows.map((r) => userMap.get(r.userId)).filter((v): v is string => !!v))];
+  const importItemIds = [...new Set(rows.map((r) => r.itemId).filter((v): v is string => !!v))];
+  const liveIntervals = await loadLiveJellyfinIntervals(importMsUserIds, importItemIds);
+
   let imported = 0;
   let errors = 0;
+  let deduped = 0;
 
   for (const row of rows) {
     const msUserId = userMap.get(row.userId);
@@ -173,6 +246,13 @@ async function importFromPlaybackReporting(
       const playedAt = new Date(row.date);
       const playDurationS = Math.max(0, Math.floor(row.playDuration));
       const stoppedAt = new Date(playedAt.getTime() + playDurationS * 1000);
+
+      // Skip plays the canonical live poller already captured (richer metadata).
+      // This cron only backfills sessions the poller never saw.
+      if (liveCovers(liveIntervals.get(`${msUserId}:${row.itemId}`), playedAt.getTime(), stoppedAt.getTime())) {
+        deduped++;
+        continue;
+      }
 
       // Use the real runtime where Jellyfin gave us one; otherwise 0 means "unknown"
       // and the row is honestly not credited toward completion stats.
@@ -229,7 +309,7 @@ async function importFromPlaybackReporting(
     }
   }
 
-  return { imported, errors };
+  return { imported, errors, deduped };
 }
 
 // ── IsPlayed fallback path ───────────────────────────────────────────────────
@@ -239,9 +319,16 @@ async function importFromIsPlayed(
   baseUrl: string,
   apiKey: string,
   users: Array<{ id: string; sourceUserId: string; username: string }>,
-): Promise<{ imported: number; errors: number }> {
+): Promise<{ imported: number; errors: number; deduped: number }> {
   let imported = 0;
   let errors = 0;
+  let deduped = 0;
+
+  // Prefetch live-captured rows for these users so the coarse IsPlayed backfill
+  // (one row per item, last play only) doesn't duplicate a watch the live poller
+  // already recorded with full metadata. itemIds are unknown until we stream the
+  // pages, so this is keyed on user only and filtered per-item in the loop.
+  const liveIntervals = await loadLiveJellyfinIntervals(users.map((u) => u.id), null);
 
   for (const user of users) {
     try {
@@ -270,6 +357,14 @@ async function importFromIsPlayed(
               ? Math.max(0, Math.floor(item.durationTicks / 10_000_000))
               : 0;
             const stoppedAt = new Date(datePlayed.getTime() + durationS * 1000);
+
+            // Skip if the live poller already captured this watch. datePlayed is
+            // Jellyfin's LastPlayedDate (≈ the end of the play); treat the play
+            // window as [datePlayed - runtime, datePlayed].
+            if (liveCovers(liveIntervals.get(`${user.id}:${item.itemId}`), datePlayed.getTime() - durationS * 1000, datePlayed.getTime())) {
+              deduped++;
+              continue;
+            }
 
             const title = item.itemType === "Episode"
               ? (item.seriesName ?? item.title.split(" — ")[0] ?? item.title)
@@ -318,7 +413,7 @@ async function importFromIsPlayed(
     }
   }
 
-  return { imported, errors };
+  return { imported, errors, deduped };
 }
 
 export async function POST(request: NextRequest) {
@@ -339,6 +434,14 @@ export async function POST(request: NextRequest) {
 
       if (!urlRow?.value || !keyRow?.value) {
         return NextResponse.json({ skipped: true, reason: "Jellyfin not configured" });
+      }
+
+      // Respect the admin play-history toggles. The live poller already gates on
+      // these in /api/sync/play-history; without the same check here, turning
+      // Jellyfin (or all) play history off in settings wouldn't stop this cron
+      // from importing — the toggle would be a half-measure.
+      if (!(await isPlayHistoryEnabled()) || !(await isSourceEnabled("jellyfin"))) {
+        return NextResponse.json({ skipped: true, reason: "Jellyfin play history disabled" });
       }
 
       const baseUrl = urlRow.value.replace(/\/$/, "");
@@ -415,6 +518,7 @@ export async function POST(request: NextRequest) {
       let method: "playback-reporting" | "is-played";
       let imported: number;
       let errors: number;
+      let deduped: number;
 
       const prResult = await importFromPlaybackReporting(baseUrl, apiKey, userMap, lastSyncDate);
 
@@ -422,11 +526,13 @@ export async function POST(request: NextRequest) {
         method = "playback-reporting";
         imported = prResult.imported;
         errors = prResult.errors;
+        deduped = prResult.deduped;
       } else {
         method = "is-played";
         const isPlayedResult = await importFromIsPlayed(baseUrl, apiKey, jellyfinUsers);
         imported = isPlayedResult.imported;
         errors = isPlayedResult.errors;
+        deduped = isPlayedResult.deduped;
       }
 
       // Only stamp on the PlaybackReporting path — it uses the timestamp as an incremental lower bound.
@@ -450,7 +556,7 @@ export async function POST(request: NextRequest) {
 
       // Non-2xx on error so withCronRunRecording marks ok=false.
       const status = errors > 0 ? 500 : 200;
-      return NextResponse.json({ method, imported, errors, users: jellyfinUsers.length, durationMs }, { status });
+      return NextResponse.json({ method, imported, deduped, errors, users: jellyfinUsers.length, durationMs }, { status });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   ));
