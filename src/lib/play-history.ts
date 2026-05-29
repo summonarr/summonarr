@@ -253,6 +253,15 @@ const MIN_PLAY_DURATION_S = 90;
 // Cap any single accumulation delta. Protects against missed events, machine sleep, or clock skew
 // inflating playtime. cleanupStaleSessions(30) handles ghost sessions; this is the per-event guard.
 export const MAX_PLAYTIME_DELTA_MS = 5 * 60 * 1000;
+// Grace window before a session that has disappeared from the upstream snapshot
+// (/status/sessions for Plex, /Sessions for Jellyfin) is treated as stopped.
+// Why: pause flickers — Plex Web spuriously emits state="stopped" on pause,
+// and some Jellyfin clients briefly clear NowPlayingItem on background — would
+// otherwise write a stopped PlayHistory row + delete the ActiveSession on every
+// pause. Sessions that miss N consecutive 5s polls (≈12 polls @ 60s) are
+// finalized; pauses that resume within the window are preserved as still-live.
+// cleanupStaleSessions(30) is the longer 30-min safety net beneath this.
+export const SESSION_ABSENCE_GRACE_MS = 60_000;
 
 // Returns the bigint to add to ActiveSession.playtimeMs when applying an event at `now`.
 // Only accumulates when the prior state was "playing" — pause/buffer/initial state contribute nothing.

@@ -372,6 +372,28 @@ class PlexEventStreamManager {
         return;
       }
 
+      // Plex Web and several cast/mobile clients emit a spurious state="stopped"
+      // SSE event on pause, app-background, or player-navigation transitions —
+      // not just on real stops. Without this cross-check, every such event
+      // writes a Stopped PlayHistory row, deletes the ActiveSession, and ledger-
+      // locks the sessionKey so the next poll can't even resurrect it as paused.
+      // Confirm against /status/sessions: if Plex still reports the session in
+      // any state (playing, paused, buffering), treat the SSE as advisory and
+      // let the 5s poller drive state going forward. The poller's stall
+      // detector + grace window catch true stops within 60s as the backstop.
+      if (this.currentUrl && this.currentToken) {
+        try {
+          const sessions = await getPlexSessions(this.currentUrl, this.currentToken);
+          if (sessions.some((s) => s.sessionKey === sessionKey)) return;
+        } catch (err) {
+          // Network blip cross-checking — fall through and finalize. Real stops
+          // should win over transient errors; the 1h ledger entry below
+          // prevents a racey reappearance from recreating the row.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[plex-events] cross-check failed for ${id}: ${msg}`);
+        }
+      }
+
       markPlexSessionFinalized(id);
 
       const now = new Date();

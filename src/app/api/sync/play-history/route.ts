@@ -12,6 +12,7 @@ import {
   computePlaytimeIncrement,
   applyFinalTick,
   emitActiveSessionsSnapshot,
+  SESSION_ABSENCE_GRACE_MS,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
@@ -247,7 +248,17 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
     where: { source: "plex" },
   });
 
-  const stale = activePlexSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  // Grace window: only finalize sessions that have been missing from
+  // /status/sessions for SESSION_ABSENCE_GRACE_MS. A single dropped poll (Plex
+  // hiccup, paused client briefly dropped from the snapshot) shouldn't write a
+  // PlayHistory row and ledger-lock the sessionKey. Real stops linger up to
+  // 60s as "Now Playing" before finalize, but the SSE feed catches them in
+  // real-time as long as it's connected; this is the fallback when SSE is down.
+  const stale = activePlexSessions.filter(
+    (session) =>
+      !seenSessionKeys.has(session.sessionKey)
+      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+  );
   const finalized = await Promise.all(
     stale.map((session) => {
       // Gate re-create against a racey Plex /status/sessions reappearance,
@@ -471,7 +482,17 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
     where: { source: "jellyfin" },
   });
 
-  const stale = activeJfSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  // Grace window: only finalize sessions missing from /Sessions for
+  // SESSION_ABSENCE_GRACE_MS. Jellyfin clients can briefly clear NowPlayingItem
+  // (the filter on getJellyfinSessions) during pause-related transitions —
+  // browser tab background, app reload, network reconnect — without the user
+  // actually stopping. Real stops are detected within ~60s as the trade-off.
+  const nowMs = now.getTime();
+  const stale = activeJfSessions.filter(
+    (session) =>
+      !seenSessionKeys.has(session.sessionKey)
+      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+  );
   const finalized = await Promise.all(
     stale.map((session) =>
       // skipSSE: see Plex branch above; one batched SSE per cron run.
