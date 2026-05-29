@@ -333,6 +333,14 @@ class PlexEventStreamManager {
       return;
     }
 
+    // A successful getPlexSessions() against the local server is authoritative
+    // proof it's online — override any stale plex.tv-relay "offline" heuristic.
+    // Plex only emits a ReachabilityNotification on *change*, so a `false`
+    // observed during a relay blip (or while remote access is simply off) would
+    // otherwise persist forever even though the server is plainly reachable. The
+    // lastReachable guard in persistReachability keeps this a no-op once true.
+    void this.persistReachability(true);
+
     const seenKeys = new Set<string>();
     for (const s of plexSessions) {
       if (s.sessionKey) seenKeys.add(s.sessionKey);
@@ -504,7 +512,16 @@ class PlexEventStreamManager {
     }
   }
 
+  // Last reachability value this process persisted. Guards the upsert + SSE
+  // emit so a value that hasn't changed (e.g. persistReachability(true) firing
+  // on every periodic SSE reconnect) doesn't write the row or fan out an event
+  // on every tick. null until the first persist, so a stale false in the DB is
+  // always corrected on the first connect.
+  private lastReachable: boolean | null = null;
+
   private async persistReachability(reachable: boolean): Promise<void> {
+    // No-op when the value is unchanged since this process last persisted it.
+    if (this.lastReachable === reachable) return;
     // Setting is the single source of truth used by the UI to render the
     // server-reachability indicator. Store a JSON blob so we can add fields
     // (lastChangedAt etc) without a schema change.
@@ -515,6 +532,9 @@ class PlexEventStreamManager {
         create: { key: "plexServerReachable", value },
         update: { value },
       });
+      // Only record the value as persisted after the write succeeds, so a
+      // failed upsert is retried on the next call rather than silently latched.
+      this.lastReachable = reachable;
       // Broadcast so the UI updates without polling.
       const { emitSSE } = await import("./sse-emitter");
       emitSSE({ type: "plex:reachability", reachable });

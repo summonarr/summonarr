@@ -455,7 +455,8 @@ export function ActivityNowPlaying({
   source?: string;
   mediaType?: string;
   // null = unknown (no Plex configured / no notification observed yet),
-  // true = reachable via plex.tv, false = remote access offline. Read
+  // true = local server reachable (proven on each SSE connect) and/or plex.tv
+  // remote access up, false = Plex reported no plex.tv remote access. Read
   // server-side from Setting('plexServerReachable'); SSE updates flow via
   // the plex:reachability event below.
   initialPlexReachable?: boolean | null;
@@ -514,7 +515,7 @@ export function ActivityNowPlaying({
             {plexReachable === false && (
               <span
                 className="ds-mono"
-                title="Plex server is offline (no plex.tv remote access). Reported by Plex's SSE ReachabilityNotification."
+                title="Plex has no plex.tv remote access — the server may still be reachable on your local network. Reported by Plex's SSE ReachabilityNotification."
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -532,7 +533,7 @@ export function ActivityNowPlaying({
                     background: "var(--ds-warning, #c84)",
                   }}
                 />
-                Plex offline
+                No remote access
               </span>
             )}
             <span
