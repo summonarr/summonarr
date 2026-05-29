@@ -278,7 +278,12 @@ export async function getSessionDurations(): Promise<SessionDurations> {
 }
 
 export function isTokenExpired(session: SummonarrSession | null): boolean {
-  if (!session) return false;
+  // A null session is not a valid, unexpired session — report expired. Every
+  // current caller guards with `!session || …` or a `session?.… &&` short-
+  // circuit, so this only hardens against a future caller that writes
+  // `if (!isTokenExpired(session)) allow()` and would otherwise treat a missing
+  // session as valid.
+  if (!session) return true;
   return !!session.tokenExpiresAt && Math.floor(Date.now() / 1000) > session.tokenExpiresAt;
 }
 
