@@ -12,6 +12,7 @@ import {
   computePlaytimeIncrement,
   applyFinalTick,
   emitActiveSessionsSnapshot,
+  reanchorActiveSessionsOnBoot,
   SESSION_ABSENCE_GRACE_MS,
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
@@ -680,6 +681,14 @@ async function syncPlayHistory(request: NextRequest) {
   const results: Record<string, unknown> = {};
 
   try {
+    // Boot re-anchor (once per process, no-op afterwards): give every existing
+    // ActiveSession a fresh absence-grace window measured from now, so a
+    // restart's downtime doesn't make this run's stale sweep finalize a session
+    // that's still playing. Covers Plex AND Jellyfin in one write; if the SSE
+    // bootstrap already ran it, this is a no-op. Must run before the source
+    // syncs read their ActiveSession rows below.
+    await reanchorActiveSessionsOnBoot();
+
     const [plexEnabled, jellyfinEnabled, settingRows] = await Promise.all([
       isSourceEnabled("plex"),
       isSourceEnabled("jellyfin"),

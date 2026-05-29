@@ -269,6 +269,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     Rule: refresh `progressUpdatedAt` whenever the playhead **moved** (`s.viewOffset !== existing.progressMs` / `BigInt(viewOffset) !== prior.progressMs`), forward *or* backward — not only on a strict forward advance. The poller does this via `playheadMoved`; SSE does this on `transitionedToPlaying || playheadMoved`. Don't regress either to `>` or to transition-only.
 
+21. **`ActiveSession.lastSeenAt` must be re-anchored to "now" once at boot, before any absence-finalize runs.**
+
+    Why:
+    - `lastSeenAt` is the "we last saw this session live" anchor for all three finalize paths: the SSE bootstrap reconcile ([plex-events.ts](src/lib/plex-events.ts) `bootstrapReconcile`), the 5s poller's stale sweep ([sync/play-history/route.ts](src/app/api/sync/play-history/route.ts)), and `cleanupStaleSessions`.
+    - A restart (Docker upgrade, host reboot) takes the poller and SSE down for the whole outage, so every row's `lastSeenAt` is stale by the downtime and the `>= SESSION_ABSENCE_GRACE_MS` (60s) grace becomes trivially true the instant the process comes back.
+    - On the first boot snapshot a session can be briefly absent from `/status/sessions` — Plex still spinning up, an incomplete session list, or a Plex-side `sessionKey` reset. With the grace defeated, that single transient absence **finalizes AND ledger-locks a session that's still playing**, and the now-playing card never returns (matches the reported "restart marked my stream stopped and never picked it back up").
+
+    Rule: call `reanchorActiveSessionsOnBoot()` ([play-history.ts](src/lib/play-history.ts)) — an in-memory once-guarded `updateMany` that sets `lastSeenAt = now` for every row — at the top of BOTH `bootstrapReconcile` and the poller's `syncPlayHistory`, before either reads rows for its stale sweep. Whichever runs first wins; it covers Plex and Jellyfin in one write. A genuinely-ended session is still finalized ~60s after boot once confirmed absent across real post-boot observations. Don't move the finalize ahead of the re-anchor, and don't measure the grace off a pre-restart timestamp.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

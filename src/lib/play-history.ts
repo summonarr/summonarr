@@ -637,6 +637,43 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
   });
 }
 
+// In-memory once-guard. Resets on process restart — which is exactly when we
+// want to re-anchor again.
+let activeSessionsReanchored = false;
+
+// On the FIRST reconcile after this process started, bump lastSeenAt = now for
+// every ActiveSession row so the absence grace (SESSION_ABSENCE_GRACE_MS) and
+// cleanupStaleSessions are measured from boot, not from the last poll before
+// the process went down.
+//
+// Why: lastSeenAt is the "we last saw this session live" anchor for all three
+// finalize paths — the SSE bootstrap reconcile, the 5s poller's stale sweep,
+// and cleanupStaleSessions. After a restart (Docker upgrade, host reboot) the
+// poller and SSE were down for the entire outage, so every row's lastSeenAt is
+// stale by the downtime and the >=60s grace becomes trivially true. A single
+// transient absence at boot — Plex still spinning up, an incomplete
+// /status/sessions, or a Plex-side sessionKey reset — then finalizes AND
+// ledger-locks a session that's actually still playing, and the now-playing
+// card never returns. Re-anchoring restores the grace: an ongoing session that
+// is present in the snapshot keeps getting bumped and is never killed; a
+// session that genuinely ended during the outage is finalized ~60s after boot
+// once it's been confirmed absent across real post-boot observations.
+//
+// Idempotent per process; safe to call from both the SSE bootstrap and the
+// poller (whichever runs first wins). On failure the guard is released so the
+// next caller retries rather than leaving sessions exposed to the stale-anchor
+// finalize.
+export async function reanchorActiveSessionsOnBoot(): Promise<void> {
+  if (activeSessionsReanchored) return;
+  activeSessionsReanchored = true;
+  try {
+    await prisma.activeSession.updateMany({ data: { lastSeenAt: new Date() } });
+  } catch (err) {
+    activeSessionsReanchored = false;
+    console.warn("[play-history] boot re-anchor of ActiveSession.lastSeenAt failed:", err);
+  }
+}
+
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
   const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
   const stale = await prisma.activeSession.findMany({

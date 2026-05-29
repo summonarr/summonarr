@@ -17,7 +17,7 @@
 
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
-import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
+import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import { getPlexSessions } from "./plex";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
@@ -309,6 +309,12 @@ class PlexEventStreamManager {
   }
 
   private async bootstrapReconcile(url: string, token: string): Promise<void> {
+    // Re-anchor lastSeenAt to boot time BEFORE reading the rows, so a restart's
+    // downtime can't make the absence-grace check below trivially true and
+    // finalize a still-playing session on the first (fragile) boot snapshot.
+    // Once-guarded — only the first reconcile after process start does this.
+    await reanchorActiveSessionsOnBoot();
+
     let plexSessions;
     let activeDbRows;
     try {
