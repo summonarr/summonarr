@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter } from "@/lib/play-history";
+import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import {
@@ -124,16 +124,25 @@ export default async function ActivityPage({
   // (manual edit, schema drift) falls back to null (= "unknown") instead of
   // crashing the page.
   //
-  // Gate on Plex actually being configured (url + token). A stale
-  // plexServerReachable=false from a prior config lingers in the Setting table,
-  // and the self-heal in plex-events only fires when the Plex SSE connects — so
-  // for a Jellyfin-only (or Plex-removed) instance there's nothing to clear it.
-  // No Plex config → null (= "unknown") so the badge stays hidden.
+  // Only trust the reachability flag when the Plex SSE that maintains it is
+  // actually running. plexServerReachable is written *exclusively* by the SSE
+  // (ReachabilityNotification + the connect-time self-heal in plex-events), and
+  // the SSE only runs when play-history is enabled AND the Plex source is
+  // enabled AND url+token are set (see doReconcile's `shouldRun`). If any of
+  // those is off, a stale {reachable:false} from a prior config is never
+  // updated and the self-heal can never clear it — so the badge must not be
+  // driven by it. Gating here on the same conditions keeps the badge's
+  // visibility aligned with the only thing that keeps its data fresh.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
   const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
+  const [phEnabled, plexSourceEnabled] = await Promise.all([
+    isPlayHistoryEnabled(),
+    isSourceEnabled("plex"),
+  ]);
+  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
   let initialPlexReachable: boolean | null = null;
   const reachableValue = plexSettings.get("plexServerReachable");
-  if (plexConfigured && reachableValue) {
+  if (plexSseActive && reachableValue) {
     try {
       const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
       if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
