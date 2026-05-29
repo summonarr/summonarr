@@ -85,8 +85,20 @@ function buildSqlStream(
                       `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY array_position(i.indkey, a.attnum)`,
                       `"public"."${table}"`,
                     );
-                    orderClause = pkRows.length > 0
-                      ? "ORDER BY " + pkRows.map((r) => `"${r.attname}"`).join(", ")
+                    // Identifiers come from pg_attribute (DB-owner trusted), but
+                    // pattern-match what could go wrong if that trust boundary
+                    // ever loosens: reject anything that's not a sane Postgres
+                    // identifier and double-quote-escape what remains. This
+                    // closes any future SQL-injection regression at the source.
+                    const safeIdents: string[] = [];
+                    for (const r of pkRows) {
+                      if (!/^[A-Za-z0-9_]{1,63}$/.test(r.attname)) {
+                        throw new Error(`[db-export] refusing unsafe PK column name: ${JSON.stringify(r.attname)}`);
+                      }
+                      safeIdents.push(`"${r.attname.replace(/"/g, '""')}"`);
+                    }
+                    orderClause = safeIdents.length > 0
+                      ? "ORDER BY " + safeIdents.join(", ")
                       : "";
                   }
                   rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(

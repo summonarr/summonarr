@@ -572,6 +572,7 @@ enum AuditAction {
   BATCH_REQUEST_DECLINE
   VOTE_DISMISS_ALL
   SERVER_USERS_BULK
+  PLEX_SESSION_TERMINATE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -651,6 +652,35 @@ model PlayHistory {
   container     String?    @db.VarChar(32)
   transcodeReason String?  @db.VarChar(500) // Why the server transcoded, from Plex transcodeSession / Jellyfin TranscodingInfo.TranscodeReasons. Comma-joined when multiple. Null/Unknown for sessions recorded before this was captured.
 
+  // Network / connection metadata (Plex). Populated from /status/sessions
+  // Session and Player sub-objects: location is "lan" | "wan" | "relay",
+  // bandwidth is the server-reported session bandwidth in kbps, secure
+  // reflects whether the client connected over HTTPS, relayed indicates
+  // playback travelled through plex.tv's relay proxy.
+  location  String? @db.VarChar(16)
+  bandwidth Int? // kbps
+  secure    Boolean?
+  relayed   Boolean?
+
+  // Intro/credits markers from /library/metadata/{ratingKey}?includeMarkers=1.
+  // Offsets are in milliseconds relative to the start of the file. Stored on
+  // PlayHistory so completion + watched detection can treat content end at
+  // creditsStartMs rather than raw duration (Plex clients commonly leave the
+  // player at viewOffset ≈ duration even when the user actually stopped at
+  // the credits roll, undercounting "watched" at the default 80% threshold).
+  introStartMs    Int?
+  introEndMs      Int?
+  creditsStartMs  Int?
+  creditsEndMs    Int?
+
+  // Resume-grouping. Set to the previous PlayHistory.id when this row is
+  // the continuation of an unwatched watch of the same media by the same
+  // user (Tautulli-style reference_id). UI groups history rows sharing a
+  // referenceId chain so "paused on Monday, finished on Tuesday" shows as
+  // one logical viewing. Self-link when the row starts its own chain — see
+  // applyResumeGrouping in src/lib/play-history.ts.
+  referenceId String? @db.VarChar(32)
+
   createdAt DateTime @default(now())
 
   @@unique([source, sourceSessionId])
@@ -661,6 +691,7 @@ model PlayHistory {
   @@index([source, sourceSessionId])
   @@index([source, sourceItemId, mediaServerUserId, startedAt])
   @@index([watched])
+  @@index([referenceId])
   // Powers the arc-detection window functions in getMostPopularOnServer — partition key
   // (user, tmdbId, mediaType, season, episode) ordered by startedAt lets Postgres skip the sort.
   @@index([mediaServerUserId, tmdbId, mediaType, seasonNumber, episodeNumber, startedAt])
@@ -700,6 +731,12 @@ model ActiveSession {
   // Progress
   progressPercent Float  @default(0)
   progressMs      BigInt @default(0) // Playhead position in the file (last known viewOffset / PlaybackPositionTicks). Drives PlayHistory.completed.
+  // Wall-clock timestamp of the last poll that observed progressMs increasing. Drives Plex
+  // stall detection: when Plex keeps a session in /status/sessions after the client quit
+  // (mobile/TV especially, up to 30 min), the playhead freezes while state still reports
+  // "playing". progressUpdatedAt aging past STALL_THRESHOLD_MS in that state finalizes the
+  // session early instead of waiting on cleanupStaleSessions(30).
+  progressUpdatedAt DateTime @default(now())
   playtimeMs      BigInt @default(0) // Accumulated wall-clock ms spent in the "playing" state. Drives PlayHistory.playDuration / watched.
   durationMs      BigInt @default(0)
 
@@ -717,6 +754,20 @@ model ActiveSession {
   audioDecision String?  @db.VarChar(32)
   container     String?  @db.VarChar(32)
   transcodeReason String? @db.VarChar(500)
+
+  // Network connection metadata (Plex). See PlayHistory.location/bandwidth/secure/relayed.
+  location  String? @db.VarChar(16)
+  bandwidth Int?
+  secure    Boolean?
+  relayed   Boolean?
+
+  // Intro/credits markers fetched once at session start. The values stay
+  // pinned through the playback so finalize can stamp them on PlayHistory
+  // without a re-fetch of /library/metadata at stop time.
+  introStartMs   Int?
+  introEndMs     Int?
+  creditsStartMs Int?
+  creditsEndMs   Int?
 
   @@unique([source, sessionKey])
   @@index([source])

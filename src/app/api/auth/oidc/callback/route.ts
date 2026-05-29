@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { findOrCreateOidcUser, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
+import { findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
   exchangeOidcCode,
@@ -63,6 +63,10 @@ export async function GET(req: NextRequest) {
     return loginErrorRedirect(req, "oidc_user_rejected");
   }
 
+  if (dbUser === PROVIDER_REBIND_REQUIRED) {
+    return loginErrorRedirect(req, "oidc_rebind_required");
+  }
+
   // Keep notificationEmail in lock-step with the OIDC provider's email claim
   // on every sign-in. Mirrors the events.signIn handler in next-auth's flow.
   if (claims.email) {
@@ -79,7 +83,14 @@ export async function GET(req: NextRequest) {
   });
 
   const base = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? new URL("/", req.url).toString();
-  const res = NextResponse.redirect(new URL("/", base).toString());
+  // returnTo was already validated at /start (must start with "/", not "//")
+  // and signed into the state cookie, so re-validating here is belt-and-
+  // suspenders — defends against a future regression in /start.
+  const safeReturn =
+    flowState.returnTo && flowState.returnTo.startsWith("/") && !flowState.returnTo.startsWith("//")
+      ? flowState.returnTo
+      : "/";
+  const res = NextResponse.redirect(new URL(safeReturn, base).toString());
   res.headers.append(
     "Set-Cookie",
     serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { resolveToSafeUrl } from "@/lib/ssrf";
 import { encryptToken } from "@/lib/token-crypto";
+import { sanitizeText } from "@/lib/sanitize";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
@@ -74,7 +75,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
   const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
 
-  const sanitizedLabel = label ? label.replace(/[<>]/g, "").replace(/\0/g, "").trim().slice(0, 100) || undefined : undefined;
+  // sanitizeText also strips control chars and Unicode bidi-overrides, which
+  // matters because labels get captured by the audit log (auditContext bundles
+  // user-controlled strings into `details`) — a bidi-override would otherwise
+  // let a user spoof apparent identity in audit-table views.
+  const sanitizedLabel = label
+    ? (sanitizeText(label).slice(0, 100) || undefined)
+    : undefined;
 
   // Cap-check + oldest-eviction + upsert all live in one transaction so two
   // concurrent registrations can't both pass the count check and end up with

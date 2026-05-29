@@ -62,7 +62,9 @@ export default async function RootLayout({
           provider: summonarrSessionClaims.provider,
           mediaServer: summonarrSessionClaims.mediaServer ?? null,
         },
-        sessionId: summonarrSessionClaims.sessionId,
+        // sessionId intentionally omitted from the client-bootstrap payload —
+        // server components that need it use auth() directly. Mirrors what
+        // /api/auth/me returns.
         expiresAt: summonarrSessionClaims.expiresAt,
       }
     : null;

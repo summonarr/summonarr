@@ -11,7 +11,9 @@ export interface SummonarrSession {
     provider?: string;
     mediaServer?: string | null;
   };
-  sessionId?: string;
+  // sessionId intentionally omitted from the client shape: no client consumer
+  // reads it. Server components that need it use auth() which still carries
+  // the full claims.
   expiresAt?: number;
 }
 

@@ -12,7 +12,8 @@ export type LiveEvent =
   | { type: "issue:deleted"; issueId: string }
   | { type: "issuemessage:created"; issueId: string }
   | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
-  | { type: "activity:history-updated" };
+  | { type: "activity:history-updated" }
+  | { type: "plex:reachability"; reachable: boolean };
 
 export interface ActiveSessionLive {
   id: string;
@@ -44,6 +45,16 @@ export interface ActiveSessionLive {
   audioDecision: string | null;
   container: string | null;
   posterUrl: string | null;
+  // Network metadata from /status/sessions Session + Player sub-objects.
+  location: string | null;
+  bandwidth: number | null;
+  secure: boolean | null;
+  relayed: boolean | null;
+  // Intro/credits marker offsets in ms, from /library/metadata?includeMarkers=1.
+  introStartMs: number | null;
+  introEndMs: number | null;
+  creditsStartMs: number | null;
+  creditsEndMs: number | null;
 }
 
 type Subscriber = (event: LiveEvent) => void;

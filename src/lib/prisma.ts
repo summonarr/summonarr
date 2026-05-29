@@ -1,39 +1,16 @@
 import { PrismaClient } from "@/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { decryptToken, encryptToken } from "@/lib/token-crypto";
+import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
 
-// Hardcoded mirror of the SENSITIVE_KEYS set in src/app/api/settings/route.ts. Kept inline because
-// that route doesn't export the constant and importing the route module here would pull NextAuth +
-// half the API surface into the prisma client module-load graph. Update both lists together —
-// any divergence means a sensitive key written through the API is encrypted but read raw, or vice
-// versa.
-const SENSITIVE_KEYS = new Set<string>([
-  "plexAdminToken",
-  "jellyfinApiKey",
-  "vapidPrivateKey",
-  "webhookSecret",
-  "sonarrWebhookSecret",
-  "radarrWebhookSecret",
-  "discordBotToken",
-  "radarrApiKey",
-  "sonarrApiKey",
-  "tmdbApiKey",
-  "tmdbReadToken",
-  "omdbApiKey",
-  "mdblistApiKey",
-  "traktApiKey",
-  "traktClientId",
-  "traktClientSecret",
-  "ipinfoToken",
-  "resendApiKey",
-  "smtpPassword",
-  "discordClientSecret",
-  "oidcClientSecret",
-  "trashGithubToken",
-]);
+// Single source of truth — see src/lib/settings-sensitive-keys.ts. Previously
+// this list was duplicated in prisma.ts and settings/route.ts; the lists drifted
+// (six dead keys in this file with no counterpart in the writable schema), so
+// any add-a-key change had to remember both spots.
+const SENSITIVE_KEYS = SETTINGS_SENSITIVE_KEYS_SET;
 
 // Account columns whose contents are OAuth secrets and must never sit at rest in plaintext.
 const ACCOUNT_TOKEN_FIELDS = ["refresh_token", "access_token", "id_token"] as const;

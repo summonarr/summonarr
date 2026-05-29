@@ -16,6 +16,159 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
+// Plex ActiveSession.id is "plex:<sessionKey>". Strip the prefix for the
+// terminate endpoint, which expects the raw sessionKey.
+function plexSessionKeyFromId(id: string): string | null {
+  return id.startsWith("plex:") ? id.slice(5) : null;
+}
+
+// Format a ms offset as m:ss (or h:mm:ss if >=1h). Used for marker labels.
+function fmtOffset(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function MarkersChip({ s }: { s: ActiveSessionLive }) {
+  const hasIntro = s.introStartMs != null && s.introEndMs != null;
+  const hasCredits = s.creditsStartMs != null;
+  if (!hasIntro && !hasCredits) return null;
+  const creditsLabel = hasCredits
+    ? (s.creditsEndMs != null && s.creditsEndMs >= s.durationMs - 1000
+        ? `${fmtOffset(s.creditsStartMs!)}+`
+        : `${fmtOffset(s.creditsStartMs!)}–${fmtOffset(s.creditsEndMs ?? s.durationMs)}`)
+    : null;
+  return (
+    <div
+      className="ds-mono"
+      style={{
+        display: "flex",
+        gap: 8,
+        fontSize: 9.5,
+        color: "var(--ds-fg-subtle)",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {hasIntro && (
+        <span title="Intro marker (from Plex)">
+          <span style={{ color: "var(--ds-fg-disabled)" }}>INTRO </span>
+          {fmtOffset(s.introStartMs!)}–{fmtOffset(s.introEndMs!)}
+        </span>
+      )}
+      {hasCredits && (
+        <span title="Credits marker (from Plex)">
+          <span style={{ color: "var(--ds-fg-disabled)" }}>CREDITS </span>
+          {creditsLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function NetworkBadges({ s }: { s: ActiveSessionLive }) {
+  // Only render anything when at least one signal is present. Plex populates
+  // these; Jellyfin currently leaves them null.
+  if (s.location == null && s.secure == null && s.relayed == null) {
+    return <span style={{ color: "var(--ds-fg-disabled)" }}>—</span>;
+  }
+  const locColor = s.location === "lan"
+    ? "var(--ds-success, #2c9)"
+    : s.location === "relay"
+      ? "var(--ds-warning, #c84)"
+      : "var(--ds-fg-muted)";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {s.location && (
+        <span className="ds-mono" style={{ color: locColor, textTransform: "uppercase" }}>
+          {s.location}
+        </span>
+      )}
+      {s.relayed && (
+        <span
+          className="ds-mono"
+          style={{ color: "var(--ds-warning, #c84)" }}
+          title="Streaming through Plex's relay proxy"
+        >
+          RELAY
+        </span>
+      )}
+      {s.secure != null && (
+        <span
+          className="ds-mono"
+          style={{ color: s.secure ? "var(--ds-fg-subtle)" : "var(--ds-warning, #c84)" }}
+          title={s.secure ? "HTTPS connection" : "Plain HTTP connection"}
+        >
+          {s.secure ? "TLS" : "HTTP"}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function TerminateButton({ session }: { session: ActiveSessionLive }) {
+  const sessionKey = plexSessionKeyFromId(session.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!sessionKey) return null;
+  async function onClick() {
+    const reason = window.prompt(
+      "Reason shown to the user in their player:",
+      "Session terminated by an administrator.",
+    );
+    if (reason == null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/play-history/terminate-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionKey, reason }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: "Unknown error" }));
+        setError(typeof data.error === "string" ? data.error : "Failed");
+        setBusy(false);
+        return;
+      }
+      // The session row will disappear from the next activity:sessions SSE
+      // push (within ~1s) once Plex tears the stream down. Keep busy=true so
+      // the button doesn't flash re-enabled before the card removes itself.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        style={{
+          fontSize: 10.5,
+          padding: "3px 8px",
+          background: "transparent",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          color: busy ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
+          cursor: busy ? "default" : "pointer",
+        }}
+        title="Terminate this Plex session"
+      >
+        {busy ? "Terminating…" : "Terminate"}
+      </button>
+      {error && (
+        <span style={{ fontSize: 10.5, color: "var(--ds-fg-danger, #c44)" }}>
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // Plex reports bitrate in kbps; Jellyfin in bps — normalize to kbps.
 function toBitrateKbps(raw: number | null): number {
   if (!raw || raw <= 0) return 0;
@@ -137,6 +290,11 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
                   ? "BUFFERING"
                   : "PLAYING"}
             </span>
+            {s.source === "plex" && (
+              <span style={{ marginLeft: "auto" }}>
+                <TerminateButton session={s} />
+              </span>
+            )}
           </div>
           <h3
             style={{
@@ -216,6 +374,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           </span>
           <span>{Math.round(Math.min(s.progressPercent, 100))}%</span>
         </div>
+        <MarkersChip s={s} />
       </div>
 
       <div
@@ -280,6 +439,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
             )
           }
         />
+        <KeyVal k="Network" v={<NetworkBadges s={s} />} />
       </div>
     </article>
   );
@@ -289,14 +449,25 @@ export function ActivityNowPlaying({
   initialSessions,
   source,
   mediaType,
+  initialPlexReachable,
 }: {
   initialSessions: ActiveSessionLive[];
   source?: string;
   mediaType?: string;
+  // null = unknown (no Plex configured / not polled yet),
+  // true = Summonarr can reach the local Plex server (getPlexSessions succeeds),
+  // false = Summonarr cannot reach Plex (poll/connect failing). This tracks
+  // *local* reachability, not plex.tv remote access. Read server-side from
+  // Setting('plexServerReachable'); SSE updates flow via the plex:reachability
+  // event below.
+  initialPlexReachable?: boolean | null;
 }) {
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
+  const [plexReachable, setPlexReachable] = useState<boolean | null>(
+    initialPlexReachable ?? null,
+  );
 
   useLiveEvents((event) => {
     if (event.type === "connected") setConnected(true);
@@ -315,6 +486,9 @@ export function ActivityNowPlaying({
           posterUrl: s.posterUrl ?? posterMap.get(s.id) ?? null,
         }));
       });
+    }
+    if (event.type === "plex:reachability") {
+      setPlexReachable(event.reachable);
     }
   });
 
@@ -338,28 +512,54 @@ export function ActivityNowPlaying({
         label="Now playing"
         sub={sub}
         right={
-          <span
-            className="ds-mono"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              fontSize: 10.5,
-              color: connected ? "var(--ds-success)" : "var(--ds-fg-subtle)",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+            {plexReachable === false && (
+              <span
+                className="ds-mono"
+                title="Summonarr can't reach the Plex server — Plex play tracking and now-playing are paused until it's reachable again. Checked every poll via getPlexSessions."
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 10.5,
+                  color: "var(--ds-warning, #c84)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 999,
+                    background: "var(--ds-warning, #c84)",
+                  }}
+                />
+                Plex unreachable
+              </span>
+            )}
             <span
+              className="ds-mono"
               style={{
-                width: 6,
-                height: 6,
-                borderRadius: 999,
-                background: connected
-                  ? "var(--ds-success)"
-                  : "var(--ds-fg-disabled)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: 10.5,
+                color: connected ? "var(--ds-success)" : "var(--ds-fg-subtle)",
+                whiteSpace: "nowrap",
               }}
-            />
-            {connected ? "Live" : "Connecting…"}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 999,
+                  background: connected
+                    ? "var(--ds-success)"
+                    : "var(--ds-fg-disabled)",
+                }}
+              />
+              {connected ? "Live" : "Connecting…"}
+            </span>
           </span>
         }
       />

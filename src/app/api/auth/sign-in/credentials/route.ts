@@ -1,16 +1,26 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
 import { serializeSessionCookie } from "@/lib/session-cookie";
+import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 
 // Summonarr-native credentials sign-in. Hits the same authorize() body that
 // next-auth's Credentials provider uses, then mints a Summonarr JWT we own.
-//
-// Dead in prod until PR 5 swaps the client's signIn() call from
-// next-auth/react to fetch('/api/auth/sign-in/credentials').
+
+// Sign-in bodies carry only email/password/rememberMe — 16 KB is overkill
+// and protects this unauthenticated surface against memory-exhaustion DoS.
+const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
+
 export async function POST(req: NextRequest) {
+  const headerCheck = checkBodySize(req, MAX_SIGNIN_BODY_BYTES);
+  if (headerCheck) return headerCheck;
+
+  const raw = new Uint8Array(await req.arrayBuffer());
+  const sizeCheck = assertBodyBytesUnderCap(raw, MAX_SIGNIN_BODY_BYTES);
+  if (sizeCheck) return sizeCheck;
+
   let body: Record<string, unknown>;
   try {
-    body = (await req.json()) as Record<string, unknown>;
+    body = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }

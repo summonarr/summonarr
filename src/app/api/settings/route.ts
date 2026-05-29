@@ -11,6 +11,7 @@ import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
 import { FEATURE_KEYS } from "@/lib/features";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -136,6 +137,27 @@ const ALLOWED_KEYS = SETTINGS_SCHEMA.map(([k]) => k) as unknown as readonly Allo
 const SENSITIVE_KEYS = new Set<string>(
   SETTINGS_SCHEMA.filter(([, sensitive]) => sensitive).map(([k]) => k)
 );
+
+// Defense-in-depth boot check: bail loud if the writable-schema sensitive set
+// drifts from SETTINGS_SENSITIVE_KEYS_SET (which the Prisma extension uses to
+// gate encryption). A mismatch ships as either plaintext-at-rest or
+// ciphertext-as-API-key — both silent failure modes.
+(function assertSensitiveKeysAligned() {
+  for (const k of SENSITIVE_KEYS) {
+    if (!SETTINGS_SENSITIVE_KEYS_SET.has(k)) {
+      throw new Error(
+        `[settings] '${k}' is sensitive in SETTINGS_SCHEMA but missing from SETTINGS_SENSITIVE_KEYS — encryption will not fire`,
+      );
+    }
+  }
+  for (const k of SETTINGS_SENSITIVE_KEYS_SET) {
+    if (!SENSITIVE_KEYS.has(k)) {
+      throw new Error(
+        `[settings] '${k}' is in SETTINGS_SENSITIVE_KEYS but not marked sensitive in SETTINGS_SCHEMA — encryption gate is dead-coded`,
+      );
+    }
+  }
+})();
 
 // Keys whose value is a full URL pointing at an upstream service. PATCH validates
 // these (no embedded credentials, http/https only); GET strips any pre-existing
@@ -509,7 +531,15 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           if (prior === undefined) {
             await tx.setting.deleteMany({ where: { key } });
           } else {
-            await tx.setting.update({ where: { key }, data: { value: prior } });
+            // upsert (not update): if the row was concurrently deleted between
+            // the oldRows read and now, update() throws RecordNotFound and the
+            // outer catch swallows it — leaving the bad value durably persisted
+            // while the admin sees a 422 implying rollback. upsert is idempotent.
+            await tx.setting.upsert({
+              where: { key },
+              update: { value: prior },
+              create: { key, value: prior },
+            });
           }
         }
         await tx.auditLog.create({

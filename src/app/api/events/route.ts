@@ -56,7 +56,11 @@ export async function GET() {
   //     ISSUE_ADMIN goes through the same per-user filter as a normal USER.
   // Without this split, ISSUE_ADMIN could observe every user's request/settings/push events.
   function shouldDeliver(eventType: string, evtUserId: string | undefined): boolean {
-    if (eventType === "activity:sessions" || eventType === "activity:history-updated") {
+    if (
+      eventType === "activity:sessions"
+      || eventType === "activity:history-updated"
+      || eventType === "plex:reachability"
+    ) {
       return isSystemAdmin;
     }
     const bypassesUserFilter =

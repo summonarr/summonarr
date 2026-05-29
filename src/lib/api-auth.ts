@@ -12,6 +12,10 @@ import {
   type VerifyAndRefreshResult,
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
+import {
+  extractUaFingerprint,
+  serializeFingerprint,
+} from "@/lib/ua-fingerprint";
 
 // The session passed to authenticated handlers. Shaped to match what
 // next-auth's Session was — `user.{id,role,provider,mediaServer}`,
@@ -73,6 +77,16 @@ export async function requireAuth(
   if (!result) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // Belt-and-suspenders UA-fingerprint check for direct callers (dual-auth
+  // routes, the play-history export, SSE). The proxy's matcher excludes
+  // prefetch-header requests entirely, so we re-check here so the binding
+  // is enforced on every authenticated path. Matches the duplicate in
+  // authenticateRequest below.
+  const { headers: getHeaders } = await import("next/headers");
+  const h = await getHeaders();
+  if (!matchesStoredFingerprint(result.claims.uaFingerprint, h.get("user-agent"))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -82,6 +96,19 @@ export async function requireAuth(
 function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
   if (required === "ADMIN") return actual === "ADMIN";
   return actual === "ADMIN" || actual === "ISSUE_ADMIN";
+}
+
+// Compares the current request's UA against the stored fingerprint on the
+// claims. "machine:"-prefixed fingerprints (issued by /api/auth/machine-session)
+// are bound to CRON_SECRET, not a browser UA, so skip them. Returns false on
+// mismatch (caller should 401), true on match or no-fingerprint-on-claims.
+function matchesStoredFingerprint(
+  storedFp: string | undefined,
+  currentUa: string | null,
+): boolean {
+  if (!storedFp || storedFp.startsWith("machine:")) return true;
+  const currentFp = serializeFingerprint(extractUaFingerprint(currentUa ?? ""));
+  return currentFp === storedFp;
 }
 
 type AuthedHandler<Ctx> = (
@@ -102,6 +129,11 @@ async function authenticateRequest(
   }
   const result: VerifyAndRefreshResult | null = await verifyAndRefreshSession(token);
   if (!result) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  // UA-fingerprint check. See matchesStoredFingerprint above for the rationale —
+  // belt-and-suspenders with proxy.ts which the prefetch-header matcher exempts.
+  if (!matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {

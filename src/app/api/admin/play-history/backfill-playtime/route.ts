@@ -21,6 +21,23 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const threshold = await getWatchedThreshold();
 
+  // Parse confirmation body for the execute path. The admin must echo the
+  // candidate-row count from a prior dry-run; this both proves they saw the
+  // dry-run output (reducing accidental destructive double-clicks) and
+  // defends against a CSRF-style request that doesn't know the live count.
+  // The dry-run path ignores the body.
+  let confirmAffected: number | null = null;
+  if (execute) {
+    try {
+      const body = await req.json().catch(() => ({}));
+      if (typeof body?.confirmAffectedRows === "number") {
+        confirmAffected = body.confirmAffectedRows;
+      }
+    } catch {
+      // body absent or invalid → handled by the count-match check below
+    }
+  }
+
   const [counts, sample] = await Promise.all([
     prisma.$queryRawUnsafe<{
       total_rows: bigint;
@@ -94,8 +111,22 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       affectedRows,
       watchedFlippedToFalse,
       sample: sampleSerialized,
-      hint: "Re-POST with ?execute=true to apply.",
+      hint: `Re-POST with ?execute=true and body {"confirmAffectedRows": ${affectedRows}} to apply.`,
     });
+  }
+
+  // Confirmation gate. Match exactly against the live candidate count so an
+  // execute call made before the operator saw the dry-run output (or after
+  // the data shifted underneath it) fails closed.
+  if (confirmAffected === null || confirmAffected !== affectedRows) {
+    return NextResponse.json(
+      {
+        error: "Confirmation required",
+        hint: `POST {"confirmAffectedRows": ${affectedRows}} to confirm.`,
+        affectedRows,
+      },
+      { status: 409 },
+    );
   }
 
   const updated = await prisma.$executeRawUnsafe(

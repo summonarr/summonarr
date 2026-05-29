@@ -11,9 +11,14 @@ import { normalizeEmail } from "./email-normalize";
 // admin's account list, and matches by email so the next sign-in succeeds.
 //
 // Candidate filter: only "Plex-only" users — no passwordHash, no jellyfinUserId,
-// no OIDC Account row. These are the rows that will ACTUALLY be locked out
-// without a backfill; local/Jellyfin/OIDC users whose plexUserId happens to be
-// null have another way in and shouldn't generate noise on every boot.
+// no OIDC Account row, AND no @jellyfin.local synthetic email (legacy Jellyfin
+// users created before the jellyfinUserId column landed sit with
+// jellyfinUserId=null until their next Jellyfin sign-in self-heals them via
+// findOrCreateJellyfinUser; treating them as Plex candidates produced spurious
+// "REFUSED on next Plex sign-in" warnings every boot). These rows are the
+// ones that will ACTUALLY be locked out without a backfill; local/Jellyfin/
+// OIDC users whose plexUserId happens to be null have another way in and
+// shouldn't generate noise on every boot.
 
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {
@@ -23,6 +28,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
         jellyfinUserId: null,
         passwordHash: null,
         accounts: { none: { provider: "oidc" } },
+        NOT: { email: { endsWith: "@jellyfin.local" } },
       },
       select: { id: true, email: true },
     });

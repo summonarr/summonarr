@@ -114,17 +114,49 @@ export async function verifyAndRefreshSession(
     dbCheckedAt: now,
   };
 
-  // Role change → rotate sessionId so a leaked pre-change token cannot be replayed
+  // Role change → rotate sessionId so a leaked pre-change token cannot be replayed.
+  // ALSO bump sessionsRevokedAt so the old JWT's iat now falls below the cutoff and
+  // refreshToken() on OTHER replicas rejects it within their own dbCheckedAt window.
+  // Without this bump, the rotation only protects requests that go through THIS
+  // replica's verifyAndRefreshSession after the rotation — a cached old token can
+  // keep refreshing on a different replica for up to 60s (10s for admin) and would
+  // pass the new sessionId check (which the row carries) because we don't verify
+  // the JWT's sessionId against anything beyond cryptographic integrity.
+  // Tracks whether this verify rotated sessionId. The signing path below uses
+  // it to force the new JWT's iat past the cutoff we just stamped, so the
+  // freshly-minted token doesn't fail its own cutoff check when rotation
+  // happens in the same wall-clock second as the original sign-in.
+  let rotationCutoffSec: number | null = null;
   if (dbUser.role !== claims.role) {
     const newSessionId = randomUUID();
-    const rotated = await prisma.authSession
-      .update({
-        where: { sessionId: claims.sessionId },
-        data: { sessionId: newSessionId },
-      })
-      .catch(() => null);
+    const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
+    const cutoffSec = oldIatSec + 1;
+    const cutoffMs = cutoffSec * 1000;
+    const rotated = await prisma.$transaction(async (tx) => {
+      const row = await tx.authSession
+        .update({
+          where: { sessionId: claims.sessionId },
+          data: { sessionId: newSessionId },
+        })
+        .catch(() => null);
+      if (!row) return false;
+      const userRow = await tx.user.findUnique({
+        where: { id: claims.id },
+        select: { sessionsRevokedAt: true },
+      });
+      const existing = userRow?.sessionsRevokedAt;
+      // Never decrease — a prior full-user revoke may have set it higher.
+      if (!existing || existing.getTime() < cutoffMs) {
+        await tx.user.update({
+          where: { id: claims.id },
+          data: { sessionsRevokedAt: new Date(cutoffMs) },
+        });
+      }
+      return true;
+    }).catch(() => false);
     if (!rotated) return null;
     workingClaims = { ...workingClaims, sessionId: newSessionId, role: dbUser.role };
+    rotationCutoffSec = cutoffSec;
   }
 
   // mediaServer refresh for credentials/oidc — plex/jellyfin/jellyfin-qc are pinned at sign-in
@@ -165,6 +197,9 @@ export async function verifyAndRefreshSession(
 
   // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
   // changed; the fast path at the top of the function still skips this entirely.
+  // On a same-second rotation, force iat past the cutoff so the new JWT doesn't
+  // fail its own sessionsRevokedAt check.
+  const signedIat = rotationCutoffSec !== null ? Math.max(now, rotationCutoffSec) : undefined;
   const newToken = await signSessionJwt(
     {
       id: workingClaims.id,
@@ -181,7 +216,7 @@ export async function verifyAndRefreshSession(
       // Threading dbCheckedAt through the SessionClaims-as-JWTPayload escape hatch:
       dbCheckedAt: now,
     } as SessionClaims,
-    { expiresInSeconds: resignExpiresIn },
+    { expiresInSeconds: resignExpiresIn, iat: signedIat },
   );
 
   return {

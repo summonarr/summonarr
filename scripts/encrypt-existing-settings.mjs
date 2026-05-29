@@ -20,9 +20,12 @@
 import { Client } from "pg";
 import { createCipheriv, randomBytes } from "node:crypto";
 
-// MUST match SENSITIVE_KEYS in src/lib/prisma.ts and src/app/api/settings/route.ts
-// Drift in this list means the listed keys stay plaintext on disk after running
-// the one-shot migration (the extension only encrypts on subsequent updates).
+// MUST match SETTINGS_SENSITIVE_KEYS in src/lib/settings-sensitive-keys.ts
+// (the canonical source-of-truth that prisma.ts and settings/route.ts both
+// import). This file can't import from TS, so the list is duplicated — but
+// the boot-time assertion in src/app/api/settings/route.ts catches schema
+// drift, and unused entries here are harmless (the LIKE query just returns
+// no rows for them).
 const SENSITIVE_KEYS = [
   "plexAdminToken",
   "jellyfinApiKey",
@@ -33,18 +36,12 @@ const SENSITIVE_KEYS = [
   "discordBotToken",
   "radarrApiKey",
   "sonarrApiKey",
-  "tmdbApiKey",
-  "tmdbReadToken",
   "omdbApiKey",
   "mdblistApiKey",
-  "traktApiKey",
   "traktClientId",
-  "traktClientSecret",
   "ipinfoToken",
   "resendApiKey",
   "smtpPassword",
-  "discordClientSecret",
-  "oidcClientSecret",
   "trashGithubToken",
 ];
 

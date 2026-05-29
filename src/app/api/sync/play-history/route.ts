@@ -11,22 +11,82 @@ import {
   resolveShowTmdbId,
   computePlaytimeIncrement,
   applyFinalTick,
-  MAX_PLAYTIME_DELTA_MS,
+  emitActiveSessionsSnapshot,
+  reanchorActiveSessionsOnBoot,
+  SESSION_ABSENCE_GRACE_MS,
 } from "@/lib/play-history";
-import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser } from "@/lib/plex";
+import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { emitSSE } from "@/lib/sse-emitter";
-import { posterUrl } from "@/lib/tmdb-types";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import {
+  PLEX_STALL_THRESHOLD_MS,
+  clearFinalizedNotInCurrentSnapshot,
+  isPlexSessionRecentlyFinalized,
+  markPlexSessionFinalized,
+  pruneRecentlyFinalized,
+  reconcilePlexEventStream,
+  setPlexReachable,
+} from "@/lib/plex-events";
 
 type SyncResult = { started: number; updated: number; ended: number };
 
+// DLNA clients open phantom sessions just from *browsing* the library — the
+// session appears in /status/sessions for one tick with platform="DLNA" and
+// then disappears. Tautulli sleeps 1s and re-fetches to filter them
+// (activity_handler.py:97-101). We achieve the same with a one-poll grace:
+// the first time a brand-new DLNA session shows up, we tag it pending and
+// skip creating an ActiveSession row; if it re-appears on the next poll
+// (~5s later), it's a real playback and we create. Entries are dropped when
+// the session stops appearing in the snapshot. Held in-memory: a process
+// restart drops the gate, but the worst case is one extra phantom row that
+// the 60s absence grace will reap.
+const pendingDlnaSessions = new Set<string>();
+
+// The 5s poller's /status/sessions snapshot lags the real-time SSE writer
+// (applyLiveStateUpdate in plex-events.ts), which pushes progressMs ahead. When
+// the poller then writes its slightly-older snapshot it would move progressMs
+// *backward* by a few seconds, making the now-playing progress bar bounce every
+// poll. Treat a small backward step (within this window) as stale-snapshot
+// jitter and keep the fresher stored value; a larger backward jump is a genuine
+// seek-back and is written through. ~2 poll intervals of slack. Only the poller
+// clamps — SSE is the authoritative real-time source and always writes raw.
+const PROGRESS_JITTER_TOLERANCE_MS = 10_000;
+
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
-  const sessions = await getPlexSessions(serverUrl, token);
+  // getPlexSessions is the authoritative local-reachability probe — it runs
+  // every poll. Report the result so the UI's reachability badge reflects
+  // whether Summonarr can actually reach the Plex server (not plex.tv remote
+  // access). Fire-and-forget; the persist is deduped + only writes on change.
+  let sessions;
+  try {
+    sessions = await getPlexSessions(serverUrl, token);
+  } catch (err) {
+    void setPlexReachable(false);
+    throw err;
+  }
+  void setPlexReachable(true);
   const now = new Date();
+  const nowMs = now.getTime();
+  pruneRecentlyFinalized(nowMs);
+
+  // Release ledger entries Plex has stopped reporting before the create-gate
+  // checks it. The ledger exists to suppress re-creation while Plex keeps a
+  // ghost in /status/sessions; once Plex drops the key, a new play reusing it
+  // (rare, but possible after a Plex server restart) shouldn't be blocked.
+  const allReportedKeys = new Set<string>();
+  for (const s of sessions) {
+    if (s.sessionKey) allReportedKeys.add(s.sessionKey);
+  }
+  clearFinalizedNotInCurrentSnapshot(allReportedKeys);
 
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
-  const valid = sessions.filter((s) => s.sessionKey && s.accountId);
+  // Skip sessions Plex is still reporting after we've already finalized them via
+  // SSE stop, stall detection, or the stale loop — they'd otherwise be re-created
+  // on every poll.
+  const valid = sessions.filter(
+    (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(`plex:${s.sessionKey}`),
+  );
   if (valid.length === 0) {
     // Still need the cleanup sweep below to finalize any stale rows.
   }
@@ -118,32 +178,136 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
     : [];
   const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
 
+  // Drop DLNA gate entries Plex is no longer reporting — the phantom is
+  // gone and the slot shouldn't keep a future *real* session waiting.
+  const seenInThisPoll = new Set(valid.map((s) => `plex:${s.sessionKey}`));
+  for (const pending of pendingDlnaSessions) {
+    if (!seenInThisPoll.has(pending)) pendingDlnaSessions.delete(pending);
+  }
+
   // Run per-session writes in parallel.
   const writeResults = await Promise.all(
-    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
+    resolved.map(async ({ s, sessionId, msUserId, tmdbId, mediaType }): Promise<"started" | "updated" | "ended" | "skipped"> => {
       const progressPercent = s.duration > 0 ? (s.viewOffset / s.duration) * 100 : 0;
       const posterPath = tmdbId != null && mediaType ? posterMap.get(`${tmdbId}:${mediaType}`) ?? null : null;
 
       const existing = existingMap.get(sessionId);
       if (existing) {
-        const increment = computePlaytimeIncrement(existing, now);
-        await prisma.activeSession.update({
-          where: { id: sessionId },
-          data: {
-            lastSeenAt: now,
-            state: s.state,
-            progressPercent,
-            progressMs: BigInt(s.viewOffset),
-            playMethod: s.playMethod,
-            resolution: s.resolution,
-            transcodeReason: s.transcodeReason ?? null,
-            ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-            ...(tmdbId != null ? { tmdbId, mediaType } : {}),
-            ...(posterPath ? { posterPath } : {}),
-          },
-        });
-        return "updated";
+        // rating_key change without a stop event: auto-play next episode (the
+        // most common Plex client behavior) keeps the same sessionKey but
+        // swaps the underlying ratingKey. Without this, the previous
+        // episode's watch silently merges into the next episode's PlayHistory
+        // row at finalize. Tautulli handles it the same way
+        // (activity_handler.py:331-335): force-stop the previous, recreate.
+        if (existing.sourceItemId && s.ratingKey && existing.sourceItemId !== s.ratingKey) {
+          try {
+            await recordCompletedSession(
+              applyFinalTick(existing, now),
+              { skipSSE: true, stoppedAt: now },
+            );
+          } catch (err) {
+            console.warn(`[play-history] ratingKey-change finalize failed for ${sessionId}:`, err);
+          }
+          // Fall through to create branch below. existing is now finalized
+          // and its ActiveSession row deleted by recordCompletedSession.
+        } else {
+          // Liveness must be "the playhead MOVED since the last stored value,"
+          // not "this snapshot is strictly greater than it." progressMs is
+          // written by two racing writers — this lagging 5s poller and the
+          // real-time SSE handler (applyLiveStateUpdate). SSE pushes progressMs
+          // ahead of /status/sessions, so a strict `s.viewOffset > progressMs`
+          // check reads false on a healthy stream whenever SSE wrote last,
+          // which (a) suppresses the progressUpdatedAt refresh below and (b)
+          // satisfies !playheadMoved in the stall condition — so the anchor
+          // ages past 60s and the poller stall-finalizes a still-playing
+          // stream. A genuine ghost (client quit, Plex keeps reporting it)
+          // has a FROZEN viewOffset, so `!==` is false there and the stall
+          // still fires at 60s as intended. Use inequality, not greater-than.
+          const priorProgressMs = Number(existing.progressMs);
+          const playheadMoved = s.viewOffset !== priorProgressMs;
+          // True resume from a non-playing state. Without this branch, a
+          // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
+          // progressUpdatedAt stuck at the moment the user paused. The first
+          // poll after resume sees state="playing", !playheadMoved (viewOffset
+          // hasn't moved yet, we haven't completed one playing tick), and
+          // now - progressUpdatedAt >> 60s — indistinguishable from a real
+          // ghost. Stall would fire, session finalized as a short watch,
+          // ledger-locked, card never comes back. Skip the stall check when
+          // the prior observed state was not "playing", and refresh
+          // progressUpdatedAt so the next tick measures from the resume.
+          const resumedToPlaying = existing.state !== "playing" && s.state === "playing";
+          const stalled =
+            s.state === "playing"
+            && existing.state === "playing"
+            && !playheadMoved
+            && nowMs - existing.progressUpdatedAt.getTime() >= PLEX_STALL_THRESHOLD_MS;
+
+          if (stalled) {
+            // Ghost session: Plex still reports it but the playhead has been frozen for
+            // PLEX_STALL_THRESHOLD_MS while state="playing". Finalize now and gate
+            // re-create so subsequent polls don't resurrect it. SSE feed normally
+            // catches this faster; this is the fallback when SSE is down or the
+            // client never sent a state="stopped" notification.
+            markPlexSessionFinalized(sessionId, nowMs);
+            try {
+              await recordCompletedSession(
+                applyFinalTick(existing, now),
+                { skipSSE: true, stoppedAt: now },
+              );
+            } catch (err) {
+              console.warn(`[play-history] stall-finalize failed for ${sessionId}:`, err);
+            }
+            return "ended";
+          }
+
+          const increment = computePlaytimeIncrement(existing, now);
+          // Clamp out stale-snapshot backward jitter (see PROGRESS_JITTER_
+          // TOLERANCE_MS): keep the fresher stored value on a small backward
+          // step, write through a genuine seek-back. playheadMoved above stays
+          // on the raw snapshot so liveness/stall detection is unaffected.
+          const isJitterBackstep =
+            s.viewOffset < priorProgressMs
+            && priorProgressMs - s.viewOffset <= PROGRESS_JITTER_TOLERANCE_MS;
+          const nextProgressMs = isJitterBackstep ? priorProgressMs : s.viewOffset;
+          const nextProgressPercent = s.duration > 0 ? (nextProgressMs / s.duration) * 100 : 0;
+          // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the
+          // row between our prefetch and this write, updateMany returns 0 and we
+          // silently skip instead of throwing P2025 and aborting the whole
+          // Promise.all batch. The next poll re-reads state and resumes.
+          await prisma.activeSession.updateMany({
+            where: { id: sessionId, lastSeenAt: existing.lastSeenAt },
+            data: {
+              lastSeenAt: now,
+              state: s.state,
+              progressPercent: nextProgressPercent,
+              progressMs: BigInt(nextProgressMs),
+              ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
+              playMethod: s.playMethod,
+              resolution: s.resolution,
+              transcodeReason: s.transcodeReason ?? null,
+              ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+              ...(tmdbId != null ? { tmdbId, mediaType } : {}),
+              ...(posterPath ? { posterPath } : {}),
+              location: s.location ?? null,
+              bandwidth: s.bandwidth ?? null,
+              secure: s.secure ?? null,
+              relayed: s.relayed ?? null,
+            },
+          });
+          return "updated";
+        }
       }
+
+      // DLNA phantom filter: require two consecutive snapshots before
+      // creating a new DLNA session. See pendingDlnaSessions comment above.
+      if (s.platform === "DLNA") {
+        if (!pendingDlnaSessions.has(sessionId)) {
+          pendingDlnaSessions.add(sessionId);
+          return "skipped";
+        }
+        pendingDlnaSessions.delete(sessionId);
+      }
+
       await prisma.activeSession.create({
         data: {
           id: sessionId,
@@ -180,31 +344,71 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           audioDecision: s.audioDecision ?? null,
           container: s.container ?? null,
           transcodeReason: s.transcodeReason ?? null,
+          location: s.location ?? null,
+          bandwidth: s.bandwidth ?? null,
+          secure: s.secure ?? null,
+          relayed: s.relayed ?? null,
         },
       });
+
+      // Best-effort: fetch intro/credits markers in the background and stamp
+      // them on the row we just created. Fire-and-forget — markers don't need
+      // to block session creation, and a failed fetch (Plex not Plex-Pass,
+      // metadata not yet analyzed, network blip) just leaves the columns null.
+      // The columns stay frozen for the lifetime of the session; finalize
+      // reads them off ActiveSession without a second metadata fetch.
+      if (s.ratingKey) {
+        void getPlexMarkers(serverUrl, token, s.ratingKey).then(async (markers) => {
+          if (Object.keys(markers).length === 0) return;
+          await prisma.activeSession.updateMany({
+            where: { id: sessionId },
+            data: {
+              introStartMs: markers.introStartMs ?? null,
+              introEndMs: markers.introEndMs ?? null,
+              creditsStartMs: markers.creditsStartMs ?? null,
+              creditsEndMs: markers.creditsEndMs ?? null,
+            },
+          }).catch(() => {});
+        }).catch(() => {});
+      }
+
       return "started";
     }),
   );
 
   const started = writeResults.filter((r) => r === "started").length;
   const updated = writeResults.filter((r) => r === "updated").length;
+  const stallEnded = writeResults.filter((r) => r === "ended").length;
 
   const activePlexSessions = await prisma.activeSession.findMany({
     where: { source: "plex" },
   });
 
-  const stale = activePlexSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  // Grace window: only finalize sessions that have been missing from
+  // /status/sessions for SESSION_ABSENCE_GRACE_MS. A single dropped poll (Plex
+  // hiccup, paused client briefly dropped from the snapshot) shouldn't write a
+  // PlayHistory row and ledger-lock the sessionKey. Real stops linger up to
+  // 60s as "Now Playing" before finalize, but the SSE feed catches them in
+  // real-time as long as it's connected; this is the fallback when SSE is down.
+  const stale = activePlexSessions.filter(
+    (session) =>
+      !seenSessionKeys.has(session.sessionKey)
+      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+  );
   const finalized = await Promise.all(
-    stale.map((session) =>
+    stale.map((session) => {
+      // Gate re-create against a racey Plex /status/sessions reappearance,
+      // same as the stall path above.
+      markPlexSessionFinalized(session.id, nowMs);
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
-      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
+      return recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
         .then(() => true)
-        .catch(() => false),
-    ),
+        .catch(() => false);
+    }),
   );
-  const ended = finalized.filter(Boolean).length;
+  const ended = finalized.filter(Boolean).length + stallEnded;
 
   return { started, updated, ended };
 }
@@ -342,13 +546,21 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         fallbackMap.get(`${msUserId}:${s.itemId ?? ""}`);
 
       if (existing) {
-        const wallDelta = now.getTime() - existing.lastSeenAt.getTime();
-        const posDelta = positionMs - Number(existing.progressMs);
-        const increment = (posDelta > 0 || s.state === "playing")
-          ? BigInt(Math.min(MAX_PLAYTIME_DELTA_MS, Math.max(0, wallDelta)))
-          : BigInt(0);
-        await prisma.activeSession.update({
-          where: { id: existing.id },
+        // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
+        // hand-rolled version below used to gate on s.state — the new state — so a
+        // session that was paused all interval and started playing in the final ms
+        // got the full wall-clock interval credited. Plex uses the helper at line 178;
+        // align Jellyfin to it for consistency and correctness.
+        const increment = computePlaytimeIncrement(existing, now);
+        // CAS on (id, lastSeenAt): mirrors the Plex branch (line 244). If the
+        // row was deleted/rewritten between our prefetch and this write — an
+        // overlapping tick (poll >5s), the same run's absence-finalize, or
+        // cleanupStaleSessions — a plain `update` throws P2025 and rejects the
+        // whole Promise.all batch, aborting every other session's write this
+        // tick. updateMany returns 0 instead, so we silently skip and the next
+        // poll re-reads state and resumes.
+        await prisma.activeSession.updateMany({
+          where: { id: existing.id, lastSeenAt: existing.lastSeenAt },
           data: {
             sessionKey: s.playSessionId,
             lastSeenAt: now,
@@ -413,11 +625,21 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
     where: { source: "jellyfin" },
   });
 
-  const stale = activeJfSessions.filter((session) => !seenSessionKeys.has(session.sessionKey));
+  // Grace window: only finalize sessions missing from /Sessions for
+  // SESSION_ABSENCE_GRACE_MS. Jellyfin clients can briefly clear NowPlayingItem
+  // (the filter on getJellyfinSessions) during pause-related transitions —
+  // browser tab background, app reload, network reconnect — without the user
+  // actually stopping. Real stops are detected within ~60s as the trade-off.
+  const nowMs = now.getTime();
+  const stale = activeJfSessions.filter(
+    (session) =>
+      !seenSessionKeys.has(session.sessionKey)
+      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+  );
   const finalized = await Promise.all(
     stale.map((session) =>
       // skipSSE: see Plex branch above; one batched SSE per cron run.
-      recordCompletedSession(applyFinalTick(session, now, { stoppedAt: now }), { skipSSE: true })
+      recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
         .then(() => true)
         .catch((err) => {
           console.warn(`[play-history] Failed to finalize jellyfin session ${session.id}:`, err);
@@ -448,9 +670,25 @@ async function syncPlayHistory(request: NextRequest) {
     return NextResponse.json({ message: "Play history tracking is disabled" });
   }
 
+  // Fire-and-forget: idempotently keep the Plex SSE connection in sync with
+  // current Settings. If the URL/token didn't change and the connection is up,
+  // this is a near-no-op; if settings were edited via the admin UI we pick up
+  // the change within one poll tick.
+  reconcilePlexEventStream().catch((err) => {
+    console.warn("[plex-events] reconcile failed:", err);
+  });
+
   const results: Record<string, unknown> = {};
 
   try {
+    // Boot re-anchor (once per process, no-op afterwards): give every existing
+    // ActiveSession a fresh absence-grace window measured from now, so a
+    // restart's downtime doesn't make this run's stale sweep finalize a session
+    // that's still playing. Covers Plex AND Jellyfin in one write; if the SSE
+    // bootstrap already ran it, this is a no-op. Must run before the source
+    // syncs read their ActiveSession rows below.
+    await reanchorActiveSessionsOnBoot();
+
     const [plexEnabled, jellyfinEnabled, settingRows] = await Promise.all([
       isSourceEnabled("plex"),
       isSourceEnabled("jellyfin"),
@@ -497,99 +735,17 @@ async function syncPlayHistory(request: NextRequest) {
     // Single batched activity:history-updated after both source loops complete.
     // recordCompletedSession is called with skipSSE inside each loop to avoid
     // N+1 events. Emit only when at least one session actually ended.
-    const totalEnded = (results.plex as { ended?: number } | undefined)?.ended ?? 0
-      + ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
+    // Parens are load-bearing: `+` binds tighter than `??`, so without them
+    // `a?.x ?? 0 + b?.y ?? 0` parses as `a?.x ?? (0 + (b?.y ?? 0))` and a
+    // defined `plex.ended = 0` would short-circuit, silently dropping Jellyfin's count.
+    const totalEnded =
+      ((results.plex as { ended?: number } | undefined)?.ended ?? 0) +
+      ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
     if (totalEnded > 0) {
       emitSSE({ type: "activity:history-updated" });
     }
 
-    const allSessions = await prisma.activeSession.findMany({
-      orderBy: { startedAt: "desc" },
-      select: {
-        id: true,
-        source: true,
-        state: true,
-        mediaServerUserId: true,
-        serverUsername: true,
-        title: true,
-        tmdbId: true,
-        mediaType: true,
-        year: true,
-        seasonNumber: true,
-        episodeNumber: true,
-        episodeTitle: true,
-        progressPercent: true,
-        progressMs: true,
-        durationMs: true,
-        platform: true,
-        player: true,
-        device: true,
-        ipAddress: true,
-        startedAt: true,
-        playMethod: true,
-        videoCodec: true,
-        audioCodec: true,
-        resolution: true,
-        bitrate: true,
-        videoDecision: true,
-        audioDecision: true,
-        container: true,
-      },
-    });
-
-    const sessionPosterMap: Record<number, string | null> = {};
-    const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
-    if (tmdbIds.length > 0) {
-      const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
-      const cacheRows = await prisma.tmdbCache.findMany({
-        where: { key: { in: cacheKeys } },
-        select: { key: true, data: true },
-      });
-      for (const row of cacheRows) {
-        try {
-          const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-          if (parsed.posterPath) {
-            const id = parseInt(row.key.split(":")[1] ?? "", 10);
-            if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
-          }
-        } catch { }
-      }
-    }
-
-    emitSSE({
-      type: "activity:sessions",
-      sessions: allSessions.map((s) => ({
-        id: s.id,
-        source: s.source,
-        state: s.state,
-        mediaServerUserId: s.mediaServerUserId,
-        serverUsername: s.serverUsername,
-        title: s.title,
-        tmdbId: s.tmdbId,
-        mediaType: s.mediaType,
-        year: s.year,
-        seasonNumber: s.seasonNumber,
-        episodeNumber: s.episodeNumber,
-        episodeTitle: s.episodeTitle,
-        progressPercent: s.progressPercent,
-        progressMs: Number(s.progressMs),
-        durationMs: Number(s.durationMs),
-        platform: s.platform,
-        player: s.player,
-        device: s.device,
-        ipAddress: s.ipAddress,
-        startedAt: s.startedAt.toISOString(),
-        playMethod: s.playMethod,
-        videoCodec: s.videoCodec,
-        audioCodec: s.audioCodec,
-        resolution: s.resolution,
-        bitrate: s.bitrate,
-        videoDecision: s.videoDecision,
-        audioDecision: s.audioDecision,
-        container: s.container,
-        posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
-      })),
-    });
+    await emitActiveSessionsSnapshot();
 
     await cleanupStaleSessions(30);
 

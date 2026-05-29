@@ -128,6 +128,29 @@ function jellyfinAdminHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+// Fetch the Jellyfin server's machine identifier. The /System/Info endpoint
+// requires admin token; the `Id` field on the response is the server's stable
+// machineId — same value the Jellyfin webhook plugin sends. We use this as the
+// pin on MediaServerUser.serverMachineId so any cross-server webhook/sync
+// payload aimed at the same userId is rejected (see MediaServerMismatchError
+// in src/lib/play-history.ts).
+export async function getJellyfinServerMachineId(
+  baseUrl: string,
+  apiKey: string,
+): Promise<string | null> {
+  try {
+    const res = await safeFetchAdminConfigured(`${baseUrl.replace(/\/$/, "")}/System/Info`, {
+      headers: jellyfinAdminHeaders(apiKey),
+      timeoutMs: FETCH_TIMEOUT_MS,
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { Id?: string };
+    return typeof data.Id === "string" && data.Id.length > 0 ? data.Id : null;
+  } catch {
+    return null;
+  }
+}
+
 interface JellyfinItem {
   Id?:              string;
   ProviderIds?:     Record<string, string>;
@@ -479,16 +502,22 @@ export interface JellyfinEpisodeSeriesInfo {
 export async function getJellyfinEpisodeSeriesIds(
   baseUrl: string,
   apiKey: string,
+  // Jellyfin admin userId. The /Items endpoint without a user scope is rejected
+  // (or returns empty) on multiple Jellyfin server versions even with an admin
+  // token — /Users/{userId}/Items?Ids=... is the cross-version-safe form. Any
+  // user the admin token can read works; the existing PR-import call site
+  // picks the first user from getJellyfinAllUsers.
+  userId: string,
   itemIds: string[],
 ): Promise<Map<string, JellyfinEpisodeSeriesInfo>> {
   const result = new Map<string, JellyfinEpisodeSeriesInfo>();
-  if (itemIds.length === 0) return result;
+  if (itemIds.length === 0 || !userId) return result;
 
   const base = baseUrl.replace(/\/$/, "");
   const CHUNK = 100;
   for (let i = 0; i < itemIds.length; i += CHUNK) {
     const chunk = itemIds.slice(i, i + CHUNK);
-    const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
+    const url = `${base}/Users/${encodeURIComponent(userId)}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
     try {
       const res = await safeFetchAdminConfigured(url, {
         headers: jellyfinAdminHeaders(apiKey),
@@ -510,6 +539,50 @@ export async function getJellyfinEpisodeSeriesIds(
       }
     } catch (err) {
       console.warn("[jellyfin] Failed to fetch episode series data page:", err);
+    }
+  }
+  return result;
+}
+
+// Batch-fetch RunTimeTicks for a set of item IDs. PlaybackReporting's PlayActivity
+// endpoint doesn't include the item runtime, so callers that need real completion
+// ratios (playDuration / totalDuration) have to look it up separately. Returns
+// itemId → durationMs; missing items are absent from the map.
+//
+// userId: Jellyfin admin userId. /Items without a user scope is rejected (or
+// returns empty) on multiple Jellyfin server versions even with an admin token;
+// without a runtime in the returned map the PR-import path computes durationMs
+// = 0 and writes every imported play as watched=false. /Users/{userId}/Items
+// is the cross-version-safe form. Same fix as getJellyfinEpisodeSeriesIds.
+export async function getJellyfinItemRuntimes(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  itemIds: string[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>();
+  if (itemIds.length === 0 || !userId) return result;
+
+  const base = baseUrl.replace(/\/$/, "");
+  const CHUNK = 100;
+  for (let i = 0; i < itemIds.length; i += CHUNK) {
+    const chunk = itemIds.slice(i, i + CHUNK);
+    const url = `${base}/Users/${encodeURIComponent(userId)}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=RunTimeTicks&Recursive=true`;
+    try {
+      const res = await safeFetchAdminConfigured(url, {
+        headers: jellyfinAdminHeaders(apiKey),
+        timeoutMs: FETCH_TIMEOUT_MS,
+      });
+      if (!res.ok) continue;
+      const data = (await res.json()) as { Items?: { Id?: string; RunTimeTicks?: number }[] };
+      for (const item of data.Items ?? []) {
+        if (item.Id && typeof item.RunTimeTicks === "number" && item.RunTimeTicks > 0) {
+          // RunTimeTicks are 100-ns ticks; /10_000 → ms.
+          result.set(item.Id, Math.floor(item.RunTimeTicks / 10_000));
+        }
+      }
+    } catch (err) {
+      console.warn("[jellyfin] Failed to fetch item runtimes page:", err);
     }
   }
   return result;

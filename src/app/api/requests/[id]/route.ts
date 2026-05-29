@@ -54,6 +54,18 @@ export const PATCH = withAdmin(async (
 
     if (adminNote !== undefined) {
       await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      // Audit the note change so silent edits via search/retry leave a trail.
+      // The status-transition branches already audit via logAuditOrFail.
+      if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
+        void logAuditOrFail({
+          userId: session.user.id,
+          userName: session.user.name ?? session.user.email ?? "unknown",
+          action: "SETTINGS_CHANGE",
+          target: `request:${id}:adminNote`,
+          details: { via: "search", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
+          ...auditContext(req, session),
+        });
+      }
     }
     let arrError: string | null = null;
     try {
@@ -80,6 +92,16 @@ export const PATCH = withAdmin(async (
 
     if (adminNote !== undefined) {
       await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
+        void logAuditOrFail({
+          userId: session.user.id,
+          userName: session.user.name ?? session.user.email ?? "unknown",
+          action: "SETTINGS_CHANGE",
+          target: `request:${id}:adminNote`,
+          details: { via: "retry", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
+          ...auditContext(req, session),
+        });
+      }
     }
     let arrError: string | null = null;
     try {

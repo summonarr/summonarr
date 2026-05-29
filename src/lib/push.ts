@@ -198,6 +198,17 @@ export async function notifyAdminsIssueMessagePush(data: {
 //   at least one push to a subscription succeeded.
 // - false: ≥1 subscription existed but every send failed (transient endpoint outage,
 //   401 from upstream, etc.) — retry on the next webhook tick may succeed.
+// Outcome of an admin push send attempt. Lets the webhook caller distinguish
+// "user has no subs / no VAPID configured" (don't retry, but the notification
+// channel was effectively a no-op — caller may want to backstop via email or
+// Discord) from "delivered" (success) and "failed" (retryable network/transport
+// error).
+export type AdminGrabPushOutcome =
+  | "delivered"
+  | "skipped-no-subs"
+  | "skipped-no-keys"
+  | "failed";
+
 export async function notifyAdminGrabCompletedPush(data: {
   userId: string;
   title: string;
@@ -205,13 +216,13 @@ export async function notifyAdminGrabCompletedPush(data: {
   seasonNumber?: number | null;
   episodeNumber?: number | null;
   issueId: string;
-}): Promise<boolean> {
+}): Promise<AdminGrabPushOutcome> {
   try {
     const keys = await getVapidKeys();
-    if (!keys) return true;
+    if (!keys) return "skipped-no-keys";
 
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
-    if (!subs.length) return true;
+    if (!subs.length) return "skipped-no-subs";
 
     let scopeLabel = "";
     if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
@@ -227,10 +238,11 @@ export async function notifyAdminGrabCompletedPush(data: {
     };
 
     const results = await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
-    return results.some((r) => r.status === "fulfilled" && r.value === true);
+    const anyDelivered = results.some((r) => r.status === "fulfilled" && r.value === true);
+    return anyDelivered ? "delivered" : "failed";
   } catch (err) {
     console.error("[push] Failed to notify admin (grab completed):", err);
-    return false;
+    return "failed";
   }
 }
 

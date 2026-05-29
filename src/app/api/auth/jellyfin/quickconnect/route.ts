@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import {
+  buildQcFlowSetCookie,
+  hashQuickConnectSecret,
+  signQcFlowCookie,
+} from "@/lib/jellyfin-flow-state";
+
+function isSecureCookieContext(): boolean {
+  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  if (url.startsWith("https://")) return true;
+  if (url.startsWith("http://")) return false;
+  return process.env.NODE_ENV === "production";
+}
 
 const JELLYFIN_URL = process.env.JELLYFIN_URL;
 
@@ -41,7 +54,19 @@ export async function POST(req: NextRequest) {
   }
   try {
     const result = await initiateJellyfinQuickConnect(JELLYFIN_URL);
-    return NextResponse.json(result);
+    // Bind the secret to this browser so /api/auth/sign-in/jellyfin-quickconnect
+    // can refuse a redemption from any other origin. Cookie carries the SHA-256
+    // of the secret (not the secret itself).
+    const cookieValue = await signQcFlowCookie({
+      secretHash: hashQuickConnectSecret(result.secret),
+      nonce: randomUUID(),
+    });
+    const response = NextResponse.json(result);
+    response.headers.append(
+      "Set-Cookie",
+      buildQcFlowSetCookie(cookieValue, isSecureCookieContext()),
+    );
+    return response;
   } catch (err) {
     console.error("[jellyfin quickconnect] initiate error:", err);
     return NextResponse.json({ error: "Failed to initiate QuickConnect" }, { status: 502 });

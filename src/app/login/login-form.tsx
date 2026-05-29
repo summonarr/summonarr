@@ -140,24 +140,26 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     let pinId: number;
     let pinCode: string;
     try {
-      const res = await fetch("https://plex.tv/api/v2/pins", {
+      // Server creates the PIN and sets a signed HttpOnly cookie binding the
+      // pinId to this browser. /api/auth/sign-in/plex rejects any submission
+      // whose body pinId doesn't match the cookie's pinId, defeating
+      // PIN-phishing attacks where an attacker's PIN gets approved by a
+      // victim and the resulting token is submitted from the attacker's
+      // browser.
+      const res = await fetch("/api/auth/plex/start", {
         method: "POST",
-        headers: {
-          "X-Plex-Client-Identifier": clientId,
-          "X-Plex-Product": "Summonarr",
-          "X-Plex-Version": "1.0",
-          "X-Plex-Model": deviceMeta.model,
-          "X-Plex-Device": deviceMeta.device,
-          "X-Plex-Device-Name": "Summonarr",
-          "X-Plex-Platform": deviceMeta.platform,
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-        body: "strong=true",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          clientId,
+          platform: deviceMeta.platform,
+          device: deviceMeta.device,
+          model: deviceMeta.model,
+        }),
       });
       if (!res.ok) throw new Error("create failed");
-      const data: { id: number; code: string } = await res.json();
-      pinId = data.id;
+      const data: { pinId: number; code: string } = await res.json();
+      pinId = data.pinId;
       pinCode = data.code;
     } catch {
       setError("Could not start Plex sign-in. Please try again.");
@@ -334,7 +336,10 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
             onClick={() => {
               setLoading(true);
               setError("");
-              window.location.href = "/api/auth/oidc/start";
+              const qp = callbackUrl && callbackUrl !== "/"
+                ? `?callbackUrl=${encodeURIComponent(callbackUrl)}`
+                : "";
+              window.location.href = `/api/auth/oidc/start${qp}`;
             }}
             disabled={loading}
             className="w-full min-h-11"

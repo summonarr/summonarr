@@ -489,20 +489,32 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       : plexTvIds.has(req.tmdbId)    || jfTvIds.has(req.tmdbId);
     return !inArr && !inLibrary;
   });
+  const revertedIds = new Set<string>();
   if (toRevert.length > 0) {
     const result = await prisma.mediaRequest.updateMany({
       where: { id: { in: toRevert.map((r) => r.id) } },
       data: { status: "APPROVED" },
     });
     reverted = result.count;
+    for (const r of toRevert) revertedIds.add(r.id);
   }
 
   // Snapshot taken once after both library writes complete; both marking passes share this exact set.
   // Changes made by the Plex pass are NOT visible to the Jellyfin pass — intentional by design.
-  const stillPending = await prisma.mediaRequest.findMany({
+  //
+  // Exclude rows we just reverted from AVAILABLE→APPROVED in this same run.
+  // Otherwise markLibraryRequests below could re-flip them to AVAILABLE if
+  // they're present in Plex/Jellyfin but absent from the ARR caches —
+  // triggering exactly the same-run flap the revert was added to prevent.
+  // Those items get a fresh look on the next sync run when the caches and
+  // status are coherent.
+  const stillPendingAll = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
     select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, notifiedAvailable: true },
   });
+  const stillPending = revertedIds.size === 0
+    ? stillPendingAll
+    : stillPendingAll.filter((r) => !revertedIds.has(r.id));
 
   const markLibraryRequests = async (
     movieIds: Map<number, unknown>,
@@ -544,12 +556,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       });
 
       if (toNotify.length > 0) {
-        const winners = await claimAvailableNotificationWinners(toNotify, (ids) =>
-          prisma.mediaRequest.updateMany({
-            where: { id: { in: ids }, notifiedAvailable: false },
-            data: { status: "AVAILABLE", availableAt: new Date(), notifiedAvailable: true },
-          }),
-        );
+        const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
         if (winners.length > 0) {
           void clearDeletionVotesForTmdbs(winners);
           notifyUsersRequestsAvailable(winners).catch(() => {});

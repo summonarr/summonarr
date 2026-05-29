@@ -92,15 +92,33 @@ async function checkAndRecordDigest(key: string): Promise<boolean> {
 // otherwise the digest blocks Sonarr/Radarr's source-side retry for the next 24h
 // and the work is permanently lost.
 //
-// Idempotent: a missing row is a no-op. Best-effort: swallows errors so the
-// caller can re-throw the original handler exception untouched.
+// Idempotent: a missing row (P2025) is a no-op. Other Prisma failures are
+// surfaced as a [webhook-replay] warn — the most common reason this fails is
+// the same transient DB outage that caused the handler to throw, which is
+// exactly the case where a silent failure would permanently burn the 24h
+// replay window.
 export async function clearWebhookReplayDigestJson(
   source: string,
   secret: string,
   parsedJson: unknown,
 ): Promise<void> {
   const key = digestForJson(source, secret, parsedJson);
-  await prisma.webhookReplay.delete({ where: { digest: key } }).catch(() => {});
+  try {
+    await prisma.webhookReplay.delete({ where: { digest: key } });
+  } catch (err) {
+    if (
+      err instanceof Prisma.PrismaClientKnownRequestError &&
+      err.code === "P2025"
+    ) {
+      // Row already gone — handler succeeded against the source-side retry but
+      // the local cleanup raced. Benign.
+      return;
+    }
+    console.warn(
+      `[webhook-replay] rollback failed for source=${source} digest=${key.slice(0, 12)}…`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 export function __resetWebhookReplayCacheForTests(): void {

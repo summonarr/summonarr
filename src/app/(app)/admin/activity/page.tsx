@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter } from "@/lib/play-history";
+import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import {
@@ -93,7 +93,7 @@ export default async function ActivityPage({
   if (source) prismaWhere.source = source;
   if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
 
-  const [stats, activeSessions, recentPlays, mostRewatched, calendarData] = await Promise.all([
+  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, plexReachableRows] = await Promise.all([
     getPlayHistoryStats({ days, source, mediaType }),
     prisma.activeSession.findMany({
       ...(source || mediaType
@@ -113,7 +113,40 @@ export default async function ActivityPage({
     }),
     getMostRewatched({ days, source, mediaType }, 10),
     getActivityCalendar(source, mediaType),
+    prisma.setting.findMany({
+      where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
+      select: { key: true, value: true },
+    }),
   ]);
+
+  // Parse the persisted Plex reachability snapshot. The value is JSON written
+  // by plex-events.persistReachability — defensive parse so a malformed row
+  // (manual edit, schema drift) falls back to null (= "unknown") instead of
+  // crashing the page.
+  //
+  // Only trust the reachability flag when the Plex poller that maintains it is
+  // actually running. plexServerReachable now tracks *local* reachability — it's
+  // written by the 5s poller (true when getPlexSessions succeeds, false when it
+  // throws) plus the SSE connect-time probe. The poller only runs when
+  // play-history is enabled AND the Plex source is enabled AND url+token are set
+  // (mirrored by doReconcile's `shouldRun`). If any of those is off, the value
+  // is stale and unmaintained, so the badge must not be driven by it. Gating
+  // here on the same conditions keeps the badge aligned with its data source.
+  const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
+  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
+  const [phEnabled, plexSourceEnabled] = await Promise.all([
+    isPlayHistoryEnabled(),
+    isSourceEnabled("plex"),
+  ]);
+  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
+  let initialPlexReachable: boolean | null = null;
+  const reachableValue = plexSettings.get("plexServerReachable");
+  if (plexSseActive && reachableValue) {
+    try {
+      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
+      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
+    } catch { /* leave null */ }
+  }
 
   // Inline raw queries here used to re-compute uniqueViewers / totalWatchTimeHours
   // and prevPeriod totals that getPlayHistoryStats already returns above. Removed
@@ -302,6 +335,14 @@ export default async function ActivityPage({
     videoDecision: s.videoDecision,
     audioDecision: s.audioDecision,
     container: s.container,
+    location: s.location,
+    bandwidth: s.bandwidth,
+    secure: s.secure,
+    relayed: s.relayed,
+    introStartMs: s.introStartMs,
+    introEndMs: s.introEndMs,
+    creditsStartMs: s.creditsStartMs,
+    creditsEndMs: s.creditsEndMs,
     posterUrl: s.effectiveTmdbId ? posterMap[s.effectiveTmdbId] ?? null : null,
   }));
 
@@ -509,6 +550,7 @@ export default async function ActivityPage({
           initialSessions={serializedSessions}
           source={source}
           mediaType={mediaType}
+          initialPlexReachable={initialPlexReachable}
         />
       )}
 

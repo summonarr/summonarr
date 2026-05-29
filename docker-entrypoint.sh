@@ -253,13 +253,40 @@ _cron_loop() {
   done
 }
 
-# Separate fast loop for play history — runs every 10s by default for granular tracking.
+# Separate fast loop for play history — runs every 5s by default for granular tracking.
 # Decoupled from the main cron loop which ticks every 60s.
+#
+# Why the readiness check instead of a flat sleep: every poll cycle bumps
+# ActiveSession.lastSeenAt; every cycle missed during boot ages it toward the
+# SESSION_ABSENCE_GRACE_MS=60s threshold. With the previous blind `sleep 30`,
+# a sub-30s redeploy left lastSeenAt 30-45s old by the time the first poll
+# fired — close enough to the grace threshold that bootstrapReconcile (which
+# fires as a side-effect of that first poll triggering reconcilePlexEventStream)
+# could finalize the in-progress session as stale, ledger-lock the sessionKey,
+# and make the Now Playing card permanently disappear from the user's view.
+# Poll /api/health (unauthenticated, no DB hit) and proceed within ~1s of
+# Node becoming reachable. 60s max is the same window the HEALTHCHECK
+# start-period uses.
 _play_history_loop() {
   INTERVAL=${PLAY_HISTORY_SYNC_INTERVAL:-5}
   echo "Play history polling started (every ${INTERVAL}s)"
-  # Wait for node to start up
-  sleep 30
+
+  PORT_VALUE="${PORT:-3000}" node --input-type=module <<'JSEOF'
+const port = process.env.PORT_VALUE;
+const url = `http://127.0.0.1:${port}/api/health`;
+const start = Date.now();
+const MAX_MS = 60_000;
+while (Date.now() - start < MAX_MS) {
+  try {
+    const r = await fetch(url);
+    if (r.ok) process.exit(0);
+  } catch {}
+  await new Promise((res) => setTimeout(res, 500));
+}
+console.warn("[entrypoint] play-history readiness probe timed out after 60s; starting poll loop anyway");
+process.exit(0);
+JSEOF
+
   while true; do
     _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000/api/sync/play-history}" "play-history" "1"
     sleep "$INTERVAL"

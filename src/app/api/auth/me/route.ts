@@ -15,11 +15,13 @@ interface PublicSession {
     provider?: string;
     mediaServer?: string | null;
   };
-  sessionId?: string;
   expiresAt?: number;
 }
 
 function serialize(claims: SessionClaims): PublicSession {
+  // sessionId is intentionally omitted: no client consumer reads it (server
+  // components that need it use auth() which carries the full claims) and
+  // exposing it widens the JS-visible surface for no benefit.
   return {
     user: {
       id: claims.id,
@@ -29,9 +31,20 @@ function serialize(claims: SessionClaims): PublicSession {
       provider: claims.provider,
       mediaServer: claims.mediaServer ?? null,
     },
-    sessionId: claims.sessionId,
     expiresAt: claims.expiresAt,
   };
+}
+
+function applyPrivacyHeaders(res: NextResponse): NextResponse {
+  // Never let a shared HTTP cache (corporate proxy, mis-configured CDN, BFCache,
+  // service worker default cache) serve one user's session payload to the next
+  // visitor. `private` blocks shared caches; `no-store` blocks even private
+  // ones from persisting. `Vary: Cookie` is belt-and-suspenders for the few
+  // legitimate caches that do honor private.
+  res.headers.set("Cache-Control", "no-store, private, must-revalidate");
+  res.headers.set("Pragma", "no-cache");
+  res.headers.set("Vary", "Cookie");
+  return res;
 }
 
 // Session source for the client-side SummonarrSessionProvider. Reads the
@@ -41,13 +54,13 @@ function serialize(claims: SessionClaims): PublicSession {
 export async function GET(req: NextRequest) {
   const token = parseSessionCookie(req.headers.get("cookie"));
   if (!token) {
-    return NextResponse.json({ session: null }, { status: 401 });
+    return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
   const result = await verifyAndRefreshSession(token);
   if (!result) {
-    return NextResponse.json({ session: null }, { status: 401 });
+    return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
-  const res = NextResponse.json({ session: serialize(result.claims) });
+  const res = applyPrivacyHeaders(NextResponse.json({ session: serialize(result.claims) }));
   if (result.refreshed) {
     res.headers.append(
       "Set-Cookie",

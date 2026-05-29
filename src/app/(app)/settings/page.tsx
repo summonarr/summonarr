@@ -222,7 +222,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies",
+      "trash-sync", "download-policies", "jellyfin-history",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -304,6 +304,7 @@ export default async function SettingsPage({
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: `${process.env.SCRUB_AUDIT_PII_INTERVAL ?? "86400"}s`, ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
       { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("download-policies") },
+      { name: "Jellyfin History Sync", description: "Import Jellyfin play history via PlaybackReporting plugin (or IsPlayed fallback)", endpoint: "/api/cron/sync-jellyfin-history", interval: `${process.env.JF_HISTORY_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("jellyfin-history") },
     ];
   }
 

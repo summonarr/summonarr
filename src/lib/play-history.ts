@@ -2,6 +2,7 @@ import { prisma } from "./prisma";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
+import { posterUrl } from "./tmdb-types";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 export function safeBigInt(x: unknown): bigint {
@@ -224,7 +225,12 @@ export async function resolveMediaServerUser(params: {
         ...(thumbUrl ? { thumbUrl } : {}),
         ...(userId ? { userId } : {}),
         ...(serverMachineId ? { serverMachineId } : {}),
-        ...(isServerAdmin !== undefined ? { isServerAdmin } : {}),
+        // Set-only on existing rows: a transient mismatch between the admin
+        // token's plex user id and the row we're upserting (e.g. token
+        // rotation, OIDC-linked admin re-key, multi-user server with the
+        // admin signed in from a fresh client) must NEVER demote
+        // isServerAdmin true→false. Only ever upgrade false→true here.
+        ...(isServerAdmin === true ? { isServerAdmin: true } : {}),
       },
       select: { id: true },
     });
@@ -247,6 +253,30 @@ const MIN_PLAY_DURATION_S = 90;
 // Cap any single accumulation delta. Protects against missed events, machine sleep, or clock skew
 // inflating playtime. cleanupStaleSessions(30) handles ghost sessions; this is the per-event guard.
 export const MAX_PLAYTIME_DELTA_MS = 5 * 60 * 1000;
+// Grace window before a session that has disappeared from the upstream snapshot
+// (/status/sessions for Plex, /Sessions for Jellyfin) is treated as stopped.
+// Why: pause flickers — Plex Web spuriously emits state="stopped" on pause,
+// and some Jellyfin clients briefly clear NowPlayingItem on background — would
+// otherwise write a stopped PlayHistory row + delete the ActiveSession on every
+// pause. Sessions that miss N consecutive 5s polls (≈12 polls @ 60s) are
+// finalized; pauses that resume within the window are preserved as still-live.
+// cleanupStaleSessions(30) is the longer 30-min safety net beneath this.
+export const SESSION_ABSENCE_GRACE_MS = 60_000;
+// End-of-file clamp window. When the playhead lands within this distance of the
+// media's total duration at finalize, treat it as a full-completion stop —
+// Plex/Jellyfin clients commonly leave the player at viewOffset ≈ duration − a
+// few seconds when the user "stops at the credits," and the natural endpoint
+// of natural-end playback is rarely exactly duration. Without the clamp,
+// sessions that effectively reached the end get classed as 99% completionRatio
+// (not completed) and slide just below the 80% watched threshold for media
+// where the credits roll consumes the tail. Tautulli uses the same 10 s window
+// (activity_handler.py:122-126).
+const END_OF_FILE_CLAMP_MS = 10_000;
+// How far back to look when chaining a new finalize into the resume-group of a
+// previous unwatched watch of the same media by the same user. Tautulli sets
+// no upper bound; we cap at 7 days so the chain doesn't link a rewatch months
+// later (which is a separate logical viewing).
+const RESUME_GROUPING_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Returns the bigint to add to ActiveSession.playtimeMs when applying an event at `now`.
 // Only accumulates when the prior state was "playing" — pause/buffer/initial state contribute nothing.
@@ -264,54 +294,103 @@ export function computePlaytimeIncrement(
 // (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt
 // and the close event is counted. cleanupStaleSessions does not use this — a stale session has no
 // signal it was still playing.
+//
+// Do NOT overwrite session.lastSeenAt here. recordCompletedSession's deleteMany uses lastSeenAt
+// as the CAS reference against the DB row; mutating it would compare the row to a fabricated
+// "now" rather than the value we read, the CAS would never match, and finalized sessions would
+// stay in the ActiveSession table until cleanupStaleSessions(30) caught them 30 minutes later.
+// Pass stoppedAt via recordCompletedSession's opts instead.
 export function applyFinalTick(
   session: ActiveSession,
   now: Date,
-  override?: { progressMs?: bigint; stoppedAt?: Date },
+  override?: { progressMs?: bigint },
 ): ActiveSession {
   const increment = computePlaytimeIncrement(session, now);
   return {
     ...session,
     playtimeMs: session.playtimeMs + increment,
     ...(override?.progressMs !== undefined ? { progressMs: override.progressMs } : {}),
-    ...(override?.stoppedAt ? { lastSeenAt: override.stoppedAt } : {}),
   };
 }
 
 export async function recordCompletedSession(
   session: ActiveSession,
-  opts: { skipSSE?: boolean } = {},
+  opts: { skipSSE?: boolean; stoppedAt?: Date } = {},
 ): Promise<void> {
-  // The polling sync may leave playtimeMs at zero for short watches that disappear between two
-  // 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes 0.
-  // progressMs (playhead at stop) is always populated, so taking the max yields the right
-  // answer regardless of which signal is more accurate for a given session.
-  const playDurationMs = Math.max(Number(session.playtimeMs), Number(session.progressMs));
+  // Take `now` once so every downstream timestamp/elapsed calc agrees on the same reference.
+  const now = new Date();
+
+  // The polling sync may leave playtimeMs at zero for short watches that disappear between
+  // two 5s ticks, and pre-stop pauses can leave state="paused" so applyFinalTick contributes
+  // 0. progressMs (playhead at stop) is always populated, so falling back to it covers those
+  // gaps. BUT progressMs is the playhead POSITION in the file, not elapsed wall-clock time:
+  // a user who seeks to the credits and quits at five seconds has progressMs ≈ totalDuration
+  // even though they only watched five seconds. Cap by the actual wall-clock window so the
+  // fallback can't credit more time than physically elapsed.
+  const stoppedAt =
+    opts.stoppedAt ?? (session.lastSeenAt > session.startedAt ? session.lastSeenAt : now);
+  const wallElapsedMs = Math.max(0, stoppedAt.getTime() - session.startedAt.getTime());
+
+  // End-of-file clamp: a session that ended within END_OF_FILE_CLAMP_MS of
+  // the media's runtime is treated as completed at exactly durationMs. Some
+  // clients stop at credits with a stale viewOffset; without this, the
+  // PlayHistory row records progressMs = duration − 4 s, completionRatio
+  // ≈ 99.7%, completed = false. Tautulli applies the same 10 s clamp at
+  // activity_handler.py:122-126.
+  const rawProgressMs = Number(session.progressMs);
+  const totalDurationMsRaw = Number(session.durationMs);
+  const clampedProgressMs =
+    totalDurationMsRaw > 0 && rawProgressMs >= totalDurationMsRaw - END_OF_FILE_CLAMP_MS
+      ? totalDurationMsRaw
+      : rawProgressMs;
+
+  const cappedProgressMs = Math.min(clampedProgressMs, wallElapsedMs);
+  const playDurationMs = Math.max(Number(session.playtimeMs), cappedProgressMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
+  // Both short-circuits use the same lastSeenAt CAS the post-transaction
+  // delete below uses (line 387). A blind delete here can stomp a row the
+  // sync just rewrote (same `id`, new `lastSeenAt`, new `startedAt`) for a
+  // fresh playback, leaving the new watch with no ActiveSession — its
+  // trailing time and finalize then never fire.
   if (EXCLUDED_USERNAMES.has(session.serverUsername)) {
-    await prisma.activeSession.delete({ where: { id: session.id } }).catch(() => {});
+    await prisma.activeSession
+      .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
+      .catch(() => {});
     return;
   }
   if (playDurationS < MIN_PLAY_DURATION_S) {
-    await prisma.activeSession.delete({ where: { id: session.id } }).catch(() => {});
+    await prisma.activeSession
+      .deleteMany({ where: { id: session.id, lastSeenAt: session.lastSeenAt } })
+      .catch(() => {});
     return;
   }
 
   const threshold = await getWatchedThreshold();
 
-  const totalDurationMs = Number(session.durationMs);
-  const watched = calculateWatched(playDurationMs, totalDurationMs, threshold);
+  // For watched / completed evaluation, treat "effective content end" as the
+  // credits start when we have a marker — Plex players commonly stop at the
+  // credits roll with progressMs just shy of duration, and a media that ran
+  // 50 min of content + 5 min of credits should mark watched at the credits
+  // boundary, not at 80% of the credit-inclusive 55 min total. Falls back to
+  // the file duration when no marker exists.
+  const totalDurationMs = totalDurationMsRaw;
+  const effectiveDurationMs =
+    session.creditsStartMs != null && session.creditsStartMs > 0 && session.creditsStartMs <= totalDurationMs
+      ? session.creditsStartMs
+      : totalDurationMs;
+  const watched = calculateWatched(playDurationMs, effectiveDurationMs, threshold);
 
-  const now = new Date();
-  const stoppedAt = session.lastSeenAt > session.startedAt ? session.lastSeenAt : now;
-
+  // `now` and `stoppedAt` were already established at the top so the cap on
+  // cappedProgressMs and the historyData.stoppedAt agree on the same instant.
   const totalElapsedS = Math.max(0, Math.floor((stoppedAt.getTime() - session.startedAt.getTime()) / 1000));
   const durationS = Math.max(0, Math.floor(totalDurationMs / 1000));
   const pausedDurationS = Math.max(0, totalElapsedS - playDurationS);
 
-  const progressMs = Number(session.progressMs);
-  const completionRatio = totalDurationMs > 0 ? progressMs / totalDurationMs : 0;
+  const progressMs = clampedProgressMs;
+  // completionRatio uses effectiveDurationMs (credits-aware) for the same
+  // reason as watched — reaching the credits is "completed."
+  const completionRatio = effectiveDurationMs > 0 ? progressMs / effectiveDurationMs : 0;
 
   const completed = completionRatio >= 0.95;
 
@@ -332,6 +411,36 @@ export async function recordCompletedSession(
   // own startedAt yields a key that's unique per watch instance while still being deterministic
   // across webhook replays of the same Stop event.
   const uniqueSourceSessionId = `${session.sessionKey}:${session.startedAt.toISOString()}`;
+
+  // Resume-grouping: link this row into a chain when a previous unwatched
+  // PlayHistory row exists for the same (user, source-item) within the last
+  // 7 days. The chain root self-references — every row in a chain shares the
+  // referenceId of the first row, so the UI can `GROUP BY referenceId` to
+  // collapse split watches ("paused on Monday, finished on Tuesday") into
+  // one logical viewing without recursive walks. We only look back from
+  // *unwatched* prior plays — once a chain reaches the watched threshold, the
+  // next play is a rewatch and starts its own chain.
+  let referenceId: string | null = null;
+  if (session.sourceItemId) {
+    const lookbackCutoff = new Date(stoppedAt.getTime() - RESUME_GROUPING_LOOKBACK_MS);
+    const priorUnwatched = await prisma.playHistory.findFirst({
+      where: {
+        source: session.source,
+        sourceItemId: session.sourceItemId,
+        mediaServerUserId: session.mediaServerUserId,
+        watched: false,
+        startedAt: { gte: lookbackCutoff, lt: session.startedAt },
+      },
+      orderBy: { startedAt: "desc" },
+      select: { id: true, referenceId: true },
+    }).catch(() => null);
+    if (priorUnwatched) {
+      // Chain to the previous row's referenceId (already a chain root) or to
+      // the row's own id (it's the root). Either way, every row in the chain
+      // shares one referenceId value.
+      referenceId = priorUnwatched.referenceId ?? priorUnwatched.id;
+    }
+  }
 
   const historyData = {
     source: session.source,
@@ -366,28 +475,39 @@ export async function recordCompletedSession(
     audioDecision: session.audioDecision,
     container: session.container,
     transcodeReason: session.transcodeReason,
+    location: session.location,
+    bandwidth: session.bandwidth,
+    secure: session.secure,
+    relayed: session.relayed,
+    introStartMs: session.introStartMs,
+    introEndMs: session.introEndMs,
+    creditsStartMs: session.creditsStartMs,
+    creditsEndMs: session.creditsEndMs,
+    referenceId,
   };
 
-  await prisma.$transaction(async (tx) => {
-    // update:{} means a duplicate webhook replay is a no-op — the first write wins
-    await tx.playHistory.upsert({
-      where: {
-        source_sourceSessionId: { source: session.source, sourceSessionId: uniqueSourceSessionId },
-      },
-      create: historyData,
-      update: {},
-    });
+  // recordCompletedSession runs from three paths that can fire concurrently for the same
+  // sessionKey: SSE 'stopped' notification, 5s poller stall detection, and webhook handlers.
+  // Prisma's upsert is SELECT-then-INSERT (not atomic) — under that race the loser hits P2002
+  // even though `update: {}` already means "first writer wins". Catching P2002 in JS works but
+  // still leaves a Postgres ERROR and a `prisma:error` log per collision because the INSERT
+  // reaches the DB before failing. createMany({ skipDuplicates: true }) compiles to
+  // INSERT ... ON CONFLICT DO NOTHING, which resolves the race inside Postgres with no error
+  // emitted. Single-row createMany is the idiomatic Prisma way to express this.
+  await prisma.playHistory.createMany({
+    data: [historyData],
+    skipDuplicates: true,
+  });
 
-    // CAS on lastSeenAt: only delete if the row hasn't been touched since the
-    // caller read it. Without this, a concurrent activeSession update or
-    // re-create from sync/play-history could be silently deleted here when
-    // recordCompletedSession was triggered by a stale Stop webhook.
-    // updateMany returns 0 if the lastSeenAt timestamp shifted; in that case
-    // we leave the row alone (it's now part of a different playback session).
-    await tx.activeSession.deleteMany({
-      where: { id: session.id, lastSeenAt: session.lastSeenAt },
-    }).catch(() => {});
-  }, { timeout: 15_000 });
+  // CAS on lastSeenAt: only delete if the row hasn't been touched since the
+  // caller read it. Without this, a concurrent activeSession update or
+  // re-create from sync/play-history could be silently deleted here when
+  // recordCompletedSession was triggered by a stale Stop webhook.
+  // deleteMany returns 0 if the lastSeenAt timestamp shifted; in that case
+  // we leave the row alone (it's now part of a different playback session).
+  await prisma.activeSession.deleteMany({
+    where: { id: session.id, lastSeenAt: session.lastSeenAt },
+  }).catch(() => {});
 
   // Invalidate cached stats so the next page load reflects the new record.
   // Callers that import many sessions in a tight loop (cron, sync) should pass
@@ -396,6 +516,161 @@ export async function recordCompletedSession(
   clearActivityCache();
   if (!opts.skipSSE) {
     emitSSE({ type: "activity:history-updated" });
+    // Also push a fresh sessions snapshot. recordCompletedSession is the moment a
+    // session leaves ActiveSession; the now-playing UI listens for activity:sessions
+    // (history-updated only refreshes the history table). Without this emit the SSE
+    // finalize paths cleared the row in the DB but the now-playing card stayed up for
+    // up to 5 seconds until the next poll re-snapshotted — defeating the purpose of
+    // subscribing to Plex SSE for instant stop detection.
+    await emitActiveSessionsSnapshot();
+  }
+}
+
+// Build an activity:sessions SSE payload from current ActiveSession rows and emit it.
+// Used after SSE-driven finalize (plex-events) to push an immediate now-playing update,
+// and reused by the 5s poll route so the wire format stays in one place.
+export async function emitActiveSessionsSnapshot(): Promise<void> {
+  const allSessions = await prisma.activeSession.findMany({
+    orderBy: { startedAt: "desc" },
+    select: {
+      id: true,
+      source: true,
+      state: true,
+      mediaServerUserId: true,
+      serverUsername: true,
+      title: true,
+      tmdbId: true,
+      mediaType: true,
+      year: true,
+      seasonNumber: true,
+      episodeNumber: true,
+      episodeTitle: true,
+      progressPercent: true,
+      progressMs: true,
+      durationMs: true,
+      platform: true,
+      player: true,
+      device: true,
+      ipAddress: true,
+      startedAt: true,
+      playMethod: true,
+      videoCodec: true,
+      audioCodec: true,
+      resolution: true,
+      bitrate: true,
+      videoDecision: true,
+      audioDecision: true,
+      container: true,
+      location: true,
+      bandwidth: true,
+      secure: true,
+      relayed: true,
+      introStartMs: true,
+      introEndMs: true,
+      creditsStartMs: true,
+      creditsEndMs: true,
+    },
+  });
+
+  const sessionPosterMap: Record<number, string | null> = {};
+  const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
+  if (tmdbIds.length > 0) {
+    const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
+    const cacheRows = await prisma.tmdbCache.findMany({
+      where: { key: { in: cacheKeys } },
+      select: { key: true, data: true },
+    });
+    for (const row of cacheRows) {
+      try {
+        const parsed = JSON.parse(row.data) as { posterPath?: string | null };
+        if (parsed.posterPath) {
+          const id = parseInt(row.key.split(":")[1] ?? "", 10);
+          if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) {
+            sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
+          }
+        }
+      } catch { }
+    }
+  }
+
+  emitSSE({
+    type: "activity:sessions",
+    sessions: allSessions.map((s) => ({
+      id: s.id,
+      source: s.source,
+      state: s.state,
+      mediaServerUserId: s.mediaServerUserId,
+      serverUsername: s.serverUsername,
+      title: s.title,
+      tmdbId: s.tmdbId,
+      mediaType: s.mediaType,
+      year: s.year,
+      seasonNumber: s.seasonNumber,
+      episodeNumber: s.episodeNumber,
+      episodeTitle: s.episodeTitle,
+      progressPercent: s.progressPercent,
+      progressMs: Number(s.progressMs),
+      durationMs: Number(s.durationMs),
+      platform: s.platform,
+      player: s.player,
+      device: s.device,
+      ipAddress: s.ipAddress,
+      startedAt: s.startedAt.toISOString(),
+      playMethod: s.playMethod,
+      videoCodec: s.videoCodec,
+      audioCodec: s.audioCodec,
+      resolution: s.resolution,
+      bitrate: s.bitrate,
+      videoDecision: s.videoDecision,
+      audioDecision: s.audioDecision,
+      container: s.container,
+      location: s.location,
+      bandwidth: s.bandwidth,
+      secure: s.secure,
+      relayed: s.relayed,
+      introStartMs: s.introStartMs,
+      introEndMs: s.introEndMs,
+      creditsStartMs: s.creditsStartMs,
+      creditsEndMs: s.creditsEndMs,
+      posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
+    })),
+  });
+}
+
+// In-memory once-guard. Resets on process restart — which is exactly when we
+// want to re-anchor again.
+let activeSessionsReanchored = false;
+
+// On the FIRST reconcile after this process started, bump lastSeenAt = now for
+// every ActiveSession row so the absence grace (SESSION_ABSENCE_GRACE_MS) and
+// cleanupStaleSessions are measured from boot, not from the last poll before
+// the process went down.
+//
+// Why: lastSeenAt is the "we last saw this session live" anchor for all three
+// finalize paths — the SSE bootstrap reconcile, the 5s poller's stale sweep,
+// and cleanupStaleSessions. After a restart (Docker upgrade, host reboot) the
+// poller and SSE were down for the entire outage, so every row's lastSeenAt is
+// stale by the downtime and the >=60s grace becomes trivially true. A single
+// transient absence at boot — Plex still spinning up, an incomplete
+// /status/sessions, or a Plex-side sessionKey reset — then finalizes AND
+// ledger-locks a session that's actually still playing, and the now-playing
+// card never returns. Re-anchoring restores the grace: an ongoing session that
+// is present in the snapshot keeps getting bumped and is never killed; a
+// session that genuinely ended during the outage is finalized ~60s after boot
+// once it's been confirmed absent across real post-boot observations.
+//
+// Idempotent per process; safe to call from both the SSE bootstrap and the
+// poller (whichever runs first wins). On failure the guard is released so the
+// next caller retries rather than leaving sessions exposed to the stale-anchor
+// finalize.
+export async function reanchorActiveSessionsOnBoot(): Promise<void> {
+  if (activeSessionsReanchored) return;
+  activeSessionsReanchored = true;
+  try {
+    await prisma.activeSession.updateMany({ data: { lastSeenAt: new Date() } });
+  } catch (err) {
+    activeSessionsReanchored = false;
+    console.warn("[play-history] boot re-anchor of ActiveSession.lastSeenAt failed:", err);
   }
 }
 
@@ -796,9 +1071,11 @@ export async function getMostPopularOnServer(
 
   const trendArcFilter = trendingIdx ? `FILTER (WHERE arc_started_at >= $${trendingIdx})` : "";
   const trendRawFilter = trendingIdx ? `FILTER (WHERE "startedAt" >= $${trendingIdx})` : "";
-  const episodesFilter = trendingIdx
-    ? `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL AND "startedAt" >= $${trendingIdx})`
-    : `FILTER (WHERE "mediaType"::text = 'TV' AND "seasonNumber" IS NOT NULL AND "episodeNumber" IS NOT NULL)`;
+  // Episodes badge counts only episodes that have at least one completed arc, so a half-watched
+  // pilot no longer pads the "5 eps" count. Pulled from completed_arcs (ca.*), filtered to TV.
+  const episodesArcFilter = trendingIdx
+    ? `FILTER (WHERE ca."mediaType"::text = 'TV' AND ca."seasonNumber" IS NOT NULL AND ca."episodeNumber" IS NOT NULL AND ca.arc_started_at >= $${trendingIdx})`
+    : `FILTER (WHERE ca."mediaType"::text = 'TV' AND ca."seasonNumber" IS NOT NULL AND ca."episodeNumber" IS NOT NULL)`;
   const havingSql = trendingIdx ? `HAVING COUNT(*) ${trendArcFilter} > 0` : "";
 
   const orderBy =
@@ -861,7 +1138,6 @@ export async function getMostPopularOnServer(
       SELECT "tmdbId", "mediaType"::text AS "mediaType",
              MAX("title") AS title,
              MAX("year") AS year,
-             (COUNT(DISTINCT ("seasonNumber", "episodeNumber")) ${episodesFilter})::bigint AS episodes,
              (COALESCE(SUM("playDuration") ${trendRawFilter}, 0) / 3600.0)::float8 AS "totalHours"
       FROM "PlayHistory"
       WHERE ${baseWhere}
@@ -869,14 +1145,15 @@ export async function getMostPopularOnServer(
     ),
     popular AS (
       SELECT ca."tmdbId", ca."mediaType"::text AS "mediaType",
-             sa.title, sa.year, sa.episodes, sa."totalHours",
+             sa.title, sa.year, sa."totalHours",
+             (COUNT(DISTINCT (ca."seasonNumber", ca."episodeNumber")) ${episodesArcFilter})::bigint AS episodes,
              (COUNT(*) ${trendArcFilter})::bigint AS plays,
              COUNT(*)::bigint AS "allTimePlays",
              (COUNT(DISTINCT ca."mediaServerUserId") ${trendArcFilter})::bigint AS viewers
       FROM completed_arcs ca
       JOIN session_aggregates sa
         ON sa."tmdbId" = ca."tmdbId" AND sa."mediaType" = ca."mediaType"::text
-      GROUP BY ca."tmdbId", ca."mediaType", sa.title, sa.year, sa.episodes, sa."totalHours"
+      GROUP BY ca."tmdbId", ca."mediaType", sa.title, sa.year, sa."totalHours"
       ${havingSql}
     )
     SELECT *,
@@ -1147,6 +1424,61 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   }
   const prevWhere = prevConditions.join(" AND ");
 
+  // Arc-grouped completion: three sittings of one movie should count as one completion, not
+  // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
+  // sessions on the same (user, tmdbId, season, episode) split by playHistoryArcGapDays or by a
+  // prior `completed=true` row (rewatch boundary). The arc CTE needs one extra param (arcGap)
+  // on top of `where`'s params; the rate query needs a second (completionRatio), but the
+  // histogram uses fixed bucket thresholds so it must NOT receive completionRatio — Postgres
+  // rejects prepared statements with unused binds ("bind message supplies N parameters, but
+  // prepared statement requires M"). Keep arcHistogramParams and arcRateParams separate.
+  const [completionPct, arcGapDays] = await Promise.all([
+    getCompletionThreshold(),
+    getArcGapDays(),
+  ]);
+  const arcHistogramParams = [...params, arcGapDays * 24 * 60 * 60];
+  const arcRateParams = [...arcHistogramParams, completionPct / 100];
+  const arcGapIdx = params.length + 1;
+  const completionIdx = params.length + 2;
+  const arcCte = `WITH base AS (
+       SELECT "mediaServerUserId", "tmdbId", "mediaType",
+              "seasonNumber", "episodeNumber",
+              "startedAt", "playDuration", "duration", "completed"
+       FROM "PlayHistory" WHERE ${where}
+     ),
+     arc_flags AS (
+       SELECT *,
+         CASE
+           WHEN LAG("startedAt") OVER w IS NULL
+             OR EXTRACT(EPOCH FROM ("startedAt" - LAG("startedAt") OVER w)) >= $${arcGapIdx}
+             OR LAG("completed") OVER w = true
+           THEN 1 ELSE 0
+         END AS arc_start
+       FROM base
+       WINDOW w AS (
+         PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                      COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+         ORDER BY "startedAt"
+       )
+     ),
+     arc_ids AS (
+       SELECT *,
+         SUM(arc_start) OVER (
+           PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+                        COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+           ORDER BY "startedAt"
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) AS arc_id
+       FROM arc_flags
+     ),
+     arcs AS (
+       SELECT SUM("playDuration") AS arc_play,
+              MAX("duration") AS arc_dur
+       FROM arc_ids
+       GROUP BY "mediaServerUserId", "tmdbId", "mediaType",
+                COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1), arc_id
+     )`;
+
   const [
     totalPlays,
     totalWatchTime,
@@ -1260,21 +1592,23 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ watched: bigint; total: bigint }[]>(
-      `SELECT COUNT(*) FILTER (WHERE "watched" = true)::bigint AS watched,
+      `${arcCte}
+       SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx})::bigint AS watched,
               COUNT(*)::bigint AS total
-       FROM "PlayHistory" WHERE ${where}`,
-      ...params,
+       FROM arcs`,
+      ...arcRateParams,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN ("playDuration"::float / "duration") < 0.25 THEN '0-25%'
-         WHEN ("playDuration"::float / "duration") < 0.50 THEN '25-50%'
-         WHEN ("playDuration"::float / "duration") < 0.75 THEN '50-75%'
+      `${arcCte}
+       SELECT CASE
+         WHEN (arc_play::float / arc_dur) < 0.25 THEN '0-25%'
+         WHEN (arc_play::float / arc_dur) < 0.50 THEN '25-50%'
+         WHEN (arc_play::float / arc_dur) < 0.75 THEN '50-75%'
          ELSE '75-100%'
        END AS bucket, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE ${where} AND "duration" > 0
+       FROM arcs WHERE arc_dur > 0
        GROUP BY bucket ORDER BY bucket`,
-      ...params,
+      ...arcHistogramParams,
     ),
 
     prisma.$queryRawUnsafe<{ avg_mbps: number | null; total_gb: number | null }[]>(
@@ -1590,6 +1924,10 @@ function setCached<T>(key: string, data: T, ttlMs: number): void {
 
 export function clearActivityCache(): void {
   activityCache.clear();
+  // popularCache lives in the same module with its own 5-min TTL but is fed by the same
+  // PlayHistory rows. Without flushing it here a freshly-finalized session can take up to
+  // 5 minutes to surface on /popular, and deletions take 5 minutes to drop a title out.
+  popularCache.clear();
 }
 
 export async function warmActivityCache(): Promise<{ warmed: number }> {

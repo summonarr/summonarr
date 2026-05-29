@@ -1,39 +1,53 @@
 import "server-only";
+import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
 
 type MediaType = "MOVIE" | "TV";
 
 /**
- * Filters `candidates` to those whose `notifiedAvailable` was actually flipped
- * by `applyCas`. Pattern: snapshot preState IMMEDIATELY before the CAS, then
- * return the subset whose preState was unnotified and the CAS reported
- * `count > 0`.
+ * Atomically flips `notifiedAvailable: true` on the candidate set (WHERE
+ * notifiedAvailable=false) and returns the subset whose row was actually
+ * flipped — collapses the snapshot-then-CAS pattern into a single statement
+ * so the previous TOCTOU between findMany() and updateMany() is closed.
  *
  * Multiple paths (orchestrator, per-source sync routes, webhooks) can
- * concurrently flip `notifiedAvailable` for overlapping request sets. Without
- * filtering to actual winners, every caller fires notifications for the full
- * pre-CAS overlap → duplicate "Now Available" pushes/Discord/email/CAS-race.
+ * concurrently flip `notifiedAvailable` for overlapping request sets. The
+ * `UPDATE ... RETURNING id` is atomic in Postgres: another writer that wins
+ * the race for a row sees zero rows affected (notifiedAvailable already true
+ * by the time their WHERE clause re-evaluates), so the row appears only in
+ * the genuine winner's RETURNING set.
  *
- * Caller's `applyCas` must include `notifiedAvailable: false` in its WHERE
- * clause — that's what makes it a CAS, not a blind write.
+ * When `opts.markAvailable=true` (used by sync paths that also need to flip
+ * status), the same UPDATE additionally writes `status='AVAILABLE'` and
+ * `availableAt=NOW()`. Without it, only `notifiedAvailable` flips (used by
+ * the webhook path where status was already set upstream).
  */
 export async function claimAvailableNotificationWinners<T extends { id: string }>(
   candidates: readonly T[],
-  applyCas: (ids: string[]) => Promise<{ count: number }>,
+  opts: { markAvailable?: boolean } = {},
 ): Promise<T[]> {
   if (candidates.length === 0) return [];
   const ids = candidates.map((r) => r.id);
-  const preState = await prisma.mediaRequest.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, notifiedAvailable: true },
-  });
-  const stillUnnotifiedIds = new Set(
-    preState.filter((r) => !r.notifiedAvailable).map((r) => r.id),
-  );
-  if (stillUnnotifiedIds.size === 0) return [];
-  const { count } = await applyCas(ids);
-  if (count === 0) return [];
-  return candidates.filter((r) => stillUnnotifiedIds.has(r.id));
+  const updated = opts.markAvailable
+    ? await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        UPDATE "MediaRequest"
+        SET "notifiedAvailable" = true,
+            "status" = 'AVAILABLE',
+            "availableAt" = NOW()
+        WHERE id IN (${Prisma.join(ids)})
+          AND "notifiedAvailable" = false
+        RETURNING id
+      `)
+    : await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+        UPDATE "MediaRequest"
+        SET "notifiedAvailable" = true
+        WHERE id IN (${Prisma.join(ids)})
+          AND "notifiedAvailable" = false
+        RETURNING id
+      `);
+  if (updated.length === 0) return [];
+  const winnerIds = new Set(updated.map((r) => r.id));
+  return candidates.filter((r) => winnerIds.has(r.id));
 }
 
 /**
