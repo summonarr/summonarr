@@ -42,6 +42,16 @@ type SyncResult = { started: number; updated: number; ended: number };
 // the 60s absence grace will reap.
 const pendingDlnaSessions = new Set<string>();
 
+// The 5s poller's /status/sessions snapshot lags the real-time SSE writer
+// (applyLiveStateUpdate in plex-events.ts), which pushes progressMs ahead. When
+// the poller then writes its slightly-older snapshot it would move progressMs
+// *backward* by a few seconds, making the now-playing progress bar bounce every
+// poll. Treat a small backward step (within this window) as stale-snapshot
+// jitter and keep the fresher stored value; a larger backward jump is a genuine
+// seek-back and is written through. ~2 poll intervals of slack. Only the poller
+// clamps — SSE is the authoritative real-time source and always writes raw.
+const PROGRESS_JITTER_TOLERANCE_MS = 10_000;
+
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
   // getPlexSessions is the authoritative local-reachability probe — it runs
   // every poll. Report the result so the UI's reachability badge reflects
@@ -212,7 +222,8 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           // stream. A genuine ghost (client quit, Plex keeps reporting it)
           // has a FROZEN viewOffset, so `!==` is false there and the stall
           // still fires at 60s as intended. Use inequality, not greater-than.
-          const playheadMoved = s.viewOffset !== Number(existing.progressMs);
+          const priorProgressMs = Number(existing.progressMs);
+          const playheadMoved = s.viewOffset !== priorProgressMs;
           // True resume from a non-playing state. Without this branch, a
           // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
           // progressUpdatedAt stuck at the moment the user paused. The first
@@ -249,6 +260,15 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           }
 
           const increment = computePlaytimeIncrement(existing, now);
+          // Clamp out stale-snapshot backward jitter (see PROGRESS_JITTER_
+          // TOLERANCE_MS): keep the fresher stored value on a small backward
+          // step, write through a genuine seek-back. playheadMoved above stays
+          // on the raw snapshot so liveness/stall detection is unaffected.
+          const isJitterBackstep =
+            s.viewOffset < priorProgressMs
+            && priorProgressMs - s.viewOffset <= PROGRESS_JITTER_TOLERANCE_MS;
+          const nextProgressMs = isJitterBackstep ? priorProgressMs : s.viewOffset;
+          const nextProgressPercent = s.duration > 0 ? (nextProgressMs / s.duration) * 100 : 0;
           // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the
           // row between our prefetch and this write, updateMany returns 0 and we
           // silently skip instead of throwing P2025 and aborting the whole
@@ -258,8 +278,8 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
             data: {
               lastSeenAt: now,
               state: s.state,
-              progressPercent,
-              progressMs: BigInt(s.viewOffset),
+              progressPercent: nextProgressPercent,
+              progressMs: BigInt(nextProgressMs),
               ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
               playMethod: s.playMethod,
               resolution: s.resolution,
