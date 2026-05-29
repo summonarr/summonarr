@@ -454,11 +454,12 @@ export function ActivityNowPlaying({
   initialSessions: ActiveSessionLive[];
   source?: string;
   mediaType?: string;
-  // null = unknown (no Plex configured / no notification observed yet),
-  // true = local server reachable (proven on each SSE connect) and/or plex.tv
-  // remote access up, false = Plex reported no plex.tv remote access. Read
-  // server-side from Setting('plexServerReachable'); SSE updates flow via
-  // the plex:reachability event below.
+  // null = unknown (no Plex configured / not polled yet),
+  // true = Summonarr can reach the local Plex server (getPlexSessions succeeds),
+  // false = Summonarr cannot reach Plex (poll/connect failing). This tracks
+  // *local* reachability, not plex.tv remote access. Read server-side from
+  // Setting('plexServerReachable'); SSE updates flow via the plex:reachability
+  // event below.
   initialPlexReachable?: boolean | null;
 }) {
   const [sessions, setSessions] =
@@ -515,7 +516,7 @@ export function ActivityNowPlaying({
             {plexReachable === false && (
               <span
                 className="ds-mono"
-                title="Plex has no plex.tv remote access — the server may still be reachable on your local network. Reported by Plex's SSE ReachabilityNotification."
+                title="Summonarr can't reach the Plex server — Plex play tracking and now-playing are paused until it's reachable again. Checked every poll via getPlexSessions."
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -533,7 +534,7 @@ export function ActivityNowPlaying({
                     background: "var(--ds-warning, #c84)",
                   }}
                 />
-                No remote access
+                Plex unreachable
               </span>
             )}
             <span

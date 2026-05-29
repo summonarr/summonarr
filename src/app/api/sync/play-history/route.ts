@@ -25,6 +25,7 @@ import {
   markPlexSessionFinalized,
   pruneRecentlyFinalized,
   reconcilePlexEventStream,
+  setPlexReachable,
 } from "@/lib/plex-events";
 
 type SyncResult = { started: number; updated: number; ended: number };
@@ -42,7 +43,18 @@ type SyncResult = { started: number; updated: number; ended: number };
 const pendingDlnaSessions = new Set<string>();
 
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
-  const sessions = await getPlexSessions(serverUrl, token);
+  // getPlexSessions is the authoritative local-reachability probe — it runs
+  // every poll. Report the result so the UI's reachability badge reflects
+  // whether Summonarr can actually reach the Plex server (not plex.tv remote
+  // access). Fire-and-forget; the persist is deduped + only writes on change.
+  let sessions;
+  try {
+    sessions = await getPlexSessions(serverUrl, token);
+  } catch (err) {
+    void setPlexReachable(false);
+    throw err;
+  }
+  void setPlexReachable(true);
   const now = new Date();
   const nowMs = now.getTime();
   pruneRecentlyFinalized(nowMs);

@@ -107,17 +107,6 @@ type TimelineEventData = {
   TimelineEntry?: PlexTimelineEntry | PlexTimelineEntry[];
 };
 
-// Plex "reachability" event — fires whenever the server's plex.tv remote-
-// access status changes. The reachability field is the boolean we want; we
-// store it on the Setting table so the UI can read a single source of truth.
-interface PlexReachabilityNotification {
-  reachability?: boolean;
-}
-
-type ReachabilityEventData = {
-  ReachabilityNotification?: PlexReachabilityNotification | PlexReachabilityNotification[];
-};
-
 // Debounce window for the scanner-triggered library re-sync. Plex's scanner
 // emits a TimelineEntry for every item it touches — a full Sonarr-style import
 // can produce hundreds of events in a few seconds. Coalesce them into one
@@ -250,13 +239,15 @@ class PlexEventStreamManager {
     const recycleTimer = setTimeout(() => localAbort.abort(), PERIODIC_RECYCLE_MS);
 
     try {
-      // Subscribe to playing + timeline + reachability event types. Playing
-      // drives the Now Playing card; timeline lets us invalidate the library
-      // cache when Plex's scanner adds/removes items; reachability surfaces
-      // the server's plex.tv remote-access status as a UI indicator. Other
-      // notification types (transcode.*, preferences, account) are dropped
-      // server-side by the filter so we don't waste bandwidth parsing them.
-      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline,reachability&X-Plex-Token=${encodeURIComponent(token)}`;
+      // Subscribe to playing + timeline event types. Playing drives the Now
+      // Playing card; timeline lets us invalidate the library cache when Plex's
+      // scanner adds/removes items. We deliberately do NOT subscribe to
+      // reachability — that reports plex.tv *remote-access* status, which is
+      // irrelevant for a self-hosted server reached over LAN/VPN; local
+      // reachability is derived from getPlexSessions succeeding instead (see
+      // persistReachability). Other notification types (transcode.*,
+      // preferences, account) are dropped server-side by the filter.
+      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline&X-Plex-Token=${encodeURIComponent(token)}`;
       const res = await safeFetchAdminConfigured(sseUrl, {
         headers: {
           Accept: "text/event-stream",
@@ -334,11 +325,10 @@ class PlexEventStreamManager {
     }
 
     // A successful getPlexSessions() against the local server is authoritative
-    // proof it's online — override any stale plex.tv-relay "offline" heuristic.
-    // Plex only emits a ReachabilityNotification on *change*, so a `false`
-    // observed during a relay blip (or while remote access is simply off) would
-    // otherwise persist forever even though the server is plainly reachable. The
-    // lastReachable guard in persistReachability keeps this a no-op once true.
+    // proof Summonarr can reach Plex — mark it reachable. This is the connect-
+    // time complement to the 5s poller, which is the steady-state writer (it
+    // reports true on every successful poll and false when getPlexSessions
+    // throws). The lastReachable guard keeps this a no-op once true.
     void this.persistReachability(true);
 
     const seenKeys = new Set<string>();
@@ -401,8 +391,6 @@ class PlexEventStreamManager {
       this.handlePlaying(dataParts.join("\n"));
     } else if (eventType === "timeline") {
       this.handleTimeline(dataParts.join("\n"));
-    } else if (eventType === "reachability") {
-      this.handleReachability(dataParts.join("\n"));
     }
   }
 
@@ -464,25 +452,6 @@ class PlexEventStreamManager {
     }
   }
 
-  private handleReachability(payload: string): void {
-    let parsed: ReachabilityEventData;
-    try {
-      parsed = JSON.parse(payload) as ReachabilityEventData;
-    } catch {
-      return;
-    }
-    const raw = parsed.ReachabilityNotification;
-    const notifications: PlexReachabilityNotification[] = Array.isArray(raw)
-      ? raw
-      : raw
-        ? [raw]
-        : [];
-    for (const n of notifications) {
-      if (typeof n.reachability !== "boolean") continue;
-      void this.persistReachability(n.reachability);
-    }
-  }
-
   // Debounce + dispatch for the scanner-triggered library re-sync. Plex emits
   // a TimelineEntry per touched item; coalescing inside this window keeps a
   // full re-scan from N+1ing /api/sync. The trigger fires HTTP to the local
@@ -513,13 +482,18 @@ class PlexEventStreamManager {
   }
 
   // Last reachability value this process persisted. Guards the upsert + SSE
-  // emit so a value that hasn't changed (e.g. persistReachability(true) firing
-  // on every periodic SSE reconnect) doesn't write the row or fan out an event
-  // on every tick. null until the first persist, so a stale false in the DB is
-  // always corrected on the first connect.
+  // emit so an unchanged value (the 5s poller reports the same state every
+  // tick) doesn't write the row or fan out an event on every poll. null until
+  // the first persist, so a stale value in the DB is corrected on the first
+  // poll/connect.
   private lastReachable: boolean | null = null;
 
-  private async persistReachability(reachable: boolean): Promise<void> {
+  // Persist whether Summonarr can reach the *local* Plex server. Called with
+  // true after a successful getPlexSessions() (SSE bootstrap + 5s poller) and
+  // false when that call throws. This is NOT plex.tv remote-access status —
+  // that signal is intentionally ignored (irrelevant for a self-hosted server
+  // reached over LAN/VPN). Exposed to the poller via setPlexReachable().
+  async persistReachability(reachable: boolean): Promise<void> {
     // No-op when the value is unchanged since this process last persisted it.
     if (this.lastReachable === reachable) return;
     // Setting is the single source of truth used by the UI to render the
@@ -657,4 +631,12 @@ const manager = new PlexEventStreamManager();
 // this every 5s so settings edits via the admin UI propagate within one tick.
 export function reconcilePlexEventStream(): Promise<void> {
   return manager.reconcile();
+}
+
+// Report whether the local Plex server is reachable. Called by the 5s poller:
+// true after a successful getPlexSessions(), false when it throws. Deduped +
+// SSE-broadcast inside the manager so the UI's reachability badge tracks actual
+// local connectivity rather than plex.tv remote-access status.
+export function setPlexReachable(reachable: boolean): Promise<void> {
+  return manager.persistReachability(reachable);
 }

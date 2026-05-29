@@ -124,15 +124,14 @@ export default async function ActivityPage({
   // (manual edit, schema drift) falls back to null (= "unknown") instead of
   // crashing the page.
   //
-  // Only trust the reachability flag when the Plex SSE that maintains it is
-  // actually running. plexServerReachable is written *exclusively* by the SSE
-  // (ReachabilityNotification + the connect-time self-heal in plex-events), and
-  // the SSE only runs when play-history is enabled AND the Plex source is
-  // enabled AND url+token are set (see doReconcile's `shouldRun`). If any of
-  // those is off, a stale {reachable:false} from a prior config is never
-  // updated and the self-heal can never clear it — so the badge must not be
-  // driven by it. Gating here on the same conditions keeps the badge's
-  // visibility aligned with the only thing that keeps its data fresh.
+  // Only trust the reachability flag when the Plex poller that maintains it is
+  // actually running. plexServerReachable now tracks *local* reachability — it's
+  // written by the 5s poller (true when getPlexSessions succeeds, false when it
+  // throws) plus the SSE connect-time probe. The poller only runs when
+  // play-history is enabled AND the Plex source is enabled AND url+token are set
+  // (mirrored by doReconcile's `shouldRun`). If any of those is off, the value
+  // is stale and unmaintained, so the badge must not be driven by it. Gating
+  // here on the same conditions keeps the badge aligned with its data source.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
   const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
   const [phEnabled, plexSourceEnabled] = await Promise.all([
