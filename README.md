@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.12.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.12.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,30 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.12.1
+
+**Added**
+
+- Real-time Plex playback tracking over Server-Sent Events — the now-playing card updates and clears the instant a stream starts or stops instead of waiting on the 5-second poll.
+- Activity views surface intro/credits markers and per-session network/connection metadata.
+- Resume-grouping for play history — a watch split across sittings ("paused Monday, finished Tuesday") collapses into a single viewing.
+- Settings observability panel now surfaces the Jellyfin history cron alongside the other jobs.
+
+**Changed**
+
+- The container now waits on an `/api/health` readiness probe before starting play-history sync instead of a fixed 30-second boot delay.
+- The Plex reachability badge reflects local server connectivity (not plex.tv remote access) and only appears when Plex is configured.
+
+**Fixed**
+
+- Plex sessions no longer stop being tracked ~1 minute into a stream (live streams were being false-finalized by the stall detector).
+- A server or container restart (e.g. a Docker upgrade) no longer marks an ongoing stream as stopped or drops the now-playing card.
+- The now-playing progress bar no longer jumps backward between the real-time feed and the 5-second poll.
+- Jellyfin plays imported from PlaybackReporting were incorrectly marked unwatched on most servers.
+- Jellyfin history backfill no longer double-counts plays already captured live.
+- Play-history accuracy pass: paused sessions stay active, resume-from-pause no longer ends a watch early, imports record real durations, and activity-stats queries serialize correctly.
+- Revoked or demoted admin sessions are no longer honored on sync/cron endpoints.
 
 ### v0.12.0
 
@@ -460,7 +484,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.12.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.12.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
