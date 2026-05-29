@@ -531,8 +531,15 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         // got the full wall-clock interval credited. Plex uses the helper at line 178;
         // align Jellyfin to it for consistency and correctness.
         const increment = computePlaytimeIncrement(existing, now);
-        await prisma.activeSession.update({
-          where: { id: existing.id },
+        // CAS on (id, lastSeenAt): mirrors the Plex branch (line 244). If the
+        // row was deleted/rewritten between our prefetch and this write — an
+        // overlapping tick (poll >5s), the same run's absence-finalize, or
+        // cleanupStaleSessions — a plain `update` throws P2025 and rejects the
+        // whole Promise.all batch, aborting every other session's write this
+        // tick. updateMany returns 0 instead, so we silently skip and the next
+        // poll re-reads state and resumes.
+        await prisma.activeSession.updateMany({
+          where: { id: existing.id, lastSeenAt: existing.lastSeenAt },
           data: {
             sessionKey: s.playSessionId,
             lastSeenAt: now,
