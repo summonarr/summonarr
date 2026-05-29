@@ -479,16 +479,22 @@ export interface JellyfinEpisodeSeriesInfo {
 export async function getJellyfinEpisodeSeriesIds(
   baseUrl: string,
   apiKey: string,
+  // Jellyfin admin userId. The /Items endpoint without a user scope is rejected
+  // (or returns empty) on multiple Jellyfin server versions even with an admin
+  // token — /Users/{userId}/Items?Ids=... is the cross-version-safe form. Any
+  // user the admin token can read works; the existing PR-import call site
+  // picks the first user from getJellyfinAllUsers.
+  userId: string,
   itemIds: string[],
 ): Promise<Map<string, JellyfinEpisodeSeriesInfo>> {
   const result = new Map<string, JellyfinEpisodeSeriesInfo>();
-  if (itemIds.length === 0) return result;
+  if (itemIds.length === 0 || !userId) return result;
 
   const base = baseUrl.replace(/\/$/, "");
   const CHUNK = 100;
   for (let i = 0; i < itemIds.length; i += CHUNK) {
     const chunk = itemIds.slice(i, i + CHUNK);
-    const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
+    const url = `${base}/Users/${encodeURIComponent(userId)}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
     try {
       const res = await safeFetchAdminConfigured(url, {
         headers: jellyfinAdminHeaders(apiKey),
@@ -519,19 +525,26 @@ export async function getJellyfinEpisodeSeriesIds(
 // endpoint doesn't include the item runtime, so callers that need real completion
 // ratios (playDuration / totalDuration) have to look it up separately. Returns
 // itemId → durationMs; missing items are absent from the map.
+//
+// userId: Jellyfin admin userId. /Items without a user scope is rejected (or
+// returns empty) on multiple Jellyfin server versions even with an admin token;
+// without a runtime in the returned map the PR-import path computes durationMs
+// = 0 and writes every imported play as watched=false. /Users/{userId}/Items
+// is the cross-version-safe form. Same fix as getJellyfinEpisodeSeriesIds.
 export async function getJellyfinItemRuntimes(
   baseUrl: string,
   apiKey: string,
+  userId: string,
   itemIds: string[],
 ): Promise<Map<string, number>> {
   const result = new Map<string, number>();
-  if (itemIds.length === 0) return result;
+  if (itemIds.length === 0 || !userId) return result;
 
   const base = baseUrl.replace(/\/$/, "");
   const CHUNK = 100;
   for (let i = 0; i < itemIds.length; i += CHUNK) {
     const chunk = itemIds.slice(i, i + CHUNK);
-    const url = `${base}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=RunTimeTicks&Recursive=true`;
+    const url = `${base}/Users/${encodeURIComponent(userId)}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=RunTimeTicks&Recursive=true`;
     try {
       const res = await safeFetchAdminConfigured(url, {
         headers: jellyfinAdminHeaders(apiKey),

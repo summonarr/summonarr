@@ -48,21 +48,75 @@ async function importFromPlaybackReporting(
   const rows = await getJellyfinPlaybackReporting(baseUrl, apiKey, lastSyncDate);
   if (!rows) return null; // plugin absent
 
+  // Pick any Jellyfin userId to scope the /Users/{userId}/Items lookups. The
+  // bare /Items endpoint returns empty on several Jellyfin server versions
+  // even with an admin token — when the runtime/series-info maps came back
+  // empty, durationMs was 0 and every PlaybackReporting-imported row was
+  // written with watched=false regardless of actual playback. Any user the
+  // admin token can read works; we just need a valid id in the URL.
+  const lookupUserId = userMap.keys().next().value ?? "";
+
+  // One-time-ish backfill: rows imported before the /Users/{userId}/Items fix
+  // sit in the DB with duration=0 and watched=false. The PR cron only fetches
+  // *new* play activity (since jellyfinHistoryLastSync), so the upsert below
+  // would never revisit those old rows on its own. Collect their itemIds and
+  // include them in the runtime lookup batch; after the lookup, update each
+  // broken row in place. Cheap when there's nothing to fix (one COUNT-style
+  // query returns []) so it can stay in the steady-state cron path.
+  const brokenRows = lookupUserId
+    ? await prisma.playHistory.findMany({
+        where: {
+          source: "jellyfin",
+          duration: 0,
+          sourceSessionId: { startsWith: "jf-pr:" },
+          sourceItemId: { not: null },
+        },
+        select: { id: true, sourceItemId: true, playDuration: true },
+      }).catch(() => [])
+    : [];
+
   // Batch-resolve seriesId for all episode itemIds in one round-trip set.
   const episodeItemIds = [...new Set(rows.filter((r) => r.itemType === "Episode").map((r) => r.itemId))];
-  const seriesInfoMap = episodeItemIds.length > 0
-    ? await getJellyfinEpisodeSeriesIds(baseUrl, apiKey, episodeItemIds)
+  const seriesInfoMap = episodeItemIds.length > 0 && lookupUserId
+    ? await getJellyfinEpisodeSeriesIds(baseUrl, apiKey, lookupUserId, episodeItemIds)
     : new Map();
 
   // Batch-fetch RunTimeTicks for every distinct item. PlaybackReporting only reports
   // PlayDuration (time spent playing); without the item's runtime we can't compute the
   // completion ratio. Before this fetch we wrote duration = playDuration on every row,
   // which made every imported play look like a 100% completion.
-  const allItemIds = [...new Set(rows.map((r) => r.itemId))];
-  const runtimeMap = allItemIds.length > 0
-    ? await getJellyfinItemRuntimes(baseUrl, apiKey, allItemIds)
+  // Merge the new-import itemIds with the broken-row itemIds so the runtime
+  // lookup is a single round-trip set rather than two passes.
+  const newItemIds = rows.map((r) => r.itemId);
+  const brokenItemIds = brokenRows.map((r) => r.sourceItemId!).filter((v): v is string => !!v);
+  const allItemIds = [...new Set([...newItemIds, ...brokenItemIds])];
+  const runtimeMap = allItemIds.length > 0 && lookupUserId
+    ? await getJellyfinItemRuntimes(baseUrl, apiKey, lookupUserId, allItemIds)
     : new Map<string, number>();
   const watchedThreshold = await getWatchedThreshold();
+
+  // Apply the backfill before walking the new-import rows. We only update when
+  // a real runtime came back — items the server genuinely has no RunTimeTicks
+  // for (live TV, unidentified) stay at duration=0/watched=false honestly,
+  // they aren't actually broken.
+  let backfilled = 0;
+  for (const broken of brokenRows) {
+    if (!broken.sourceItemId) continue;
+    const durationMs = runtimeMap.get(broken.sourceItemId);
+    if (!durationMs || durationMs <= 0) continue;
+    const durationS = Math.floor(durationMs / 1000);
+    const playDurationMs = broken.playDuration * 1000;
+    const watched = calculateWatched(playDurationMs, durationMs, watchedThreshold);
+    const completed = playDurationMs / durationMs >= 0.95;
+    await prisma.playHistory.update({
+      where: { id: broken.id },
+      data: { duration: durationS, watched, completed },
+    }).catch(() => {});
+    backfilled++;
+  }
+  if (backfilled > 0) {
+    console.warn(`[jf-history/pr] backfilled watched/duration on ${backfilled} previously broken PR row(s)`);
+  }
 
   // Cache TMDB lookups: seriesId → tmdbId, movieItemId → tmdbId
   const tmdbCache = new Map<string, number | null>();
@@ -156,7 +210,16 @@ async function importFromPlaybackReporting(
           player: row.clientName || null,
           device: row.deviceName || null,
         },
-        update: {},
+        // Self-heal rows that were imported before the /Users/{userId}/Items
+        // fix: when an earlier run wrote duration=0 (because the bare /Items
+        // lookup returned empty on this Jellyfin version), the watched flag
+        // was forced to false regardless of actual playback. Re-derive both
+        // when we now have a real runtime; leave the row untouched if we
+        // still can't resolve one (legit zero-runtime items like live TV
+        // would otherwise get clobbered).
+        update: durationS > 0
+          ? { duration: durationS, watched, completed }
+          : {},
       });
       imported++;
     } catch (err) {
