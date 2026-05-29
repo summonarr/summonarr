@@ -17,7 +17,7 @@
 
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
-import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot } from "./play-history";
+import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import { getPlexSessions } from "./plex";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
@@ -301,11 +301,22 @@ class PlexEventStreamManager {
     // not be invisible.
     clearFinalizedNotInCurrentSnapshot(seenKeys);
 
-    const stale = activeDbRows.filter((r) => !seenKeys.has(r.sessionKey));
-    if (stale.length === 0) return;
-
     const now = new Date();
     const nowMs = now.getTime();
+
+    // Apply the SESSION_ABSENCE_GRACE_MS window the 5s poller uses. Without
+    // it, a Summonarr restart (or any SSE reconnect) that races a Plex API
+    // tick where the session is briefly missing from /status/sessions
+    // finalizes a session that's still playing, ledger-locks the sessionKey,
+    // and prevents the next poll from re-creating the row — the "Now Playing"
+    // card disappears forever from the user's perspective. lastSeenAt is the
+    // wall-clock anchor for "we know it was active recently"; a sub-60s gap
+    // means trust the cached state and let the next snapshot confirm.
+    const stale = activeDbRows.filter((r) =>
+      !seenKeys.has(r.sessionKey)
+      && nowMs - r.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+    );
+    if (stale.length === 0) return;
 
     await Promise.all(
       stale.map(async (session) => {
