@@ -64,6 +64,13 @@ interface HistoryRow {
   creditsEndMs: number | null;
   // Resume-grouping anchor (see prisma/schema.prisma PlayHistory.referenceId).
   referenceId: string | null;
+  // Resume-grouping aggregates. Populated by the grouped API path (default);
+  // in ungrouped mode the API mirrors single-row defaults (segmentCount = 1,
+  // totalPlayDuration = playDuration, chainId = referenceId ?? id) so the
+  // UI can read these fields unconditionally.
+  segmentCount?: number;
+  chainId?: string;
+  totalPlayDuration?: number;
   mediaServerUserId: string;
   mediaServerUser: {
     username: string;
@@ -244,20 +251,27 @@ function DetailRow({
   colSpan: number;
   mounted: boolean;
 }) {
+  // Mirror the row body's grouping-aware effective values: when this PlayHistory
+  // is a chain representative, the watch time / progress reflect the whole
+  // chain. In ungrouped mode the API mirrors these into single-segment
+  // defaults, so the expression is uniform.
+  const effectivePlay = play.totalPlayDuration ?? play.playDuration;
+  const segments = play.segmentCount ?? 1;
   const pct =
     play.duration > 0
-      ? Math.round((play.playDuration / play.duration) * 100)
+      ? Math.round((effectivePlay / play.duration) * 100)
       : 0;
   const details: [string, React.ReactNode][] = [
     ["Started", fmtTimestamp(play.startedAt, mounted)],
     ["Stopped", fmtTimestamp(play.stoppedAt, mounted)],
     ["Total length", fmtDuration(play.duration)],
-    ["Watch time", fmtDuration(play.playDuration)],
+    ["Watch time", fmtDuration(effectivePlay)],
     [
       "Paused",
       play.pausedDuration ? fmtDuration(play.pausedDuration) : "—",
     ],
     ["Progress", `${pct}%`],
+    ...(segments > 1 ? ([["Segments", `${segments} (grouped resume)`]] as [string, React.ReactNode][]) : []),
     ["Device", play.device ?? "—"],
     [
       "IP address",
@@ -556,6 +570,12 @@ export function ActivityHistoryTable({
   const [sortBy, setSortBy] = useState<SortField>("startedAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
+  // Resume-grouping: default-on. When grouped, the table shows one row per
+  // chain (latest segment + chain aggregates); when off, each segment is its
+  // own row. Stored as `grouped` (true = collapsed) — API param is the
+  // inverse (`?ungrouped=true`) because the server defaults to grouped.
+  const [grouped, setGrouped] = useState(true);
+
   const [page, setPage] = useState(1);
   const [limit, setLimit] = useState(25);
 
@@ -585,6 +605,7 @@ export function ActivityHistoryTable({
     sortBy,
     sortDir,
     limit,
+    grouped,
     globalSource,
     globalMediaType,
     days,
@@ -630,6 +651,9 @@ export function ActivityHistoryTable({
     if (userFilter) params.set("userId", userFilter);
     params.set("sortBy", sortBy);
     params.set("sortDir", sortDir);
+    // API defaults to grouped; only set the flag in the ungrouped case so a
+    // bare-URL share still lands on the default-on behaviour.
+    if (!grouped) params.set("ungrouped", "true");
     return params;
   }, [
     globalSource,
@@ -644,6 +668,7 @@ export function ActivityHistoryTable({
     userFilter,
     sortBy,
     sortDir,
+    grouped,
   ]);
 
   useEffect(() => {
@@ -973,6 +998,15 @@ export function ActivityHistoryTable({
               onChange={setPlatform}
               options={platforms.map((p) => ({ value: p, label: p }))}
             />
+            <SegGroup
+              label="Group resumes"
+              value={grouped ? "on" : "off"}
+              setValue={(v) => setGrouped(v === "on")}
+              options={[
+                { value: "on", label: "On" },
+                { value: "off", label: "Off" },
+              ]}
+            />
           </div>
         </div>
 
@@ -1077,11 +1111,15 @@ export function ActivityHistoryTable({
               ) : (
                 rows.map((r, i) => {
                   const isExpanded = expandedId === r.id;
+                  // Use chain totals when present (grouped mode). Ungrouped
+                  // rows mirror these to single-segment defaults, so the
+                  // expression is safe either way.
+                  const effectivePlay = r.totalPlayDuration ?? r.playDuration;
                   const pct =
                     r.duration > 0
                       ? Math.min(
                           100,
-                          Math.round((r.playDuration / r.duration) * 100),
+                          Math.round((effectivePlay / r.duration) * 100),
                         )
                       : 0;
                   const ml = methodLabel(
@@ -1180,13 +1218,40 @@ export function ActivityHistoryTable({
                             >
                               <div
                                 style={{
-                                  color: "var(--ds-fg)",
-                                  whiteSpace: "nowrap",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 6,
+                                  minWidth: 0,
                                 }}
                               >
-                                {r.title}
+                                <div
+                                  style={{
+                                    color: "var(--ds-fg)",
+                                    whiteSpace: "nowrap",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {r.title}
+                                </div>
+                                {(r.segmentCount ?? 1) > 1 && (
+                                  <span
+                                    className="ds-mono"
+                                    title="Continued watch — toggle Group resumes off to see individual segments"
+                                    style={{
+                                      fontSize: 9.5,
+                                      padding: "2px 6px",
+                                      borderRadius: 999,
+                                      background: "oklch(1 0 0 / 0.06)",
+                                      color: "var(--ds-fg-subtle)",
+                                      letterSpacing: "0.04em",
+                                      whiteSpace: "nowrap",
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    {r.segmentCount}×
+                                  </span>
+                                )}
                               </div>
                               <div
                                 className="ds-mono"

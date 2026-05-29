@@ -27,6 +27,134 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
   const limit = Math.min(100, Math.max(1, parseInt(params.get("limit") ?? "20", 10) || 20));
   const skip = (page - 1) * limit;
 
+  // Default: collapse continued watches (PlayHistory.referenceId chains) into
+  // one logical viewing per chain. The chain's *latest* segment is the
+  // representative row (for title/poster/codec/etc) and the response includes
+  // aggregates over the whole chain (totalPlayDuration, segmentCount). Pass
+  // ?ungrouped=true to see individual segments — used when the user toggles
+  // the "Group continued watches" switch off in the filter bar.
+  const ungrouped = params.get("ungrouped") === "true";
+
+  const sortDir = params.get("sortDir") === "asc" ? "asc" : "desc";
+  const sortByRaw = params.get("sortBy");
+  type SortField = "startedAt" | "title" | "playDuration" | "duration" | "source" | "platform";
+  const safeSortBy: SortField = ((): SortField => {
+    switch (sortByRaw) {
+      case "startedAt": return "startedAt";
+      case "title": return "title";
+      case "playDuration": return "playDuration";
+      case "duration": return "duration";
+      case "source": return "source";
+      case "platform": return "platform";
+      default: return "startedAt";
+    }
+  })();
+
+  if (ungrouped) {
+    return ungroupedQuery(params, page, limit, skip, safeSortBy, sortDir);
+  }
+
+  return groupedQuery(params, page, limit, skip, safeSortBy, sortDir);
+});
+
+// Shape of a filter expression for raw-SQL composition. Each entry adds an
+// "AND <sql>" fragment with its binds appended to the parameter list.
+type SqlFragment = { sql: string; binds: unknown[] };
+
+// Translate the query-string filters into a flat list of SQL fragments. Same
+// semantics as the original Prisma `where` object, but emitted as `$N`-bound
+// fragments so they can be composed into a window-function query.
+function parseFilters(params: URLSearchParams): SqlFragment[] {
+  const fragments: SqlFragment[] = [];
+
+  const source = params.get("source");
+  if (source === "plex" || source === "jellyfin") {
+    fragments.push({ sql: `h."source" = ?`, binds: [source] });
+  }
+
+  const tmdbIdRaw = params.get("tmdbId");
+  if (tmdbIdRaw) {
+    const tmdbId = parseInt(tmdbIdRaw, 10);
+    if (!isNaN(tmdbId)) {
+      fragments.push({ sql: `h."tmdbId" = ?`, binds: [tmdbId] });
+    }
+  }
+
+  const mediaType = params.get("mediaType");
+  if (mediaType === "MOVIE" || mediaType === "TV") {
+    fragments.push({ sql: `h."mediaType" = CAST(? AS "MediaType")`, binds: [mediaType] });
+  }
+
+  const watched = params.get("watched");
+  if (watched === "true") fragments.push({ sql: `h."watched" = TRUE`, binds: [] });
+  else if (watched === "false") fragments.push({ sql: `h."watched" = FALSE`, binds: [] });
+
+  const userId = params.get("userId");
+  if (userId) fragments.push({ sql: `h."mediaServerUserId" = ?`, binds: [userId] });
+
+  const playMethod = params.get("playMethod");
+  if (playMethod && ["DirectPlay", "DirectStream", "Transcode"].includes(playMethod)) {
+    fragments.push({ sql: `h."playMethod" = ?`, binds: [playMethod] });
+  }
+
+  const platform = params.get("platform");
+  if (platform) fragments.push({ sql: `h."platform" = ?`, binds: [platform] });
+
+  const startDate = params.get("startDate");
+  if (startDate) fragments.push({ sql: `h."startedAt" >= ?`, binds: [new Date(startDate)] });
+  const endDate = params.get("endDate");
+  if (endDate) fragments.push({ sql: `h."startedAt" <= ?`, binds: [new Date(endDate)] });
+
+  const search = params.get("search")?.trim();
+  if (search) {
+    // Username search requires a join in the grouped path; keep it inline here
+    // by emitting a subquery test so the filter composes cleanly.
+    const like = `%${search}%`;
+    fragments.push({
+      sql: `(h."title" ILIKE ? OR EXISTS (
+              SELECT 1 FROM "MediaServerUser" msu2
+              WHERE msu2.id = h."mediaServerUserId" AND msu2."username" ILIKE ?
+            ))`,
+      binds: [like, like],
+    });
+  }
+
+  return fragments;
+}
+
+// Renumber `?` placeholders in a SQL string to `$1, $2, ...` starting at
+// `startIndex`. Postgres needs positional binds, not the `?` placeholder.
+function renumber(sql: string, startIndex: number): { sql: string; nextIndex: number } {
+  let i = startIndex;
+  const out = sql.replace(/\?/g, () => `$${i++}`);
+  return { sql: out, nextIndex: i };
+}
+
+function composeWhere(fragments: SqlFragment[]): { whereSql: string; binds: unknown[]; nextBindIndex: number } {
+  const binds: unknown[] = [];
+  const parts: string[] = [];
+  let next = 1;
+  for (const f of fragments) {
+    const { sql, nextIndex } = renumber(f.sql, next);
+    parts.push(sql);
+    binds.push(...f.binds);
+    next = nextIndex;
+  }
+  return {
+    whereSql: parts.length > 0 ? `AND ${parts.join(" AND ")}` : "",
+    binds,
+    nextBindIndex: next,
+  };
+}
+
+async function ungroupedQuery(
+  params: URLSearchParams,
+  page: number,
+  limit: number,
+  skip: number,
+  sortBy: string,
+  sortDir: "asc" | "desc",
+) {
   const where: Record<string, unknown> = {};
   const source = params.get("source");
   if (source === "plex" || source === "jellyfin") where.source = source;
@@ -72,21 +200,7 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
     ];
   }
 
-  const sortDir = params.get("sortDir") === "asc" ? "asc" : "desc";
-  const sortByRaw = params.get("sortBy");
-  type SortField = "startedAt" | "title" | "playDuration" | "duration" | "source" | "platform";
-  const safeSortBy: SortField = ((): SortField => {
-    switch (sortByRaw) {
-      case "startedAt": return "startedAt";
-      case "title": return "title";
-      case "playDuration": return "playDuration";
-      case "duration": return "duration";
-      case "source": return "source";
-      case "platform": return "platform";
-      default: return "startedAt";
-    }
-  })();
-  const orderBy: Record<string, string> = { [safeSortBy]: sortDir };
+  const orderBy: Record<string, string> = { [sortBy]: sortDir };
 
   const [items, total] = await Promise.all([
     prisma.playHistory.findMany({
@@ -103,13 +217,15 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
     prisma.playHistory.count({ where }),
   ]);
 
-  // Attach real TMDB poster art (cache-resolved) so the History tab can
-  // render covers instead of letter placeholders. Additive field — existing
-  // consumers ignore it.
   const posters = await resolvePosterMap(items);
   const itemsWithPosters = items.map((it) => ({
     ...it,
     posterUrl: it.tmdbId != null ? posters[it.tmdbId] ?? null : null,
+    // In ungrouped mode every row is its own chain of one — surface segmentCount
+    // so the client can render the badge consistently in either mode.
+    segmentCount: 1,
+    chainId: it.referenceId ?? it.id,
+    totalPlayDuration: it.playDuration,
   }));
 
   return NextResponse.json({
@@ -118,5 +234,203 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
     page,
     limit,
     totalPages: Math.ceil(total / limit),
+    grouped: false,
   });
-});
+}
+
+async function groupedQuery(
+  params: URLSearchParams,
+  page: number,
+  limit: number,
+  skip: number,
+  sortBy: string,
+  sortDir: "asc" | "desc",
+) {
+  const fragments = parseFilters(params);
+  const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
+
+  // chain_id = COALESCE("referenceId", id) groups a continued-watch chain
+  // (the finalize logic in src/lib/play-history.ts sets PlayHistory.referenceId
+  // on resume so all segments of a chain share one value). Window functions
+  // aggregate over the chain partition; ROW_NUMBER picks the latest segment
+  // as the representative row whose fields the UI displays.
+  //
+  // sortBy mapping when grouped:
+  //   startedAt    → latest segment's startedAt (most recent activity)
+  //   playDuration → SUM over chain (total watch time)
+  //   duration / title / source / platform → latest segment value
+  //
+  // Sort column comes from a static whitelist (safeSortBy) so it cannot be
+  // user-injected. Direction is also pre-validated to asc/desc.
+  const sortColumn = sortBy === "playDuration" ? "total_play_duration" : sortBy;
+
+  const dataLimitBind = nextBindIndex;
+  const dataOffsetBind = nextBindIndex + 1;
+  const dataSql = `
+    WITH base AS (
+      SELECT h.*,
+        COALESCE(h."referenceId", h.id) AS chain_id,
+        ROW_NUMBER() OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+          ORDER BY h."startedAt" DESC
+        ) AS rn,
+        COUNT(*) OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        )::int AS segment_count,
+        SUM(h."playDuration") OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        )::int AS total_play_duration,
+        SUM(COALESCE(h."pausedDuration", 0)) OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        )::int AS total_paused_duration,
+        MIN(h."startedAt") OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        ) AS first_started_at,
+        MAX(h."stoppedAt") OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        ) AS last_stopped_at,
+        bool_or(h."watched") OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        ) AS chain_watched,
+        bool_or(h."completed") OVER (
+          PARTITION BY COALESCE(h."referenceId", h.id)
+        ) AS chain_completed
+      FROM "PlayHistory" h
+      WHERE 1=1 ${whereSql}
+    )
+    SELECT b.*,
+      msu.username AS msu_username,
+      msu.source AS msu_source,
+      msu."thumbUrl" AS msu_thumb_url
+    FROM base b
+    LEFT JOIN "MediaServerUser" msu ON msu.id = b."mediaServerUserId"
+    WHERE b.rn = 1
+    ORDER BY b."${sortColumn}" ${sortDir.toUpperCase()} NULLS LAST
+    LIMIT $${dataLimitBind} OFFSET $${dataOffsetBind}
+  `;
+
+  const countSql = `
+    SELECT COUNT(DISTINCT COALESCE(h."referenceId", h.id))::int AS total
+    FROM "PlayHistory" h
+    WHERE 1=1 ${whereSql}
+  `;
+
+  // Run data + count concurrently. They share the same bind list except
+  // for limit/offset which only data uses.
+  const [rows, totalRows] = await Promise.all([
+    prisma.$queryRawUnsafe<RawGroupedRow[]>(dataSql, ...binds, limit, skip),
+    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
+  ]);
+
+  const total = totalRows[0]?.total ?? 0;
+
+  // Resolve posters by tmdbId. Mirror the ungrouped path's contract so the
+  // UI doesn't need a mode switch for posterUrl.
+  const tmdbIds = [...new Set(rows.map((r) => r.tmdbId).filter((v): v is number => v != null))];
+  const posters = tmdbIds.length > 0
+    ? await resolvePosterMap(rows as unknown as { tmdbId: number | null; mediaType: "MOVIE" | "TV" | null }[])
+    : {};
+
+  const items = rows.map((r) => {
+    // Map snake_case raw columns to the camelCase shape the rest of the app
+    // consumes. The base PlayHistory columns already arrive camelCase via the
+    // SELECT b.* — only the window-function aliases need translation.
+    const mediaServerUser = r.msu_username != null
+      ? {
+          username: r.msu_username,
+          source: r.msu_source,
+          thumbUrl: r.msu_thumb_url,
+        }
+      : null;
+    return {
+      ...r,
+      mediaServerUser,
+      posterUrl: r.tmdbId != null ? posters[r.tmdbId] ?? null : null,
+      segmentCount: r.segment_count,
+      chainId: r.chain_id,
+      totalPlayDuration: r.total_play_duration,
+      totalPausedDuration: r.total_paused_duration,
+      firstStartedAt: r.first_started_at,
+      lastStoppedAt: r.last_stopped_at,
+      // Override the row's own watched/completed flags with the chain-wide
+      // booleans so the UI's "Watched" pill reflects whether *any* segment of
+      // this chain reached the threshold (a chain that finishes watched should
+      // still show watched even if the final segment was a 2-minute coda).
+      watched: r.chain_watched,
+      completed: r.chain_completed,
+    };
+  });
+
+  return NextResponse.json({
+    items,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+    grouped: true,
+  });
+}
+
+// Shape of the raw row returned by groupedQuery's $queryRawUnsafe. Mirrors
+// PlayHistory's columns (already camelCase via SELECT b.*) plus the window
+// function aliases (snake_case) and the joined MediaServerUser fields.
+interface RawGroupedRow {
+  id: string;
+  source: string;
+  startedAt: Date;
+  stoppedAt: Date | null;
+  duration: number;
+  playDuration: number;
+  pausedDuration: number | null;
+  watched: boolean;
+  completed: boolean;
+  mediaServerUserId: string;
+  tmdbId: number | null;
+  mediaType: "MOVIE" | "TV" | null;
+  title: string;
+  year: string | null;
+  posterPath: string | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  episodeTitle: string | null;
+  sourceSessionId: string | null;
+  sourceItemId: string | null;
+  platform: string | null;
+  player: string | null;
+  device: string | null;
+  ipAddress: string | null;
+  playMethod: string | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  resolution: string | null;
+  bitrate: number | null;
+  videoDecision: string | null;
+  audioDecision: string | null;
+  container: string | null;
+  transcodeReason: string | null;
+  location: string | null;
+  bandwidth: number | null;
+  secure: boolean | null;
+  relayed: boolean | null;
+  introStartMs: number | null;
+  introEndMs: number | null;
+  creditsStartMs: number | null;
+  creditsEndMs: number | null;
+  referenceId: string | null;
+  createdAt: Date;
+  // Window aliases
+  chain_id: string;
+  rn: number;
+  segment_count: number;
+  total_play_duration: number;
+  total_paused_duration: number;
+  first_started_at: Date;
+  last_stopped_at: Date | null;
+  chain_watched: boolean;
+  chain_completed: boolean;
+  // Joined columns
+  msu_username: string | null;
+  msu_source: string | null;
+  msu_thumb_url: string | null;
+}
+
