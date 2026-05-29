@@ -128,6 +128,29 @@ function jellyfinAdminHeaders(apiKey: string): Record<string, string> {
   };
 }
 
+// Fetch the Jellyfin server's machine identifier. The /System/Info endpoint
+// requires admin token; the `Id` field on the response is the server's stable
+// machineId — same value the Jellyfin webhook plugin sends. We use this as the
+// pin on MediaServerUser.serverMachineId so any cross-server webhook/sync
+// payload aimed at the same userId is rejected (see MediaServerMismatchError
+// in src/lib/play-history.ts).
+export async function getJellyfinServerMachineId(
+  baseUrl: string,
+  apiKey: string,
+): Promise<string | null> {
+  try {
+    const res = await safeFetchAdminConfigured(`${baseUrl.replace(/\/$/, "")}/System/Info`, {
+      headers: jellyfinAdminHeaders(apiKey),
+      timeoutMs: FETCH_TIMEOUT_MS,
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { Id?: string };
+    return typeof data.Id === "string" && data.Id.length > 0 ? data.Id : null;
+  } catch {
+    return null;
+  }
+}
+
 interface JellyfinItem {
   Id?:              string;
   ProviderIds?:     Record<string, string>;

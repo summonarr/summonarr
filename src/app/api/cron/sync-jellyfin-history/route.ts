@@ -8,6 +8,7 @@ import {
   getJellyfinEpisodeSeriesIds,
   getJellyfinItemRuntimes,
   getJellyfinAllUsers,
+  getJellyfinServerMachineId,
 } from "@/lib/jellyfin";
 import {
   resolveShowTmdbId,
@@ -342,9 +343,24 @@ export async function POST(request: NextRequest) {
 
       const baseUrl = urlRow.value.replace(/\/$/, "");
       const apiKey = keyRow.value;
-      const serverMachineId = machineIdRow?.value ?? null;
+      // Self-bootstrap the machineId pin. The H-3 defense-in-depth check on
+      // MediaServerUser.serverMachineId only activates once a value is present
+      // — without one, an attacker with a leaked Jellyfin webhook secret could
+      // spoof user payloads from a different Jellyfin instance. Lazy-fetch from
+      // /System/Info on first run and persist; subsequent runs short-circuit
+      // with the cached Setting value.
+      let serverMachineId = machineIdRow?.value ?? null;
       if (!serverMachineId) {
-        console.warn("[cron/sync-jellyfin-history] jellyfinServerMachineId not configured — pin will not be set");
+        serverMachineId = await getJellyfinServerMachineId(baseUrl, apiKey);
+        if (serverMachineId) {
+          await prisma.setting.upsert({
+            where: { key: "jellyfinServerMachineId" },
+            create: { key: "jellyfinServerMachineId", value: serverMachineId },
+            update: { value: serverMachineId },
+          });
+        } else {
+          console.warn("[cron/sync-jellyfin-history] /System/Info returned no Id — pin will not be set this run");
+        }
       }
 
       // Always fetch the server user list so new Jellyfin users are discovered every run.
