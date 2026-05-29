@@ -16,6 +16,73 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
+// Plex ActiveSession.id is "plex:<sessionKey>". Strip the prefix for the
+// terminate endpoint, which expects the raw sessionKey.
+function plexSessionKeyFromId(id: string): string | null {
+  return id.startsWith("plex:") ? id.slice(5) : null;
+}
+
+function TerminateButton({ session }: { session: ActiveSessionLive }) {
+  const sessionKey = plexSessionKeyFromId(session.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!sessionKey) return null;
+  async function onClick() {
+    const reason = window.prompt(
+      "Reason shown to the user in their player:",
+      "Session terminated by an administrator.",
+    );
+    if (reason == null) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/admin/play-history/terminate-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionKey, reason }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: "Unknown error" }));
+        setError(typeof data.error === "string" ? data.error : "Failed");
+        setBusy(false);
+        return;
+      }
+      // The session row will disappear from the next activity:sessions SSE
+      // push (within ~1s) once Plex tears the stream down. Keep busy=true so
+      // the button doesn't flash re-enabled before the card removes itself.
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+    }
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={busy}
+        style={{
+          fontSize: 10.5,
+          padding: "3px 8px",
+          background: "transparent",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+          color: busy ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
+          cursor: busy ? "default" : "pointer",
+        }}
+        title="Terminate this Plex session"
+      >
+        {busy ? "Terminating…" : "Terminate"}
+      </button>
+      {error && (
+        <span style={{ fontSize: 10.5, color: "var(--ds-fg-danger, #c44)" }}>
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
 // Plex reports bitrate in kbps; Jellyfin in bps — normalize to kbps.
 function toBitrateKbps(raw: number | null): number {
   if (!raw || raw <= 0) return 0;
@@ -137,6 +204,11 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
                   ? "BUFFERING"
                   : "PLAYING"}
             </span>
+            {s.source === "plex" && (
+              <span style={{ marginLeft: "auto" }}>
+                <TerminateButton session={s} />
+              </span>
+            )}
           </div>
           <h3
             style={{

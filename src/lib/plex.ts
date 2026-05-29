@@ -424,6 +424,13 @@ export interface PlexSessionData {
   audioDecision?: string;
   container?: string;
   transcodeReason?: string;
+  // Network metadata. Session sub-object provides bandwidth (kbps) and
+  // location ("lan" | "wan" | "relay"); Player sub-object exposes secure
+  // ("0"/"1") and relayed ("0"/"1") to describe the client's connection.
+  location?: "lan" | "wan" | "relay";
+  bandwidth?: number;
+  secure?: boolean;
+  relayed?: boolean;
 }
 
 interface PlexSessionRaw {
@@ -434,6 +441,9 @@ interface PlexSessionRaw {
     platform?: string;
     machineIdentifier?: string;
     address?: string;
+    secure?: string | boolean;
+    relayed?: string | boolean;
+    remotePublicAddress?: string;
   };
   User?: { id?: string; title?: string; thumb?: string };
   ratingKey?: string;
@@ -456,7 +466,7 @@ interface PlexSessionRaw {
       Stream?: Array<{ streamType?: number; codec?: string; decision?: string }>;
     }>;
   }>;
-  Session?: { id?: string };
+  Session?: { id?: string; bandwidth?: number; location?: string };
   TranscodeSession?: {
     videoDecision?: string;
     audioDecision?: string;
@@ -496,6 +506,20 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       transcodeReason = reasons.join(", ");
     }
 
+    // Plex Player encodes secure/relayed as "0"/"1" strings on most clients but
+    // some newer Plex builds emit booleans. Normalize both forms.
+    const toBool = (v: string | boolean | undefined): boolean | undefined => {
+      if (typeof v === "boolean") return v;
+      if (v === "1" || v === "true") return true;
+      if (v === "0" || v === "false") return false;
+      return undefined;
+    };
+    const rawLocation = s.Session?.location;
+    const location: "lan" | "wan" | "relay" | undefined =
+      rawLocation === "lan" || rawLocation === "wan" || rawLocation === "relay"
+        ? rawLocation
+        : undefined;
+
     return {
       sessionKey: s.sessionKey ?? s.Session?.id ?? "",
       state: (s.Player?.state === "paused" ? "paused" : s.Player?.state === "buffering" ? "buffering" : "playing"),
@@ -528,8 +552,93 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       audioDecision: ts?.audioDecision ?? audioStream?.decision ?? undefined,
       container: s.Media?.[0]?.container ?? undefined,
       transcodeReason,
+      location,
+      bandwidth: typeof s.Session?.bandwidth === "number" ? s.Session.bandwidth : undefined,
+      secure: toBool(s.Player?.secure),
+      relayed: toBool(s.Player?.relayed),
     };
   });
+}
+
+// Plex /library/metadata/{ratingKey}?includeMarkers=1 returns intro and credits
+// markers as Marker[] entries on the metadata item. Used at session start to
+// stamp marker offsets onto ActiveSession so finalize can credit watched at the
+// credits boundary without a second metadata fetch at stop time.
+export interface PlexMarkers {
+  introStartMs?: number;
+  introEndMs?: number;
+  creditsStartMs?: number;
+  creditsEndMs?: number;
+}
+
+interface PlexMarkerRaw {
+  type?: string; // "intro" | "credits"
+  final?: boolean; // credits markers can be split into mid/final — only `final: true` is the actual end-credits roll
+  startTimeOffset?: number;
+  endTimeOffset?: number;
+}
+
+interface PlexMetadataWithMarkersRaw extends PlexMetadataItem {
+  Marker?: PlexMarkerRaw[];
+}
+
+export async function getPlexMarkers(
+  serverUrl: string,
+  token: string,
+  ratingKey: string,
+): Promise<PlexMarkers> {
+  try {
+    const res = await plexFetch(
+      `${serverUrl}/library/metadata/${encodeURIComponent(ratingKey)}?includeMarkers=1`,
+      token,
+    );
+    if (!res.ok) return {};
+    const data = await res.json() as { MediaContainer?: { Metadata?: PlexMetadataWithMarkersRaw[] } };
+    const markers = data.MediaContainer?.Metadata?.[0]?.Marker ?? [];
+    const result: PlexMarkers = {};
+    for (const m of markers) {
+      if (m.type === "intro") {
+        if (typeof m.startTimeOffset === "number") result.introStartMs = m.startTimeOffset;
+        if (typeof m.endTimeOffset === "number") result.introEndMs = m.endTimeOffset;
+      } else if (m.type === "credits") {
+        // Plex emits two credit markers on shows with mid-credit scenes:
+        // a non-final block for the credits scroll and a `final: true` block
+        // for the absolute end. Prefer the earliest startTimeOffset (the
+        // start of the credits roll) and the latest endTimeOffset.
+        if (typeof m.startTimeOffset === "number") {
+          result.creditsStartMs = result.creditsStartMs == null
+            ? m.startTimeOffset
+            : Math.min(result.creditsStartMs, m.startTimeOffset);
+        }
+        if (typeof m.endTimeOffset === "number") {
+          result.creditsEndMs = result.creditsEndMs == null
+            ? m.endTimeOffset
+            : Math.max(result.creditsEndMs, m.endTimeOffset);
+        }
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+// Plex admin endpoint to terminate an in-progress playback. `reason` is shown
+// to the user in their player as the stop dialog text. Returns true when Plex
+// accepted the request (200 or 204); the actual session teardown is async and
+// will surface as a state="stopped" SSE event within a second or two.
+export async function terminatePlexSession(
+  serverUrl: string,
+  token: string,
+  sessionId: string,
+  reason: string,
+): Promise<{ ok: boolean; status: number }> {
+  // Plex accepts either ?sessionId= (the Session.id GUID) or sessionKey for
+  // legacy clients. We pass sessionId because it's what /status/sessions exposes
+  // as Session.id and what Tautulli's pmsconnect uses (pmsconnect.py:108).
+  const url = `${serverUrl}/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`;
+  const res = await plexFetch(url, token);
+  return { ok: res.ok, status: res.status };
 }
 
 export async function hasPlexItemByTmdbId(

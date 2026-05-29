@@ -262,6 +262,21 @@ export const MAX_PLAYTIME_DELTA_MS = 5 * 60 * 1000;
 // finalized; pauses that resume within the window are preserved as still-live.
 // cleanupStaleSessions(30) is the longer 30-min safety net beneath this.
 export const SESSION_ABSENCE_GRACE_MS = 60_000;
+// End-of-file clamp window. When the playhead lands within this distance of the
+// media's total duration at finalize, treat it as a full-completion stop —
+// Plex/Jellyfin clients commonly leave the player at viewOffset ≈ duration − a
+// few seconds when the user "stops at the credits," and the natural endpoint
+// of natural-end playback is rarely exactly duration. Without the clamp,
+// sessions that effectively reached the end get classed as 99% completionRatio
+// (not completed) and slide just below the 80% watched threshold for media
+// where the credits roll consumes the tail. Tautulli uses the same 10 s window
+// (activity_handler.py:122-126).
+const END_OF_FILE_CLAMP_MS = 10_000;
+// How far back to look when chaining a new finalize into the resume-group of a
+// previous unwatched watch of the same media by the same user. Tautulli sets
+// no upper bound; we cap at 7 days so the chain doesn't link a rewatch months
+// later (which is a separate logical viewing).
+const RESUME_GROUPING_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Returns the bigint to add to ActiveSession.playtimeMs when applying an event at `now`.
 // Only accumulates when the prior state was "playing" — pause/buffer/initial state contribute nothing.
@@ -315,7 +330,21 @@ export async function recordCompletedSession(
   const stoppedAt =
     opts.stoppedAt ?? (session.lastSeenAt > session.startedAt ? session.lastSeenAt : now);
   const wallElapsedMs = Math.max(0, stoppedAt.getTime() - session.startedAt.getTime());
-  const cappedProgressMs = Math.min(Number(session.progressMs), wallElapsedMs);
+
+  // End-of-file clamp: a session that ended within END_OF_FILE_CLAMP_MS of
+  // the media's runtime is treated as completed at exactly durationMs. Some
+  // clients stop at credits with a stale viewOffset; without this, the
+  // PlayHistory row records progressMs = duration − 4 s, completionRatio
+  // ≈ 99.7%, completed = false. Tautulli applies the same 10 s clamp at
+  // activity_handler.py:122-126.
+  const rawProgressMs = Number(session.progressMs);
+  const totalDurationMsRaw = Number(session.durationMs);
+  const clampedProgressMs =
+    totalDurationMsRaw > 0 && rawProgressMs >= totalDurationMsRaw - END_OF_FILE_CLAMP_MS
+      ? totalDurationMsRaw
+      : rawProgressMs;
+
+  const cappedProgressMs = Math.min(clampedProgressMs, wallElapsedMs);
   const playDurationMs = Math.max(Number(session.playtimeMs), cappedProgressMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
@@ -339,8 +368,18 @@ export async function recordCompletedSession(
 
   const threshold = await getWatchedThreshold();
 
-  const totalDurationMs = Number(session.durationMs);
-  const watched = calculateWatched(playDurationMs, totalDurationMs, threshold);
+  // For watched / completed evaluation, treat "effective content end" as the
+  // credits start when we have a marker — Plex players commonly stop at the
+  // credits roll with progressMs just shy of duration, and a media that ran
+  // 50 min of content + 5 min of credits should mark watched at the credits
+  // boundary, not at 80% of the credit-inclusive 55 min total. Falls back to
+  // the file duration when no marker exists.
+  const totalDurationMs = totalDurationMsRaw;
+  const effectiveDurationMs =
+    session.creditsStartMs != null && session.creditsStartMs > 0 && session.creditsStartMs <= totalDurationMs
+      ? session.creditsStartMs
+      : totalDurationMs;
+  const watched = calculateWatched(playDurationMs, effectiveDurationMs, threshold);
 
   // `now` and `stoppedAt` were already established at the top so the cap on
   // cappedProgressMs and the historyData.stoppedAt agree on the same instant.
@@ -348,8 +387,10 @@ export async function recordCompletedSession(
   const durationS = Math.max(0, Math.floor(totalDurationMs / 1000));
   const pausedDurationS = Math.max(0, totalElapsedS - playDurationS);
 
-  const progressMs = Number(session.progressMs);
-  const completionRatio = totalDurationMs > 0 ? progressMs / totalDurationMs : 0;
+  const progressMs = clampedProgressMs;
+  // completionRatio uses effectiveDurationMs (credits-aware) for the same
+  // reason as watched — reaching the credits is "completed."
+  const completionRatio = effectiveDurationMs > 0 ? progressMs / effectiveDurationMs : 0;
 
   const completed = completionRatio >= 0.95;
 
@@ -370,6 +411,36 @@ export async function recordCompletedSession(
   // own startedAt yields a key that's unique per watch instance while still being deterministic
   // across webhook replays of the same Stop event.
   const uniqueSourceSessionId = `${session.sessionKey}:${session.startedAt.toISOString()}`;
+
+  // Resume-grouping: link this row into a chain when a previous unwatched
+  // PlayHistory row exists for the same (user, source-item) within the last
+  // 7 days. The chain root self-references — every row in a chain shares the
+  // referenceId of the first row, so the UI can `GROUP BY referenceId` to
+  // collapse split watches ("paused on Monday, finished on Tuesday") into
+  // one logical viewing without recursive walks. We only look back from
+  // *unwatched* prior plays — once a chain reaches the watched threshold, the
+  // next play is a rewatch and starts its own chain.
+  let referenceId: string | null = null;
+  if (session.sourceItemId) {
+    const lookbackCutoff = new Date(stoppedAt.getTime() - RESUME_GROUPING_LOOKBACK_MS);
+    const priorUnwatched = await prisma.playHistory.findFirst({
+      where: {
+        source: session.source,
+        sourceItemId: session.sourceItemId,
+        mediaServerUserId: session.mediaServerUserId,
+        watched: false,
+        startedAt: { gte: lookbackCutoff, lt: session.startedAt },
+      },
+      orderBy: { startedAt: "desc" },
+      select: { id: true, referenceId: true },
+    }).catch(() => null);
+    if (priorUnwatched) {
+      // Chain to the previous row's referenceId (already a chain root) or to
+      // the row's own id (it's the root). Either way, every row in the chain
+      // shares one referenceId value.
+      referenceId = priorUnwatched.referenceId ?? priorUnwatched.id;
+    }
+  }
 
   const historyData = {
     source: session.source,
@@ -404,6 +475,15 @@ export async function recordCompletedSession(
     audioDecision: session.audioDecision,
     container: session.container,
     transcodeReason: session.transcodeReason,
+    location: session.location,
+    bandwidth: session.bandwidth,
+    secure: session.secure,
+    relayed: session.relayed,
+    introStartMs: session.introStartMs,
+    introEndMs: session.introEndMs,
+    creditsStartMs: session.creditsStartMs,
+    creditsEndMs: session.creditsEndMs,
+    referenceId,
   };
 
   // recordCompletedSession runs from three paths that can fire concurrently for the same

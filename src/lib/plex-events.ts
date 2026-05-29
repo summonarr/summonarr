@@ -17,7 +17,7 @@
 
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
-import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled } from "./play-history";
+import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot } from "./play-history";
 import { getPlexSessions } from "./plex";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
@@ -351,12 +351,50 @@ class PlexEventStreamManager {
         : [];
 
     for (const n of notifications) {
-      if (n.state === "stopped" && n.sessionKey) {
+      if (!n.sessionKey) continue;
+      if (n.state === "stopped") {
         // viewOffset is the playhead position at stop. Pass it through so the
         // PlayHistory row's progressMs reflects where the user actually left
         // off, not the last 5s-poll snapshot which can lag.
         void this.finalizeStopped(n.sessionKey, n.viewOffset);
+      } else if (n.state === "playing" || n.state === "paused" || n.state === "buffering") {
+        // Non-stop state transitions: update ActiveSession.state in near
+        // realtime so the Now Playing card flips between PLAYING / PAUSED /
+        // BUFFERING within ~1s instead of waiting up to 5s for the next poll.
+        // The 5s poller is still authoritative for progressMs, playtimeMs
+        // accumulation, and full metadata refresh.
+        void this.applyLiveStateUpdate(n.sessionKey, n.state, n.viewOffset);
       }
+    }
+  }
+
+  private async applyLiveStateUpdate(
+    sessionKey: string,
+    state: "playing" | "paused" | "buffering",
+    viewOffset: number | undefined,
+  ): Promise<void> {
+    const id = `plex:${sessionKey}`;
+    // Skip if this session was just finalized — a late state event arriving
+    // after a stop should not resurrect the row.
+    if (isPlexSessionRecentlyFinalized(id)) return;
+    try {
+      const result = await prisma.activeSession.updateMany({
+        where: { id },
+        data: {
+          state,
+          ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
+            ? { progressMs: BigInt(Math.floor(viewOffset)) }
+            : {}),
+        },
+      });
+      // Push a sessions snapshot only if the row actually changed — avoids
+      // SSE storms when Plex hammers "playing" notifications during scrubbing.
+      if (result.count > 0) {
+        await emitActiveSessionsSnapshot();
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] live state update failed for ${id}: ${msg}`);
     }
   }
 
