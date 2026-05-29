@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { readActiveSummonarrSession } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
@@ -50,10 +50,13 @@ function isSameOriginRequest(request: NextRequest): boolean {
   return trusted.has(effectiveOrigin);
 }
 
-// Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET
+// Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET.
+// These routes are in proxy.ts's isPublicPath(), so the proxy does NOT DB-validate the session here;
+// readActiveSummonarrSession() does it instead (revocation/cutoff/role-demotion honored immediately),
+// rather than auth() which would trust a revoked admin's JWT until its exp (up to the 7d admin ceiling).
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
-  const session = await auth();
-  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) {
+  const claims = await readActiveSummonarrSession();
+  if (claims?.role === "ADMIN") {
     if (!isSameOriginRequest(request)) return false;
     return true;
   }
