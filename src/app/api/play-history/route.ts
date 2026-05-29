@@ -273,7 +273,7 @@ async function groupedQuery(
         ROW_NUMBER() OVER (
           PARTITION BY COALESCE(h."referenceId", h.id)
           ORDER BY h."startedAt" DESC
-        ) AS rn,
+        )::int AS rn,
         COUNT(*) OVER (
           PARTITION BY COALESCE(h."referenceId", h.id)
         )::int AS segment_count,
