@@ -200,11 +200,23 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           // Fall through to create branch below. existing is now finalized
           // and its ActiveSession row deleted by recordCompletedSession.
         } else {
-          const advanced = s.viewOffset > Number(existing.progressMs);
+          // Liveness must be "the playhead MOVED since the last stored value,"
+          // not "this snapshot is strictly greater than it." progressMs is
+          // written by two racing writers — this lagging 5s poller and the
+          // real-time SSE handler (applyLiveStateUpdate). SSE pushes progressMs
+          // ahead of /status/sessions, so a strict `s.viewOffset > progressMs`
+          // check reads false on a healthy stream whenever SSE wrote last,
+          // which (a) suppresses the progressUpdatedAt refresh below and (b)
+          // satisfies !playheadMoved in the stall condition — so the anchor
+          // ages past 60s and the poller stall-finalizes a still-playing
+          // stream. A genuine ghost (client quit, Plex keeps reporting it)
+          // has a FROZEN viewOffset, so `!==` is false there and the stall
+          // still fires at 60s as intended. Use inequality, not greater-than.
+          const playheadMoved = s.viewOffset !== Number(existing.progressMs);
           // True resume from a non-playing state. Without this branch, a
           // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
           // progressUpdatedAt stuck at the moment the user paused. The first
-          // poll after resume sees state="playing", !advanced (viewOffset
+          // poll after resume sees state="playing", !playheadMoved (viewOffset
           // hasn't moved yet, we haven't completed one playing tick), and
           // now - progressUpdatedAt >> 60s — indistinguishable from a real
           // ghost. Stall would fire, session finalized as a short watch,
@@ -215,7 +227,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           const stalled =
             s.state === "playing"
             && existing.state === "playing"
-            && !advanced
+            && !playheadMoved
             && nowMs - existing.progressUpdatedAt.getTime() >= PLEX_STALL_THRESHOLD_MS;
 
           if (stalled) {
@@ -248,7 +260,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
               state: s.state,
               progressPercent,
               progressMs: BigInt(s.viewOffset),
-              ...(advanced || resumedToPlaying ? { progressUpdatedAt: now } : {}),
+              ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
               playMethod: s.playMethod,
               resolution: s.resolution,
               transcodeReason: s.transcodeReason ?? null,

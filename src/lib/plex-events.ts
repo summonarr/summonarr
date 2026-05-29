@@ -545,21 +545,17 @@ class PlexEventStreamManager {
       if (!prior) return;
       const transitionedToPlaying = prior.state !== "playing" && state === "playing";
 
-      // Did the playhead actually move forward in this event? The 5s poller's
-      // stall detector treats progressUpdatedAt as "when the playhead last
-      // advanced" and finalizes a still-playing session once it's >60s stale
-      // (PLEX_STALL_THRESHOLD_MS). The poller's own advance check is
-      // `s.viewOffset > existing.progressMs` — but because SSE here pushes
-      // progressMs ahead of the poller's slower /status/sessions snapshot, the
-      // poller almost always sees s.viewOffset <= existing.progressMs, reads it
-      // as "not advanced," and never refreshes progressUpdatedAt. The anchor
-      // then goes stale on an actively-watched stream and the poller
-      // stall-finalizes it mid-watch (then the 1h ledger blocks the card from
-      // returning). So SSE must refresh progressUpdatedAt itself whenever it
-      // advances the playhead — not only on a resume-to-playing transition.
-      const advancedPlayhead =
+      // Did the playhead MOVE in this event (forward OR backward — a seek is
+      // still liveness)? The 5s poller's stall detector treats
+      // progressUpdatedAt as "when the playhead last moved" and finalizes a
+      // still-playing session once it's >60s stale (PLEX_STALL_THRESHOLD_MS).
+      // Both writers must refresh the anchor on any movement; checking for a
+      // strict forward advance misses backward seeks and lets the anchor go
+      // stale on an actively-scrubbed stream. A frozen ghost never emits SSE
+      // events at all, so refreshing on movement here cannot keep one alive.
+      const playheadMoved =
         viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
-          ? BigInt(Math.floor(viewOffset)) > prior.progressMs
+          ? BigInt(Math.floor(viewOffset)) !== prior.progressMs
           : false;
 
       const result = await prisma.activeSession.updateMany({
@@ -569,7 +565,7 @@ class PlexEventStreamManager {
           ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
             ? { progressMs: BigInt(Math.floor(viewOffset)) }
             : {}),
-          ...(transitionedToPlaying || advancedPlayhead ? { progressUpdatedAt: new Date() } : {}),
+          ...(transitionedToPlaying || playheadMoved ? { progressUpdatedAt: new Date() } : {}),
         },
       });
       // Push a sessions snapshot only if the row actually changed — avoids
