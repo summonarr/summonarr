@@ -449,14 +449,23 @@ export function ActivityNowPlaying({
   initialSessions,
   source,
   mediaType,
+  initialPlexReachable,
 }: {
   initialSessions: ActiveSessionLive[];
   source?: string;
   mediaType?: string;
+  // null = unknown (no Plex configured / no notification observed yet),
+  // true = reachable via plex.tv, false = remote access offline. Read
+  // server-side from Setting('plexServerReachable'); SSE updates flow via
+  // the plex:reachability event below.
+  initialPlexReachable?: boolean | null;
 }) {
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
+  const [plexReachable, setPlexReachable] = useState<boolean | null>(
+    initialPlexReachable ?? null,
+  );
 
   useLiveEvents((event) => {
     if (event.type === "connected") setConnected(true);
@@ -475,6 +484,9 @@ export function ActivityNowPlaying({
           posterUrl: s.posterUrl ?? posterMap.get(s.id) ?? null,
         }));
       });
+    }
+    if (event.type === "plex:reachability") {
+      setPlexReachable(event.reachable);
     }
   });
 
@@ -498,28 +510,54 @@ export function ActivityNowPlaying({
         label="Now playing"
         sub={sub}
         right={
-          <span
-            className="ds-mono"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              fontSize: 10.5,
-              color: connected ? "var(--ds-success)" : "var(--ds-fg-subtle)",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+            {plexReachable === false && (
+              <span
+                className="ds-mono"
+                title="Plex server is offline (no plex.tv remote access). Reported by Plex's SSE ReachabilityNotification."
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  fontSize: 10.5,
+                  color: "var(--ds-warning, #c84)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 999,
+                    background: "var(--ds-warning, #c84)",
+                  }}
+                />
+                Plex offline
+              </span>
+            )}
             <span
+              className="ds-mono"
               style={{
-                width: 6,
-                height: 6,
-                borderRadius: 999,
-                background: connected
-                  ? "var(--ds-success)"
-                  : "var(--ds-fg-disabled)",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 5,
+                fontSize: 10.5,
+                color: connected ? "var(--ds-success)" : "var(--ds-fg-subtle)",
+                whiteSpace: "nowrap",
               }}
-            />
-            {connected ? "Live" : "Connecting…"}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: 999,
+                  background: connected
+                    ? "var(--ds-success)"
+                    : "var(--ds-fg-disabled)",
+                }}
+              />
+              {connected ? "Live" : "Connecting…"}
+            </span>
           </span>
         }
       />

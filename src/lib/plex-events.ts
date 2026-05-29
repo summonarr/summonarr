@@ -89,6 +89,42 @@ type PlayingEventData = {
     | PlaySessionStateNotification[];
 };
 
+// Plex "timeline" event payload — fires when the scanner adds, updates, or
+// deletes a library item. metadataState transitions through a small lifecycle:
+// "queued" → "processing" → "created" / "updated" / "deleted". Only the
+// terminal states (created / updated / deleted) materially change our cached
+// library data; intermediate states are noise.
+interface PlexTimelineEntry {
+  itemID?: number;
+  sectionID?: number;
+  title?: string;
+  type?: number;
+  metadataState?: string;
+  mediaState?: string;
+}
+
+type TimelineEventData = {
+  TimelineEntry?: PlexTimelineEntry | PlexTimelineEntry[];
+};
+
+// Plex "reachability" event — fires whenever the server's plex.tv remote-
+// access status changes. The reachability field is the boolean we want; we
+// store it on the Setting table so the UI can read a single source of truth.
+interface PlexReachabilityNotification {
+  reachability?: boolean;
+}
+
+type ReachabilityEventData = {
+  ReachabilityNotification?: PlexReachabilityNotification | PlexReachabilityNotification[];
+};
+
+// Debounce window for the scanner-triggered library re-sync. Plex's scanner
+// emits a TimelineEntry for every item it touches — a full Sonarr-style import
+// can produce hundreds of events in a few seconds. Coalesce them into one
+// /api/sync call rather than N. 30 s is long enough to absorb a normal
+// re-scan while still being responsive to one-off edits.
+const TIMELINE_RESYNC_DEBOUNCE_MS = 30_000;
+
 // Reconnect backoff parameters. The poller already runs every 5s, so an SSE
 // outage degrades to 60s detection (stall fallback) rather than 30 min — no
 // need to hammer the server.
@@ -214,7 +250,13 @@ class PlexEventStreamManager {
     const recycleTimer = setTimeout(() => localAbort.abort(), PERIODIC_RECYCLE_MS);
 
     try {
-      const sseUrl = `${url}/:/eventsource/notifications?filters=playing&X-Plex-Token=${encodeURIComponent(token)}`;
+      // Subscribe to playing + timeline + reachability event types. Playing
+      // drives the Now Playing card; timeline lets us invalidate the library
+      // cache when Plex's scanner adds/removes items; reachability surfaces
+      // the server's plex.tv remote-access status as a UI indicator. Other
+      // notification types (transcode.*, preferences, account) are dropped
+      // server-side by the filter so we don't waste bandwidth parsing them.
+      const sseUrl = `${url}/:/eventsource/notifications?filters=playing,timeline,reachability&X-Plex-Token=${encodeURIComponent(token)}`;
       const res = await safeFetchAdminConfigured(sseUrl, {
         headers: {
           Accept: "text/event-stream",
@@ -345,11 +387,21 @@ class PlexEventStreamManager {
       else if (field === "data") dataParts.push(value);
     }
 
-    if (eventType !== "playing" || dataParts.length === 0) return;
+    if (dataParts.length === 0) return;
 
+    if (eventType === "playing") {
+      this.handlePlaying(dataParts.join("\n"));
+    } else if (eventType === "timeline") {
+      this.handleTimeline(dataParts.join("\n"));
+    } else if (eventType === "reachability") {
+      this.handleReachability(dataParts.join("\n"));
+    }
+  }
+
+  private handlePlaying(payload: string): void {
     let parsed: PlayingEventData;
     try {
-      parsed = JSON.parse(dataParts.join("\n")) as PlayingEventData;
+      parsed = JSON.parse(payload) as PlayingEventData;
     } catch {
       return;
     }
@@ -376,6 +428,99 @@ class PlexEventStreamManager {
         // accumulation, and full metadata refresh.
         void this.applyLiveStateUpdate(n.sessionKey, n.state, n.viewOffset);
       }
+    }
+  }
+
+  private handleTimeline(payload: string): void {
+    let parsed: TimelineEventData;
+    try {
+      parsed = JSON.parse(payload) as TimelineEventData;
+    } catch {
+      return;
+    }
+    const raw = parsed.TimelineEntry;
+    const entries: PlexTimelineEntry[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    let materialChange = false;
+    for (const e of entries) {
+      // Only "created" / "updated" / "deleted" terminal states change the
+      // library shape we cache. "queued" and "processing" are intermediate
+      // scan steps that the next terminal event supersedes — ignoring them
+      // both halves the event rate and avoids triggering a sync mid-scan.
+      if (e.metadataState === "created" || e.metadataState === "updated" || e.metadataState === "deleted") {
+        materialChange = true;
+        break;
+      }
+    }
+    if (materialChange) {
+      this.requestLibraryResync();
+    }
+  }
+
+  private handleReachability(payload: string): void {
+    let parsed: ReachabilityEventData;
+    try {
+      parsed = JSON.parse(payload) as ReachabilityEventData;
+    } catch {
+      return;
+    }
+    const raw = parsed.ReachabilityNotification;
+    const notifications: PlexReachabilityNotification[] = Array.isArray(raw)
+      ? raw
+      : raw
+        ? [raw]
+        : [];
+    for (const n of notifications) {
+      if (typeof n.reachability !== "boolean") continue;
+      void this.persistReachability(n.reachability);
+    }
+  }
+
+  // Debounce + dispatch for the scanner-triggered library re-sync. Plex emits
+  // a TimelineEntry per touched item; coalescing inside this window keeps a
+  // full re-scan from N+1ing /api/sync. The trigger fires HTTP to the local
+  // sync route with the cron bearer token — exactly the same path the
+  // external cron uses, so observability + auth stay consistent.
+  private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private requestLibraryResync(): void {
+    if (this.resyncTimer) clearTimeout(this.resyncTimer);
+    this.resyncTimer = setTimeout(() => {
+      this.resyncTimer = null;
+      void this.triggerLibrarySync();
+    }, TIMELINE_RESYNC_DEBOUNCE_MS);
+  }
+
+  private async triggerLibrarySync(): Promise<void> {
+    try {
+      const secret = process.env.CRON_SECRET;
+      if (!secret) return; // no auth token available — silently skip.
+      const port = process.env.PORT ?? "3000";
+      await fetch(`http://127.0.0.1:${port}/api/sync`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${secret}` },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] timeline-triggered library sync failed: ${msg}`);
+    }
+  }
+
+  private async persistReachability(reachable: boolean): Promise<void> {
+    // Setting is the single source of truth used by the UI to render the
+    // server-reachability indicator. Store a JSON blob so we can add fields
+    // (lastChangedAt etc) without a schema change.
+    try {
+      const value = JSON.stringify({ reachable, observedAt: new Date().toISOString() });
+      await prisma.setting.upsert({
+        where: { key: "plexServerReachable" },
+        create: { key: "plexServerReachable", value },
+        update: { value },
+      });
+      // Broadcast so the UI updates without polling.
+      const { emitSSE } = await import("./sse-emitter");
+      emitSSE({ type: "plex:reachability", reachable });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] persist reachability failed: ${msg}`);
     }
   }
 

@@ -93,7 +93,7 @@ export default async function ActivityPage({
   if (source) prismaWhere.source = source;
   if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
 
-  const [stats, activeSessions, recentPlays, mostRewatched, calendarData] = await Promise.all([
+  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, plexReachableRow] = await Promise.all([
     getPlayHistoryStats({ days, source, mediaType }),
     prisma.activeSession.findMany({
       ...(source || mediaType
@@ -113,7 +113,20 @@ export default async function ActivityPage({
     }),
     getMostRewatched({ days, source, mediaType }, 10),
     getActivityCalendar(source, mediaType),
+    prisma.setting.findUnique({ where: { key: "plexServerReachable" } }),
   ]);
+
+  // Parse the persisted Plex reachability snapshot. The value is JSON written
+  // by plex-events.persistReachability — defensive parse so a malformed row
+  // (manual edit, schema drift) falls back to null (= "unknown") instead of
+  // crashing the page.
+  let initialPlexReachable: boolean | null = null;
+  if (plexReachableRow?.value) {
+    try {
+      const parsed = JSON.parse(plexReachableRow.value) as { reachable?: unknown };
+      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
+    } catch { /* leave null */ }
+  }
 
   // Inline raw queries here used to re-compute uniqueViewers / totalWatchTimeHours
   // and prevPeriod totals that getPlayHistoryStats already returns above. Removed
@@ -517,6 +530,7 @@ export default async function ActivityPage({
           initialSessions={serializedSessions}
           source={source}
           mediaType={mediaType}
+          initialPlexReachable={initialPlexReachable}
         />
       )}
 

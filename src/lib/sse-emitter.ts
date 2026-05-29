@@ -31,7 +31,11 @@ export type SSEEvent =
   | { type: "issuemessage:created"; issueId: string; userId: string }
 
   | { type: "activity:sessions"; sessions: unknown[] }
-  | { type: "activity:history-updated" };
+  | { type: "activity:history-updated" }
+  // Emitted by plex-events.ts when Plex's ReachabilityNotification flips. The
+  // current value is also persisted in Setting('plexServerReachable') for the
+  // initial page render; this event drives live updates without polling.
+  | { type: "plex:reachability"; reachable: boolean };
 
 export function emitSSE(event: SSEEvent) {
   emitter.emit("event", event);

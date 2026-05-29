@@ -12,7 +12,8 @@ export type LiveEvent =
   | { type: "issue:deleted"; issueId: string }
   | { type: "issuemessage:created"; issueId: string }
   | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
-  | { type: "activity:history-updated" };
+  | { type: "activity:history-updated" }
+  | { type: "plex:reachability"; reachable: boolean };
 
 export interface ActiveSessionLive {
   id: string;
