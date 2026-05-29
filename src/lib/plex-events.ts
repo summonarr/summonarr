@@ -389,6 +389,23 @@ class PlexEventStreamManager {
     // after a stop should not resurrect the row.
     if (isPlexSessionRecentlyFinalized(id)) return;
     try {
+      // Read prior state so we can refresh progressUpdatedAt on a
+      // resume-to-playing transition. The 5s poll's stall detector uses
+      // progressUpdatedAt as the "playhead last advanced" anchor — if we
+      // flip state to playing here without refreshing, the next poll sees
+      // existing.state=playing (set by us) with a progressUpdatedAt frozen
+      // from before the pause, and stall-finalizes on the first tick after
+      // resume. The 5s poll has its own resumedToPlaying guard for the same
+      // case, but it only fires when *its* prior observation was non-playing
+      // — once SSE has already pre-flipped state to playing, that guard
+      // silently misses, hence this companion refresh here.
+      const prior = await prisma.activeSession.findUnique({
+        where: { id },
+        select: { state: true },
+      });
+      if (!prior) return;
+      const transitionedToPlaying = prior.state !== "playing" && state === "playing";
+
       const result = await prisma.activeSession.updateMany({
         where: { id },
         data: {
@@ -396,6 +413,7 @@ class PlexEventStreamManager {
           ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
             ? { progressMs: BigInt(Math.floor(viewOffset)) }
             : {}),
+          ...(transitionedToPlaying ? { progressUpdatedAt: new Date() } : {}),
         },
       });
       // Push a sessions snapshot only if the row actually changed — avoids

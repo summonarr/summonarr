@@ -189,8 +189,20 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           // and its ActiveSession row deleted by recordCompletedSession.
         } else {
           const advanced = s.viewOffset > Number(existing.progressMs);
+          // True resume from a non-playing state. Without this branch, a
+          // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
+          // progressUpdatedAt stuck at the moment the user paused. The first
+          // poll after resume sees state="playing", !advanced (viewOffset
+          // hasn't moved yet, we haven't completed one playing tick), and
+          // now - progressUpdatedAt >> 60s — indistinguishable from a real
+          // ghost. Stall would fire, session finalized as a short watch,
+          // ledger-locked, card never comes back. Skip the stall check when
+          // the prior observed state was not "playing", and refresh
+          // progressUpdatedAt so the next tick measures from the resume.
+          const resumedToPlaying = existing.state !== "playing" && s.state === "playing";
           const stalled =
             s.state === "playing"
+            && existing.state === "playing"
             && !advanced
             && nowMs - existing.progressUpdatedAt.getTime() >= PLEX_STALL_THRESHOLD_MS;
 
@@ -224,7 +236,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
               state: s.state,
               progressPercent,
               progressMs: BigInt(s.viewOffset),
-              ...(advanced ? { progressUpdatedAt: now } : {}),
+              ...(advanced || resumedToPlaying ? { progressUpdatedAt: now } : {}),
               playMethod: s.playMethod,
               resolution: s.resolution,
               transcodeReason: s.transcodeReason ?? null,
