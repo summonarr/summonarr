@@ -259,6 +259,15 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **ALWAYS** gate the cron on `isPlayHistoryEnabled()` AND `isSourceEnabled("jellyfin")` — it's a separate cron service, so the admin toggle is otherwise a half-measure (the live poller already gates).
     - Don't "simplify" by making the live poller skip Jellyfin finalize (loses the rich metadata) or by deleting the cron (loses downtime / pre-install backfill).
 
+20. **`ActiveSession.progressUpdatedAt` must be refreshed by EVERY writer that advances the playhead — SSE and the 5s poller both.**
+
+    Why:
+    - The poller's stall detector ([sync/play-history/route.ts](src/app/api/sync/play-history/route.ts)) finalizes a *still-playing* Plex session when `now - progressUpdatedAt >= PLEX_STALL_THRESHOLD_MS` (60s). It's the "playhead last moved" anchor.
+    - Two paths write `progressMs`: the 5s poller and the SSE `playing` handler `applyLiveStateUpdate` ([plex-events.ts](src/lib/plex-events.ts)). SSE is more real-time, so it pushes `progressMs` ahead of the poller's `/status/sessions` snapshot.
+    - The poller's advance check is `s.viewOffset > existing.progressMs`. Once SSE has moved `progressMs` past the poller's snapshot, the poller reads "not advanced," never refreshes `progressUpdatedAt`, and after 60s **stall-finalizes a live stream** — then the 1h `recentlyFinalizedPlexSessions` ledger blocks the now-playing card from returning. This shipped as a regression with the SSE feature.
+
+    Rule: whenever a writer advances `progressMs` (playhead moved forward), it MUST also set `progressUpdatedAt`. SSE does this on `transitionedToPlaying || advancedPlayhead`, not just on resume. Don't "optimize" the `progressUpdatedAt` write back to transition-only.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

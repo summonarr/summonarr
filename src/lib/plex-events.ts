@@ -540,10 +540,27 @@ class PlexEventStreamManager {
       // silently misses, hence this companion refresh here.
       const prior = await prisma.activeSession.findUnique({
         where: { id },
-        select: { state: true },
+        select: { state: true, progressMs: true },
       });
       if (!prior) return;
       const transitionedToPlaying = prior.state !== "playing" && state === "playing";
+
+      // Did the playhead actually move forward in this event? The 5s poller's
+      // stall detector treats progressUpdatedAt as "when the playhead last
+      // advanced" and finalizes a still-playing session once it's >60s stale
+      // (PLEX_STALL_THRESHOLD_MS). The poller's own advance check is
+      // `s.viewOffset > existing.progressMs` — but because SSE here pushes
+      // progressMs ahead of the poller's slower /status/sessions snapshot, the
+      // poller almost always sees s.viewOffset <= existing.progressMs, reads it
+      // as "not advanced," and never refreshes progressUpdatedAt. The anchor
+      // then goes stale on an actively-watched stream and the poller
+      // stall-finalizes it mid-watch (then the 1h ledger blocks the card from
+      // returning). So SSE must refresh progressUpdatedAt itself whenever it
+      // advances the playhead — not only on a resume-to-playing transition.
+      const advancedPlayhead =
+        viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
+          ? BigInt(Math.floor(viewOffset)) > prior.progressMs
+          : false;
 
       const result = await prisma.activeSession.updateMany({
         where: { id },
@@ -552,7 +569,7 @@ class PlexEventStreamManager {
           ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
             ? { progressMs: BigInt(Math.floor(viewOffset)) }
             : {}),
-          ...(transitionedToPlaying ? { progressUpdatedAt: new Date() } : {}),
+          ...(transitionedToPlaying || advancedPlayhead ? { progressUpdatedAt: new Date() } : {}),
         },
       });
       // Push a sessions snapshot only if the row actually changed — avoids
