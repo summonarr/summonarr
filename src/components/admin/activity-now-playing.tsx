@@ -22,6 +22,92 @@ function plexSessionKeyFromId(id: string): string | null {
   return id.startsWith("plex:") ? id.slice(5) : null;
 }
 
+// Format a ms offset as m:ss (or h:mm:ss if >=1h). Used for marker labels.
+function fmtOffset(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+function MarkersChip({ s }: { s: ActiveSessionLive }) {
+  const hasIntro = s.introStartMs != null && s.introEndMs != null;
+  const hasCredits = s.creditsStartMs != null;
+  if (!hasIntro && !hasCredits) return null;
+  const creditsLabel = hasCredits
+    ? (s.creditsEndMs != null && s.creditsEndMs >= s.durationMs - 1000
+        ? `${fmtOffset(s.creditsStartMs!)}+`
+        : `${fmtOffset(s.creditsStartMs!)}–${fmtOffset(s.creditsEndMs ?? s.durationMs)}`)
+    : null;
+  return (
+    <div
+      className="ds-mono"
+      style={{
+        display: "flex",
+        gap: 8,
+        fontSize: 9.5,
+        color: "var(--ds-fg-subtle)",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {hasIntro && (
+        <span title="Intro marker (from Plex)">
+          <span style={{ color: "var(--ds-fg-disabled)" }}>INTRO </span>
+          {fmtOffset(s.introStartMs!)}–{fmtOffset(s.introEndMs!)}
+        </span>
+      )}
+      {hasCredits && (
+        <span title="Credits marker (from Plex)">
+          <span style={{ color: "var(--ds-fg-disabled)" }}>CREDITS </span>
+          {creditsLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function NetworkBadges({ s }: { s: ActiveSessionLive }) {
+  // Only render anything when at least one signal is present. Plex populates
+  // these; Jellyfin currently leaves them null.
+  if (s.location == null && s.secure == null && s.relayed == null) {
+    return <span style={{ color: "var(--ds-fg-disabled)" }}>—</span>;
+  }
+  const locColor = s.location === "lan"
+    ? "var(--ds-success, #2c9)"
+    : s.location === "relay"
+      ? "var(--ds-warning, #c84)"
+      : "var(--ds-fg-muted)";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      {s.location && (
+        <span className="ds-mono" style={{ color: locColor, textTransform: "uppercase" }}>
+          {s.location}
+        </span>
+      )}
+      {s.relayed && (
+        <span
+          className="ds-mono"
+          style={{ color: "var(--ds-warning, #c84)" }}
+          title="Streaming through Plex's relay proxy"
+        >
+          RELAY
+        </span>
+      )}
+      {s.secure != null && (
+        <span
+          className="ds-mono"
+          style={{ color: s.secure ? "var(--ds-fg-subtle)" : "var(--ds-warning, #c84)" }}
+          title={s.secure ? "HTTPS connection" : "Plain HTTP connection"}
+        >
+          {s.secure ? "TLS" : "HTTP"}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function TerminateButton({ session }: { session: ActiveSessionLive }) {
   const sessionKey = plexSessionKeyFromId(session.id);
   const [busy, setBusy] = useState(false);
@@ -288,6 +374,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           </span>
           <span>{Math.round(Math.min(s.progressPercent, 100))}%</span>
         </div>
+        <MarkersChip s={s} />
       </div>
 
       <div
@@ -352,6 +439,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
             )
           }
         />
+        <KeyVal k="Network" v={<NetworkBadges s={s} />} />
       </div>
     </article>
   );

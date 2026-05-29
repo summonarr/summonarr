@@ -52,6 +52,18 @@ interface HistoryRow {
   episodeNumber: number | null;
   episodeTitle: string | null;
   posterUrl: string | null;
+  // Network metadata (Plex-only — Jellyfin leaves these null).
+  location: string | null;
+  bandwidth: number | null;
+  secure: boolean | null;
+  relayed: boolean | null;
+  // Intro/credits markers (Plex-only). Offsets in milliseconds.
+  introStartMs: number | null;
+  introEndMs: number | null;
+  creditsStartMs: number | null;
+  creditsEndMs: number | null;
+  // Resume-grouping anchor (see prisma/schema.prisma PlayHistory.referenceId).
+  referenceId: string | null;
   mediaServerUserId: string;
   mediaServerUser: {
     username: string;
@@ -83,6 +95,18 @@ function relTime(iso: string): string {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   return `${d}d ago`;
+}
+
+// Format a millisecond offset as m:ss / h:mm:ss for marker labels in the
+// session detail panel. Matches the formatter on the Now Playing card so the
+// numbers line up visually.
+function fmtMarkerOffset(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
 const inputStyle: React.CSSProperties = {
@@ -246,6 +270,48 @@ function DetailRow({
     ["Video decision", play.videoDecision ?? "—"],
     ["Audio decision", play.audioDecision ?? "—"],
   ];
+
+  // Network metadata. Plex-only — Jellyfin rows leave these null. Suppress
+  // the cells entirely when there's nothing to show rather than emit a row
+  // of dashes that pads the panel for no reason.
+  if (play.location || play.secure != null || play.relayed != null || play.bandwidth != null) {
+    if (play.location) {
+      details.push(["Connection", play.location.toUpperCase()]);
+    }
+    if (play.secure != null) {
+      details.push(["Secure", play.secure ? "TLS" : "HTTP"]);
+    }
+    if (play.relayed) {
+      details.push(["Relay", "via plex.tv"]);
+    }
+    if (play.bandwidth != null) {
+      // Plex reports bandwidth in kbps; surface as Mbps for parity with the
+      // rest of the panel.
+      const mbps = play.bandwidth / 1000;
+      details.push(["Session bandwidth", `${mbps.toFixed(1)} Mbps`]);
+    }
+  }
+
+  // Intro/credits markers (Plex includeMarkers=1). Same suppression rule.
+  if (play.introStartMs != null && play.introEndMs != null) {
+    details.push([
+      "Intro marker",
+      `${fmtMarkerOffset(play.introStartMs)} – ${fmtMarkerOffset(play.introEndMs)}`,
+    ]);
+  }
+  if (play.creditsStartMs != null) {
+    const tail = play.creditsEndMs != null && play.duration > 0
+      && play.creditsEndMs >= play.duration * 1000 - 1000
+      ? "end"
+      : play.creditsEndMs != null
+        ? fmtMarkerOffset(play.creditsEndMs)
+        : "end";
+    details.push([
+      "Credits marker",
+      `${fmtMarkerOffset(play.creditsStartMs)} – ${tail}`,
+    ]);
+  }
+
   if (play.mediaType === "TV" && play.seasonNumber != null) {
     details.push([
       "Episode",

@@ -302,6 +302,14 @@ export default async function ActivityPage({
     videoDecision: s.videoDecision,
     audioDecision: s.audioDecision,
     container: s.container,
+    location: s.location,
+    bandwidth: s.bandwidth,
+    secure: s.secure,
+    relayed: s.relayed,
+    introStartMs: s.introStartMs,
+    introEndMs: s.introEndMs,
+    creditsStartMs: s.creditsStartMs,
+    creditsEndMs: s.creditsEndMs,
     posterUrl: s.effectiveTmdbId ? posterMap[s.effectiveTmdbId] ?? null : null,
   }));
 

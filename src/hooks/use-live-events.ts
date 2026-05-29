@@ -44,6 +44,16 @@ export interface ActiveSessionLive {
   audioDecision: string | null;
   container: string | null;
   posterUrl: string | null;
+  // Network metadata from /status/sessions Session + Player sub-objects.
+  location: string | null;
+  bandwidth: number | null;
+  secure: boolean | null;
+  relayed: boolean | null;
+  // Intro/credits marker offsets in ms, from /library/metadata?includeMarkers=1.
+  introStartMs: number | null;
+  introEndMs: number | null;
+  creditsStartMs: number | null;
+  creditsEndMs: number | null;
 }
 
 type Subscriber = (event: LiveEvent) => void;
