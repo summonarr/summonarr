@@ -93,7 +93,7 @@ export default async function ActivityPage({
   if (source) prismaWhere.source = source;
   if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
 
-  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, plexReachableRow] = await Promise.all([
+  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, plexReachableRows] = await Promise.all([
     getPlayHistoryStats({ days, source, mediaType }),
     prisma.activeSession.findMany({
       ...(source || mediaType
@@ -113,17 +113,29 @@ export default async function ActivityPage({
     }),
     getMostRewatched({ days, source, mediaType }, 10),
     getActivityCalendar(source, mediaType),
-    prisma.setting.findUnique({ where: { key: "plexServerReachable" } }),
+    prisma.setting.findMany({
+      where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
+      select: { key: true, value: true },
+    }),
   ]);
 
   // Parse the persisted Plex reachability snapshot. The value is JSON written
   // by plex-events.persistReachability — defensive parse so a malformed row
   // (manual edit, schema drift) falls back to null (= "unknown") instead of
   // crashing the page.
+  //
+  // Gate on Plex actually being configured (url + token). A stale
+  // plexServerReachable=false from a prior config lingers in the Setting table,
+  // and the self-heal in plex-events only fires when the Plex SSE connects — so
+  // for a Jellyfin-only (or Plex-removed) instance there's nothing to clear it.
+  // No Plex config → null (= "unknown") so the badge stays hidden.
+  const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
+  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
   let initialPlexReachable: boolean | null = null;
-  if (plexReachableRow?.value) {
+  const reachableValue = plexSettings.get("plexServerReachable");
+  if (plexConfigured && reachableValue) {
     try {
-      const parsed = JSON.parse(plexReachableRow.value) as { reachable?: unknown };
+      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
       if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
     } catch { /* leave null */ }
   }
