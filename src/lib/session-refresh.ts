@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
+import { shouldForceDbCheck } from "@/lib/session-revocation";
 
 // Verify-and-refresh for the Summonarr session JWT.
 //
@@ -56,8 +57,14 @@ export async function verifyAndRefreshSession(
     claims.role === "ADMIN" || claims.role === "ISSUE_ADMIN"
       ? FAST_CHECK_INTERVAL_SECONDS
       : SLOW_CHECK_INTERVAL_SECONDS;
+  // Honor the cache window only if this replica hasn't locally revoked the
+  // session/user since — otherwise force a DB hit so a "revoke this device" /
+  // "log out everywhere" issued here takes effect on the next request rather
+  // than up to checkInterval later.
   const skipDbCheck =
-    typeof dbCheckedAt === "number" && now - dbCheckedAt <= checkInterval;
+    typeof dbCheckedAt === "number" &&
+    now - dbCheckedAt <= checkInterval &&
+    !shouldForceDbCheck(claims.id, claims.sessionId);
 
   if (skipDbCheck) {
     // Still enforce the ADMIN 7d ceiling without hitting the DB.
