@@ -531,7 +531,12 @@ export async function recordCompletedSession(
 // and reused by the 5s poll route so the wire format stays in one place.
 export async function emitActiveSessionsSnapshot(): Promise<void> {
   const allSessions = await prisma.activeSession.findMany({
-    orderBy: { startedAt: "desc" },
+    // Secondary key `id` (immutable PK) breaks startedAt ties deterministically.
+    // Sessions that first appear in the same 5s poll share an identical
+    // startedAt (the poll stamps one `now` across all creates), and with no
+    // tiebreaker Postgres returns the tied rows in heap order — which the
+    // per-poll UPDATEs reshuffle, making the now-playing cards swap places.
+    orderBy: [{ startedAt: "desc" }, { id: "asc" }],
     select: {
       id: true,
       source: true,

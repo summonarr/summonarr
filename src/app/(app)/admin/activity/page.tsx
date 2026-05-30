@@ -99,7 +99,10 @@ export default async function ActivityPage({
       ...(source || mediaType
         ? { where: { ...(source ? { source } : {}), ...(mediaType ? { mediaType } : {}) } }
         : {}),
-      orderBy: { startedAt: "desc" },
+      // Match emitActiveSessionsSnapshot's deterministic ordering so the SSR
+      // list and the first live SSE push agree (no reorder flash on connect).
+      // `id` (immutable PK) breaks the common startedAt ties.
+      orderBy: [{ startedAt: "desc" }, { id: "asc" }],
     }),
     prisma.playHistory.findMany({
       where: prismaWhere,
