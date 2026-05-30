@@ -438,6 +438,7 @@ interface PlexSessionRaw {
   Player?: {
     state?: string;
     title?: string;
+    device?: string;
     platform?: string;
     machineIdentifier?: string;
     address?: string;
@@ -541,7 +542,11 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       Guid: s.Guid,
       platform: s.Player?.platform,
       player: s.Player?.title,
-      device: s.Player?.machineIdentifier,
+      // Player.device is the human-readable device name ("Windows", "iPhone");
+      // machineIdentifier is an opaque GUID. Fall back to the client title, but
+      // never expose the GUID — it's what surfaces in the activity "Device"
+      // label and the top-devices stats grouping (mirrors Jellyfin deviceName).
+      device: s.Player?.device ?? s.Player?.title,
       address: s.Player?.address,
       playMethod,
       videoCodec: videoStream?.codec ?? undefined,
@@ -728,7 +733,7 @@ interface PlexHistoryRaw {
   year?: number;
   duration?: number;
   Guid?: PlexGuid[];
-  Player?: { title?: string; platform?: string; machineIdentifier?: string };
+  Player?: { title?: string; device?: string; platform?: string; machineIdentifier?: string };
 }
 
 export async function getPlexHistoryAll(
@@ -770,7 +775,7 @@ export async function getPlexHistoryAll(
       year: h.year,
       duration: h.duration,
       Guid: h.Guid,
-      device: h.Player?.machineIdentifier,
+      device: h.Player?.device ?? h.Player?.title,
       platform: h.Player?.platform,
       player: h.Player?.title,
     }));
