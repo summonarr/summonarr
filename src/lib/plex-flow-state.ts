@@ -17,8 +17,8 @@ const PLEX_FLOW_TTL_SECONDS = 10 * 60;
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
-  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET (or AUTH_SECRET) must be set");
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET must be set");
   return ENCODER.encode(secret);
 }
 

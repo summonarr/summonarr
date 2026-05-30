@@ -19,7 +19,7 @@ const MAX_START_BODY_BYTES = 4 * 1024;
 const PLEX_TV_HOSTS = ["plex.tv"];
 
 function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";

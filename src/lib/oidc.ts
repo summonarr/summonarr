@@ -78,8 +78,8 @@ interface OidcFlowState {
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
-  if (!secret) throw new Error("[oidc] NEXTAUTH_SECRET (or AUTH_SECRET) must be set");
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) throw new Error("[oidc] NEXTAUTH_SECRET must be set");
   return ENCODER.encode(secret);
 }
 

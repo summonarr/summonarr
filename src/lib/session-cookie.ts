@@ -15,7 +15,7 @@ const COOKIE_NAME_SECURE = "__Host-summonarr-session";
 const COOKIE_NAME_INSECURE = "summonarr-session";
 
 function isSecureContext(): boolean {
-  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";

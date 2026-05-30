@@ -7,7 +7,7 @@ import {
 } from "@/lib/oidc";
 
 function getRedirectUri(req: NextRequest): string {
-  const base = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL;
+  const base = process.env.AUTH_URL;
   if (base) {
     return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
   }
@@ -15,7 +15,7 @@ function getRedirectUri(req: NextRequest): string {
 }
 
 function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";

@@ -92,7 +92,7 @@ const BASE_URL = "https://api.themoviedb.org/3";
 async function tmdbFetch<T>(path: string, params?: Record<string, string>, revalidate = 3600): Promise<T> {
   const auth = tmdbAuth();
   if (!auth) {
-    throw new Error("No TMDB credentials configured (set TMDB_READ_TOKEN or TMDB_API_KEY)");
+    throw new Error("No TMDB credentials configured (set TMDB_READ_TOKEN)");
   }
   const url = new URL(`${BASE_URL}${path}`);
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);

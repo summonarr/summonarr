@@ -134,7 +134,7 @@ export default async function DiscoverPage({
           className="ds-mono"
           style={{ color: "var(--ds-fg-subtle)", fontSize: 12, marginBottom: 40 }}
         >
-          No results — set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env.local to see trending content.
+          No results — set TMDB_READ_TOKEN in .env.local to see trending content.
         </div>
       ) : (
         <>

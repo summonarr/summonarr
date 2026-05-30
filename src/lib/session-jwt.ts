@@ -25,10 +25,10 @@ export interface SessionClaims extends JWTPayload {
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
+  const secret = process.env.NEXTAUTH_SECRET;
   if (!secret) {
     throw new Error(
-      "[session-jwt] NEXTAUTH_SECRET (or AUTH_SECRET) must be set",
+      "[session-jwt] NEXTAUTH_SECRET must be set",
     );
   }
   return ENCODER.encode(secret);

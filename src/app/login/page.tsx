@@ -28,7 +28,7 @@ export default async function LoginPage() {
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
   const localLoginDisabled = disableLocalRow?.value === "true";
   const siteTitle = siteTitleRow?.value || "Summonarr";
-  const siteUrl = siteUrlRow?.value || process.env.NEXTAUTH_URL || "";
+  const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
   const maintenance = await getMaintenanceStatus();
 
   return (

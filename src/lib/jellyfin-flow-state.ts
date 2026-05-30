@@ -19,8 +19,8 @@ const QC_FLOW_TTL_SECONDS = 10 * 60;
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const s = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
-  if (!s) throw new Error("[qc-flow] NEXTAUTH_SECRET (or AUTH_SECRET) must be set");
+  const s = process.env.NEXTAUTH_SECRET;
+  if (!s) throw new Error("[qc-flow] NEXTAUTH_SECRET must be set");
   return ENCODER.encode(s);
 }
 

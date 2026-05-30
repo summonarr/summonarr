@@ -112,7 +112,7 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
 
 async function searchTmdb(query: string, type: "movie" | "tv"): Promise<TmdbResult[]> {
   const auth = tmdbAuth();
-  if (!auth) throw new Error("No TMDB credentials configured (set TMDB_READ_TOKEN or TMDB_API_KEY)");
+  if (!auth) throw new Error("No TMDB credentials configured (set TMDB_READ_TOKEN)");
 
   const url = new URL(`https://api.themoviedb.org/3/search/${type}`);
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);

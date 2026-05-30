@@ -18,7 +18,6 @@ const envOrigins: ReadonlySet<string> = (() => {
   const trusted = new Set<string>();
   for (const raw of [
     process.env.AUTH_URL,
-    process.env.NEXTAUTH_URL,
     ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
   ]) {
     const trimmed = raw?.trim();
@@ -28,7 +27,7 @@ const envOrigins: ReadonlySet<string> = (() => {
   if (trusted.size === 0 && process.env.NODE_ENV === "production") {
     console.error(
       "[proxy] No trusted origins configured in production. " +
-      "Set AUTH_URL or NEXTAUTH_URL to allow browser API calls."
+      "Set AUTH_URL to allow browser API calls."
     );
   }
   return trusted;
@@ -65,7 +64,7 @@ function isPublicPath(pathname: string): boolean {
 
 function buildLoginRedirect(req: NextRequest): URL {
   const baseUrl =
-    process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? req.nextUrl.origin;
+    process.env.AUTH_URL ?? req.nextUrl.origin;
   const basePath = process.env.BASE_PATH ?? "";
   const url = new URL(`${basePath}/login`, baseUrl);
   url.searchParams.set("callbackUrl", req.nextUrl.pathname);
@@ -191,7 +190,6 @@ export async function proxy(request: NextRequest) {
       ) {
         const baseUrl =
           process.env.AUTH_URL ??
-          process.env.NEXTAUTH_URL ??
           request.nextUrl.origin;
         const basePath = process.env.BASE_PATH ?? "";
         return NextResponse.redirect(new URL(`${basePath}/`, baseUrl));

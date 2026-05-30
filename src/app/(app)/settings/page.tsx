@@ -125,7 +125,7 @@ export default async function SettingsPage({
   // disappears automatically on the next page load after the operator re-saves.
   const decryptFailures = getSettingDecryptFailures();
 
-  const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.NEXTAUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
+  const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.AUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
 
   let metrics: {
     totalRequests: number; pendingRequests: number; approvedRequests: number;
@@ -520,7 +520,7 @@ export default async function SettingsPage({
                 initialEmail={cfg.plexAdminEmail ?? ""}
                 initialServerUrl={cfg.plexServerUrl ?? ""}
                 initialPlexLibraries={cfg.plexLibraries ?? ""}
-                siteUrl={cfg.siteUrl ?? process.env.NEXTAUTH_URL ?? ""}
+                siteUrl={cfg.siteUrl ?? process.env.AUTH_URL ?? ""}
               />
             </div>
 

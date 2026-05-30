@@ -103,7 +103,7 @@ async function fixPlexMatch(
         console.warn("[fix-match]", `${tag} TMDB external_ids fetch failed: ${extRes?.status ?? "network error"}`);
       }
     } else {
-      console.warn("[fix-match]", `${tag} No TMDB credentials set (TMDB_READ_TOKEN or TMDB_API_KEY) — cannot fetch IMDB ID`);
+      console.warn("[fix-match]", `${tag} No TMDB credentials set (TMDB_READ_TOKEN) — cannot fetch IMDB ID`);
     }
   }
 

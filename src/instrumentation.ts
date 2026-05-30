@@ -37,7 +37,7 @@ export async function register() {
       if (process.env.NODE_ENV === "production") process.exit(1);
     }
 
-    if (!process.env.AUTH_URL && !process.env.NEXTAUTH_URL) {
+    if (!process.env.AUTH_URL) {
       console.error(
         "[startup] AUTH_URL is not set. Without it, NextAuth trusts the incoming Host header, " +
           "which allows host-header injection attacks that redirect users to attacker-controlled domains. " +
@@ -58,7 +58,7 @@ export async function register() {
     }
 
     if (process.env.TRUST_PROXY === "true") {
-      const authUrl = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+      const authUrl = process.env.AUTH_URL ?? "";
       if (authUrl.startsWith("http://") && process.env.NODE_ENV === "production") {
         console.warn(
           "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
@@ -88,10 +88,10 @@ export async function register() {
       if (process.env.NODE_ENV === "production") process.exit(1);
     }
 
-    if (!process.env.TMDB_READ_TOKEN && !process.env.TMDB_API_KEY) {
+    if (!process.env.TMDB_READ_TOKEN) {
       console.warn(
         "[startup] WARNING: No TMDB credentials set. Movie/TV search and poster images will not work. " +
-          "Set TMDB_READ_TOKEN (v4 read access token, preferred) or TMDB_API_KEY (legacy v3 key)."
+          "Set TMDB_READ_TOKEN (v4 read access token)."
       );
     }
 

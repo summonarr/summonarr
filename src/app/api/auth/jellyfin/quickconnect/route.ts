@@ -9,7 +9,7 @@ import {
 } from "@/lib/jellyfin-flow-state";
 
 function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";
