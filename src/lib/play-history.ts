@@ -1893,9 +1893,13 @@ async function getActivityCalendarUncached(
   });
 
   const result = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+    // startedAt is a tz-naive UTC timestamp and is bucketed by its UTC day, so the
+    // window edge must be a UTC date too. CURRENT_DATE evaluates in the Postgres
+    // session timezone — on a non-UTC DB that drifts a day off the UTC buckets and
+    // the UTC window the client (activity-calendar.tsx) renders. Pin it to UTC.
     `SELECT DATE("startedAt")::text AS day, COUNT(*)::bigint AS count
      FROM "PlayHistory"
-     WHERE "startedAt" >= CURRENT_DATE - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
+     WHERE "startedAt" >= (now() AT TIME ZONE 'UTC')::date - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
      GROUP BY DATE("startedAt")
      ORDER BY day ASC`,
     ...filterParams,
