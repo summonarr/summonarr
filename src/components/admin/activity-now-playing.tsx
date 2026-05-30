@@ -16,10 +16,25 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
-// Plex ActiveSession.id is "plex:<sessionKey>". Strip the prefix for the
-// terminate endpoint, which expects the raw sessionKey.
-function plexSessionKeyFromId(id: string): string | null {
-  return id.startsWith("plex:") ? id.slice(5) : null;
+// ActiveSession.id is "<source>:<sessionKey>". Strip the prefix to recover the
+// raw sessionKey the terminate endpoints expect. Returns the endpoint + key for
+// the sources that support termination (Plex, Jellyfin), or null otherwise.
+function terminateTargetFor(
+  session: ActiveSessionLive,
+): { endpoint: string; sessionKey: string } | null {
+  if (session.id.startsWith("plex:")) {
+    return {
+      endpoint: "/api/admin/play-history/terminate-session",
+      sessionKey: session.id.slice(5),
+    };
+  }
+  if (session.id.startsWith("jellyfin:")) {
+    return {
+      endpoint: "/api/admin/play-history/terminate-jellyfin-session",
+      sessionKey: session.id.slice(9),
+    };
+  }
+  return null;
 }
 
 // Format a ms offset as m:ss (or h:mm:ss if >=1h). Used for marker labels.
@@ -109,10 +124,11 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
 }
 
 function TerminateButton({ session }: { session: ActiveSessionLive }) {
-  const sessionKey = plexSessionKeyFromId(session.id);
+  const target = terminateTargetFor(session);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (!sessionKey) return null;
+  if (!target) return null;
+  const { endpoint, sessionKey } = target;
   async function onClick() {
     const reason = window.prompt(
       "Reason shown to the user in their player:",
@@ -122,7 +138,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/admin/play-history/terminate-session", {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionKey, reason }),
@@ -134,8 +150,8 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
         return;
       }
       // The session row will disappear from the next activity:sessions SSE
-      // push (within ~1s) once Plex tears the stream down. Keep busy=true so
-      // the button doesn't flash re-enabled before the card removes itself.
+      // push (within ~1s) once the server tears the stream down. Keep busy=true
+      // so the button doesn't flash re-enabled before the card removes itself.
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -156,7 +172,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
           color: busy ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
           cursor: busy ? "default" : "pointer",
         }}
-        title="Terminate this Plex session"
+        title={`Terminate this ${session.source === "jellyfin" ? "Jellyfin" : "Plex"} session`}
       >
         {busy ? "Terminating…" : "Terminate"}
       </button>
@@ -290,7 +306,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
                   ? "BUFFERING"
                   : "PLAYING"}
             </span>
-            {s.source === "plex" && (
+            {(s.source === "plex" || s.source === "jellyfin") && (
               <span style={{ marginLeft: "auto" }}>
                 <TerminateButton session={s} />
               </span>

@@ -573,6 +573,7 @@ enum AuditAction {
   VOTE_DISMISS_ALL
   SERVER_USERS_BULK
   PLEX_SESSION_TERMINATE
+  JELLYFIN_SESSION_TERMINATE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

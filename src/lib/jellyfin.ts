@@ -740,6 +740,43 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
     });
 }
 
+// Tear down a Jellyfin playback by sending the "Stop" playstate command.
+// Jellyfin addresses sessions by the session UUID (`Sessions[].Id`), NOT the
+// PlaySessionId we persist on ActiveSession.sessionKey — the caller resolves
+// sessionKey → the live session UUID via a /Sessions snapshot before calling.
+// Jellyfin has no terminate-with-reason like Plex's, so when a reason is given
+// we push a best-effort DisplayMessage command first; its failure must not
+// block the Stop. Uses admin headers because session-control commands require
+// elevation in newer Jellyfin versions (see jellyfinAdminHeaders).
+export async function terminateJellyfinSession(
+  baseUrl: string,
+  apiKey: string,
+  sessionId: string,
+  reason?: string,
+): Promise<{ ok: boolean; status: number }> {
+  const base = baseUrl.replace(/\/$/, "");
+  const id = encodeURIComponent(sessionId);
+
+  if (reason && reason.trim().length > 0) {
+    await safeFetchAdminConfigured(`${base}/Sessions/${id}/Command`, {
+      method: "POST",
+      headers: jellyfinAdminHeaders(apiKey),
+      body: JSON.stringify({
+        Name: "DisplayMessage",
+        Arguments: { Header: "Playback stopped", Text: reason.slice(0, 500), TimeoutMs: 5000 },
+      }),
+      timeoutMs: FETCH_TIMEOUT_MS,
+    }).catch(() => null);
+  }
+
+  const res = await safeFetchAdminConfigured(`${base}/Sessions/${id}/Playing/Stop`, {
+    method: "POST",
+    headers: jellyfinAdminHeaders(apiKey),
+    timeoutMs: FETCH_TIMEOUT_MS,
+  });
+  return { ok: res.ok, status: res.status };
+}
+
 export interface JellyfinUserInfo {
   id: string;
   name: string;
