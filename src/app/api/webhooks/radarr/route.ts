@@ -68,7 +68,13 @@ export async function POST(req: NextRequest) {
 
   let payload: RadarrWebhookPayload;
   try {
-    payload = JSON.parse(rawBody);
+    const parsed = JSON.parse(rawBody);
+    // JSON.parse("null") / primitives / arrays are valid JSON but not a payload
+    // object; guard so the eventType dereference below can't throw a 500.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+    payload = parsed;
   } catch (err) {
     console.warn("[webhook/radarr] 400 invalid JSON:", err);
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
