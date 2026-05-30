@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
+import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import {
   buildQcFlowSetCookie,
@@ -14,8 +15,6 @@ function isSecureCookieContext(): boolean {
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";
 }
-
-const JELLYFIN_URL = process.env.JELLYFIN_URL;
 
 // Long-poll can hold the connection up to ~25s, so bump the route timeout above the default
 export const maxDuration = 30;
@@ -45,7 +44,8 @@ setInterval(() => {
 }, 60_000).unref();
 
 export async function POST(req: NextRequest) {
-  if (!JELLYFIN_URL) {
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
   }
 
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
   try {
-    const result = await initiateJellyfinQuickConnect(JELLYFIN_URL);
+    const result = await initiateJellyfinQuickConnect(jellyfinUrl);
     // Bind the secret to this browser so /api/auth/sign-in/jellyfin-quickconnect
     // can refuse a redemption from any other origin. Cookie carries the SHA-256
     // of the secret (not the secret itself).
@@ -74,7 +74,8 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  if (!JELLYFIN_URL) {
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
   }
   const { searchParams } = new URL(req.url);
@@ -105,7 +106,7 @@ export async function GET(req: NextRequest) {
 
   try {
     if (!wait) {
-      const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
+      const authenticated = await pollJellyfinQuickConnect(jellyfinUrl, secret);
       if (authenticated) pollCounts.delete(countKey);
       return NextResponse.json({ authenticated });
     }
@@ -131,7 +132,7 @@ export async function GET(req: NextRequest) {
         if (req.signal.aborted) {
           return NextResponse.json({ authenticated: false }, { status: 499 });
         }
-        const authenticated = await pollJellyfinQuickConnect(JELLYFIN_URL, secret);
+        const authenticated = await pollJellyfinQuickConnect(jellyfinUrl, secret);
         if (authenticated) {
           pollCounts.delete(countKey);
           return NextResponse.json({ authenticated: true });

@@ -3,6 +3,7 @@ import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
+import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
@@ -695,10 +696,17 @@ export async function authorizeWithJellyfin(
     return null;
   }
 
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
+    console.error("[jellyfin auth] Jellyfin URL is not configured");
+    await dummyVerify();
+    return null;
+  }
+
   let jfUser;
   try {
     jfUser = await authenticateWithJellyfin(
-      process.env.JELLYFIN_URL!,
+      jellyfinUrl,
       username,
       credentials.password as string
     );
@@ -730,10 +738,16 @@ export async function authorizeWithJellyfinQuickConnect(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
+    console.error("[jellyfin quickconnect auth] Jellyfin URL is not configured");
+    return null;
+  }
+
   let jfUser;
   try {
     jfUser = await authenticateWithJellyfinQuickConnect(
-      process.env.JELLYFIN_URL!,
+      jellyfinUrl,
       credentials.secret as string
     );
   } catch (err) {

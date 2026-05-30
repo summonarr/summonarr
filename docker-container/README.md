@@ -89,7 +89,7 @@ TOKEN_ENCRYPTION_KEY=...     # exactly 64 hex chars (32 bytes)
 TRUST_PROXY=false            # set to "true" when behind Nginx/Traefik/Caddy
 ```
 
-Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, `JELLYFIN_URL`, schedule overrides, …) is optional — see [Environment variables](#environment-variables).
+Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, schedule overrides, …) is optional — see [Environment variables](#environment-variables). Jellyfin is configured in-app (Admin → Settings → Media), not via env var.
 
 ## First-run checklist
 
@@ -136,7 +136,6 @@ The app refuses to boot in production if any of these are missing or invalid.
 
 | Variable             | Constraints                                                 | Purpose                                                                                                            |
 | -------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `JELLYFIN_URL`       | Absolute URL                                                | Base URL of your Jellyfin server. Enables both standard and QuickConnect Jellyfin sign-in.                         |
 | `OIDC_ISSUER`        | Absolute URL; must serve `.well-known/openid-configuration` | Any OIDC provider (Authelia, Authentik, Keycloak, Auth0, Okta, …). Must be set together with the client id/secret. |
 | `OIDC_CLIENT_ID`     | provider-defined                                            | Client ID registered with the IdP.                                                                                 |
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
@@ -269,9 +268,8 @@ All service wiring is done in the running app (**Admin → Settings**) and persi
 
 ### Jellyfin
 
-1. Set `JELLYFIN_URL` in `.env`.
-2. Admin → Settings → Jellyfin → paste an API key from the Jellyfin dashboard.
-3. Pick libraries. Incremental sync uses a 2-hour `MinDateLastSaved` window, so a missed run is survivable.
+1. Admin → Settings → Media → Jellyfin → paste the server URL and an API key from the Jellyfin dashboard. Saving both turns on Jellyfin sign-in (standard + QuickConnect).
+2. Pick libraries. Incremental sync uses a 2-hour `MinDateLastSaved` window, so a missed run is survivable.
 
 ### Radarr & Sonarr
 

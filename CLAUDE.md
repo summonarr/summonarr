@@ -83,7 +83,9 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 ## Environment
 
 Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY`, `TMDB_READ_TOKEN`.
-Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+
+Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
 
 ## Deployment
 
