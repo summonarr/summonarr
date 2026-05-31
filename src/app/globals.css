@@ -329,6 +329,8 @@
 .ds-chip-approved { background: var(--ds-success);  color: #000; border-color: transparent; font-weight: 600; }
 .ds-chip-declined { background: var(--ds-danger);   color: #fff; border-color: transparent; font-weight: 600; }
 .ds-chip-accent   { background: var(--ds-accent);   color: var(--ds-accent-fg); border-color: transparent; font-weight: 600; }
+.ds-chip-link     { cursor: pointer; text-decoration: none; transition: color 0.12s, border-color 0.12s, background 0.12s; }
+.ds-chip-link:hover { color: var(--ds-fg); border-color: var(--ds-accent-ring); background: var(--ds-accent-soft); }
 
 .ds-kbd {
   display: inline-flex; align-items: center;

@@ -11,6 +11,8 @@ interface FilterBarProps {
   genres: Genre[];
   watchProviders?: WatchProvider[];
   activeGenreId?: string;
+  activeKeywordId?: string;
+  activeKeywordName?: string;
   activeMinRating?: string;
   activeRatingFilter?: string;
   activeMinVoteCount?: string;
@@ -106,6 +108,8 @@ export function FilterBar({
   genres,
   watchProviders,
   activeGenreId,
+  activeKeywordId,
+  activeKeywordName,
   activeMinRating,
   activeRatingFilter,
   activeMinVoteCount,
@@ -147,7 +151,7 @@ export function FilterBar({
     }
   }
 
-  const hasFilters = !!(activeGenreId || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
+  const hasFilters = !!(activeGenreId || activeKeywordId || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
   const chipLabel = ratingChipLabel(activeMinRating, activeRatingFilter);
 
   const sortedProviders = (watchProviders ?? []).slice().sort((a, b) => {
@@ -281,6 +285,9 @@ export function FilterBar({
         <div className="flex flex-wrap gap-1.5">
           {activeGenreId && (
             <Chip label={genres.find((g) => String(g.id) === activeGenreId)?.name ?? activeGenreId} onRemove={() => push({ genreId: undefined })} />
+          )}
+          {activeKeywordId && (
+            <Chip label={activeKeywordName ?? "Keyword"} onRemove={() => push({ keywordId: undefined, keywordName: undefined })} />
           )}
           {chipLabel && (
             <Chip label={chipLabel} onRemove={() => push({ minRating: undefined, ratingFilter: undefined })} />

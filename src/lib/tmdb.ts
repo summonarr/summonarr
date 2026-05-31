@@ -411,6 +411,7 @@ function discoverKey(type: "movie" | "tv", filters: DiscoverFilters): string {
     `discover:${type}`,
     filters.sortBy ?? "popularity.desc",
     filters.genreId ?? "",
+    filters.keywordId ?? "",
     filters.minRating ?? "",
     filters.minVoteCount ?? "",
     filters.fromYear ?? "",
@@ -919,6 +920,7 @@ export async function discoverMovies(filters: DiscoverFilters): Promise<TmdbMedi
     sort_by: filters.sortBy ?? "popularity.desc",
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
+  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
   if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
   if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
   if (fromYear !== undefined)   params["primary_release_date.gte"] = `${fromYear}-01-01`;
@@ -963,6 +965,7 @@ export async function discoverTV(filters: DiscoverFilters): Promise<TmdbMedia[]>
     sort_by: filters.sortBy ?? "popularity.desc",
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
+  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
   if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
   if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
   if (fromYear !== undefined)   params["first_air_date.gte"] = `${fromYear}-01-01`;
@@ -1109,6 +1112,7 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
     page: String(p),
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
+  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
   if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
   if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
   if (fromYear !== undefined)   params["primary_release_date.gte"] = `${fromYear}-01-01`;
@@ -1148,6 +1152,7 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
     page: String(p),
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
+  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
   if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
   if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
   if (fromYear !== undefined)   params["first_air_date.gte"] = `${fromYear}-01-01`;

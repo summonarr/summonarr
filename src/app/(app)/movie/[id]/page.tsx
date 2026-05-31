@@ -1,4 +1,5 @@
-import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -34,7 +35,7 @@ export default async function MovieDetailPage({
 
   const session = await auth();
 
-  const [plexItem, jellyfinItem, radarrWanted, userRequest, userDeletionVote, cast, rawSuggestions, rawCollection] = await Promise.all([
+  const [plexItem, jellyfinItem, radarrWanted, userRequest, userDeletionVote, cast, rawSuggestions, rawCollection, genreList] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
     }),
@@ -53,7 +54,9 @@ export default async function MovieDetailPage({
     getMovieCredits(media.id).catch(() => []),
     getMovieSuggestions(media.id).catch(() => []),
     media.collectionId ? getMovieCollection(media.collectionId).catch(() => []) : Promise.resolve([]),
+    getMovieGenres().catch(() => []),
   ]);
+  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
   const plexAvailable     = !!plexItem;
   const jellyfinAvailable = !!jellyfinItem;
   const arrPending        = !!radarrWanted;
@@ -153,9 +156,16 @@ export default async function MovieDetailPage({
 
             {media.genres && media.genres.length > 0 && (
               <div className="flex flex-wrap" style={{ gap: 6 }}>
-                {media.genres.slice(0, 5).map((g) => (
-                  <Chip key={g}>{g}</Chip>
-                ))}
+                {media.genres.slice(0, 5).map((g) => {
+                  const gid = genreNameToId.get(g);
+                  return gid !== undefined ? (
+                    <Link key={g} href={`/movies?genreId=${gid}`} aria-label={`Browse ${g} movies`}>
+                      <Chip className="ds-chip-link">{g}</Chip>
+                    </Link>
+                  ) : (
+                    <Chip key={g}>{g}</Chip>
+                  );
+                })}
               </div>
             )}
 
@@ -249,7 +259,7 @@ export default async function MovieDetailPage({
         </div>
       </div>
 
-      <DetailExtras media={media} />
+      <DetailExtras media={media} mediaType="movie" />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 

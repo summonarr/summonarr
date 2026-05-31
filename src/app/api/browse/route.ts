@@ -39,6 +39,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const mediaType     = sp.get("mediaType") === "tv" ? "tv" : "movie";
   const page          = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
   const genreId       = sp.get("genreId") || undefined;
+  const keywordId     = sp.get("keywordId") || undefined;
   const minRating     = sp.get("minRating") || undefined;
   const ratingFilter  = sp.get("ratingFilter") || undefined;
   const minVoteCount  = sp.get("minVoteCount") || undefined;
@@ -49,8 +50,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const watchRegion   = sp.get("watchRegion") || undefined;
   const hideAvailable = sp.get("hideAvailable") === "1";
 
-  const hasFilters = !!(genreId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
-  const filters: DiscoverFilters = { genreId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
+  const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
 
   const needsLoop = hideAvailable || !!ratingFilter;
   const tmdbStartPage = needsLoop ? (page - 1) * TMDB_PAGES_PER_VIRTUAL + 1 : page;

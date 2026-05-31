@@ -1,4 +1,5 @@
 import Image from "next/image";
+import Link from "next/link";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 
@@ -15,7 +16,8 @@ const PROVIDER_GROUP_LABEL: Record<NonNullable<TmdbMedia["watchProviders"]>[numb
  * (JustWatch data via TMDB), keyword tags, and an official-site link. Rendered as a server
  * component below the hero. Each section self-hides when its data is absent.
  */
-export function DetailExtras({ media }: { media: TmdbMedia }) {
+export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType: "movie" | "tv" }) {
+  const browseBase = mediaType === "tv" ? "/tv" : "/movies";
   const providers = media.watchProviders ?? [];
   const keywords = media.keywords ?? [];
   const homepage = media.homepage ?? null;
@@ -76,7 +78,13 @@ export function DetailExtras({ media }: { media: TmdbMedia }) {
           </h2>
           <div className="flex flex-wrap" style={{ gap: 6 }}>
             {keywords.map((k) => (
-              <Chip key={k.id}>{k.name}</Chip>
+              <Link
+                key={k.id}
+                href={`${browseBase}?keywordId=${k.id}&keywordName=${encodeURIComponent(k.name)}`}
+                aria-label={`Browse ${mediaType === "tv" ? "TV" : "movies"} tagged ${k.name}`}
+              >
+                <Chip className="ds-chip-link">{k.name}</Chip>
+              </Link>
             ))}
           </div>
         </section>

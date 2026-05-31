@@ -1,4 +1,5 @@
-import { getTVDetails, getTVCredits, getTVSuggestions, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getTVDetails, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -42,7 +43,7 @@ export default async function TVDetailPage({
       ? ["jellyfin"]
       : ["plex", "jellyfin"];
 
-  const [plexItem, jellyfinItem, tvdbRequest, userRequest, userDeletionVote, sonarrWanted, cast, rawSuggestions, ownedEpisodes] = await Promise.all([
+  const [plexItem, jellyfinItem, tvdbRequest, userRequest, userDeletionVote, sonarrWanted, cast, rawSuggestions, ownedEpisodes, genreList] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "TV" } },
     }),
@@ -68,7 +69,9 @@ export default async function TVDetailPage({
       where: { tmdbId: media.id, source: { in: episodeSources } },
       select: { seasonNumber: true, episodeNumber: true },
     }),
+    getTVGenres().catch(() => []),
   ]);
+  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
   const ownedBySeason: Record<number, number[]> = {};
   const seen = new Set<string>();
@@ -178,9 +181,16 @@ export default async function TVDetailPage({
 
             {media.genres && media.genres.length > 0 && (
               <div className="flex flex-wrap" style={{ gap: 6 }}>
-                {media.genres.slice(0, 5).map((g) => (
-                  <Chip key={g}>{g}</Chip>
-                ))}
+                {media.genres.slice(0, 5).map((g) => {
+                  const gid = genreNameToId.get(g);
+                  return gid !== undefined ? (
+                    <Link key={g} href={`/tv?genreId=${gid}`} aria-label={`Browse ${g} TV shows`}>
+                      <Chip className="ds-chip-link">{g}</Chip>
+                    </Link>
+                  ) : (
+                    <Chip key={g}>{g}</Chip>
+                  );
+                })}
               </div>
             )}
 
@@ -286,7 +296,7 @@ export default async function TVDetailPage({
         </div>
       </div>
 
-      <DetailExtras media={media} />
+      <DetailExtras media={media} mediaType="tv" />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 

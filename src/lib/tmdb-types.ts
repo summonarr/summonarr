@@ -132,6 +132,7 @@ export interface Genre {
 
 export interface DiscoverFilters {
   genreId?: string;
+  keywordId?: string;
   minRating?: string;
   minVoteCount?: string;
   fromYear?: string;
