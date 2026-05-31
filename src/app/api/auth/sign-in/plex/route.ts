@@ -74,7 +74,10 @@ export async function POST(req: NextRequest) {
     "Set-Cookie",
     serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
   );
-  // Single-use: clear the flow cookie so it can't be replayed.
+  // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
+  // a client that ignores the Set-Cookie can resubmit until the 10-min TTL. True
+  // single-use is enforced one layer up: Plex invalidates the PIN token on first
+  // redemption, so a replayed (cookie, token) pair fails at authorizeWithPlex().
   res.headers.append("Set-Cookie", buildPlexFlowClearedSetCookie());
   return res;
 }

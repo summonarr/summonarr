@@ -29,7 +29,6 @@ export interface QcFlowState {
   // cookie, since stuffing a high-entropy upstream token into our own JWT
   // expands its blast-radius unnecessarily.
   secretHash: string;
-  nonce: string;
 }
 
 export function hashQuickConnectSecret(secret: string): string {
@@ -48,10 +47,10 @@ export async function signQcFlowCookie(state: QcFlowState): Promise<string> {
 export async function verifyQcFlowCookie(token: string): Promise<QcFlowState | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
-    if (typeof payload.secretHash !== "string" || typeof payload.nonce !== "string") {
+    if (typeof payload.secretHash !== "string") {
       return null;
     }
-    return { secretHash: payload.secretHash, nonce: payload.nonce };
+    return { secretHash: payload.secretHash };
   } catch {
     return null;
   }

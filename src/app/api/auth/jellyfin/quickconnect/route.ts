@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { randomUUID } from "node:crypto";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -59,7 +58,6 @@ export async function POST(req: NextRequest) {
     // of the secret (not the secret itself).
     const cookieValue = await signQcFlowCookie({
       secretHash: hashQuickConnectSecret(result.secret),
-      nonce: randomUUID(),
     });
     const response = NextResponse.json(result);
     response.headers.append(

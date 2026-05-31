@@ -24,7 +24,6 @@ function getSecret(): Uint8Array {
 
 export interface PlexFlowState {
   pinId: number;
-  nonce: string;
   clientId: string;
 }
 
@@ -42,14 +41,12 @@ export async function verifyPlexFlowCookie(token: string): Promise<PlexFlowState
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
     if (
       typeof payload.pinId !== "number" ||
-      typeof payload.nonce !== "string" ||
       typeof payload.clientId !== "string"
     ) {
       return null;
     }
     return {
       pinId: payload.pinId,
-      nonce: payload.nonce,
       clientId: payload.clientId,
     };
   } catch {

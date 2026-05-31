@@ -1,5 +1,4 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { randomUUID } from "node:crypto";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import {
   buildPlexFlowSetCookie,
@@ -86,7 +85,6 @@ export async function POST(req: NextRequest) {
 
   const cookieValue = await signPlexFlowCookie({
     pinId: data.id,
-    nonce: randomUUID(),
     clientId,
   });
 
