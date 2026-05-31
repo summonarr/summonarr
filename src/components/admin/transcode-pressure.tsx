@@ -1,7 +1,11 @@
+"use client";
+
 // Transcode-pressure leaderboards for the activity overview. Transcodes are the
 // expensive playback path (server CPU + bandwidth); this surfaces the users and
 // titles driving the most of them in the selected period so an admin can spot
-// heavy hitters. Static markup — data is fetched server-side (getTranscodeOffenders).
+// heavy hitters. Data is fetched server-side (getTranscodeOffenders) and passed
+// as serializable props. Marked "use client" because it composes client-only
+// primitives from activity-ui (sourceDotColor can't be called from the server).
 
 import { ActivityCard, SectionHeader, sourceDotColor } from "@/components/admin/activity-ui";
 import type { TranscodeOffenders } from "@/lib/play-history";
