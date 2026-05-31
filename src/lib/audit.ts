@@ -4,7 +4,9 @@ import { sanitizeText } from "./sanitize";
 import type { AuditAction } from "@/generated/prisma";
 
 export type AuditParams = {
-  userId: string;
+  // null for non-user actors (e.g. machine sessions) — the AuditLog.userId
+  // column is nullable. Most callers pass a real user id.
+  userId: string | null;
   userName: string | null | undefined;
   action: AuditAction;
   target: string;

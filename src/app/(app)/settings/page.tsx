@@ -97,7 +97,7 @@ const ALL_KEYS = [
   "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId",
   "deletionVoteThreshold",
   "disableLocalLogin",
-  "enableMachineSession",
+  "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
@@ -441,7 +441,10 @@ export default async function SettingsPage({
                 </p>
               </div>
               <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
-              <EnableMachineSessionToggle initialEnabled={cfg.enableMachineSession === "true"} />
+              <EnableMachineSessionToggle
+                initialEnabled={cfg.enableMachineSession === "true"}
+                initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
+              />
             </div>
 
             <div id="sessions" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
