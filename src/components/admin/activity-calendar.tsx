@@ -40,10 +40,17 @@ export function ActivityCalendar({
   // When provided, day cells with plays become clickable and open the
   // drill-down popover. Holds the fixed filter context (everything except the
   // clicked day, which is filled in on click). Omit to render a static calendar.
-  detailBase?: { userId?: string; source?: string; mediaType?: string };
+  // `historyPath` (e.g. "/admin/activity") enables the popover's "View these
+  // plays" deep-link; omit it on pages with no history table (user detail).
+  detailBase?: { userId?: string; source?: string; mediaType?: string; historyPath?: string };
 }) {
   const [selected, setSelected] = useState<
-    { queryString: string; anchor: HeatmapCellAnchor; label: string } | null
+    {
+      queryString: string;
+      anchor: HeatmapCellAnchor;
+      label: string;
+      viewPlaysHref?: string;
+    } | null
   >(null);
 
   function openCell(el: HTMLDivElement, date: string, count: number) {
@@ -62,10 +69,18 @@ export function ActivityCalendar({
       year: "numeric",
       timeZone: "UTC",
     });
+    let viewPlaysHref: string | undefined;
+    if (detailBase.historyPath) {
+      const hp = new URLSearchParams({ tab: "history", from: date, to: date });
+      if (detailBase.source) hp.set("source", detailBase.source);
+      if (detailBase.mediaType) hp.set("mediaType", detailBase.mediaType);
+      viewPlaysHref = `${detailBase.historyPath}?${hp.toString()}`;
+    }
     setSelected({
       queryString: params.toString(),
       anchor: { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
       label,
+      viewPlaysHref,
     });
   }
 
@@ -254,6 +269,9 @@ export function ActivityCalendar({
               />
             ))}
             <span>More</span>
+            <span style={{ marginLeft: "auto", color: "var(--ds-fg-disabled)" }}>
+              days in UTC
+            </span>
           </div>
         </div>
       </div>
@@ -262,6 +280,7 @@ export function ActivityCalendar({
           queryString={selected.queryString}
           anchor={selected.anchor}
           label={selected.label}
+          viewPlaysHref={selected.viewPlaysHref}
           onClose={() => setSelected(null)}
         />
       )}

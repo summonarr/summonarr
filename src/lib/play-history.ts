@@ -1937,6 +1937,10 @@ export interface HeatmapCellDetail {
   dataTransferredGb: number;
   topResolutions: { resolution: string; count: number }[];
   network: { lan: number; wan: number; relay: number };
+  topTitles: { title: string; count: number }[];
+  // Top viewer for the bucket. null on user-scoped pages (it would always be
+  // the page's own user — redundant).
+  topUser: { username: string; count: number } | null;
 }
 
 export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<HeatmapCellDetail> {
@@ -1981,7 +1985,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
   // Mbps / GB math (mirrors the total_gb query in getPlayHistoryStatsUncached).
   const normBitrate = `(CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)`;
 
-  const [agg, reasons, resolutions] = await Promise.all([
+  const [agg, reasons, resolutions, titles, topUserRows] = await Promise.all([
     prisma.$queryRawUnsafe<
       {
         total: bigint;
@@ -2038,6 +2042,32 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
        GROUP BY "resolution" ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
+    // Most-played titles in the bucket — same tmdbId/title dedup as the stats
+    // topMedia query (null tmdbId falls back to lowercased title).
+    prisma.$queryRawUnsafe<{ title: string; count: bigint }[]>(
+      `SELECT MAX("title") AS title, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+    // Top viewer — skipped on user-scoped pages (always the page's own user).
+    // Filter inside a CTE (bare column names, no alias collisions) then join
+    // MediaServerUser outside; PlayHistory and MediaServerUser both have a
+    // "source" column so a direct join on the filtered set would be ambiguous.
+    q.userId
+      ? Promise.resolve([] as { username: string; count: bigint }[])
+      : prisma.$queryRawUnsafe<{ username: string; count: bigint }[]>(
+          `WITH f AS (
+             SELECT "mediaServerUserId", COUNT(*)::bigint AS count
+             FROM "PlayHistory" WHERE ${where}
+             GROUP BY "mediaServerUserId"
+           )
+           SELECT m."username" AS username, f."count" AS count
+           FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
+           ORDER BY f."count" DESC LIMIT 1`,
+          ...params,
+        ),
   ]);
 
   const r = agg[0];
@@ -2073,10 +2103,72 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
       wan: Number(r?.net_wan ?? 0),
       relay: Number(r?.net_relay ?? 0),
     },
+    topTitles: titles.map((x) => ({ title: x.title, count: Number(x.count) })),
+    topUser: topUserRows[0]
+      ? { username: topUserRows[0].username, count: Number(topUserRows[0].count) }
+      : null,
   };
 
   setCached(cacheKey, detail, STATS_TTL);
   return detail;
+}
+
+// Transcode-pressure leaderboard for the activity overview: who/what forces the
+// most server-side transcodes in the period. Transcodes are the expensive path
+// (CPU + bandwidth), so a ranked list helps an admin spot the heavy hitters.
+export interface TranscodeOffenders {
+  topUsers: { username: string; source: string; count: number }[];
+  topTitles: { title: string; tmdbId: number | null; mediaType: string | null; count: number }[];
+}
+
+export async function getTranscodeOffenders(
+  filters: PlayHistoryStatsFilters = {},
+  limit = 6,
+): Promise<TranscodeOffenders> {
+  const cacheKey = `transcode-offenders:${JSON.stringify({ ...filters, limit })}`;
+  const cached = getCached<TranscodeOffenders>(cacheKey);
+  if (cached) return cached;
+
+  const { where, params } = buildStatsFilters(filters);
+  const twhere = `${where} AND "playMethod" = 'Transcode'`;
+  const limitIdx = params.length + 1;
+
+  const [users, titles] = await Promise.all([
+    // Filter in a CTE (bare names) then join MediaServerUser — PlayHistory and
+    // MediaServerUser both expose "source", so a direct join would be ambiguous.
+    prisma.$queryRawUnsafe<{ username: string; source: string; count: bigint }[]>(
+      `WITH f AS (
+         SELECT "mediaServerUserId", COUNT(*)::bigint AS count
+         FROM "PlayHistory" WHERE ${twhere}
+         GROUP BY "mediaServerUserId"
+       )
+       SELECT m."username" AS username, m."source" AS source, f."count" AS count
+       FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
+       ORDER BY f."count" DESC LIMIT $${limitIdx}`,
+      ...params,
+      limit,
+    ),
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${twhere} AND "title" IS NOT NULL AND "title" <> ''
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT $${limitIdx}`,
+      ...params,
+      limit,
+    ),
+  ]);
+
+  const result: TranscodeOffenders = {
+    topUsers: users.map((u) => ({ username: u.username, source: u.source, count: Number(u.count) })),
+    topTitles: titles.map((t) => ({
+      title: t.title,
+      tmdbId: t.tmdbId,
+      mediaType: t.mediaType,
+      count: Number(t.count),
+    })),
+  };
+  setCached(cacheKey, result, STATS_TTL);
+  return result;
 }
 
 function getCacheKey(prefix: string, params: Record<string, unknown>): string {

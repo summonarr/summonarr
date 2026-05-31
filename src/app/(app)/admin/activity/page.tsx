@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
+import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, getTranscodeOffenders, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import {
@@ -15,6 +15,7 @@ import { ActivityRecentPlays } from "@/components/admin/activity-recent-plays";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ActivityHistoryTable } from "@/components/admin/activity-history-table";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
+import { TranscodePressure } from "@/components/admin/transcode-pressure";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { posterUrl } from "@/lib/tmdb-types";
@@ -50,7 +51,14 @@ const HEATMAP_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 export default async function ActivityPage({
   searchParams,
 }: {
-  searchParams: Promise<{ days?: string; source?: string; mediaType?: string; tab?: string }>;
+  searchParams: Promise<{
+    days?: string;
+    source?: string;
+    mediaType?: string;
+    tab?: string;
+    from?: string;
+    to?: string;
+  }>;
 }) {
   await requireFeature("feature.admin.activity");
   const session = await auth();
@@ -60,11 +68,16 @@ export default async function ActivityPage({
   const showActiveSessions   = featureFlags["feature.behavior.activeSessions"] !== false;
   const showActivityCalendar = featureFlags["feature.behavior.activityCalendar"] !== false;
 
-  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab } = await searchParams;
+  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam } = await searchParams;
   const isHistoryTab = tab === "history";
   const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
   const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
+  // Date deep-link from a calendar-cell "View these plays" link. Seeds the
+  // history table's date filter. Validated to YYYY-MM-DD; anything else ignored.
+  const isYmd = (v?: string) => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  const fromDate = isYmd(fromParam) ? fromParam : undefined;
+  const toDate = isYmd(toParam) ? toParam : undefined;
 
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -79,11 +92,13 @@ export default async function ActivityPage({
         />
         <ActivityFilterBar />
         <ActivityHistoryTable
-          key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}`}
+          key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}-${fromDate ?? ""}-${toDate ?? ""}`}
           source={source}
           mediaType={mediaType}
           days={days}
           startDateIso={periodCutoff.toISOString()}
+          initialFromDate={fromDate}
+          initialToDate={toDate}
         />
       </div>
     );
@@ -93,7 +108,7 @@ export default async function ActivityPage({
   if (source) prismaWhere.source = source;
   if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
 
-  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, plexReachableRows] = await Promise.all([
+  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, transcodeOffenders, plexReachableRows] = await Promise.all([
     getPlayHistoryStats({ days, source, mediaType }),
     prisma.activeSession.findMany({
       ...(source || mediaType
@@ -116,6 +131,7 @@ export default async function ActivityPage({
     }),
     getMostRewatched({ days, source, mediaType }, 10),
     getActivityCalendar(source, mediaType),
+    getTranscodeOffenders({ days, source, mediaType }),
     prisma.setting.findMany({
       where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
       select: { key: true, value: true },
@@ -578,6 +594,8 @@ export default async function ActivityPage({
         days={days}
       />
 
+      <TranscodePressure data={transcodeOffenders} days={days} />
+
       {showActivityCalendar && calendarData.length > 0 && (
         <CalendarSection
           activeDays={activeDays}
@@ -586,7 +604,7 @@ export default async function ActivityPage({
           <ActivityCalendar
             data={calendarData}
             today={new Date().toISOString()}
-            detailBase={{ source, mediaType }}
+            detailBase={{ source, mediaType, historyPath: "/admin/activity" }}
           />
         </CalendarSection>
       )}

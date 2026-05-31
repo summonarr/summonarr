@@ -639,7 +639,13 @@ export function HourHeatmap({
         justifyContent: "start",
       }}
     >
-      <div />
+      <div
+        className="ds-mono"
+        title="Hours are bucketed in UTC"
+        style={{ fontSize: 7.5, color: "var(--ds-fg-disabled)", alignSelf: "end", lineHeight: 1 }}
+      >
+        UTC
+      </div>
       {Array.from({ length: 24 }).map((_, hr) => (
         <div
           key={hr}

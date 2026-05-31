@@ -26,11 +26,15 @@ export function HeatmapCellPopover({
   queryString,
   anchor,
   label,
+  viewPlaysHref,
   onClose,
 }: {
   queryString: string;
   anchor: HeatmapCellAnchor;
   label: string;
+  // When set, a "View these plays →" footer links to the History tab filtered
+  // to this bucket. Day cells pass it; hour cells don't (no hour-of-day filter).
+  viewPlaysHref?: string;
   onClose: () => void;
 }) {
   const [detail, setDetail] = useState<HeatmapCellDetail | null>(null);
@@ -153,6 +157,23 @@ export function HeatmapCellPopover({
           <CellBody detail={detail} />
         )}
       </div>
+
+      {viewPlaysHref && detail && detail.totalPlays > 0 && (
+        <a
+          href={viewPlaysHref}
+          className="ds-mono"
+          style={{
+            display: "block",
+            padding: "8px 12px",
+            borderTop: "1px solid var(--ds-border)",
+            fontSize: 10.5,
+            color: "var(--ds-accent)",
+            textDecoration: "none",
+          }}
+        >
+          View these plays →
+        </a>
+      )}
     </div>,
     document.body,
   );
@@ -202,6 +223,20 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
           {detail.topTranscodeReasons.map((r) => (
             <KV key={r.reason} k={r.reason} v={`${r.count}`} />
           ))}
+        </Section>
+      )}
+
+      {detail.topTitles.length > 0 && (
+        <Section title="Top titles">
+          {detail.topTitles.map((t) => (
+            <KV key={t.title} k={t.title} v={`${t.count}`} />
+          ))}
+        </Section>
+      )}
+
+      {detail.topUser && (
+        <Section title="Top viewer">
+          <KV k={detail.topUser.username} v={`${detail.topUser.count}`} />
         </Section>
       )}
 
