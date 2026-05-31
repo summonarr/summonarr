@@ -170,6 +170,7 @@ interface DistRow {
 export function AnalyticsRow({
   playsByDay,
   heatmapMatrix,
+  heatmapDetailBase,
   streamMix,
   mediaMix,
   days,
@@ -180,6 +181,8 @@ export function AnalyticsRow({
 }: {
   playsByDay: number[];
   heatmapMatrix: number[][];
+  // Forwarded to HourHeatmap so its cells open the drill-down popover.
+  heatmapDetailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
   streamMix: DistRow[];
   mediaMix: DistRow[];
   days: number;
@@ -227,7 +230,7 @@ export function AnalyticsRow({
         </ActivityCard>
         <ActivityCard>
           <SectionHeader label="Day × hour" sub="when watching happens" />
-          <HourHeatmap matrix={heatmapMatrix} />
+          <HourHeatmap matrix={heatmapMatrix} detailBase={heatmapDetailBase} />
           <div
             className="ds-mono"
             style={{

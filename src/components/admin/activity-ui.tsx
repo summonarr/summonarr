@@ -17,6 +17,10 @@ import {
   type ReactNode,
 } from "react";
 import Image from "next/image";
+import {
+  HeatmapCellPopover,
+  type HeatmapCellAnchor,
+} from "@/components/admin/heatmap-cell-popover";
 
 /* ── Source helpers ───────────────────────────────────────────── */
 
@@ -585,12 +589,48 @@ export function AreaChart({
 }
 
 // `matrix` is 7 rows (Mon..Sun) × 24 cols (hour 0..23) of raw counts.
-export function HourHeatmap({ matrix }: { matrix: number[][] }) {
+export function HourHeatmap({
+  matrix,
+  detailBase,
+}: {
+  matrix: number[][];
+  // When provided, cells with plays become clickable and open the drill-down
+  // popover. `days` scopes the admin grid; per-user grids pass `userId` instead
+  // (all-history) — matches getHeatmapCellDetail's scoping. Omit for static.
+  detailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
+}) {
   const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const cell = 12;
   const gap = 2;
   const max = Math.max(1, ...matrix.flat());
+  const [selected, setSelected] = useState<
+    { queryString: string; anchor: HeatmapCellAnchor; label: string } | null
+  >(null);
+
+  // Matrix rows are Mon-first (0=Mon..6=Sun); Postgres DOW is 0=Sun..6=Sat, so
+  // pgDow = (row + 1) % 7 — the inverse of the (dow + 6) % 7 mapping the callers
+  // use to build the matrix.
+  function openCell(el: HTMLDivElement, r: number, c: number, v: number) {
+    if (!detailBase || v === 0) return;
+    const rect = el.getBoundingClientRect();
+    const params = new URLSearchParams({
+      mode: "hour",
+      dow: String((r + 1) % 7),
+      hour: String(c),
+    });
+    if (detailBase.userId) params.set("userId", detailBase.userId);
+    if (detailBase.source) params.set("source", detailBase.source);
+    if (detailBase.mediaType) params.set("mediaType", detailBase.mediaType);
+    if (detailBase.days) params.set("days", String(detailBase.days));
+    setSelected({
+      queryString: params.toString(),
+      anchor: { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+      label: `${DAYS[r]} ${String(c).padStart(2, "0")}:00`,
+    });
+  }
+
   return (
+    <>
     <div
       style={{
         display: "grid",
@@ -628,24 +668,50 @@ export function HourHeatmap({ matrix }: { matrix: number[][] }) {
           >
             {DAYS[r]}
           </div>
-          {row.map((v, c) => (
-            <div
-              key={c}
-              title={`${DAYS[r]} ${c}:00 — ${v} plays`}
-              style={{
-                width: cell,
-                height: cell,
-                borderRadius: 2,
-                background:
-                  v === 0
-                    ? "oklch(1 0 0 / 0.025)"
-                    : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
-              }}
-            />
-          ))}
+          {row.map((v, c) => {
+            const clickable = !!detailBase && v > 0;
+            return (
+              <div
+                key={c}
+                title={`${DAYS[r]} ${c}:00 — ${v} plays`}
+                role={clickable ? "button" : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                onClick={clickable ? (e) => openCell(e.currentTarget, r, c, v) : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openCell(e.currentTarget, r, c, v);
+                        }
+                      }
+                    : undefined
+                }
+                style={{
+                  width: cell,
+                  height: cell,
+                  borderRadius: 2,
+                  cursor: clickable ? "pointer" : "default",
+                  background:
+                    v === 0
+                      ? "oklch(1 0 0 / 0.025)"
+                      : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
+                }}
+              />
+            );
+          })}
         </Fragment>
       ))}
     </div>
+    {selected && (
+      <HeatmapCellPopover
+        queryString={selected.queryString}
+        anchor={selected.anchor}
+        label={selected.label}
+        onClose={() => setSelected(null)}
+      />
+    )}
+    </>
   );
 }
 

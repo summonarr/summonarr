@@ -563,6 +563,7 @@ export default async function ActivityPage({
         playsByDay={stats.playsByDay.map((d) => d.count)}
         playsByDayLabels={stats.playsByDay.map((d) => shortDay(d.day))}
         heatmapMatrix={heatmapMatrix}
+        heatmapDetailBase={{ days, source, mediaType }}
         streamMix={streamMix}
         mediaMix={mediaMix}
         days={days}
@@ -585,6 +586,7 @@ export default async function ActivityPage({
           <ActivityCalendar
             data={calendarData}
             today={new Date().toISOString()}
+            detailBase={{ source, mediaType }}
           />
         </CalendarSection>
       )}

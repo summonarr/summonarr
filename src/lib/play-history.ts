@@ -1908,6 +1908,177 @@ async function getActivityCalendarUncached(
   return result.map((r) => ({ day: r.day, count: Number(r.count) }));
 }
 
+// Per-cell drill-down behind the click popover on the activity heatmaps
+// (activity-calendar.tsx day cells + HourHeatmap dow/hour cells). All counts
+// filter watched=true so the popover's "total plays" matches the count the
+// cell was coloured by (both heatmaps colour from watched=true aggregates).
+export interface HeatmapCellQuery {
+  mode: "day" | "hour";
+  day?: string; // YYYY-MM-DD (UTC) — mode="day"
+  dow?: number; // Postgres DOW 0=Sun..6=Sat — mode="hour"
+  hour?: number; // 0-23 — mode="hour"
+  userId?: string; // mediaServerUserId — user-scoped pages
+  source?: string; // "plex" | "jellyfin"
+  mediaType?: string; // "MOVIE" | "TV"
+  days?: number; // time window for mode="hour" on the admin (non-user) page
+}
+
+export interface HeatmapCellDetail {
+  totalPlays: number;
+  watchHours: number;
+  avgSessionMinutes: number;
+  completedCount: number;
+  completedPct: number;
+  methods: { directPlay: number; directStream: number; transcode: number; other: number };
+  topTranscodeReasons: { reason: string; count: number }[];
+  source: { plex: number; jellyfin: number };
+  mediaType: { movie: number; tv: number; other: number };
+  avgBitrateMbps: number;
+  dataTransferredGb: number;
+  topResolutions: { resolution: string; count: number }[];
+  network: { lan: number; wan: number; relay: number };
+}
+
+export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<HeatmapCellDetail> {
+  const cacheKey = `heatmap-cell:${JSON.stringify(q)}`;
+  const cached = getCached<HeatmapCellDetail>(cacheKey);
+  if (cached) return cached;
+
+  // Build the WHERE incrementally so the $-index always tracks params.length —
+  // same discipline as appendPlayHistoryFilter (the 803cd11 bug class).
+  const conditions: string[] = [`"watched" = true`];
+  const params: unknown[] = [];
+  const bind = (v: unknown): string => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+
+  if (q.mode === "day") {
+    conditions.push(`DATE("startedAt") = ${bind(q.day)}::date`);
+  } else {
+    // Match the source heatmaps' scoping: admin grid is bounded by the `days`
+    // window (getPlayHistoryStats); the per-user grid is all-history. Only apply
+    // the window when not user-scoped so the popover total matches the cell.
+    if (!q.userId && q.days) {
+      conditions.push(
+        `"startedAt" >= ${bind(new Date(Date.now() - q.days * 24 * 60 * 60 * 1000))}`,
+      );
+    }
+    conditions.push(`EXTRACT(DOW FROM "startedAt")::int = ${bind(q.dow)}`);
+    conditions.push(`EXTRACT(HOUR FROM "startedAt")::int = ${bind(q.hour)}`);
+  }
+  if (q.userId) conditions.push(`"mediaServerUserId" = ${bind(q.userId)}`);
+  if (q.source === "plex" || q.source === "jellyfin") {
+    conditions.push(`"source" = ${bind(q.source)}`);
+  }
+  if (q.mediaType === "MOVIE" || q.mediaType === "TV") {
+    conditions.push(`"mediaType"::text = ${bind(q.mediaType)}`);
+  }
+  const where = conditions.join(" AND ");
+
+  // bitrate is normalized like the rest of the stats layer: Jellyfin reports bps
+  // (>100000), Plex kbps — divide the former by 1000 to get kbps before the
+  // Mbps / GB math (mirrors the total_gb query in getPlayHistoryStatsUncached).
+  const normBitrate = `(CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)`;
+
+  const [agg, reasons, resolutions] = await Promise.all([
+    prisma.$queryRawUnsafe<
+      {
+        total: bigint;
+        watch_hours: number;
+        avg_minutes: number;
+        completed: bigint;
+        direct_play: bigint;
+        direct_stream: bigint;
+        transcode: bigint;
+        method_other: bigint;
+        src_plex: bigint;
+        src_jellyfin: bigint;
+        mt_movie: bigint;
+        mt_tv: bigint;
+        mt_other: bigint;
+        net_lan: bigint;
+        net_wan: bigint;
+        net_relay: bigint;
+        avg_mbps: number | null;
+        total_gb: number | null;
+      }[]
+    >(
+      `SELECT
+         COUNT(*)::bigint AS total,
+         (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS watch_hours,
+         (COALESCE(AVG("playDuration"), 0) / 60.0)::float8 AS avg_minutes,
+         COUNT(*) FILTER (WHERE "completed" = true)::bigint AS completed,
+         COUNT(*) FILTER (WHERE "playMethod" = 'DirectPlay')::bigint AS direct_play,
+         COUNT(*) FILTER (WHERE "playMethod" = 'DirectStream')::bigint AS direct_stream,
+         COUNT(*) FILTER (WHERE "playMethod" = 'Transcode')::bigint AS transcode,
+         COUNT(*) FILTER (WHERE "playMethod" IS NULL OR "playMethod" NOT IN ('DirectPlay','DirectStream','Transcode'))::bigint AS method_other,
+         COUNT(*) FILTER (WHERE "source" = 'plex')::bigint AS src_plex,
+         COUNT(*) FILTER (WHERE "source" = 'jellyfin')::bigint AS src_jellyfin,
+         COUNT(*) FILTER (WHERE "mediaType"::text = 'MOVIE')::bigint AS mt_movie,
+         COUNT(*) FILTER (WHERE "mediaType"::text = 'TV')::bigint AS mt_tv,
+         COUNT(*) FILTER (WHERE "mediaType" IS NULL)::bigint AS mt_other,
+         COUNT(*) FILTER (WHERE "location" = 'lan')::bigint AS net_lan,
+         COUNT(*) FILTER (WHERE "location" = 'wan')::bigint AS net_wan,
+         COUNT(*) FILTER (WHERE "location" = 'relay' OR "relayed" = true)::bigint AS net_relay,
+         (AVG(${normBitrate} / 1000.0) FILTER (WHERE "bitrate" > 0))::float8 AS avg_mbps,
+         (COALESCE(SUM((${normBitrate})::float8 * "playDuration"::float8) FILTER (WHERE "bitrate" > 0), 0) / 8.0 / 1024.0 / 1024.0)::float8 AS total_gb
+       FROM "PlayHistory" WHERE ${where}`,
+      ...params,
+    ),
+    prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
+      `SELECT "transcodeReason" AS reason, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "transcodeReason" IS NOT NULL AND "transcodeReason" <> ''
+       GROUP BY "transcodeReason" ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+    prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
+      `SELECT "resolution", COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
+       GROUP BY "resolution" ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+  ]);
+
+  const r = agg[0];
+  const total = Number(r?.total ?? 0);
+  const completedCount = Number(r?.completed ?? 0);
+  const detail: HeatmapCellDetail = {
+    totalPlays: total,
+    watchHours: Math.round(Number(r?.watch_hours ?? 0) * 10) / 10,
+    avgSessionMinutes: Math.round(Number(r?.avg_minutes ?? 0)),
+    completedCount,
+    completedPct: total > 0 ? Math.round((completedCount / total) * 100) : 0,
+    methods: {
+      directPlay: Number(r?.direct_play ?? 0),
+      directStream: Number(r?.direct_stream ?? 0),
+      transcode: Number(r?.transcode ?? 0),
+      other: Number(r?.method_other ?? 0),
+    },
+    topTranscodeReasons: reasons.map((x) => ({ reason: x.reason, count: Number(x.count) })),
+    source: {
+      plex: Number(r?.src_plex ?? 0),
+      jellyfin: Number(r?.src_jellyfin ?? 0),
+    },
+    mediaType: {
+      movie: Number(r?.mt_movie ?? 0),
+      tv: Number(r?.mt_tv ?? 0),
+      other: Number(r?.mt_other ?? 0),
+    },
+    avgBitrateMbps: Math.round(Number(r?.avg_mbps ?? 0) * 10) / 10,
+    dataTransferredGb: Math.round(Number(r?.total_gb ?? 0) * 100) / 100,
+    topResolutions: resolutions.map((x) => ({ resolution: x.resolution, count: Number(x.count) })),
+    network: {
+      lan: Number(r?.net_lan ?? 0),
+      wan: Number(r?.net_wan ?? 0),
+      relay: Number(r?.net_relay ?? 0),
+    },
+  };
+
+  setCached(cacheKey, detail, STATS_TTL);
+  return detail;
+}
+
 function getCacheKey(prefix: string, params: Record<string, unknown>): string {
   const parts = [prefix];
   if (params.days) parts.push(String(params.days));

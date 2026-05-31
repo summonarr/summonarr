@@ -4,6 +4,12 @@
 // in play-history.ts. Restyled to the Claude Design "Activity Page" handoff:
 // DS-token indigo wash, 11px cells, mono gutter labels, Less→More legend.
 
+import { useState } from "react";
+import {
+  HeatmapCellPopover,
+  type HeatmapCellAnchor,
+} from "@/components/admin/heatmap-cell-popover";
+
 const DOW_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
 const CELL = 11;
 const GAP = 2;
@@ -27,10 +33,42 @@ function cellBg(count: number, max: number): string {
 export function ActivityCalendar({
   data,
   today: todayIso,
+  detailBase,
 }: {
   data: CalendarData[];
   today: string;
+  // When provided, day cells with plays become clickable and open the
+  // drill-down popover. Holds the fixed filter context (everything except the
+  // clicked day, which is filled in on click). Omit to render a static calendar.
+  detailBase?: { userId?: string; source?: string; mediaType?: string };
 }) {
+  const [selected, setSelected] = useState<
+    { queryString: string; anchor: HeatmapCellAnchor; label: string } | null
+  >(null);
+
+  function openCell(el: HTMLDivElement, date: string, count: number) {
+    if (!detailBase || count === 0) return;
+    const rect = el.getBoundingClientRect();
+    const params = new URLSearchParams({ mode: "day", day: date });
+    if (detailBase.userId) params.set("userId", detailBase.userId);
+    if (detailBase.source) params.set("source", detailBase.source);
+    if (detailBase.mediaType) params.set("mediaType", detailBase.mediaType);
+    // Date formatting in an event handler runs only client-side (never during
+    // SSR/hydration), so new Date() here is safe — see guardrail 16.
+    const label = new Date(`${date}T00:00:00Z`).toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+    setSelected({
+      queryString: params.toString(),
+      anchor: { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+      label,
+    });
+  }
+
   const countMap = new Map(data.map((d) => [d.day, d.count]));
   const max = Math.max(...data.map((d) => d.count), 1);
   const totalPlays = data.reduce((sum, d) => sum + d.count, 0);
@@ -152,18 +190,39 @@ export function ActivityCalendar({
                         style={{ width: CELL, height: CELL }}
                       />
                     ))}
-                  {week.map((day) => (
-                    <div
-                      key={day.date}
-                      title={`${day.date}: ${day.count} plays`}
-                      style={{
-                        width: CELL,
-                        height: CELL,
-                        borderRadius: 2,
-                        background: cellBg(day.count, max),
-                      }}
-                    />
-                  ))}
+                  {week.map((day) => {
+                    const clickable = !!detailBase && day.count > 0;
+                    return (
+                      <div
+                        key={day.date}
+                        title={`${day.date}: ${day.count} plays`}
+                        role={clickable ? "button" : undefined}
+                        tabIndex={clickable ? 0 : undefined}
+                        onClick={
+                          clickable
+                            ? (e) => openCell(e.currentTarget, day.date, day.count)
+                            : undefined
+                        }
+                        onKeyDown={
+                          clickable
+                            ? (e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  openCell(e.currentTarget, day.date, day.count);
+                                }
+                              }
+                            : undefined
+                        }
+                        style={{
+                          width: CELL,
+                          height: CELL,
+                          borderRadius: 2,
+                          background: cellBg(day.count, max),
+                          cursor: clickable ? "pointer" : "default",
+                        }}
+                      />
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -198,6 +257,14 @@ export function ActivityCalendar({
           </div>
         </div>
       </div>
+      {selected && (
+        <HeatmapCellPopover
+          queryString={selected.queryString}
+          anchor={selected.anchor}
+          label={selected.label}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   );
 }

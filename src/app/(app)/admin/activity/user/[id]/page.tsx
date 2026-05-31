@@ -119,6 +119,7 @@ export default async function UserActivityPage({
       : null;
 
   const data: UserDetailData = {
+    userId: id,
     username: msUser.username,
     source: msUser.source,
     linkedLabel: msUser.user
