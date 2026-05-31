@@ -396,6 +396,10 @@ export async function getPlexEpisodesForShow(
 
 export interface PlexSessionData {
   sessionKey: string;
+  // Session.id — the long GUID Plex assigns per playback. Distinct from the
+  // short sessionKey; the /status/sessions/terminate endpoint addresses
+  // sessions by this GUID, not the sessionKey.
+  sessionId?: string;
   state: "playing" | "paused" | "buffering";
   accountId: string;
   accountName: string;
@@ -541,6 +545,7 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
 
     return {
       sessionKey: s.sessionKey ?? s.Session?.id ?? "",
+      sessionId: s.Session?.id,
       state: (s.Player?.state === "paused" ? "paused" : s.Player?.state === "buffering" ? "buffering" : "playing"),
       accountId: String(s.User?.id ?? ""),
       accountName: s.User?.title ?? "",
@@ -652,9 +657,9 @@ export async function terminatePlexSession(
   sessionId: string,
   reason: string,
 ): Promise<{ ok: boolean; status: number }> {
-  // Plex accepts either ?sessionId= (the Session.id GUID) or sessionKey for
-  // legacy clients. We pass sessionId because it's what /status/sessions exposes
-  // as Session.id and what Tautulli's pmsconnect uses (pmsconnect.py:108).
+  // `sessionId` MUST be the Session.id GUID, not the short sessionKey — Plex
+  // matches /status/sessions/terminate against Session.id and 404s on the
+  // short key. Same identifier Tautulli's pmsconnect uses (pmsconnect.py:108).
   const url = `${serverUrl}/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`;
   const res = await plexFetch(url, token);
   return { ok: res.ok, status: res.status };

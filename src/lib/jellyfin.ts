@@ -757,15 +757,20 @@ export async function terminateJellyfinSession(
   const base = baseUrl.replace(/\/$/, "");
   const id = encodeURIComponent(sessionId);
 
+  // Best-effort DisplayMessage — fire WITHOUT awaiting so a client that doesn't
+  // ack the General command can't stall the Stop behind a 30s timeout (the
+  // caller's fetch has no timeout, so a stalled command shows as a hung button).
+  // Short timeout: a message that takes >5s to deliver is pointless. The Stop
+  // below is the one we await. Safe to float in a long-lived Node server.
   if (reason && reason.trim().length > 0) {
-    await safeFetchAdminConfigured(`${base}/Sessions/${id}/Command`, {
+    void safeFetchAdminConfigured(`${base}/Sessions/${id}/Command`, {
       method: "POST",
       headers: jellyfinAdminHeaders(apiKey),
       body: JSON.stringify({
         Name: "DisplayMessage",
         Arguments: { Header: "Playback stopped", Text: reason.slice(0, 500), TimeoutMs: 5000 },
       }),
-      timeoutMs: FETCH_TIMEOUT_MS,
+      timeoutMs: 5_000,
     }).catch(() => null);
   }
 
