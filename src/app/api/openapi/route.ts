@@ -1105,11 +1105,19 @@ const spec = {
         responses: { "200": { description: "Schema check result" } },
       },
     },
-    "/admin/clear-ratings-cache": {
-      post: {
+    "/admin/clear-cache": {
+      delete: {
         tags: ["Admin – Stats"],
-        summary: "Clear the ratings cache (ADMIN)",
-        responses: { "200": { description: "Cache cleared" } },
+        summary: "Clear a metadata cache source: tmdb | mdblist | omdb | all (ADMIN)",
+        parameters: [
+          {
+            name: "source",
+            in: "query",
+            required: false,
+            schema: { type: "string", enum: ["tmdb", "mdblist", "omdb", "all"], default: "all" },
+          },
+        ],
+        responses: { "200": { description: "Cleared source and deletion count" } },
       },
     },
 

@@ -7,7 +7,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, RatingsCacheClearButton, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -696,12 +696,8 @@ export default async function SettingsPage({
                 <div className="border-t border-zinc-800 pt-5">
                   <TraktForm initialApiKey={cfg.traktClientId ? "••••••••" : ""} />
                 </div>
-                <div className="border-t border-zinc-800 pt-5 space-y-4">
-                  <h3 className="text-sm font-medium text-zinc-300">Cache Management</h3>
-                  <div className="flex items-center gap-3">
-                    <RatingsWarmButton />
-                  </div>
-                  <RatingsCacheClearButton />
+                <div className="border-t border-zinc-800 pt-5">
+                  <CacheManagementPanel />
                 </div>
               </div>
             </div>
