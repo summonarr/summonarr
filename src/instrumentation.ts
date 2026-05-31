@@ -39,8 +39,9 @@ export async function register() {
 
     if (!process.env.AUTH_URL) {
       console.error(
-        "[startup] AUTH_URL is not set. Without it, NextAuth trusts the incoming Host header, " +
-          "which allows host-header injection attacks that redirect users to attacker-controlled domains. " +
+        "[startup] AUTH_URL is not set. Without it, the app falls back to trusting the incoming Host " +
+          "header for origin and redirect checks, which allows host-header injection attacks that redirect " +
+          "users to attacker-controlled domains. " +
           "Set AUTH_URL to the public URL of this app (e.g. https://requests.yourdomain.com)."
       );
       if (process.env.NODE_ENV === "production") {

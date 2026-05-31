@@ -215,7 +215,7 @@ export function OpenApiViewer() {
     const url = `${origin}${serverUrl}${path}${query ? `?${query}` : ""}`;
     const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
     if (op.security?.length !== 0) {
-      lines.push(`  --cookie 'authjs.session-token=YOUR_SESSION_TOKEN'`);
+      lines.push(`  --cookie '__Host-summonarr-session=YOUR_SESSION_TOKEN'`);
     }
     const bodySchema = op.requestBody?.content?.["application/json"]?.schema;
     if (bodySchema) {

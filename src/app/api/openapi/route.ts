@@ -15,8 +15,9 @@ const spec = {
       session: {
         type: "apiKey",
         in: "cookie",
-        name: "authjs.session-token",
-        description: "NextAuth session cookie",
+        name: "__Host-summonarr-session",
+        description:
+          "Summonarr session JWT (jose HS256). Named `summonarr-session` in non-HTTPS contexts.",
       },
       cronSecret: {
         type: "http",
