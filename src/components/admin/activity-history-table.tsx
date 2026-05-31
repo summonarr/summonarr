@@ -1489,7 +1489,7 @@ export function ActivityHistoryTable({
                 cursor: "pointer",
               }}
             >
-              {[10, 25, 50, 100].map((n) => (
+              {[10, 25, 50, 100, 150, 200].map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>

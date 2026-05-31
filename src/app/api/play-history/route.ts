@@ -24,7 +24,7 @@ export const GET = withAdmin(async (request, _ctx, _session) => {
   }
 
   const page = Math.min(Math.max(1, parseInt(params.get("page") ?? "1", 10) || 1), 10_000);
-  const limit = Math.min(100, Math.max(1, parseInt(params.get("limit") ?? "20", 10) || 20));
+  const limit = Math.min(200, Math.max(1, parseInt(params.get("limit") ?? "20", 10) || 20));
   const skip = (page - 1) * limit;
 
   // Default: collapse continued watches (PlayHistory.referenceId chains) into
