@@ -331,6 +331,7 @@
 .ds-chip-accent   { background: var(--ds-accent);   color: var(--ds-accent-fg); border-color: transparent; font-weight: 600; }
 .ds-chip-link     { cursor: pointer; text-decoration: none; transition: color 0.12s, border-color 0.12s, background 0.12s; }
 .ds-chip-link:hover { color: var(--ds-fg); border-color: var(--ds-accent-ring); background: var(--ds-accent-soft); }
+a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-accent-ring); background: var(--ds-accent-soft); outline: 2px solid var(--ds-accent-ring); outline-offset: 2px; }
 
 .ds-kbd {
   display: inline-flex; align-items: center;
