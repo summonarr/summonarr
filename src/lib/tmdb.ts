@@ -142,9 +142,26 @@ interface RawCastMember {
   id: number; name: string; character: string; profile_path: string | null; order: number;
 }
 
+interface RawKeywords {
+  keywords?: { id: number; name: string }[];
+  results?: { id: number; name: string }[];
+}
+
+interface RawWatchProviders {
+  results?: Record<
+    string,
+    {
+      flatrate?: { provider_id: number; provider_name: string; logo_path: string | null }[];
+      rent?: { provider_id: number; provider_name: string; logo_path: string | null }[];
+      buy?: { provider_id: number; provider_name: string; logo_path: string | null }[];
+    }
+  >;
+}
+
 interface RawMovie {
   id: number;
   title: string;
+  original_title?: string;
   overview: string;
   poster_path: string | null;
   backdrop_path: string | null;
@@ -152,6 +169,17 @@ interface RawMovie {
   vote_average: number;
   vote_count: number;
   media_type?: string;
+  genres?: { id: number; name: string }[];
+  production_companies?: { id: number; name: string }[];
+  production_countries?: { iso_3166_1: string; name: string }[];
+  spoken_languages?: { iso_639_1: string; english_name?: string; name?: string }[];
+  original_language?: string;
+  tagline?: string;
+  status?: string;
+  runtime?: number | null;
+  homepage?: string | null;
+  budget?: number | null;
+  revenue?: number | null;
   release_dates?: {
     results: { iso_3166_1: string; release_dates: { certification: string; type: number }[] }[];
   };
@@ -160,18 +188,39 @@ interface RawMovie {
   credits?: { cast: RawCastMember[] };
   recommendations?: { results: RawMovie[] };
   similar?: { results: RawMovie[] };
+  keywords?: RawKeywords;
+  "watch/providers"?: RawWatchProviders;
+  external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
 }
 
 interface RawTV {
   id: number;
   name: string;
+  original_name?: string;
   overview: string;
   poster_path: string | null;
   backdrop_path: string | null;
   first_air_date?: string;
+  last_air_date?: string | null;
   vote_average: number;
   vote_count: number;
   media_type?: string;
+  genres?: { id: number; name: string }[];
+  networks?: { id: number; name: string }[];
+  production_companies?: { id: number; name: string }[];
+  production_countries?: { iso_3166_1: string; name: string }[];
+  origin_country?: string[];
+  spoken_languages?: { iso_639_1: string; english_name?: string; name?: string }[];
+  original_language?: string;
+  tagline?: string;
+  status?: string;
+  type?: string;
+  in_production?: boolean;
+  homepage?: string | null;
+  episode_run_time?: number[];
+  number_of_seasons?: number | null;
+  number_of_episodes?: number | null;
+  next_episode_to_air?: { air_date?: string | null } | null;
   content_ratings?: {
     results: { iso_3166_1: string; rating: string }[];
   };
@@ -179,6 +228,9 @@ interface RawTV {
   credits?: { cast: RawCastMember[] };
   recommendations?: { results: RawTV[] };
   similar?: { results: RawTV[] };
+  keywords?: RawKeywords;
+  "watch/providers"?: RawWatchProviders;
+  external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
   seasons?: {
     season_number: number;
     episode_count: number;
@@ -214,8 +266,56 @@ interface PagedResponse<T> {
   total_results: number;
 }
 
+// Best-effort ISO-code → English display name. Intl.DisplayNames is available in the Node runtime;
+// fall back to the raw code if the lookup throws or returns nothing.
+let regionNames: Intl.DisplayNames | null = null;
+let languageNames: Intl.DisplayNames | null = null;
+function displayRegion(code: string): string {
+  try {
+    regionNames ??= new Intl.DisplayNames(["en"], { type: "region" });
+    return regionNames.of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+}
+function displayLanguage(code: string): string {
+  try {
+    languageNames ??= new Intl.DisplayNames(["en"], { type: "language" });
+    return languageNames.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+function extractKeywords(raw?: RawKeywords): { id: number; name: string }[] | undefined {
+  const list = raw?.keywords ?? raw?.results;
+  if (!list?.length) return undefined;
+  return list.slice(0, 12).map((k) => ({ id: k.id, name: k.name }));
+}
+
+function extractWatchProviders(
+  raw?: RawWatchProviders,
+  region = "US",
+): TmdbMedia["watchProviders"] {
+  const r = raw?.results?.[region];
+  if (!r) return undefined;
+  const out: NonNullable<TmdbMedia["watchProviders"]> = [];
+  const seen = new Set<number>();
+  const add = (type: "stream" | "rent" | "buy", list?: { provider_id: number; provider_name: string; logo_path: string | null }[]) => {
+    for (const p of list ?? []) {
+      if (seen.has(p.provider_id)) continue;
+      seen.add(p.provider_id);
+      out.push({ type, name: p.provider_name, logoPath: p.logo_path });
+    }
+  };
+  add("stream", r.flatrate);
+  add("rent", r.rent);
+  add("buy", r.buy);
+  return out.length ? out : undefined;
+}
+
 function normalizeMovie(r: RawMovie): TmdbMedia {
-  return {
+  const media: TmdbMedia = {
     id: r.id, mediaType: "movie", title: r.title ?? "", overview: r.overview ?? "",
     posterPath: r.poster_path ?? null, backdropPath: r.backdrop_path ?? null,
     releaseDate: r.release_date ?? null,
@@ -223,10 +323,33 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
+  // These fields are only present on the single-title detail response, not on list/search items —
+  // set them only when present so cached list payloads stay lean.
+  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  if (r.production_companies?.length) media.studios = r.production_companies.map((c) => c.name);
+  if (r.tagline) media.tagline = r.tagline;
+  if (r.status) media.status = r.status;
+  if (r.runtime != null) media.runtime = r.runtime;
+  if (r.original_title && r.original_title !== media.title) media.originalTitle = r.original_title;
+  if (r.original_language) media.originalLanguage = r.original_language;
+  if (r.spoken_languages?.length) {
+    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || displayLanguage(l.iso_639_1));
+  }
+  if (r.production_countries?.length) {
+    media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
+  }
+  if (r.homepage) media.homepage = r.homepage;
+  if (r.budget) media.budget = r.budget;
+  if (r.revenue) media.revenue = r.revenue;
+  const kw = extractKeywords(r.keywords);
+  if (kw) media.keywords = kw;
+  const wp = extractWatchProviders(r["watch/providers"]);
+  if (wp) media.watchProviders = wp;
+  return media;
 }
 
 function normalizeTV(r: RawTV): TmdbMedia {
-  return {
+  const media: TmdbMedia = {
     id: r.id, mediaType: "tv", title: r.name ?? "", overview: r.overview ?? "",
     posterPath: r.poster_path ?? null, backdropPath: r.backdrop_path ?? null,
     releaseDate: r.first_air_date ?? null,
@@ -234,6 +357,35 @@ function normalizeTV(r: RawTV): TmdbMedia {
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
+  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  const studios = (r.networks?.length ? r.networks : r.production_companies) ?? [];
+  if (studios.length) media.studios = studios.map((c) => c.name);
+  if (r.tagline) media.tagline = r.tagline;
+  if (r.status) media.status = r.status;
+  if (r.episode_run_time?.length) media.runtime = r.episode_run_time[0];
+  if (r.number_of_seasons != null) media.numberOfSeasons = r.number_of_seasons;
+  if (r.number_of_episodes != null) media.numberOfEpisodes = r.number_of_episodes;
+  if (r.original_name && r.original_name !== media.title) media.originalTitle = r.original_name;
+  if (r.original_language) media.originalLanguage = r.original_language;
+  if (r.spoken_languages?.length) {
+    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || displayLanguage(l.iso_639_1));
+  }
+  if (r.production_countries?.length) {
+    media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
+  } else if (r.origin_country?.length) {
+    media.productionCountries = r.origin_country.map(displayRegion);
+  }
+  if (r.homepage) media.homepage = r.homepage;
+  if (r.last_air_date) media.lastAirDate = r.last_air_date;
+  if (r.in_production != null) media.inProduction = r.in_production;
+  if (r.type) media.tvType = r.type;
+  if (r.next_episode_to_air?.air_date) media.nextEpisodeAirDate = r.next_episode_to_air.air_date;
+  const kw = extractKeywords(r.keywords);
+  if (kw) media.keywords = kw;
+  const wp = extractWatchProviders(r["watch/providers"]);
+  if (wp) media.watchProviders = wp;
+  if (r.external_ids?.tvdb_id) media.tvdbId = r.external_ids.tvdb_id;
+  return media;
 }
 
 export async function verifyTmdbMedia(
@@ -436,7 +588,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   }
 
   const [r, ratings] = await Promise.all([
-    tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar" }),
+    tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar,keywords,watch/providers,external_ids" }),
     fetchUnifiedRatings(id, "movie"),
   ]);
 
@@ -511,7 +663,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
   }
 
   const [r, ratings] = await Promise.all([
-    tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons" }),
+    tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons,keywords,watch/providers,external_ids" }),
     fetchUnifiedRatings(id, "tv"),
   ]);
 

@@ -25,26 +25,79 @@ interface RawSeason {
   overview?: string;
 }
 
+interface RawProvider {
+  provider_id: number;
+  provider_name: string;
+  logo_path: string | null;
+}
+
 interface RawItem {
   id: number;
   title?: string;
   name?: string;
+  original_title?: string;
+  original_name?: string;
   overview?: string;
   poster_path?: string | null;
   backdrop_path?: string | null;
   release_date?: string;
   first_air_date?: string;
+  last_air_date?: string | null;
   vote_average?: number;
   seasons?: RawSeason[];
 
   runtime?: number;
+  episode_run_time?: number[];
   status?: string;
+  type?: string;
+  in_production?: boolean;
   tagline?: string;
   imdb_id?: string;
+  homepage?: string | null;
+  budget?: number | null;
+  revenue?: number | null;
   genres?: { id: number; name: string }[];
+  networks?: { id: number; name: string }[];
   production_companies?: { id: number; name: string }[];
+  production_countries?: { iso_3166_1: string; name: string }[];
+  origin_country?: string[];
+  spoken_languages?: { iso_639_1: string; english_name?: string; name?: string }[];
+  original_language?: string;
   number_of_seasons?: number;
   number_of_episodes?: number;
+  next_episode_to_air?: { air_date?: string | null } | null;
+  keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
+  "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
+  external_ids?: { tvdb_id?: number | null };
+}
+
+let pwRegionNames: Intl.DisplayNames | null = null;
+let pwLanguageNames: Intl.DisplayNames | null = null;
+function pwRegion(code: string): string {
+  try { pwRegionNames ??= new Intl.DisplayNames(["en"], { type: "region" }); return pwRegionNames.of(code.toUpperCase()) ?? code; } catch { return code; }
+}
+function pwLanguage(code: string): string {
+  try { pwLanguageNames ??= new Intl.DisplayNames(["en"], { type: "language" }); return pwLanguageNames.of(code) ?? code; } catch { return code; }
+}
+function pwKeywords(raw?: RawItem["keywords"]): { id: number; name: string }[] | undefined {
+  const list = raw?.keywords ?? raw?.results;
+  if (!list?.length) return undefined;
+  return list.slice(0, 12).map((k) => ({ id: k.id, name: k.name }));
+}
+function pwWatchProviders(raw?: RawItem["watch/providers"], region = "US"): TmdbMedia["watchProviders"] {
+  const r = raw?.results?.[region];
+  if (!r) return undefined;
+  const out: NonNullable<TmdbMedia["watchProviders"]> = [];
+  const seen = new Set<number>();
+  const add = (type: "stream" | "rent" | "buy", list?: RawProvider[]) => {
+    for (const p of list ?? []) {
+      if (seen.has(p.provider_id)) continue;
+      seen.add(p.provider_id);
+      out.push({ type, name: p.provider_name, logoPath: p.logo_path });
+    }
+  };
+  add("stream", r.flatrate); add("rent", r.rent); add("buy", r.buy);
+  return out.length ? out : undefined;
 }
 
 async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<void> {
@@ -54,7 +107,12 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
 
   const url = new URL(`${TMDB_BASE}/${type}/${tmdbId}`);
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
-  if (mediaType === "TV") url.searchParams.set("append_to_response", "seasons");
+  url.searchParams.set(
+    "append_to_response",
+    mediaType === "TV"
+      ? "seasons,keywords,watch/providers,external_ids"
+      : "keywords,watch/providers,external_ids",
+  );
 
   let res: Response;
   try {
@@ -114,6 +172,11 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
 
   const title = (mediaType === "MOVIE" ? raw.title : raw.name) ?? "";
   const releaseYear = rawDate ? rawDate.substring(0, 4) : "Unknown";
+  const originalTitle = mediaType === "MOVIE" ? raw.original_title : raw.original_name;
+  const studios = (mediaType === "TV" && raw.networks?.length ? raw.networks : raw.production_companies) ?? [];
+  const countries = raw.production_countries?.length
+    ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
+    : (raw.origin_country?.map(pwRegion) ?? []);
   await setCache(`${type}:${tmdbId}:details`, {
     id: raw.id,
     mediaType: type,
@@ -127,13 +190,28 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     ...(seasons !== undefined && { seasons }),
 
     genres:          raw.genres?.map((g) => g.name) ?? [],
-    studios:         raw.production_companies?.map((c) => c.name) ?? [],
+    studios:         studios.map((c) => c.name),
     tagline:         raw.tagline ?? null,
     status:          raw.status ?? null,
     imdbId:          raw.imdb_id ?? null,
-    runtime:         raw.runtime ?? null,
+    runtime:         raw.runtime ?? (raw.episode_run_time?.[0] ?? null),
     numberOfSeasons: raw.number_of_seasons ?? null,
     numberOfEpisodes: raw.number_of_episodes ?? null,
+
+    originalTitle:       originalTitle && originalTitle !== title ? originalTitle : null,
+    originalLanguage:    raw.original_language ?? null,
+    spokenLanguages:     raw.spoken_languages?.map((l) => l.english_name || l.name || pwLanguage(l.iso_639_1)) ?? [],
+    productionCountries: countries,
+    homepage:            raw.homepage || null,
+    budget:              raw.budget || null,
+    revenue:             raw.revenue || null,
+    keywords:            pwKeywords(raw.keywords) ?? [],
+    watchProviders:      pwWatchProviders(raw["watch/providers"]) ?? [],
+    tvdbId:              raw.external_ids?.tvdb_id ?? null,
+    lastAirDate:         raw.last_air_date ?? null,
+    inProduction:        raw.in_production ?? null,
+    tvType:              raw.type ?? null,
+    nextEpisodeAirDate:  raw.next_episode_to_air?.air_date ?? null,
   }, libraryDetailsTtl(rawDate));
   await upsertTmdbMediaCore({
     id: raw.id,

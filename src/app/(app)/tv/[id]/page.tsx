@@ -15,6 +15,8 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { DetailExtras } from "@/components/media/detail-extras";
+import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 
 export default async function TVDetailPage({
@@ -163,8 +165,28 @@ export default async function TVDetailPage({
                   {media.numberOfSeasons === 1 ? "" : "s"}
                 </span>
               ) : null}
+              {media.status && <span>{media.status}</span>}
+              {media.productionCountries?.[0] && <span>{media.productionCountries[0]}</span>}
+              {languageName(media.originalLanguage) && <span>{languageName(media.originalLanguage)}</span>}
               {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
             </div>
+
+            {media.originalTitle && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Original title: {media.originalTitle}
+              </div>
+            )}
+
+            {media.nextEpisodeAirDate && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Next episode:{" "}
+                {new Date(media.nextEpisodeAirDate).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </div>
+            )}
 
             <RatingsBar
               imdbRating={media.imdbRating}
@@ -250,6 +272,8 @@ export default async function TVDetailPage({
           </div>
         </div>
       </div>
+
+      <DetailExtras media={media} />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 

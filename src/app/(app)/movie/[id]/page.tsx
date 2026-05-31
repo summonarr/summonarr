@@ -15,6 +15,8 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { DetailExtras } from "@/components/media/detail-extras";
+import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 
 export default async function MovieDetailPage({
@@ -135,8 +137,17 @@ export default async function MovieDetailPage({
               {media.releaseYear && <span>{media.releaseYear}</span>}
               {media.certification && <span>{media.certification}</span>}
               {media.runtime ? <span>{media.runtime}m</span> : null}
+              {media.status && media.status !== "Released" && <span>{media.status}</span>}
+              {media.productionCountries?.[0] && <span>{media.productionCountries[0]}</span>}
+              {languageName(media.originalLanguage) && <span>{languageName(media.originalLanguage)}</span>}
               {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
             </div>
+
+            {media.originalTitle && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Original title: {media.originalTitle}
+              </div>
+            )}
 
             <RatingsBar
               imdbRating={media.imdbRating}
@@ -221,6 +232,8 @@ export default async function MovieDetailPage({
           </div>
         </div>
       </div>
+
+      <DetailExtras media={media} />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 
