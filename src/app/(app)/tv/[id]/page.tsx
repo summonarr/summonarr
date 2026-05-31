@@ -154,22 +154,35 @@ export default async function TVDetailPage({
 
             <div
               className="ds-mono flex items-center flex-wrap"
-              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 12 }}
+              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
             >
-              {media.releaseYear && <span>{media.releaseYear}</span>}
-              {media.certification && <span>{media.certification}</span>}
-              {media.runtime ? <span>{media.runtime}m/ep</span> : null}
-              {media.numberOfSeasons ? (
-                <span>
-                  {media.numberOfSeasons} season
-                  {media.numberOfSeasons === 1 ? "" : "s"}
-                </span>
-              ) : null}
-              {media.status && <span>{media.status}</span>}
-              {media.productionCountries?.[0] && <span>{media.productionCountries[0]}</span>}
-              {languageName(media.originalLanguage) && <span>{languageName(media.originalLanguage)}</span>}
-              {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
+              {[
+                media.releaseYear,
+                media.certification,
+                media.runtime ? `${media.runtime}m/ep` : null,
+                media.numberOfSeasons
+                  ? `${media.numberOfSeasons} season${media.numberOfSeasons === 1 ? "" : "s"}`
+                  : null,
+                media.productionCountries?.[0],
+                languageName(media.originalLanguage),
+                media.status,
+              ]
+                .filter(Boolean)
+                .map((part, i) => (
+                  <span key={i} className="flex items-center" style={{ gap: 8 }}>
+                    {i > 0 && <span style={{ opacity: 0.4 }}>·</span>}
+                    {part}
+                  </span>
+                ))}
             </div>
+
+            {media.genres && media.genres.length > 0 && (
+              <div className="flex flex-wrap" style={{ gap: 6 }}>
+                {media.genres.slice(0, 5).map((g) => (
+                  <Chip key={g}>{g}</Chip>
+                ))}
+              </div>
+            )}
 
             {media.originalTitle && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
