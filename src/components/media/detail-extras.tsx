@@ -32,7 +32,10 @@ export function DetailExtras({ media }: { media: TmdbMedia }) {
   }
 
   return (
-    <div className="ds-detail-body" style={{ display: "flex", flexDirection: "column", gap: 20, paddingTop: 0 }}>
+    <section
+      className="flex flex-col"
+      style={{ padding: "0 16px 32px", gap: 20 }}
+    >
       {hasProviders && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <h2 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
@@ -90,6 +93,6 @@ export function DetailExtras({ media }: { media: TmdbMedia }) {
           Official site ↗
         </a>
       )}
-    </div>
+    </section>
   );
 }
