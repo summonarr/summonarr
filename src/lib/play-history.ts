@@ -794,10 +794,10 @@ export async function getUserPlayStats(mediaServerUserId: string) {
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
-      `SELECT "resolution", COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "mediaServerUserId" = $1 AND "resolution" IS NOT NULL
-       GROUP BY "resolution" ORDER BY count DESC LIMIT 8`,
+       GROUP BY resolution ORDER BY count DESC LIMIT 8`,
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
@@ -903,10 +903,10 @@ export async function getMediaPlayStats(tmdbId: number) {
       tmdbId,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
-      `SELECT "resolution", COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "tmdbId" = $1 AND "resolution" IS NOT NULL
-       GROUP BY "resolution" ORDER BY count DESC`,
+       GROUP BY resolution ORDER BY count DESC`,
       tmdbId,
     ),
   ]);
@@ -1215,6 +1215,22 @@ export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, li
   setCached(cacheKey, result, REWATCHED_TTL);
   return result;
 }
+
+// Canonical resolution bucketing. Plex/Jellyfin report the same resolution in
+// inconsistent forms ("720" vs "720p", "1080" vs "1080p", "4k" vs "2160"), so a
+// raw GROUP BY on "resolution" splits one resolution across several rows. Reuse
+// this CASE everywhere we surface resolution so the buckets always collapse.
+const RESOLUTION_BUCKET_SQL = `CASE
+  WHEN "resolution" IS NULL OR "resolution" = '' THEN 'Unknown'
+  WHEN LOWER("resolution") LIKE '4k%' OR LOWER("resolution") LIKE '2160%' THEN '4K'
+  WHEN LOWER("resolution") LIKE '1080%' THEN '1080p'
+  WHEN LOWER("resolution") LIKE '720%' THEN '720p'
+  WHEN LOWER("resolution") LIKE '576%'
+    OR LOWER("resolution") LIKE '540%'
+    OR LOWER("resolution") LIKE '480%'
+    OR LOWER("resolution") = 'sd' THEN 'SD'
+  ELSE 'Other'
+END`;
 
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
@@ -1668,17 +1684,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN "resolution" IS NULL OR "resolution" = '' THEN 'Unknown'
-         WHEN LOWER("resolution") LIKE '4k%' OR LOWER("resolution") LIKE '2160%' THEN '4K'
-         WHEN LOWER("resolution") LIKE '1080%' THEN '1080p'
-         WHEN LOWER("resolution") LIKE '720%' THEN '720p'
-         WHEN LOWER("resolution") LIKE '576%'
-           OR LOWER("resolution") LIKE '540%'
-           OR LOWER("resolution") LIKE '480%'
-           OR LOWER("resolution") = 'sd' THEN 'SD'
-         ELSE 'Other'
-       END AS bucket, COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS bucket, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY bucket ORDER BY count DESC`,
       ...params,
@@ -2036,10 +2042,13 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
        GROUP BY "transcodeReason" ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
+    // Bucket via the canonical CASE so "720"/"720p" and "1080"/"1080p" collapse
+    // into one row each (raw GROUP BY split them — the formatting bug). Exclude
+    // the 'Unknown' bucket so an absent resolution doesn't show as a fake row.
     prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
-      `SELECT "resolution", COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
-       GROUP BY "resolution" ORDER BY count DESC LIMIT 4`,
+       GROUP BY resolution ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats
