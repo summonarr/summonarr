@@ -229,7 +229,12 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       {detail.topTitles.length > 0 && (
         <Section title="Top titles">
           {detail.topTitles.map((t) => (
-            <KV key={t.title} k={t.title} v={`${t.count}`} />
+            <KV
+              key={t.tmdbId ?? t.title}
+              k={t.title}
+              v={`${t.count}`}
+              href={t.tmdbId ? `/admin/activity/media/${t.tmdbId}` : undefined}
+            />
           ))}
         </Section>
       )}
@@ -326,12 +331,25 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function KV({ k, v, dot }: { k: string; v: string; dot?: string }) {
+function KV({ k, v, dot, href }: { k: string; v: string; dot?: string; href?: string }) {
+  const keyText = (
+    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</span>
+  );
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
       <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--ds-fg-muted)", minWidth: 0 }}>
         {dot && <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0 }} />}
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</span>
+        {href ? (
+          <a
+            href={href}
+            title={k}
+            style={{ color: "var(--ds-accent)", textDecoration: "none", minWidth: 0 }}
+          >
+            {keyText}
+          </a>
+        ) : (
+          keyText
+        )}
       </span>
       <span className="ds-mono" style={{ color: "var(--ds-fg)", textAlign: "right", whiteSpace: "nowrap" }}>
         {v}

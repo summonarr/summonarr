@@ -1937,7 +1937,7 @@ export interface HeatmapCellDetail {
   dataTransferredGb: number;
   topResolutions: { resolution: string; count: number }[];
   network: { lan: number; wan: number; relay: number };
-  topTitles: { title: string; count: number }[];
+  topTitles: { title: string; tmdbId: number | null; count: number }[];
   // Top viewer for the bucket. null on user-scoped pages (it would always be
   // the page's own user — redundant).
   topUser: { username: string; count: number } | null;
@@ -2044,8 +2044,8 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats
     // topMedia query (null tmdbId falls back to lowercased title).
-    prisma.$queryRawUnsafe<{ title: string; count: bigint }[]>(
-      `SELECT MAX("title") AS title, COUNT(*)::bigint AS count
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
        GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 4`,
@@ -2103,7 +2103,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
       wan: Number(r?.net_wan ?? 0),
       relay: Number(r?.net_relay ?? 0),
     },
-    topTitles: titles.map((x) => ({ title: x.title, count: Number(x.count) })),
+    topTitles: titles.map((x) => ({ title: x.title, tmdbId: x.tmdbId, count: Number(x.count) })),
     topUser: topUserRows[0]
       ? { username: topUserRows[0].username, count: Number(topUserRows[0].count) }
       : null,
