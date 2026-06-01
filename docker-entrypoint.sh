@@ -246,6 +246,10 @@ _cron_loop() {
       _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000/api/cron/trash-sync}" "trash-sync"
       TRASH_SYNC_NEXT=$((NOW + ${TRASH_SYNC_INTERVAL:-86400}))
     fi
+    # NOTE: the sync-jellyfin-history route is currently disabled (pending removal) —
+    # it returns a skipped response. The live poller (/api/sync/play-history) is the
+    # canonical Jellyfin history writer now. This ping is harmless; re-enabling is a
+    # one-line flip of BACKFILL_DISABLED in the route. See CLAUDE.md guardrail 19.
     if [ "$NOW" -ge "$JF_HISTORY_NEXT" ]; then
       _cron_sync "${JF_HISTORY_SYNC_URL:-http://localhost:3000/api/cron/sync-jellyfin-history}" "jf-history"
       JF_HISTORY_NEXT=$((NOW + ${JF_HISTORY_SYNC_INTERVAL:-86400}))

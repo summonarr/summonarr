@@ -416,9 +416,28 @@ async function importFromIsPlayed(
   return { imported, errors, deduped };
 }
 
+// DISABLED — pending removal.
+//
+// The live 5s poller (/api/sync/play-history) is now the canonical writer for
+// Jellyfin play history and captures every watch while the app is up, with full
+// metadata. This backfill cron only ever added value for plays the poller can't
+// see — pre-install history and watches during downtime — which we've decided we
+// no longer need. The route is gated off here rather than deleted so the
+// PlaybackReporting / IsPlayed import paths and the liveCovers() dedup guard
+// stay available if we change our minds before removing them outright. See
+// CLAUDE.md guardrail 19.
+const BACKFILL_DISABLED = true;
+
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  if (BACKFILL_DISABLED) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "Jellyfin history backfill disabled (pending removal) — live poller is canonical",
+    });
   }
 
   return withCronRunRecording("jellyfin-history", () => withAdvisoryLock(
