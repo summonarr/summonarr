@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { shouldForceDbCheck } from "@/lib/session-revocation";
+import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 
 // Verify-and-refresh for the Summonarr session JWT.
 //
@@ -86,6 +87,8 @@ export async function verifyAndRefreshSession(
         mediaServer: true,
         sessionsRevokedAt: true,
         passwordChangedAt: true,
+        email: true,
+        notificationEmail: true,
       },
     }),
   ]);
@@ -102,6 +105,33 @@ export async function verifyAndRefreshSession(
   const cutoff = Math.max(revokedSec, passwordSec);
   if (cutoff > 0 && typeof claims.iat === "number" && claims.iat < cutoff) {
     return null;
+  }
+
+  // Plex server-membership re-check. A user un-shared from the Plex server keeps
+  // a valid session JWT until it expires, so re-verify membership here on the
+  // slow DB-check path (~once/60s per session). The allowlist is cached per
+  // replica for 30 min, so plex.tv is hit at most once per replica per window
+  // regardless of how many Plex users are active. ADMINs are exempt (always on
+  // the allowlist anyway; never lock out the operator on an email mismatch).
+  // getCachedPlexAllowlist() returns null when membership can't be determined
+  // (unconfigured / plex.tv error) — fail open and don't revoke.
+  if (claims.provider === "plex" && dbUser.role !== "ADMIN") {
+    const allowlist = await getCachedPlexAllowlist();
+    if (allowlist) {
+      const candidateEmails = [dbUser.notificationEmail, dbUser.email, claims.email]
+        .filter((e): e is string => typeof e === "string" && e.length > 0)
+        .map((e) => e.toLowerCase().trim());
+      const stillMember = candidateEmails.some((e) => allowlist.has(e));
+      if (candidateEmails.length > 0 && !stillMember) {
+        // No longer shared on the Plex server — revoke ALL of this user's
+        // sessions (every device) by advancing sessionsRevokedAt past their
+        // tokens' iat, then reject this request.
+        await prisma.user
+          .update({ where: { id: claims.id }, data: { sessionsRevokedAt: new Date() } })
+          .catch(() => {});
+        return null;
+      }
+    }
   }
 
   void prisma.authSession
