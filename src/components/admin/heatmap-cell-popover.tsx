@@ -239,9 +239,16 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
         </Section>
       )}
 
-      {detail.topUser && (
-        <Section title="Top viewer">
-          <KV k={detail.topUser.username} v={`${detail.topUser.count}`} />
+      {detail.topUsers.length > 0 && (
+        <Section title={detail.topUsers.length > 1 ? "Top viewers" : "Top viewer"}>
+          {detail.topUsers.map((u) => (
+            <KV
+              key={u.id}
+              k={u.username}
+              v={`${u.count}`}
+              href={`/admin/activity/user/${u.id}`}
+            />
+          ))}
         </Section>
       )}
 

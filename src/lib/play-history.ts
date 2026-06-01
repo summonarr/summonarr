@@ -1938,9 +1938,9 @@ export interface HeatmapCellDetail {
   topResolutions: { resolution: string; count: number }[];
   network: { lan: number; wan: number; relay: number };
   topTitles: { title: string; tmdbId: number | null; count: number }[];
-  // Top viewer for the bucket. null on user-scoped pages (it would always be
-  // the page's own user — redundant).
-  topUser: { username: string; count: number } | null;
+  // Top viewers for the bucket (up to 3). Empty on user-scoped pages (they would
+  // always be the page's own user — redundant).
+  topUsers: { id: string; username: string; count: number }[];
 }
 
 export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<HeatmapCellDetail> {
@@ -2056,16 +2056,16 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     // MediaServerUser outside; PlayHistory and MediaServerUser both have a
     // "source" column so a direct join on the filtered set would be ambiguous.
     q.userId
-      ? Promise.resolve([] as { username: string; count: bigint }[])
-      : prisma.$queryRawUnsafe<{ username: string; count: bigint }[]>(
+      ? Promise.resolve([] as { id: string; username: string; count: bigint }[])
+      : prisma.$queryRawUnsafe<{ id: string; username: string; count: bigint }[]>(
           `WITH f AS (
              SELECT "mediaServerUserId", COUNT(*)::bigint AS count
              FROM "PlayHistory" WHERE ${where}
              GROUP BY "mediaServerUserId"
            )
-           SELECT m."username" AS username, f."count" AS count
+           SELECT m."id" AS id, m."username" AS username, f."count" AS count
            FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
-           ORDER BY f."count" DESC LIMIT 1`,
+           ORDER BY f."count" DESC LIMIT 3`,
           ...params,
         ),
   ]);
@@ -2104,9 +2104,11 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
       relay: Number(r?.net_relay ?? 0),
     },
     topTitles: titles.map((x) => ({ title: x.title, tmdbId: x.tmdbId, count: Number(x.count) })),
-    topUser: topUserRows[0]
-      ? { username: topUserRows[0].username, count: Number(topUserRows[0].count) }
-      : null,
+    topUsers: topUserRows.map((u) => ({
+      id: u.id,
+      username: u.username,
+      count: Number(u.count),
+    })),
   };
 
   setCached(cacheKey, detail, STATS_TTL);
