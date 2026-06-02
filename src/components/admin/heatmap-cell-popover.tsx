@@ -262,11 +262,16 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
         {detail.avgBitrateMbps > 0 && <KV k="Avg bitrate" v={`${detail.avgBitrateMbps} Mbps`} />}
         {detail.dataTransferredGb > 0 && <KV k="Data" v={`${detail.dataTransferredGb} GB`} />}
         {detail.topResolutions.length > 0 && (
-          <KV k="Resolution" v={detail.topResolutions.map((r) => `${r.resolution} (${r.count})`).join(", ")} />
+          <KV
+            k="Resolution"
+            wrapValue
+            v={detail.topResolutions.map((r) => `${r.resolution} (${r.count})`).join(", ")}
+          />
         )}
         {(detail.network.lan > 0 || detail.network.wan > 0 || detail.network.relay > 0) && (
           <KV
             k="Network"
+            wrapValue
             v={[
               detail.network.lan > 0 ? `LAN ${detail.network.lan}` : null,
               detail.network.wan > 0 ? `WAN ${detail.network.wan}` : null,
@@ -338,13 +343,44 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function KV({ k, v, dot, href }: { k: string; v: string; dot?: string; href?: string }) {
+function KV({
+  k,
+  v,
+  dot,
+  href,
+  wrapValue,
+}: {
+  k: string;
+  v: string;
+  dot?: string;
+  href?: string;
+  // Multi-item values (Resolution, Network) can exceed the popover width. With
+  // wrapValue the label stays fixed and the value wraps inside the box instead
+  // of running off the right edge (the overhang bug).
+  wrapValue?: boolean;
+}) {
   const keyText = (
     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k}</span>
   );
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center" }}>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--ds-fg-muted)", minWidth: 0 }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        gap: 10,
+        alignItems: wrapValue ? "flex-start" : "center",
+      }}
+    >
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+          color: "var(--ds-fg-muted)",
+          minWidth: 0,
+          flexShrink: wrapValue ? 0 : 1,
+        }}
+      >
         {dot && <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0 }} />}
         {href ? (
           <a
@@ -358,7 +394,16 @@ function KV({ k, v, dot, href }: { k: string; v: string; dot?: string; href?: st
           keyText
         )}
       </span>
-      <span className="ds-mono" style={{ color: "var(--ds-fg)", textAlign: "right", whiteSpace: "nowrap" }}>
+      <span
+        className="ds-mono"
+        style={{
+          color: "var(--ds-fg)",
+          textAlign: "right",
+          whiteSpace: wrapValue ? "normal" : "nowrap",
+          wordBreak: wrapValue ? "break-word" : undefined,
+          minWidth: 0,
+        }}
+      >
         {v}
       </span>
     </div>
