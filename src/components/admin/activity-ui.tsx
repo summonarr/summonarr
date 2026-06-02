@@ -221,6 +221,94 @@ export function Avatar({
 
 /* ── Charts ───────────────────────────────────────────────────── */
 
+// Extra context shown in the line/area chart hover tooltips: where the hovered
+// point sits relative to the whole series. All derived from `data` (no extra
+// props) so every line chart gets the same richer tooltip for free.
+function ChartTooltipDetail({
+  data,
+  i,
+}: {
+  data: number[];
+  i: number;
+}) {
+  const total = data.reduce((a, b) => a + b, 0);
+  const value = data[i] ?? 0;
+  const avg = data.length > 0 ? total / data.length : 0;
+  const prev = i > 0 ? data[i - 1] : null;
+  // Round floats (watch-hours series) to one decimal; integers stay integer.
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const fmt = (n: number) => round1(n).toLocaleString("en-US");
+  const share = total > 0 ? round1((value / total) * 100) : 0;
+  const avgPct = avg > 0 ? Math.round(((value - avg) / avg) * 100) : null;
+  const delta = prev !== null ? round1(value - prev) : null;
+  const deltaPct =
+    prev !== null && prev !== 0 ? Math.round(((value - prev) / prev) * 100) : null;
+
+  const rows: { label: string; value: string; color: string }[] = [
+    { label: "Share", value: `${share}%`, color: "var(--ds-fg-muted)" },
+  ];
+  if (avgPct !== null) {
+    rows.push({
+      label: "vs avg",
+      value: `${avgPct > 0 ? "+" : ""}${avgPct}%`,
+      color:
+        avgPct > 0
+          ? "var(--ds-success)"
+          : avgPct < 0
+            ? "var(--ds-danger)"
+            : "var(--ds-fg-subtle)",
+    });
+  }
+  if (delta !== null) {
+    const arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
+    rows.push({
+      label: "vs prev",
+      value: `${arrow} ${delta > 0 ? "+" : ""}${fmt(delta)}${
+        deltaPct !== null ? ` (${deltaPct > 0 ? "+" : ""}${deltaPct}%)` : ""
+      }`,
+      color:
+        delta > 0
+          ? "var(--ds-success)"
+          : delta < 0
+            ? "var(--ds-danger)"
+            : "var(--ds-fg-subtle)",
+    });
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 5,
+        paddingTop: 5,
+        borderTop: "1px solid var(--ds-border)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      {rows.map((r) => (
+        <div
+          key={r.label}
+          style={{ display: "flex", justifyContent: "space-between", gap: 8 }}
+        >
+          <span
+            className="ds-mono uppercase"
+            style={{ fontSize: 8.5, letterSpacing: "0.06em", color: "var(--ds-fg-disabled)" }}
+          >
+            {r.label}
+          </span>
+          <span
+            className="ds-mono"
+            style={{ fontSize: 9.5, fontVariantNumeric: "tabular-nums", color: r.color }}
+          >
+            {r.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // `labels[i]` is the precomputed (server-side) display label for `data[i]` —
 // e.g. "May 13". Never compute it from Date here (guardrail 16).
 export function Sparkline({
@@ -395,6 +483,7 @@ export function Sparkline({
             {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
+          <ChartTooltipDetail data={data} i={hover.i} />
         </div>
       )}
     </div>
@@ -582,6 +671,7 @@ export function AreaChart({
             {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
+          <ChartTooltipDetail data={data} i={hover.i} />
         </div>
       )}
     </div>
