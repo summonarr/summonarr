@@ -16,6 +16,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import Image from "next/image";
 import {
   HeatmapCellPopover,
@@ -330,13 +331,15 @@ export function Sparkline({
 }) {
   const gradId = useId().replace(/[:]/g, "");
   const wrapRef = useRef<HTMLDivElement>(null);
-  // `wrapW` is captured in the mousemove handler (which has the live rect),
-  // not read off the ref during render — the React Compiler forbids reading
-  // ref.current in the render path.
+  // `x` is the SVG-local crosshair coord; `px`/`py` are the hovered point's
+  // viewport coords for the portalled tooltip. All captured in the mousemove
+  // handler (which has the live rect), not read off the ref during render —
+  // the React Compiler forbids reading ref.current in the render path.
   const [hover, setHover] = useState<{
     i: number;
     x: number;
-    wrapW: number;
+    px: number;
+    py: number;
   } | null>(null);
 
   if (!data || data.length < 2)
@@ -357,17 +360,20 @@ export function Sparkline({
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const i = Math.round(t * (data.length - 1));
     setHover({
-      i: Math.round(t * (data.length - 1)),
+      i,
       x: t * rect.width,
-      wrapW: rect.width,
+      // Viewport anchor for the portalled tooltip; clamp X off the edges.
+      px: Math.max(
+        90,
+        Math.min(window.innerWidth - 90, rect.left + t * rect.width),
+      ),
+      py: rect.top,
     });
   };
 
   const TT_W = 120;
-  const ttLeft = hover
-    ? Math.max(-4, Math.min(hover.wrapW - TT_W + 4, hover.x - TT_W / 2))
-    : 0;
 
   return (
     <div
@@ -429,12 +435,18 @@ export function Sparkline({
           </>
         )}
       </svg>
-      {hover && (
+      {hover &&
+        typeof document !== "undefined" &&
+        createPortal(
         <div
           style={{
-            position: "absolute",
-            left: ttLeft,
-            bottom: h + 6,
+            // Portalled to <body> with position:fixed so it escapes the
+            // app-shell scroll container (`<main overflow-y-auto>`), which
+            // otherwise clips a tooltip popping above the sparkline.
+            position: "fixed",
+            left: hover.px,
+            top: hover.py - 6,
+            transform: "translate(-50%, -100%)",
             minWidth: TT_W,
             width: "max-content",
             whiteSpace: "nowrap",
@@ -446,7 +458,7 @@ export function Sparkline({
             boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
             fontSize: 11,
             color: "var(--ds-fg)",
-            zIndex: 5,
+            zIndex: 60,
           }}
         >
           {labels?.[hover.i] && (
@@ -486,8 +498,9 @@ export function Sparkline({
             {valueSuffix}
           </div>
           <ChartTooltipDetail data={data} i={hover.i} />
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -508,12 +521,16 @@ export function AreaChart({
 }) {
   const gradId = useId().replace(/[:]/g, "");
   const wrapRef = useRef<HTMLDivElement>(null);
-  // `wrapW` captured in the handler, not read off the ref during render.
+  // `x`/`y` are SVG-local coords for the in-chart crosshair; `px`/`py` are the
+  // hovered point's viewport coords, used to position the portalled tooltip.
+  // All captured in the handler (which has the live rect), not read off the
+  // ref during render.
   const [hover, setHover] = useState<{
     i: number;
     x: number;
     y: number;
-    wrapW: number;
+    px: number;
+    py: number;
   } | null>(null);
   const w = 1000;
 
@@ -534,18 +551,22 @@ export function AreaChart({
     const rect = el.getBoundingClientRect();
     const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const i = Math.round(t * (data.length - 1));
+    const yLocal = (yFor(data[i]) / h) * rect.height;
     setHover({
       i,
       x: t * rect.width,
-      y: (yFor(data[i]) / h) * rect.height,
-      wrapW: rect.width,
+      y: yLocal,
+      // Viewport anchor for the portalled tooltip. Clamp X off the viewport
+      // edges so a wide tooltip stays fully on-screen.
+      px: Math.max(
+        90,
+        Math.min(window.innerWidth - 90, rect.left + t * rect.width),
+      ),
+      py: rect.top + yLocal,
     });
   };
 
   const TT_W = 120;
-  const ttLeft = hover
-    ? Math.max(4, Math.min(hover.wrapW - TT_W - 4, hover.x - TT_W / 2))
-    : 0;
 
   return (
     <div
@@ -619,17 +640,20 @@ export function AreaChart({
           </>
         )}
       </svg>
-      {hover && (
+      {hover &&
+        typeof document !== "undefined" &&
+        createPortal(
         <div
           style={{
-            position: "absolute",
-            left: ttLeft,
-            // Float the tooltip above the hovered point; translateY(-100%)
-            // lifts it by its own height so it escapes the plot area upward
-            // (the card chain is overflow:visible) instead of overlapping the
-            // line or being clamped inside the graph.
-            top: hover.y - 12,
-            transform: "translateY(-100%)",
+            // Portalled to <body> with position:fixed so it escapes the
+            // app-shell scroll container (`<main overflow-y-auto>`), which
+            // otherwise clips any tooltip drawn outside the chart card.
+            // px/py are the hovered point's viewport coords; translate(-50%,
+            // -100%) centers the box on the point and floats it above.
+            position: "fixed",
+            left: hover.px,
+            top: hover.py - 12,
+            transform: "translate(-50%, -100%)",
             minWidth: TT_W,
             width: "max-content",
             whiteSpace: "nowrap",
@@ -641,7 +665,7 @@ export function AreaChart({
             boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
             fontSize: 11,
             color: "var(--ds-fg)",
-            zIndex: 4,
+            zIndex: 60,
           }}
         >
           {labels?.[hover.i] && (
@@ -681,8 +705,9 @@ export function AreaChart({
             {valueSuffix}
           </div>
           <ChartTooltipDetail data={data} i={hover.i} />
-        </div>
-      )}
+        </div>,
+          document.body,
+        )}
     </div>
   );
 }
