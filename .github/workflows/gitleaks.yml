@@ -6,7 +6,7 @@ name: Gitleaks
 # table (not in git, but a belt-and-suspenders net for mistaken .env
 # commits).
 #
-# Uses gitleaks/gitleaks-action@v2 (the wrapper). GITLEAKS_LICENSE
+# Uses gitleaks/gitleaks-action@v3 (the wrapper). GITLEAKS_LICENSE
 # must be set as a repo or org secret — required for org-owned repos
 # like summonarr/summonarr. Grab one at https://gitleaks.io.
 #
@@ -15,11 +15,11 @@ name: Gitleaks
 #   - Uses diff-only scanning on pull_request events (faster).
 #   - Writes results.sarif on findings for Security-tab upload below.
 #
-# Known risk: gitleaks-action@v2 runs on Node 20, which GitHub is
-# retiring on GitHub Actions runners (forced to Node 24 on
-# 2026-06-02, removed 2026-09-16). If upstream hasn't shipped a
-# Node-24 build by then, revert this file to the raw-CLI install
-# approach — see commit a6f4994.
+# v3 migrated the runtime from Node 20 to Node 24 (no input/output/
+# behavior changes) ahead of GitHub retiring Node 20 on Actions
+# runners (default flipped 2026-06-02, removed 2026-09-16). If a
+# future Node bump ever strands this wrapper, revert this file to the
+# raw-CLI install approach — see commit a6f4994.
 
 on:
   push:
