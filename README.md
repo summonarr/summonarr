@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.12.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.12.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,37 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.12.2
+
+**Added**
+
+- Movie and TV detail pages now surface country, original language, and more metadata, with clickable genre and keyword chips that jump to filtered discovery.
+- Admin stats page gained a per-server library breakdown.
+- Activity heatmaps got a click-to-drill-down popover — clickable Top titles and top viewers (top 3) — plus a transcode-pressure card and richer hover tooltips on the activity line charts (share, vs average, vs previous).
+- Activity history table now offers 150 and 200 rows-per-page options.
+- Cache Management supports per-source clear + refetch.
+- Admin activity page now has a Terminate button for Jellyfin streams.
+- Machine sessions are hardened with an IP allowlist, rate limiting, and machine-attributed audit logging.
+
+**Changed**
+
+- Jellyfin login and server are now configured from Admin → Settings instead of the `JELLYFIN_URL` environment variable.
+- Dropped NextAuth-era environment aliases, the legacy TMDB v3 key, and other dead variables.
+- Session terminate now uses an in-page dialog instead of the native browser prompt.
+- Plex now locks out un-shared users on session refresh.
+- Removed the legacy Jellyfin play-history backfill cron; the live poller is the sole writer.
+
+**Fixed**
+
+- Session termination targets Plex sessions by GUID and unblocks Jellyfin Stop.
+- Now-playing ordering is stable with a deterministic tiebreaker.
+- Plex activity shows a friendly device name (Apple TV, Roku) instead of the machine GUID.
+- Play-history resolution buckets collapse 720/720p and 1080/1080p.
+- The activity calendar window is pinned to UTC.
+- The in-memory session-revocation fast-path is wired into session refresh.
+- Webhooks reject non-object JSON payloads with 400 instead of 500.
+- Detail-page UI cleanups: extras no longer overlap the hero buttons, a tidier meta line, a keyboard focus indicator on clickable chips, and heatmap popover values no longer overhang the box.
 
 ### v0.12.1
 
@@ -484,7 +515,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.12.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.12.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
