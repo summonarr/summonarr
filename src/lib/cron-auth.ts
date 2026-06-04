@@ -23,7 +23,6 @@ function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
   const trusted = new Set<string>();
   for (const raw of [
     process.env.AUTH_URL,
-    process.env.NEXTAUTH_URL,
     ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
   ]) {
     const trimmed = raw?.trim();

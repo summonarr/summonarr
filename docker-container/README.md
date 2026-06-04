@@ -33,7 +33,7 @@ You only need two files (`docker-compose.yml` and `.env`) — there's no need to
 
 ### TMDB credential (free)
 
-Get one at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api). Use a **v4 Read Access Token** (`TMDB_READ_TOKEN`, preferred) or a **v3 API key** (`TMDB_API_KEY`, legacy).
+Get one at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api). Use a **v4 Read Access Token** (`TMDB_READ_TOKEN`).
 
 ### Secrets to generate up front
 
@@ -80,7 +80,7 @@ Open the URL you set as `AUTH_URL` (e.g. <http://localhost:3001>). **The first u
 Minimum variables you must set in `.env` before the first `docker compose up`:
 
 ```dotenv
-TMDB_READ_TOKEN=...          # v4 bearer token (preferred); or TMDB_API_KEY for v3
+TMDB_READ_TOKEN=...          # v4 bearer token
 NEXTAUTH_SECRET=...          # ≥ 32 chars
 AUTH_URL=http://localhost:3001
 CRON_SECRET=...              # ≥ 32 chars
@@ -89,7 +89,7 @@ TOKEN_ENCRYPTION_KEY=...     # exactly 64 hex chars (32 bytes)
 TRUST_PROXY=false            # set to "true" when behind Nginx/Traefik/Caddy
 ```
 
-Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, `JELLYFIN_URL`, schedule overrides, …) is optional — see [Environment variables](#environment-variables).
+Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, schedule overrides, …) is optional — see [Environment variables](#environment-variables). Jellyfin is configured in-app (Admin → Settings → Media), not via env var.
 
 ## First-run checklist
 
@@ -117,8 +117,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 
 | Variable               | Constraints                                | Purpose                                                                                                                                                                                  |
 | ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TMDB_READ_TOKEN`      | v4 bearer token                            | Preferred TMDB credential. Sent as a header, so the key never leaks into upstream access logs. Set this **or** `TMDB_API_KEY`.                                                           |
-| `TMDB_API_KEY`         | v3 API key                                 | Legacy fallback. Sent as a query-string parameter and triggers a one-time deprecation warning at boot. Use `TMDB_READ_TOKEN` instead where possible.                                     |
+| `TMDB_READ_TOKEN`      | v4 bearer token                            | Required TMDB credential. Sent as a header, so the key never leaks into upstream access logs.                                                                                           |
 | `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`.                                                                                                                                     |
 | `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins NextAuth's base URL and blocks Host-header injection behind a proxy.                                                                                         |
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
@@ -137,7 +136,6 @@ The app refuses to boot in production if any of these are missing or invalid.
 
 | Variable             | Constraints                                                 | Purpose                                                                                                            |
 | -------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `JELLYFIN_URL`       | Absolute URL                                                | Base URL of your Jellyfin server. Enables both standard and QuickConnect Jellyfin sign-in.                         |
 | `OIDC_ISSUER`        | Absolute URL; must serve `.well-known/openid-configuration` | Any OIDC provider (Authelia, Authentik, Keycloak, Auth0, Okta, …). Must be set together with the client id/secret. |
 | `OIDC_CLIENT_ID`     | provider-defined                                            | Client ID registered with the IdP.                                                                                 |
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
@@ -168,8 +166,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.12.1`.                                                                                                   |
-| `DATABASE_URL`                 | postgres:// URI                  | Normally overridden automatically by the entrypoint from `POSTGRES_PASSWORD`. Set manually only when pointing at an external Postgres.                          |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.12.2`.                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -271,9 +268,8 @@ All service wiring is done in the running app (**Admin → Settings**) and persi
 
 ### Jellyfin
 
-1. Set `JELLYFIN_URL` in `.env`.
-2. Admin → Settings → Jellyfin → paste an API key from the Jellyfin dashboard.
-3. Pick libraries. Incremental sync uses a 2-hour `MinDateLastSaved` window, so a missed run is survivable.
+1. Admin → Settings → Media → Jellyfin → paste the server URL and an API key from the Jellyfin dashboard. Saving both turns on Jellyfin sign-in (standard + QuickConnect).
+2. Pick libraries. Incremental sync uses a 2-hour `MinDateLastSaved` window, so a missed run is survivable.
 
 ### Radarr & Sonarr
 
@@ -470,7 +466,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.12.1
+SUMMONARR_VERSION=v0.12.2
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

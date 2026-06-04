@@ -45,6 +45,7 @@ export default async function TVPage({
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const genreId        = sp.genreId        || undefined;
+  const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;
   const ratingFilter   = sp.ratingFilter   || undefined;
   const minVoteCount   = sp.minVoteCount   || undefined;
@@ -56,8 +57,8 @@ export default async function TVPage({
   const hideAvailable  = sp.hideAvailable === "1";
   const page           = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
-  const hasFilters = !!(genreId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
-  const filters: DiscoverFilters = { genreId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
+  const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
 
   const needsLoop = hideAvailable || !!ratingFilter;
   const tmdbStartPage = needsLoop ? (page - 1) * TMDB_PAGES_PER_VIRTUAL + 1 : page;

@@ -25,7 +25,7 @@ function clearStateCookieHeader(): string {
 }
 
 function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
-  const base = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? new URL("/", req.url).toString();
+  const base = process.env.AUTH_URL ?? new URL("/", req.url).toString();
   const url = new URL("/login", base);
   url.searchParams.set("error", code);
   const res = NextResponse.redirect(url.toString());
@@ -82,7 +82,7 @@ export async function GET(req: NextRequest) {
     providerId: "oidc",
   });
 
-  const base = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? new URL("/", req.url).toString();
+  const base = process.env.AUTH_URL ?? new URL("/", req.url).toString();
   // returnTo was already validated at /start (must start with "/", not "//")
   // and signed into the state cookie, so re-validating here is belt-and-
   // suspenders — defends against a future regression in /start.

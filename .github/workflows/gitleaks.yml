@@ -6,7 +6,7 @@ name: Gitleaks
 # table (not in git, but a belt-and-suspenders net for mistaken .env
 # commits).
 #
-# Uses gitleaks/gitleaks-action@v2 (the wrapper). GITLEAKS_LICENSE
+# Uses gitleaks/gitleaks-action@v3 (the wrapper). GITLEAKS_LICENSE
 # must be set as a repo or org secret — required for org-owned repos
 # like summonarr/summonarr. Grab one at https://gitleaks.io.
 #
@@ -15,11 +15,11 @@ name: Gitleaks
 #   - Uses diff-only scanning on pull_request events (faster).
 #   - Writes results.sarif on findings for Security-tab upload below.
 #
-# Known risk: gitleaks-action@v2 runs on Node 20, which GitHub is
-# retiring on GitHub Actions runners (forced to Node 24 on
-# 2026-06-02, removed 2026-09-16). If upstream hasn't shipped a
-# Node-24 build by then, revert this file to the raw-CLI install
-# approach — see commit a6f4994.
+# v3 migrated the runtime from Node 20 to Node 24 (no input/output/
+# behavior changes) ahead of GitHub retiring Node 20 on Actions
+# runners (default flipped 2026-06-02, removed 2026-09-16). If a
+# future Node bump ever strands this wrapper, revert this file to the
+# raw-CLI install approach — see commit a6f4994.
 
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
       security-events: write
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           # Full history so scheduled scans catch secrets in older
           # commits; the action auto-diffs on pull_request events.
@@ -60,7 +60,7 @@ jobs:
           persist-credentials: false
 
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
@@ -70,7 +70,7 @@ jobs:
         # only emits results.sarif when something was flagged, so skip
         # the upload if the file isn't there.
         if: always() && hashFiles('results.sarif') != ''
-        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        uses: github/codeql-action/upload-sarif@87557b9c84dde89fdd9b10e88954ac2f4248e463 # v4.36.1
         with:
           sarif_file: results.sarif
           category: gitleaks

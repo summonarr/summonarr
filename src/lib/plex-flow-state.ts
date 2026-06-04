@@ -17,14 +17,13 @@ const PLEX_FLOW_TTL_SECONDS = 10 * 60;
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
-  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET (or AUTH_SECRET) must be set");
+  const secret = process.env.NEXTAUTH_SECRET;
+  if (!secret) throw new Error("[plex-flow] NEXTAUTH_SECRET must be set");
   return ENCODER.encode(secret);
 }
 
 export interface PlexFlowState {
   pinId: number;
-  nonce: string;
   clientId: string;
 }
 
@@ -42,14 +41,12 @@ export async function verifyPlexFlowCookie(token: string): Promise<PlexFlowState
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
     if (
       typeof payload.pinId !== "number" ||
-      typeof payload.nonce !== "string" ||
       typeof payload.clientId !== "string"
     ) {
       return null;
     }
     return {
       pinId: payload.pinId,
-      nonce: payload.nonce,
       clientId: payload.clientId,
     };
   } catch {

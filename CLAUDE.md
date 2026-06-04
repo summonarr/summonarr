@@ -83,7 +83,9 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 ## Environment
 
 Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY`, `TMDB_READ_TOKEN`.
-Optional: `JELLYFIN_URL`, `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+
+Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
 
 ## Deployment
 
@@ -247,17 +249,16 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.
 
-19. **The live poller is the canonical writer for Jellyfin play history; the `jellyfin-history` cron only backfills.**
+19. **The live 5s poller is the SOLE writer for Jellyfin play history. There is no backfill cron.**
 
     Why:
-    - Three paths write a `PlayHistory` row for a Jellyfin watch: the 5s live poller's finalize (`sourceSessionId = ${sessionKey}:${startedAt}`, via [recordCompletedSession](src/lib/play-history.ts)), the cron PlaybackReporting import (`jf-pr:…`), and the cron IsPlayed fallback (`jf-hist:…`). The three namespaces never collide, so `createMany({skipDuplicates})` can't dedupe across them.
-    - The live poller captures codec/transcode/resolution/bitrate/device/IP/markers; PlaybackReporting and IsPlayed don't. So the live row is the richer one and must win.
-    - Without a cross-path guard the same watch lands twice, inflating play counts and watch hours on admin/activity.
+    - The live poller's finalize (`sourceSessionId = ${sessionKey}:${startedAt}`, via [recordCompletedSession](src/lib/play-history.ts)) captures every Jellyfin watch while the app is up, with full metadata (codec/transcode/resolution/bitrate/device/IP/markers).
+    - The old `sync-jellyfin-history` cron (PlaybackReporting `jf-pr:` + IsPlayed `jf-hist:` imports) was removed — it only ever added pre-install and downtime history, which the project decided it no longer needs. With it gone, all Jellyfin rows share the live namespace, so the `@@unique([source, sourceSessionId])` constraint + `createMany({skipDuplicates})` in `recordCompletedSession` is the whole dedup story — no cross-namespace `liveCovers` guard is needed anymore.
 
     Rules:
-    - **NEVER** let the cron insert a play the live poller already captured. Both cron paths call `liveCovers(...)` against `loadLiveJellyfinIntervals(...)` ([sync-jellyfin-history/route.ts](src/app/api/cron/sync-jellyfin-history/route.ts)) — a `±LIVE_DEDUP_MARGIN_MS` window overlap on `(mediaServerUserId, sourceItemId)`, excluding `jf-pr:`/`jf-hist:` rows so a prior backfill can't suppress a later one. Keep this guard if you touch either import path.
-    - **ALWAYS** gate the cron on `isPlayHistoryEnabled()` AND `isSourceEnabled("jellyfin")` — it's a separate cron service, so the admin toggle is otherwise a half-measure (the live poller already gates).
-    - Don't "simplify" by making the live poller skip Jellyfin finalize (loses the rich metadata) or by deleting the cron (loses downtime / pre-install backfill).
+    - **NEVER** make the live poller skip Jellyfin finalize — it's the only writer now; skipping it loses the watch entirely.
+    - If you ever re-introduce a Jellyfin backfill that writes a different `sourceSessionId` namespace, you MUST re-add a cross-path guard (the deleted route used a `±10min` `(mediaServerUserId, sourceItemId)` window) so the same watch can't land twice and inflate play counts/watch hours on admin/activity.
+    - The `getJellyfinSessions` lib helper feeds the live poller — don't confuse it with the removed `getJellyfinPlaybackReporting`/`getJellyfinUserPlayHistory`/`getJellyfinItemRuntimes` backfill helpers (also deleted).
 
 20. **The Plex stall anchor (`progressUpdatedAt`) must track playhead MOVEMENT, not strict forward advance — in BOTH writers (SSE and the 5s poller).**
 

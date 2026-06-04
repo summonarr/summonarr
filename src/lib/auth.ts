@@ -3,10 +3,12 @@ import { dummyVerify, verifyPassword } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
+import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
 import { signSessionJwt } from "@/lib/session-jwt";
+import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession } from "@/lib/session-server";
 
@@ -308,31 +310,12 @@ export async function auth(): Promise<SummonarrSession | null> {
   };
 }
 
-// In-memory revoke sets are a single-replica fast path — the AuthSession row
-// (deleted by revokeAllUserSessions / revokeSessionById / signOut) is the
-// cross-replica source of truth, consulted on every refreshToken() call.
-// Capped to bound memory growth on long-lived processes (auth#34).
-const FORCE_REVOKE_MAX = 1024;
-
-function addBounded(set: Set<string>, key: string, max: number): void {
-  if (set.size >= max) {
-    // Evict oldest insertion (Sets retain insertion order in JS).
-    const first = set.values().next().value;
-    if (first !== undefined) set.delete(first);
-  }
-  set.add(key);
-}
-
-const forceRevalidateUserIds = new Set<string>();
-
 export function invalidateUserSession(userId: string): void {
-  addBounded(forceRevalidateUserIds, userId, FORCE_REVOKE_MAX);
+  markUserForceRevalidate(userId);
 }
-
-const forceRevokeSessions = new Set<string>();
 
 export async function revokeSessionById(sessionId: string): Promise<void> {
-  addBounded(forceRevokeSessions, sessionId, FORCE_REVOKE_MAX);
+  markSessionForceRevoked(sessionId);
 
   // Bump sessionsRevokedAt to the revoked session's createdAt so refreshToken()'s
   // cutoff check on OTHER replicas rejects the revoked session's JWT even within
@@ -384,8 +367,8 @@ export async function revokeAllUserSessions(userId: string): Promise<void> {
     return sessions.map((s) => s.sessionId);
   });
 
-  for (const sessionId of sessionIds) addBounded(forceRevokeSessions, sessionId, FORCE_REVOKE_MAX);
-  addBounded(forceRevalidateUserIds, userId, FORCE_REVOKE_MAX);
+  for (const sessionId of sessionIds) markSessionForceRevoked(sessionId);
+  markUserForceRevalidate(userId);
 }
 
 export interface DeviceMeta {
@@ -695,10 +678,17 @@ export async function authorizeWithJellyfin(
     return null;
   }
 
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
+    console.error("[jellyfin auth] Jellyfin URL is not configured");
+    await dummyVerify();
+    return null;
+  }
+
   let jfUser;
   try {
     jfUser = await authenticateWithJellyfin(
-      process.env.JELLYFIN_URL!,
+      jellyfinUrl,
       username,
       credentials.password as string
     );
@@ -730,10 +720,16 @@ export async function authorizeWithJellyfinQuickConnect(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }
+  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  if (!jellyfinUrl) {
+    console.error("[jellyfin quickconnect auth] Jellyfin URL is not configured");
+    return null;
+  }
+
   let jfUser;
   try {
     jfUser = await authenticateWithJellyfinQuickConnect(
-      process.env.JELLYFIN_URL!,
+      jellyfinUrl,
       credentials.secret as string
     );
   } catch (err) {

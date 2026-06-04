@@ -1,4 +1,5 @@
-import { getTVDetails, getTVCredits, getTVSuggestions, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getTVDetails, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -15,6 +16,8 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { DetailExtras } from "@/components/media/detail-extras";
+import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 
 export default async function TVDetailPage({
@@ -40,7 +43,7 @@ export default async function TVDetailPage({
       ? ["jellyfin"]
       : ["plex", "jellyfin"];
 
-  const [plexItem, jellyfinItem, tvdbRequest, userRequest, userDeletionVote, sonarrWanted, cast, rawSuggestions, ownedEpisodes] = await Promise.all([
+  const [plexItem, jellyfinItem, tvdbRequest, userRequest, userDeletionVote, sonarrWanted, cast, rawSuggestions, ownedEpisodes, genreList] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "TV" } },
     }),
@@ -66,7 +69,9 @@ export default async function TVDetailPage({
       where: { tmdbId: media.id, source: { in: episodeSources } },
       select: { seasonNumber: true, episodeNumber: true },
     }),
+    getTVGenres().catch(() => []),
   ]);
+  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
   const ownedBySeason: Record<number, number[]> = {};
   const seen = new Set<string>();
@@ -152,19 +157,59 @@ export default async function TVDetailPage({
 
             <div
               className="ds-mono flex items-center flex-wrap"
-              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 12 }}
+              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
             >
-              {media.releaseYear && <span>{media.releaseYear}</span>}
-              {media.certification && <span>{media.certification}</span>}
-              {media.runtime ? <span>{media.runtime}m/ep</span> : null}
-              {media.numberOfSeasons ? (
-                <span>
-                  {media.numberOfSeasons} season
-                  {media.numberOfSeasons === 1 ? "" : "s"}
-                </span>
-              ) : null}
-              {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
+              {[
+                media.releaseYear,
+                media.certification,
+                media.runtime ? `${media.runtime}m/ep` : null,
+                media.numberOfSeasons
+                  ? `${media.numberOfSeasons} season${media.numberOfSeasons === 1 ? "" : "s"}`
+                  : null,
+                media.productionCountries?.[0],
+                languageName(media.originalLanguage),
+                media.status,
+              ]
+                .filter(Boolean)
+                .map((part, i) => (
+                  <span key={i} className="flex items-center" style={{ gap: 8 }}>
+                    {i > 0 && <span style={{ opacity: 0.4 }}>·</span>}
+                    {part}
+                  </span>
+                ))}
             </div>
+
+            {media.genres && media.genres.length > 0 && (
+              <div className="flex flex-wrap" style={{ gap: 6 }}>
+                {media.genres.slice(0, 5).map((g) => {
+                  const gid = genreNameToId.get(g);
+                  return gid !== undefined ? (
+                    <Link key={g} href={`/tv?genreId=${gid}`} aria-label={`Browse ${g} TV shows`}>
+                      <Chip className="ds-chip-link">{g}</Chip>
+                    </Link>
+                  ) : (
+                    <Chip key={g}>{g}</Chip>
+                  );
+                })}
+              </div>
+            )}
+
+            {media.originalTitle && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Original title: {media.originalTitle}
+              </div>
+            )}
+
+            {media.nextEpisodeAirDate && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Next episode:{" "}
+                {new Date(media.nextEpisodeAirDate).toLocaleDateString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}
+              </div>
+            )}
 
             <RatingsBar
               imdbRating={media.imdbRating}
@@ -250,6 +295,8 @@ export default async function TVDetailPage({
           </div>
         </div>
       </div>
+
+      <DetailExtras media={media} mediaType="tv" />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 

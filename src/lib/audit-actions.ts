@@ -37,6 +37,7 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   AUDIT_LOG_EXPORT: "admin",
   SERVER_USERS_BULK: "admin",
   PLEX_SESSION_TERMINATE: "admin",
+  JELLYFIN_SESSION_TERMINATE: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -82,4 +83,5 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   FIX_MATCH:             { label: "Library Match Fixed",       color: "bg-blue-900/50 text-blue-400",          icon: "sync" },
   SERVER_USERS_BULK:     { label: "Bulk Media-Server Action",  color: "bg-blue-900/50 text-blue-400",          icon: "role" },
   PLEX_SESSION_TERMINATE: { label: "Plex Session Terminated",  color: "bg-red-900/50 text-red-400",            icon: "delete" },
+  JELLYFIN_SESSION_TERMINATE: { label: "Jellyfin Session Terminated", color: "bg-red-900/50 text-red-400",      icon: "delete" },
 };

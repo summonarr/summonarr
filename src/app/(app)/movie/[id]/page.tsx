@@ -1,4 +1,5 @@
-import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -15,6 +16,8 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
+import { DetailExtras } from "@/components/media/detail-extras";
+import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 
 export default async function MovieDetailPage({
@@ -32,7 +35,7 @@ export default async function MovieDetailPage({
 
   const session = await auth();
 
-  const [plexItem, jellyfinItem, radarrWanted, userRequest, userDeletionVote, cast, rawSuggestions, rawCollection] = await Promise.all([
+  const [plexItem, jellyfinItem, radarrWanted, userRequest, userDeletionVote, cast, rawSuggestions, rawCollection, genreList] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
     }),
@@ -51,7 +54,9 @@ export default async function MovieDetailPage({
     getMovieCredits(media.id).catch(() => []),
     getMovieSuggestions(media.id).catch(() => []),
     media.collectionId ? getMovieCollection(media.collectionId).catch(() => []) : Promise.resolve([]),
+    getMovieGenres().catch(() => []),
   ]);
+  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
   const plexAvailable     = !!plexItem;
   const jellyfinAvailable = !!jellyfinItem;
   const arrPending        = !!radarrWanted;
@@ -130,13 +135,45 @@ export default async function MovieDetailPage({
 
             <div
               className="ds-mono flex items-center flex-wrap"
-              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 12 }}
+              style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", gap: 8 }}
             >
-              {media.releaseYear && <span>{media.releaseYear}</span>}
-              {media.certification && <span>{media.certification}</span>}
-              {media.runtime ? <span>{media.runtime}m</span> : null}
-              {media.genres?.slice(0, 4).map((g) => <span key={g}>{g}</span>)}
+              {[
+                media.releaseYear,
+                media.certification,
+                media.runtime ? `${media.runtime}m` : null,
+                media.productionCountries?.[0],
+                languageName(media.originalLanguage),
+                media.status && media.status !== "Released" ? media.status : null,
+              ]
+                .filter(Boolean)
+                .map((part, i) => (
+                  <span key={i} className="flex items-center" style={{ gap: 8 }}>
+                    {i > 0 && <span style={{ opacity: 0.4 }}>·</span>}
+                    {part}
+                  </span>
+                ))}
             </div>
+
+            {media.genres && media.genres.length > 0 && (
+              <div className="flex flex-wrap" style={{ gap: 6 }}>
+                {media.genres.slice(0, 5).map((g) => {
+                  const gid = genreNameToId.get(g);
+                  return gid !== undefined ? (
+                    <Link key={g} href={`/movies?genreId=${gid}`} aria-label={`Browse ${g} movies`}>
+                      <Chip className="ds-chip-link">{g}</Chip>
+                    </Link>
+                  ) : (
+                    <Chip key={g}>{g}</Chip>
+                  );
+                })}
+              </div>
+            )}
+
+            {media.originalTitle && (
+              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                Original title: {media.originalTitle}
+              </div>
+            )}
 
             <RatingsBar
               imdbRating={media.imdbRating}
@@ -221,6 +258,8 @@ export default async function MovieDetailPage({
           </div>
         </div>
       </div>
+
+      <DetailExtras media={media} mediaType="movie" />
 
       {cast.length > 0 && <CastSection cast={cast} />}
 

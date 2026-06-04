@@ -45,11 +45,9 @@ services:
       - "3001:3000"
     environment:
       PORT: "3000"
-      # AUTH_URL pins NextAuth's base URL to a fixed value so it does not rely on the
-      # incoming Host/X-Forwarded-Host header. AUTH_TRUST_HOST is still set as a fallback
-      # for reverse-proxy deployments that haven't set AUTH_URL yet, but AUTH_URL takes
-      # precedence and eliminates the host-header injection risk when it is set.
-      AUTH_TRUST_HOST: "true"
+      # AUTH_URL (set in .env.local) pins the app's public base URL so auth flows and
+      # redirects don't rely on the incoming Host/X-Forwarded-Host header, eliminating
+      # the host-header injection risk behind a reverse proxy.
       SYNC_INTERVAL: "${SYNC_INTERVAL:-3600}"
       UPCOMING_SYNC_INTERVAL: "${UPCOMING_SYNC_INTERVAL:-86400}"
       RATINGS_SYNC_INTERVAL: "${RATINGS_SYNC_INTERVAL:-86400}"

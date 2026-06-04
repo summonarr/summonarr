@@ -541,6 +541,8 @@ export function ActivityHistoryTable({
   mediaType: globalMediaType,
   days,
   startDateIso,
+  initialFromDate,
+  initialToDate,
 }: {
   source?: string;
   mediaType?: string;
@@ -548,6 +550,10 @@ export function ActivityHistoryTable({
   // Period lower bound, computed once on the server so client refetches don't
   // drift off a fresh client clock (guardrail 16).
   startDateIso?: string;
+  // Seed the date filter from the URL (a calendar "View these plays" deep-link).
+  // YYYY-MM-DD; the server page validates the format before passing them.
+  initialFromDate?: string;
+  initialToDate?: string;
 }) {
   const mounted = useHasMounted();
 
@@ -564,8 +570,8 @@ export function ActivityHistoryTable({
   const [method, setMethod] = useState("");
   const [platform, setPlatform] = useState("");
   const [userFilter, setUserFilter] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
+  const [fromDate, setFromDate] = useState(initialFromDate ?? "");
+  const [toDate, setToDate] = useState(initialToDate ?? "");
 
   const [sortBy, setSortBy] = useState<SortField>("startedAt");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -1489,7 +1495,7 @@ export function ActivityHistoryTable({
                 cursor: "pointer",
               }}
             >
-              {[10, 25, 50, 100].map((n) => (
+              {[10, 25, 50, 100, 150, 200].map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>

@@ -531,7 +531,12 @@ export async function recordCompletedSession(
 // and reused by the 5s poll route so the wire format stays in one place.
 export async function emitActiveSessionsSnapshot(): Promise<void> {
   const allSessions = await prisma.activeSession.findMany({
-    orderBy: { startedAt: "desc" },
+    // Secondary key `id` (immutable PK) breaks startedAt ties deterministically.
+    // Sessions that first appear in the same 5s poll share an identical
+    // startedAt (the poll stamps one `now` across all creates), and with no
+    // tiebreaker Postgres returns the tied rows in heap order — which the
+    // per-poll UPDATEs reshuffle, making the now-playing cards swap places.
+    orderBy: [{ startedAt: "desc" }, { id: "asc" }],
     select: {
       id: true,
       source: true,
@@ -789,10 +794,10 @@ export async function getUserPlayStats(mediaServerUserId: string) {
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
-      `SELECT "resolution", COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "mediaServerUserId" = $1 AND "resolution" IS NOT NULL
-       GROUP BY "resolution" ORDER BY count DESC LIMIT 8`,
+       GROUP BY resolution ORDER BY count DESC LIMIT 8`,
       mediaServerUserId,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
@@ -898,10 +903,10 @@ export async function getMediaPlayStats(tmdbId: number) {
       tmdbId,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
-      `SELECT "resolution", COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
        WHERE "tmdbId" = $1 AND "resolution" IS NOT NULL
-       GROUP BY "resolution" ORDER BY count DESC`,
+       GROUP BY resolution ORDER BY count DESC`,
       tmdbId,
     ),
   ]);
@@ -1210,6 +1215,22 @@ export async function getMostRewatched(filters: PlayHistoryStatsFilters = {}, li
   setCached(cacheKey, result, REWATCHED_TTL);
   return result;
 }
+
+// Canonical resolution bucketing. Plex/Jellyfin report the same resolution in
+// inconsistent forms ("720" vs "720p", "1080" vs "1080p", "4k" vs "2160"), so a
+// raw GROUP BY on "resolution" splits one resolution across several rows. Reuse
+// this CASE everywhere we surface resolution so the buckets always collapse.
+const RESOLUTION_BUCKET_SQL = `CASE
+  WHEN "resolution" IS NULL OR "resolution" = '' THEN 'Unknown'
+  WHEN LOWER("resolution") LIKE '4k%' OR LOWER("resolution") LIKE '2160%' THEN '4K'
+  WHEN LOWER("resolution") LIKE '1080%' THEN '1080p'
+  WHEN LOWER("resolution") LIKE '720%' THEN '720p'
+  WHEN LOWER("resolution") LIKE '576%'
+    OR LOWER("resolution") LIKE '540%'
+    OR LOWER("resolution") LIKE '480%'
+    OR LOWER("resolution") = 'sd' THEN 'SD'
+  ELSE 'Other'
+END`;
 
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
@@ -1663,17 +1684,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...params,
     ),
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
-      `SELECT CASE
-         WHEN "resolution" IS NULL OR "resolution" = '' THEN 'Unknown'
-         WHEN LOWER("resolution") LIKE '4k%' OR LOWER("resolution") LIKE '2160%' THEN '4K'
-         WHEN LOWER("resolution") LIKE '1080%' THEN '1080p'
-         WHEN LOWER("resolution") LIKE '720%' THEN '720p'
-         WHEN LOWER("resolution") LIKE '576%'
-           OR LOWER("resolution") LIKE '540%'
-           OR LOWER("resolution") LIKE '480%'
-           OR LOWER("resolution") = 'sd' THEN 'SD'
-         ELSE 'Other'
-       END AS bucket, COUNT(*)::bigint AS count
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS bucket, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
        GROUP BY bucket ORDER BY count DESC`,
       ...params,
@@ -1888,15 +1899,287 @@ async function getActivityCalendarUncached(
   });
 
   const result = await prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+    // startedAt is a tz-naive UTC timestamp and is bucketed by its UTC day, so the
+    // window edge must be a UTC date too. CURRENT_DATE evaluates in the Postgres
+    // session timezone — on a non-UTC DB that drifts a day off the UTC buckets and
+    // the UTC window the client (activity-calendar.tsx) renders. Pin it to UTC.
     `SELECT DATE("startedAt")::text AS day, COUNT(*)::bigint AS count
      FROM "PlayHistory"
-     WHERE "startedAt" >= CURRENT_DATE - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
+     WHERE "startedAt" >= (now() AT TIME ZONE 'UTC')::date - INTERVAL '364 days' AND "watched" = true${filterSql} -- 365 calendar days inclusive of today
      GROUP BY DATE("startedAt")
      ORDER BY day ASC`,
     ...filterParams,
   );
 
   return result.map((r) => ({ day: r.day, count: Number(r.count) }));
+}
+
+// Per-cell drill-down behind the click popover on the activity heatmaps
+// (activity-calendar.tsx day cells + HourHeatmap dow/hour cells). All counts
+// filter watched=true so the popover's "total plays" matches the count the
+// cell was coloured by (both heatmaps colour from watched=true aggregates).
+export interface HeatmapCellQuery {
+  mode: "day" | "hour";
+  day?: string; // YYYY-MM-DD (UTC) — mode="day"
+  dow?: number; // Postgres DOW 0=Sun..6=Sat — mode="hour"
+  hour?: number; // 0-23 — mode="hour"
+  userId?: string; // mediaServerUserId — user-scoped pages
+  source?: string; // "plex" | "jellyfin"
+  mediaType?: string; // "MOVIE" | "TV"
+  days?: number; // time window for mode="hour" on the admin (non-user) page
+}
+
+export interface HeatmapCellDetail {
+  totalPlays: number;
+  watchHours: number;
+  avgSessionMinutes: number;
+  completedCount: number;
+  completedPct: number;
+  methods: { directPlay: number; directStream: number; transcode: number; other: number };
+  topTranscodeReasons: { reason: string; count: number }[];
+  source: { plex: number; jellyfin: number };
+  mediaType: { movie: number; tv: number; other: number };
+  avgBitrateMbps: number;
+  dataTransferredGb: number;
+  topResolutions: { resolution: string; count: number }[];
+  network: { lan: number; wan: number; relay: number };
+  topTitles: { title: string; tmdbId: number | null; count: number }[];
+  // Top viewers for the bucket (up to 3). Empty on user-scoped pages (they would
+  // always be the page's own user — redundant).
+  topUsers: { id: string; username: string; count: number }[];
+}
+
+export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<HeatmapCellDetail> {
+  const cacheKey = `heatmap-cell:${JSON.stringify(q)}`;
+  const cached = getCached<HeatmapCellDetail>(cacheKey);
+  if (cached) return cached;
+
+  // Build the WHERE incrementally so the $-index always tracks params.length —
+  // same discipline as appendPlayHistoryFilter (the 803cd11 bug class).
+  const conditions: string[] = [`"watched" = true`];
+  const params: unknown[] = [];
+  const bind = (v: unknown): string => {
+    params.push(v);
+    return `$${params.length}`;
+  };
+
+  if (q.mode === "day") {
+    conditions.push(`DATE("startedAt") = ${bind(q.day)}::date`);
+  } else {
+    // Match the source heatmaps' scoping: admin grid is bounded by the `days`
+    // window (getPlayHistoryStats); the per-user grid is all-history. Only apply
+    // the window when not user-scoped so the popover total matches the cell.
+    if (!q.userId && q.days) {
+      conditions.push(
+        `"startedAt" >= ${bind(new Date(Date.now() - q.days * 24 * 60 * 60 * 1000))}`,
+      );
+    }
+    conditions.push(`EXTRACT(DOW FROM "startedAt")::int = ${bind(q.dow)}`);
+    conditions.push(`EXTRACT(HOUR FROM "startedAt")::int = ${bind(q.hour)}`);
+  }
+  if (q.userId) conditions.push(`"mediaServerUserId" = ${bind(q.userId)}`);
+  if (q.source === "plex" || q.source === "jellyfin") {
+    conditions.push(`"source" = ${bind(q.source)}`);
+  }
+  if (q.mediaType === "MOVIE" || q.mediaType === "TV") {
+    conditions.push(`"mediaType"::text = ${bind(q.mediaType)}`);
+  }
+  const where = conditions.join(" AND ");
+
+  // bitrate is normalized like the rest of the stats layer: Jellyfin reports bps
+  // (>100000), Plex kbps — divide the former by 1000 to get kbps before the
+  // Mbps / GB math (mirrors the total_gb query in getPlayHistoryStatsUncached).
+  const normBitrate = `(CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)`;
+
+  const [agg, reasons, resolutions, titles, topUserRows] = await Promise.all([
+    prisma.$queryRawUnsafe<
+      {
+        total: bigint;
+        watch_hours: number;
+        avg_minutes: number;
+        completed: bigint;
+        direct_play: bigint;
+        direct_stream: bigint;
+        transcode: bigint;
+        method_other: bigint;
+        src_plex: bigint;
+        src_jellyfin: bigint;
+        mt_movie: bigint;
+        mt_tv: bigint;
+        mt_other: bigint;
+        net_lan: bigint;
+        net_wan: bigint;
+        net_relay: bigint;
+        avg_mbps: number | null;
+        total_gb: number | null;
+      }[]
+    >(
+      `SELECT
+         COUNT(*)::bigint AS total,
+         (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS watch_hours,
+         (COALESCE(AVG("playDuration"), 0) / 60.0)::float8 AS avg_minutes,
+         COUNT(*) FILTER (WHERE "completed" = true)::bigint AS completed,
+         COUNT(*) FILTER (WHERE "playMethod" = 'DirectPlay')::bigint AS direct_play,
+         COUNT(*) FILTER (WHERE "playMethod" = 'DirectStream')::bigint AS direct_stream,
+         COUNT(*) FILTER (WHERE "playMethod" = 'Transcode')::bigint AS transcode,
+         COUNT(*) FILTER (WHERE "playMethod" IS NULL OR "playMethod" NOT IN ('DirectPlay','DirectStream','Transcode'))::bigint AS method_other,
+         COUNT(*) FILTER (WHERE "source" = 'plex')::bigint AS src_plex,
+         COUNT(*) FILTER (WHERE "source" = 'jellyfin')::bigint AS src_jellyfin,
+         COUNT(*) FILTER (WHERE "mediaType"::text = 'MOVIE')::bigint AS mt_movie,
+         COUNT(*) FILTER (WHERE "mediaType"::text = 'TV')::bigint AS mt_tv,
+         COUNT(*) FILTER (WHERE "mediaType" IS NULL)::bigint AS mt_other,
+         COUNT(*) FILTER (WHERE "location" = 'lan')::bigint AS net_lan,
+         COUNT(*) FILTER (WHERE "location" = 'wan')::bigint AS net_wan,
+         COUNT(*) FILTER (WHERE "location" = 'relay' OR "relayed" = true)::bigint AS net_relay,
+         (AVG(${normBitrate} / 1000.0) FILTER (WHERE "bitrate" > 0))::float8 AS avg_mbps,
+         (COALESCE(SUM((${normBitrate})::float8 * "playDuration"::float8) FILTER (WHERE "bitrate" > 0), 0) / 8.0 / 1024.0 / 1024.0)::float8 AS total_gb
+       FROM "PlayHistory" WHERE ${where}`,
+      ...params,
+    ),
+    prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
+      `SELECT "transcodeReason" AS reason, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "transcodeReason" IS NOT NULL AND "transcodeReason" <> ''
+       GROUP BY "transcodeReason" ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+    // Bucket via the canonical CASE so "720"/"720p" and "1080"/"1080p" collapse
+    // into one row each (raw GROUP BY split them — the formatting bug). Exclude
+    // the 'Unknown' bucket so an absent resolution doesn't show as a fake row.
+    prisma.$queryRawUnsafe<{ resolution: string; count: bigint }[]>(
+      `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "resolution" IS NOT NULL AND "resolution" <> ''
+       GROUP BY resolution ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+    // Most-played titles in the bucket — same tmdbId/title dedup as the stats
+    // topMedia query (null tmdbId falls back to lowercased title).
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT 4`,
+      ...params,
+    ),
+    // Top viewer — skipped on user-scoped pages (always the page's own user).
+    // Filter inside a CTE (bare column names, no alias collisions) then join
+    // MediaServerUser outside; PlayHistory and MediaServerUser both have a
+    // "source" column so a direct join on the filtered set would be ambiguous.
+    q.userId
+      ? Promise.resolve([] as { id: string; username: string; count: bigint }[])
+      : prisma.$queryRawUnsafe<{ id: string; username: string; count: bigint }[]>(
+          `WITH f AS (
+             SELECT "mediaServerUserId", COUNT(*)::bigint AS count
+             FROM "PlayHistory" WHERE ${where}
+             GROUP BY "mediaServerUserId"
+           )
+           SELECT m."id" AS id, m."username" AS username, f."count" AS count
+           FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
+           ORDER BY f."count" DESC LIMIT 3`,
+          ...params,
+        ),
+  ]);
+
+  const r = agg[0];
+  const total = Number(r?.total ?? 0);
+  const completedCount = Number(r?.completed ?? 0);
+  const detail: HeatmapCellDetail = {
+    totalPlays: total,
+    watchHours: Math.round(Number(r?.watch_hours ?? 0) * 10) / 10,
+    avgSessionMinutes: Math.round(Number(r?.avg_minutes ?? 0)),
+    completedCount,
+    completedPct: total > 0 ? Math.round((completedCount / total) * 100) : 0,
+    methods: {
+      directPlay: Number(r?.direct_play ?? 0),
+      directStream: Number(r?.direct_stream ?? 0),
+      transcode: Number(r?.transcode ?? 0),
+      other: Number(r?.method_other ?? 0),
+    },
+    topTranscodeReasons: reasons.map((x) => ({ reason: x.reason, count: Number(x.count) })),
+    source: {
+      plex: Number(r?.src_plex ?? 0),
+      jellyfin: Number(r?.src_jellyfin ?? 0),
+    },
+    mediaType: {
+      movie: Number(r?.mt_movie ?? 0),
+      tv: Number(r?.mt_tv ?? 0),
+      other: Number(r?.mt_other ?? 0),
+    },
+    avgBitrateMbps: Math.round(Number(r?.avg_mbps ?? 0) * 10) / 10,
+    dataTransferredGb: Math.round(Number(r?.total_gb ?? 0) * 100) / 100,
+    topResolutions: resolutions.map((x) => ({ resolution: x.resolution, count: Number(x.count) })),
+    network: {
+      lan: Number(r?.net_lan ?? 0),
+      wan: Number(r?.net_wan ?? 0),
+      relay: Number(r?.net_relay ?? 0),
+    },
+    topTitles: titles.map((x) => ({ title: x.title, tmdbId: x.tmdbId, count: Number(x.count) })),
+    topUsers: topUserRows.map((u) => ({
+      id: u.id,
+      username: u.username,
+      count: Number(u.count),
+    })),
+  };
+
+  setCached(cacheKey, detail, STATS_TTL);
+  return detail;
+}
+
+// Transcode-pressure leaderboard for the activity overview: who/what forces the
+// most server-side transcodes in the period. Transcodes are the expensive path
+// (CPU + bandwidth), so a ranked list helps an admin spot the heavy hitters.
+export interface TranscodeOffenders {
+  topUsers: { username: string; source: string; count: number }[];
+  topTitles: { title: string; tmdbId: number | null; mediaType: string | null; count: number }[];
+}
+
+export async function getTranscodeOffenders(
+  filters: PlayHistoryStatsFilters = {},
+  limit = 6,
+): Promise<TranscodeOffenders> {
+  const cacheKey = `transcode-offenders:${JSON.stringify({ ...filters, limit })}`;
+  const cached = getCached<TranscodeOffenders>(cacheKey);
+  if (cached) return cached;
+
+  const { where, params } = buildStatsFilters(filters);
+  const twhere = `${where} AND "playMethod" = 'Transcode'`;
+  const limitIdx = params.length + 1;
+
+  const [users, titles] = await Promise.all([
+    // Filter in a CTE (bare names) then join MediaServerUser — PlayHistory and
+    // MediaServerUser both expose "source", so a direct join would be ambiguous.
+    prisma.$queryRawUnsafe<{ username: string; source: string; count: bigint }[]>(
+      `WITH f AS (
+         SELECT "mediaServerUserId", COUNT(*)::bigint AS count
+         FROM "PlayHistory" WHERE ${twhere}
+         GROUP BY "mediaServerUserId"
+       )
+       SELECT m."username" AS username, m."source" AS source, f."count" AS count
+       FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
+       ORDER BY f."count" DESC LIMIT $${limitIdx}`,
+      ...params,
+      limit,
+    ),
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+       FROM "PlayHistory" WHERE ${twhere} AND "title" IS NOT NULL AND "title" <> ''
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       ORDER BY count DESC LIMIT $${limitIdx}`,
+      ...params,
+      limit,
+    ),
+  ]);
+
+  const result: TranscodeOffenders = {
+    topUsers: users.map((u) => ({ username: u.username, source: u.source, count: Number(u.count) })),
+    topTitles: titles.map((t) => ({
+      title: t.title,
+      tmdbId: t.tmdbId,
+      mediaType: t.mediaType,
+      count: Number(t.count),
+    })),
+  };
+  setCached(cacheKey, result, STATS_TTL);
+  return result;
 }
 
 function getCacheKey(prefix: string, params: Record<string, unknown>): string {

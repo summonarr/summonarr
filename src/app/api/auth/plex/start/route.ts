@@ -1,5 +1,4 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { randomUUID } from "node:crypto";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import {
   buildPlexFlowSetCookie,
@@ -19,7 +18,7 @@ const MAX_START_BODY_BYTES = 4 * 1024;
 const PLEX_TV_HOSTS = ["plex.tv"];
 
 function isSecureCookieContext(): boolean {
-  const url = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? "";
+  const url = process.env.AUTH_URL ?? "";
   if (url.startsWith("https://")) return true;
   if (url.startsWith("http://")) return false;
   return process.env.NODE_ENV === "production";
@@ -86,7 +85,6 @@ export async function POST(req: NextRequest) {
 
   const cookieValue = await signPlexFlowCookie({
     pinId: data.id,
-    nonce: randomUUID(),
     clientId,
   });
 

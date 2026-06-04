@@ -396,6 +396,10 @@ export async function getPlexEpisodesForShow(
 
 export interface PlexSessionData {
   sessionKey: string;
+  // Session.id — the long GUID Plex assigns per playback. Distinct from the
+  // short sessionKey; the /status/sessions/terminate endpoint addresses
+  // sessions by this GUID, not the sessionKey.
+  sessionId?: string;
   state: "playing" | "paused" | "buffering";
   accountId: string;
   accountName: string;
@@ -438,6 +442,8 @@ interface PlexSessionRaw {
   Player?: {
     state?: string;
     title?: string;
+    device?: string;
+    product?: string;
     platform?: string;
     machineIdentifier?: string;
     address?: string;
@@ -472,6 +478,23 @@ interface PlexSessionRaw {
     audioDecision?: string;
     transcodeHwRequested?: boolean;
   };
+}
+
+// Derive a recognizable client/device name for the activity "Device" label and
+// top-devices stats. Player.product is the canonical Plex client name ("Plex for
+// Apple TV", "Plex for Roku", "Plex Web"); stripping the "Plex for "/"Plex "
+// prefix yields the friendly form the user expects ("Apple TV", "Roku", "Web").
+// Fall back to the device attribute, then the client title — never the
+// machineIdentifier GUID.
+function friendlyPlexDevice(
+  player?: { product?: string; device?: string; title?: string },
+): string | undefined {
+  const product = player?.product?.trim();
+  if (product) {
+    const stripped = product.replace(/^Plex for /i, "").replace(/^Plex /i, "").trim();
+    return stripped.length > 0 ? stripped : product;
+  }
+  return player?.device ?? player?.title ?? undefined;
 }
 
 export async function getPlexSessions(serverUrl: string, token: string): Promise<PlexSessionData[]> {
@@ -522,6 +545,7 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
 
     return {
       sessionKey: s.sessionKey ?? s.Session?.id ?? "",
+      sessionId: s.Session?.id,
       state: (s.Player?.state === "paused" ? "paused" : s.Player?.state === "buffering" ? "buffering" : "playing"),
       accountId: String(s.User?.id ?? ""),
       accountName: s.User?.title ?? "",
@@ -541,7 +565,7 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       Guid: s.Guid,
       platform: s.Player?.platform,
       player: s.Player?.title,
-      device: s.Player?.machineIdentifier,
+      device: friendlyPlexDevice(s.Player),
       address: s.Player?.address,
       playMethod,
       videoCodec: videoStream?.codec ?? undefined,
@@ -633,9 +657,9 @@ export async function terminatePlexSession(
   sessionId: string,
   reason: string,
 ): Promise<{ ok: boolean; status: number }> {
-  // Plex accepts either ?sessionId= (the Session.id GUID) or sessionKey for
-  // legacy clients. We pass sessionId because it's what /status/sessions exposes
-  // as Session.id and what Tautulli's pmsconnect uses (pmsconnect.py:108).
+  // `sessionId` MUST be the Session.id GUID, not the short sessionKey — Plex
+  // matches /status/sessions/terminate against Session.id and 404s on the
+  // short key. Same identifier Tautulli's pmsconnect uses (pmsconnect.py:108).
   const url = `${serverUrl}/status/sessions/terminate?sessionId=${encodeURIComponent(sessionId)}&reason=${encodeURIComponent(reason)}`;
   const res = await plexFetch(url, token);
   return { ok: res.ok, status: res.status };
@@ -728,7 +752,7 @@ interface PlexHistoryRaw {
   year?: number;
   duration?: number;
   Guid?: PlexGuid[];
-  Player?: { title?: string; platform?: string; machineIdentifier?: string };
+  Player?: { title?: string; device?: string; product?: string; platform?: string; machineIdentifier?: string };
 }
 
 export async function getPlexHistoryAll(
@@ -770,7 +794,7 @@ export async function getPlexHistoryAll(
       year: h.year,
       duration: h.duration,
       Guid: h.Guid,
-      device: h.Player?.machineIdentifier,
+      device: friendlyPlexDevice(h.Player),
       platform: h.Player?.platform,
       player: h.Player?.title,
     }));

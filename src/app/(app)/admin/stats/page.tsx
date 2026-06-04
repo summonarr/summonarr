@@ -16,7 +16,7 @@ export default async function StatsPage() {
   const [
     statusCounts, mediaTypeCounts, issueStatusCounts,
     totalUsers,
-    plexItems, jellyfinItems,
+    plexLibByType, jellyfinLibByType, episodesBySource,
     avgFulfillment,
     requestsByMonth,
     topRequesters,
@@ -25,8 +25,9 @@ export default async function StatsPage() {
     prisma.mediaRequest.groupBy({ by: ["mediaType"], _count: { _all: true } }),
     prisma.issue.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.user.count(),
-    prisma.plexLibraryItem.count(),
-    prisma.jellyfinLibraryItem.count(),
+    prisma.plexLibraryItem.groupBy({ by: ["mediaType"], _count: { _all: true } }),
+    prisma.jellyfinLibraryItem.groupBy({ by: ["mediaType"], _count: { _all: true } }),
+    prisma.tVEpisodeCache.groupBy({ by: ["source"], _count: { _all: true }, _sum: { runtime: true } }),
     prisma.$queryRaw<{ avg_hours: number | null }[]>`
       SELECT EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600 AS avg_hours
       FROM "MediaRequest"
@@ -72,6 +73,34 @@ export default async function StatsPage() {
   const openIssues        = issueStatusMap.get("OPEN") ?? 0;
   const totalIssues       = Array.from(issueStatusMap.values()).reduce((a, b) => a + b, 0);
 
+  const libCount = (
+    rows: { mediaType: string; _count: { _all: number } }[],
+    type: "MOVIE" | "TV",
+  ) => rows.find((r) => r.mediaType === type)?._count._all ?? 0;
+  const episodeRow = (source: string) =>
+    episodesBySource.find((r) => r.source === source);
+
+  const libraryServers = [
+    {
+      name: "Plex",
+      movies: libCount(plexLibByType, "MOVIE"),
+      series: libCount(plexLibByType, "TV"),
+      episodes: episodeRow("plex")?._count._all ?? 0,
+      runtimeMin: episodeRow("plex")?._sum.runtime ?? 0,
+    },
+    {
+      name: "Jellyfin",
+      movies: libCount(jellyfinLibByType, "MOVIE"),
+      series: libCount(jellyfinLibByType, "TV"),
+      episodes: episodeRow("jellyfin")?._count._all ?? 0,
+      runtimeMin: episodeRow("jellyfin")?._sum.runtime ?? 0,
+    },
+  ].filter((s) => s.movies + s.series + s.episodes > 0);
+
+  const plexItems = libCount(plexLibByType, "MOVIE") + libCount(plexLibByType, "TV");
+  const jellyfinItems =
+    libCount(jellyfinLibByType, "MOVIE") + libCount(jellyfinLibByType, "TV");
+
   const diskSpace = await getArrDiskSpace();
   const avgHours = avgFulfillment[0]?.avg_hours;
   const monthData = requestsByMonth.map((r) => ({ month: r.month, count: Number(r.count) }));
@@ -82,6 +111,14 @@ export default async function StatsPage() {
     const sizes = ["B", "KB", "MB", "GB", "TB"];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+  }
+
+  function formatRuntime(minutes: number) {
+    if (minutes <= 0) return "0h";
+    const days = Math.floor(minutes / 1440);
+    const hours = Math.round((minutes % 1440) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    return `${hours}h`;
   }
 
   const statCards = [
@@ -119,6 +156,26 @@ export default async function StatsPage() {
           />
         ))}
       </div>
+
+      {libraryServers.length > 0 && (
+        <StatsSection title="Library">
+          <div
+            className="grid grid-cols-1 lg:grid-cols-2"
+            style={{ gap: 16 }}
+          >
+            {libraryServers.map((s) => (
+              <LibraryServerCard
+                key={s.name}
+                name={s.name}
+                movies={s.movies}
+                series={s.series}
+                episodes={s.episodes}
+                runtime={formatRuntime(s.runtimeMin)}
+              />
+            ))}
+          </div>
+        </StatsSection>
+      )}
 
       {avgHours !== null && avgHours !== undefined && (
         <StatsSection>
@@ -254,6 +311,82 @@ function StatsSection({
       )}
       {children}
     </section>
+  );
+}
+
+function LibraryServerCard({
+  name,
+  movies,
+  series,
+  episodes,
+  runtime,
+}: {
+  name: string;
+  movies: number;
+  series: number;
+  episodes: number;
+  runtime: string;
+}) {
+  const metrics = [
+    { label: "Titles", value: (movies + series).toLocaleString() },
+    { label: "Movies", value: movies.toLocaleString() },
+    { label: "Series", value: series.toLocaleString() },
+    { label: "Episodes", value: episodes.toLocaleString() },
+    { label: "Episode Runtime", value: runtime },
+  ];
+  return (
+    <div
+      style={{
+        padding: 16,
+        background: "var(--ds-bg-3)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 8,
+      }}
+    >
+      <h3
+        className="ds-mono uppercase"
+        style={{
+          fontSize: 10.5,
+          color: "var(--ds-fg-subtle)",
+          letterSpacing: "0.08em",
+          margin: "0 0 12px",
+        }}
+      >
+        {name}
+      </h3>
+      <div
+        className="grid grid-cols-2 sm:grid-cols-3"
+        style={{ gap: 12 }}
+      >
+        {metrics.map((m) => (
+          <div key={m.label}>
+            <p
+              className="font-semibold ds-mono"
+              style={{
+                fontSize: 18,
+                color: "var(--ds-fg)",
+                letterSpacing: "-0.02em",
+                margin: 0,
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {m.value}
+            </p>
+            <p
+              className="ds-mono uppercase"
+              style={{
+                fontSize: 10,
+                color: "var(--ds-fg-subtle)",
+                letterSpacing: "0.06em",
+                margin: "2px 0 0",
+              }}
+            >
+              {m.label}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

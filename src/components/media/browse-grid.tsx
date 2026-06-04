@@ -50,6 +50,8 @@ export function BrowseGrid({
   const [loading, setLoading] = useState(false);
 
   const genreId       = searchParams.get("genreId") || undefined;
+  const keywordId     = searchParams.get("keywordId") || undefined;
+  const keywordName   = searchParams.get("keywordName") || undefined;
   const minRating     = searchParams.get("minRating") || undefined;
   const ratingFilter  = searchParams.get("ratingFilter") || undefined;
   const minVoteCount  = searchParams.get("minVoteCount") || undefined;
@@ -67,6 +69,7 @@ export function BrowseGrid({
       params.set("mediaType", mediaType);
       params.set("page", String(page));
       if (genreId)       params.set("genreId", genreId);
+      if (keywordId)     params.set("keywordId", keywordId);
       if (minRating)     params.set("minRating", minRating);
       if (ratingFilter)  params.set("ratingFilter", ratingFilter);
       if (minVoteCount)  params.set("minVoteCount", minVoteCount);
@@ -85,7 +88,7 @@ export function BrowseGrid({
     } finally {
       setLoading(false);
     }
-  }, [mediaType, page, genreId, minRating, ratingFilter, minVoteCount, fromYear, toYear, sortBy, watchProvider, hideAvailable]);
+  }, [mediaType, page, genreId, keywordId, minRating, ratingFilter, minVoteCount, fromYear, toYear, sortBy, watchProvider, hideAvailable]);
 
   const [isInitial, setIsInitial] = useState(true);
   useEffect(() => {
@@ -97,7 +100,7 @@ export function BrowseGrid({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchResults]);
 
-  const hasFilters = !!(genreId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
   const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
 
   return (
@@ -118,6 +121,8 @@ export function BrowseGrid({
         genres={genres}
         watchProviders={watchProviders}
         activeGenreId={genreId}
+        activeKeywordId={keywordId}
+        activeKeywordName={keywordName}
         activeMinRating={minRating}
         activeRatingFilter={ratingFilter}
         activeMinVoteCount={minVoteCount}

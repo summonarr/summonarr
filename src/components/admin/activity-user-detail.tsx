@@ -25,6 +25,7 @@ import {
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 
 export interface UserDetailData {
+  userId: string; // mediaServerUserId — scopes the heatmap drill-down popovers
   username: string;
   source: string;
   linkedLabel: string | null;
@@ -227,6 +228,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             <ActivityCalendar
               data={s.activityCalendar}
               today={s.todayIso}
+              detailBase={{ userId: s.userId }}
             />
           </ActivityCard>
         </div>
@@ -255,7 +257,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader label="Viewing heatmap" sub="day × hour" />
-          <HourHeatmap matrix={heatmapMatrix} />
+          <HourHeatmap matrix={heatmapMatrix} detailBase={{ userId: s.userId }} />
         </ActivityCard>
       </div>
 

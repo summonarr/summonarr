@@ -4,6 +4,15 @@ import { useState } from "react";
 import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { IpInfo } from "@/components/admin/ip-info";
+import { Loader2, X } from "@/components/icons";
+import {
+  Dialog,
+  DialogBackdrop,
+  DialogClose,
+  DialogPopup,
+  DialogPortal,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Avatar,
   KeyVal,
@@ -16,10 +25,25 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
-// Plex ActiveSession.id is "plex:<sessionKey>". Strip the prefix for the
-// terminate endpoint, which expects the raw sessionKey.
-function plexSessionKeyFromId(id: string): string | null {
-  return id.startsWith("plex:") ? id.slice(5) : null;
+// ActiveSession.id is "<source>:<sessionKey>". Strip the prefix to recover the
+// raw sessionKey the terminate endpoints expect. Returns the endpoint + key for
+// the sources that support termination (Plex, Jellyfin), or null otherwise.
+function terminateTargetFor(
+  session: ActiveSessionLive,
+): { endpoint: string; sessionKey: string } | null {
+  if (session.id.startsWith("plex:")) {
+    return {
+      endpoint: "/api/admin/play-history/terminate-session",
+      sessionKey: session.id.slice(5),
+    };
+  }
+  if (session.id.startsWith("jellyfin:")) {
+    return {
+      endpoint: "/api/admin/play-history/terminate-jellyfin-session",
+      sessionKey: session.id.slice(9),
+    };
+  }
+  return null;
 }
 
 // Format a ms offset as m:ss (or h:mm:ss if >=1h). Used for marker labels.
@@ -108,24 +132,37 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
   );
 }
 
+const DEFAULT_TERMINATE_REASON = "Session terminated by an administrator.";
+
 function TerminateButton({ session }: { session: ActiveSessionLive }) {
-  const sessionKey = plexSessionKeyFromId(session.id);
+  const target = terminateTargetFor(session);
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState(DEFAULT_TERMINATE_REASON);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  if (!sessionKey) return null;
-  async function onClick() {
-    const reason = window.prompt(
-      "Reason shown to the user in their player:",
-      "Session terminated by an administrator.",
-    );
-    if (reason == null) return;
+  if (!target) return null;
+  const { endpoint, sessionKey } = target;
+  const serverLabel = session.source === "jellyfin" ? "Jellyfin" : "Plex";
+
+  function openDialog() {
+    setReason(DEFAULT_TERMINATE_REASON);
+    setError(null);
+    setBusy(false);
+    setOpen(true);
+  }
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/admin/play-history/terminate-session", {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionKey, reason }),
+        body: JSON.stringify({
+          sessionKey,
+          reason: reason.trim() || DEFAULT_TERMINATE_REASON,
+        }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({ error: "Unknown error" }));
@@ -133,39 +170,152 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
         setBusy(false);
         return;
       }
-      // The session row will disappear from the next activity:sessions SSE
-      // push (within ~1s) once Plex tears the stream down. Keep busy=true so
-      // the button doesn't flash re-enabled before the card removes itself.
+      // Success: keep the dialog in its "Terminating…" state. The session card
+      // unmounts on the next activity:sessions SSE push (within ~1s) once the
+      // server tears the stream down — that removes this whole component (and
+      // the dialog) with it, so we don't flash the dialog closed prematurely.
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
     }
   }
+
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+    <>
       <button
         type="button"
-        onClick={onClick}
-        disabled={busy}
+        onClick={openDialog}
         style={{
           fontSize: 10.5,
           padding: "3px 8px",
           background: "transparent",
           border: "1px solid var(--ds-border)",
           borderRadius: 6,
-          color: busy ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
-          cursor: busy ? "default" : "pointer",
+          color: "var(--ds-fg-muted)",
+          cursor: "pointer",
         }}
-        title="Terminate this Plex session"
+        title={`Terminate this ${serverLabel} session`}
       >
-        {busy ? "Terminating…" : "Terminate"}
+        Terminate
       </button>
-      {error && (
-        <span style={{ fontSize: 10.5, color: "var(--ds-fg-danger, #c44)" }}>
-          {error}
-        </span>
+
+      {open && (
+        <Dialog
+          open
+          onOpenChange={(next) => {
+            // Don't allow dismissing mid-request — the card will unmount on its own.
+            if (!next && !busy) setOpen(false);
+          }}
+        >
+          <DialogPortal>
+            <DialogBackdrop />
+            <DialogPopup
+              className="max-w-md"
+              style={{
+                background: "var(--ds-bg-1)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 12,
+                boxShadow: "var(--ds-shadow-lg)",
+              }}
+            >
+              <div
+                className="flex items-center justify-between"
+                style={{ padding: "14px 20px", borderBottom: "1px solid var(--ds-border)" }}
+              >
+                <div>
+                  <DialogTitle
+                    className="font-semibold"
+                    style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
+                  >
+                    Terminate {serverLabel} session
+                  </DialogTitle>
+                  <p
+                    className="ds-mono truncate max-w-72"
+                    style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: "2px 0 0" }}
+                  >
+                    {session.title}
+                  </p>
+                </div>
+                <DialogClose
+                  aria-label="Close"
+                  disabled={busy}
+                  className="inline-flex items-center justify-center rounded-full transition-colors disabled:opacity-40"
+                  style={{
+                    width: 28,
+                    height: 28,
+                    background: "transparent",
+                    border: 0,
+                    color: "var(--ds-fg-muted)",
+                  }}
+                >
+                  <X style={{ width: 14, height: 14 }} />
+                </DialogClose>
+              </div>
+
+              <form onSubmit={onSubmit} className="px-5 py-4 space-y-4">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="terminate-reason"
+                    className="text-xs font-medium text-zinc-400 uppercase tracking-wide"
+                  >
+                    Reason shown to the user
+                  </label>
+                  <textarea
+                    id="terminate-reason"
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    maxLength={500}
+                    rows={3}
+                    autoFocus
+                    disabled={busy}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
+                  />
+                </div>
+
+                {error && <p className="text-xs text-red-400">{error}</p>}
+
+                <div className="flex justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setOpen(false)}
+                    disabled={busy}
+                    className="inline-flex items-center justify-center font-medium transition-colors disabled:opacity-50"
+                    style={{
+                      padding: "6px 12px",
+                      height: 30,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      background: "transparent",
+                      color: "var(--ds-fg-muted)",
+                      border: "1px solid var(--ds-border)",
+                    }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors disabled:opacity-50"
+                    style={{
+                      padding: "6px 14px",
+                      height: 30,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      background: "var(--ds-danger, #c44)",
+                      color: "oklch(0.98 0 0)",
+                      border: "1px solid transparent",
+                    }}
+                  >
+                    {busy && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
+                    {busy ? "Terminating…" : "Terminate"}
+                  </button>
+                </div>
+              </form>
+            </DialogPopup>
+          </DialogPortal>
+        </Dialog>
       )}
-    </span>
+    </>
   );
 }
 
@@ -290,7 +440,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
                   ? "BUFFERING"
                   : "PLAYING"}
             </span>
-            {s.source === "plex" && (
+            {(s.source === "plex" || s.source === "jellyfin") && (
               <span style={{ marginLeft: "auto" }}>
                 <TerminateButton session={s} />
               </span>

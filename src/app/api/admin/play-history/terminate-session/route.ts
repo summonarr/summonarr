@@ -67,10 +67,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     );
   }
 
-  // Plex accepts the short sessionKey in modern versions. Pass it through —
-  // resolving the long Session.id GUID would require an extra parse pass on
-  // the snapshot we just fetched, and Plex Server >=1.20 accepts either.
-  const result = await terminatePlexSession(serverUrl, token, sessionKey, reason);
+  // Plex's terminate endpoint addresses sessions by the Session.id GUID, not
+  // the short sessionKey (passing the key 404s). Use the GUID from the snapshot;
+  // fall back to the key only if Plex omitted it (shouldn't happen on a live
+  // session).
+  const result = await terminatePlexSession(
+    serverUrl,
+    token,
+    match.sessionId ?? sessionKey,
+    reason,
+  );
 
   await logAuditOrFail({
     userId: session.user.id,

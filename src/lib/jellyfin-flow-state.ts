@@ -19,8 +19,8 @@ const QC_FLOW_TTL_SECONDS = 10 * 60;
 const ENCODER = new TextEncoder();
 
 function getSecret(): Uint8Array {
-  const s = process.env.NEXTAUTH_SECRET ?? process.env.AUTH_SECRET;
-  if (!s) throw new Error("[qc-flow] NEXTAUTH_SECRET (or AUTH_SECRET) must be set");
+  const s = process.env.NEXTAUTH_SECRET;
+  if (!s) throw new Error("[qc-flow] NEXTAUTH_SECRET must be set");
   return ENCODER.encode(s);
 }
 
@@ -29,7 +29,6 @@ export interface QcFlowState {
   // cookie, since stuffing a high-entropy upstream token into our own JWT
   // expands its blast-radius unnecessarily.
   secretHash: string;
-  nonce: string;
 }
 
 export function hashQuickConnectSecret(secret: string): string {
@@ -48,10 +47,10 @@ export async function signQcFlowCookie(state: QcFlowState): Promise<string> {
 export async function verifyQcFlowCookie(token: string): Promise<QcFlowState | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
-    if (typeof payload.secretHash !== "string" || typeof payload.nonce !== "string") {
+    if (typeof payload.secretHash !== "string") {
       return null;
     }
-    return { secretHash: payload.secretHash, nonce: payload.nonce };
+    return { secretHash: payload.secretHash };
   } catch {
     return null;
   }

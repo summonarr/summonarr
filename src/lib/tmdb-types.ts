@@ -47,6 +47,23 @@ export interface TmdbMedia {
   runtime?: number | null;
   numberOfSeasons?: number | null;
   numberOfEpisodes?: number | null;
+
+  // Extended detail metadata (populated on the single-title detail path).
+  originalTitle?: string | null;
+  originalLanguage?: string | null;
+  spokenLanguages?: string[];
+  productionCountries?: string[];
+  homepage?: string | null;
+  budget?: number | null;
+  revenue?: number | null;
+  keywords?: { id: number; name: string }[];
+  watchProviders?: { type: "stream" | "rent" | "buy"; name: string; logoPath: string | null }[];
+  tvdbId?: number | null;
+  // TV cadence
+  lastAirDate?: string | null;
+  inProduction?: boolean | null;
+  tvType?: string | null;
+  nextEpisodeAirDate?: string | null;
 }
 
 export interface TmdbSeason {
@@ -115,6 +132,7 @@ export interface Genre {
 
 export interface DiscoverFilters {
   genreId?: string;
+  keywordId?: string;
   minRating?: string;
   minVoteCount?: string;
   fromYear?: string;
@@ -143,4 +161,27 @@ export function backdropUrl(path: string | null, size: "w780" | "original" = "w7
 
 export function stillUrl(path: string | null, size: "w185" | "w300" | "original" = "w300") {
   return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
+}
+
+// ISO-code → English display name, with the raw code as fallback. Intl.DisplayNames is available in
+// both the Node and browser runtimes; lazily constructed and reused.
+let _languageNames: Intl.DisplayNames | null = null;
+let _regionNames: Intl.DisplayNames | null = null;
+export function languageName(code: string | null | undefined): string | null {
+  if (!code) return null;
+  try {
+    _languageNames ??= new Intl.DisplayNames(["en"], { type: "language" });
+    return _languageNames.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+export function regionName(code: string | null | undefined): string | null {
+  if (!code) return null;
+  try {
+    _regionNames ??= new Intl.DisplayNames(["en"], { type: "region" });
+    return _regionNames.of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
 }

@@ -12,6 +12,7 @@ import { sanitizeText } from "@/lib/sanitize";
 import { FEATURE_KEYS } from "@/lib/features";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
+import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -101,6 +102,7 @@ const SETTINGS_SCHEMA = [
   ["playHistoryPollingInterval",     false],
   ["playHistoryRetentionDays",       false],
   ["enableMachineSession",           false],
+  ["machineSessionAllowedIps",       false],
   ["trashGuidesEnabled",              false],
   ["trashSyncCustomFormats",          false],
   ["trashSyncCustomFormatGroups",     false],
@@ -337,7 +339,22 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         { status: 400 },
       );
     }
+
+    if (key === "machineSessionAllowedIps") {
+      const bad = parseIpAllowlist(value).find((t) => !isValidIpOrCidr(t));
+      if (bad) {
+        return NextResponse.json(
+          { error: `Setting "${key}" has an invalid IP or CIDR: "${bad}"` },
+          { status: 400 },
+        );
+      }
+    }
   }
+
+  // Keys that may be written empty to clear them. Most keys skip empty writes so
+  // the client can echo back unchanged/masked values without wiping them; the IP
+  // allowlist must be clearable to lift the restriction.
+  const CLEARABLE_KEYS = new Set<string>(["machineSessionAllowedIps"]);
 
   const entries = Object.entries(body)
     .filter(([k, v]) => {
@@ -345,7 +362,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       // Skip entries that are still the masked placeholder — client didn't change the value
       if (v === MASKED_VALUE) return false;
       const max = MAX_LENGTHS[k as AllowedKey] ?? DEFAULT_MAX_LENGTH;
-      return typeof v === "string" && v.length > 0 && v.length <= max;
+      if (typeof v !== "string" || v.length > max) return false;
+      if (v.length === 0) return CLEARABLE_KEYS.has(k);
+      return true;
     })
     .map(([k, v]) => [k, USER_FACING_KEYS.has(k) ? sanitizeText(v) : v] as [string, string]);
 

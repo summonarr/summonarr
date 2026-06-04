@@ -7,7 +7,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, RatingsCacheClearButton, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -97,7 +97,7 @@ const ALL_KEYS = [
   "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId",
   "deletionVoteThreshold",
   "disableLocalLogin",
-  "enableMachineSession",
+  "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
@@ -125,7 +125,7 @@ export default async function SettingsPage({
   // disappears automatically on the next page load after the operator re-saves.
   const decryptFailures = getSettingDecryptFailures();
 
-  const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.NEXTAUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
+  const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.AUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
 
   let metrics: {
     totalRequests: number; pendingRequests: number; approvedRequests: number;
@@ -222,7 +222,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies", "jellyfin-history",
+      "trash-sync", "download-policies",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -304,7 +304,6 @@ export default async function SettingsPage({
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: `${process.env.SCRUB_AUDIT_PII_INTERVAL ?? "86400"}s`, ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
       { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("download-policies") },
-      { name: "Jellyfin History Sync", description: "Import Jellyfin play history via PlaybackReporting plugin (or IsPlayed fallback)", endpoint: "/api/cron/sync-jellyfin-history", interval: `${process.env.JF_HISTORY_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("jellyfin-history") },
     ];
   }
 
@@ -441,7 +440,10 @@ export default async function SettingsPage({
                 </p>
               </div>
               <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
-              <EnableMachineSessionToggle initialEnabled={cfg.enableMachineSession === "true"} />
+              <EnableMachineSessionToggle
+                initialEnabled={cfg.enableMachineSession === "true"}
+                initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
+              />
             </div>
 
             <div id="sessions" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
@@ -520,7 +522,7 @@ export default async function SettingsPage({
                 initialEmail={cfg.plexAdminEmail ?? ""}
                 initialServerUrl={cfg.plexServerUrl ?? ""}
                 initialPlexLibraries={cfg.plexLibraries ?? ""}
-                siteUrl={cfg.siteUrl ?? process.env.NEXTAUTH_URL ?? ""}
+                siteUrl={cfg.siteUrl ?? process.env.AUTH_URL ?? ""}
               />
             </div>
 
@@ -693,12 +695,8 @@ export default async function SettingsPage({
                 <div className="border-t border-zinc-800 pt-5">
                   <TraktForm initialApiKey={cfg.traktClientId ? "••••••••" : ""} />
                 </div>
-                <div className="border-t border-zinc-800 pt-5 space-y-4">
-                  <h3 className="text-sm font-medium text-zinc-300">Cache Management</h3>
-                  <div className="flex items-center gap-3">
-                    <RatingsWarmButton />
-                  </div>
-                  <RatingsCacheClearButton />
+                <div className="border-t border-zinc-800 pt-5">
+                  <CacheManagementPanel />
                 </div>
               </div>
             </div>

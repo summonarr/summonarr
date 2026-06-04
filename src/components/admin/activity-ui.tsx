@@ -16,7 +16,12 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import Image from "next/image";
+import {
+  HeatmapCellPopover,
+  type HeatmapCellAnchor,
+} from "@/components/admin/heatmap-cell-popover";
 
 /* ── Source helpers ───────────────────────────────────────────── */
 
@@ -217,6 +222,94 @@ export function Avatar({
 
 /* ── Charts ───────────────────────────────────────────────────── */
 
+// Extra context shown in the line/area chart hover tooltips: where the hovered
+// point sits relative to the whole series. All derived from `data` (no extra
+// props) so every line chart gets the same richer tooltip for free.
+function ChartTooltipDetail({
+  data,
+  i,
+}: {
+  data: number[];
+  i: number;
+}) {
+  const total = data.reduce((a, b) => a + b, 0);
+  const value = data[i] ?? 0;
+  const avg = data.length > 0 ? total / data.length : 0;
+  const prev = i > 0 ? data[i - 1] : null;
+  // Round floats (watch-hours series) to one decimal; integers stay integer.
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const fmt = (n: number) => round1(n).toLocaleString("en-US");
+  const share = total > 0 ? round1((value / total) * 100) : 0;
+  const avgPct = avg > 0 ? Math.round(((value - avg) / avg) * 100) : null;
+  const delta = prev !== null ? round1(value - prev) : null;
+  const deltaPct =
+    prev !== null && prev !== 0 ? Math.round(((value - prev) / prev) * 100) : null;
+
+  const rows: { label: string; value: string; color: string }[] = [
+    { label: "Share", value: `${share}%`, color: "var(--ds-fg-muted)" },
+  ];
+  if (avgPct !== null) {
+    rows.push({
+      label: "vs avg",
+      value: `${avgPct > 0 ? "+" : ""}${avgPct}%`,
+      color:
+        avgPct > 0
+          ? "var(--ds-success)"
+          : avgPct < 0
+            ? "var(--ds-danger)"
+            : "var(--ds-fg-subtle)",
+    });
+  }
+  if (delta !== null) {
+    const arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
+    rows.push({
+      label: "vs prev",
+      value: `${arrow} ${delta > 0 ? "+" : ""}${fmt(delta)}${
+        deltaPct !== null ? ` (${deltaPct > 0 ? "+" : ""}${deltaPct}%)` : ""
+      }`,
+      color:
+        delta > 0
+          ? "var(--ds-success)"
+          : delta < 0
+            ? "var(--ds-danger)"
+            : "var(--ds-fg-subtle)",
+    });
+  }
+
+  return (
+    <div
+      style={{
+        marginTop: 5,
+        paddingTop: 5,
+        borderTop: "1px solid var(--ds-border)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      {rows.map((r) => (
+        <div
+          key={r.label}
+          style={{ display: "flex", justifyContent: "space-between", gap: 8 }}
+        >
+          <span
+            className="ds-mono uppercase"
+            style={{ fontSize: 8.5, letterSpacing: "0.06em", color: "var(--ds-fg-disabled)" }}
+          >
+            {r.label}
+          </span>
+          <span
+            className="ds-mono"
+            style={{ fontSize: 9.5, fontVariantNumeric: "tabular-nums", color: r.color }}
+          >
+            {r.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // `labels[i]` is the precomputed (server-side) display label for `data[i]` —
 // e.g. "May 13". Never compute it from Date here (guardrail 16).
 export function Sparkline({
@@ -238,13 +331,15 @@ export function Sparkline({
 }) {
   const gradId = useId().replace(/[:]/g, "");
   const wrapRef = useRef<HTMLDivElement>(null);
-  // `wrapW` is captured in the mousemove handler (which has the live rect),
-  // not read off the ref during render — the React Compiler forbids reading
-  // ref.current in the render path.
+  // `x` is the SVG-local crosshair coord; `px`/`py` are the hovered point's
+  // viewport coords for the portalled tooltip. All captured in the mousemove
+  // handler (which has the live rect), not read off the ref during render —
+  // the React Compiler forbids reading ref.current in the render path.
   const [hover, setHover] = useState<{
     i: number;
     x: number;
-    wrapW: number;
+    px: number;
+    py: number;
   } | null>(null);
 
   if (!data || data.length < 2)
@@ -265,17 +360,20 @@ export function Sparkline({
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const i = Math.round(t * (data.length - 1));
     setHover({
-      i: Math.round(t * (data.length - 1)),
+      i,
       x: t * rect.width,
-      wrapW: rect.width,
+      // Viewport anchor for the portalled tooltip; clamp X off the edges.
+      px: Math.max(
+        90,
+        Math.min(window.innerWidth - 90, rect.left + t * rect.width),
+      ),
+      py: rect.top,
     });
   };
 
   const TT_W = 120;
-  const ttLeft = hover
-    ? Math.max(-4, Math.min(hover.wrapW - TT_W + 4, hover.x - TT_W / 2))
-    : 0;
 
   return (
     <div
@@ -337,13 +435,21 @@ export function Sparkline({
           </>
         )}
       </svg>
-      {hover && (
+      {hover &&
+        typeof document !== "undefined" &&
+        createPortal(
         <div
           style={{
-            position: "absolute",
-            left: ttLeft,
-            bottom: h + 6,
-            width: TT_W,
+            // Portalled to <body> with position:fixed so it escapes the
+            // app-shell scroll container (`<main overflow-y-auto>`), which
+            // otherwise clips a tooltip popping above the sparkline.
+            position: "fixed",
+            left: hover.px,
+            top: hover.py - 6,
+            transform: "translate(-50%, -100%)",
+            minWidth: TT_W,
+            width: "max-content",
+            whiteSpace: "nowrap",
             pointerEvents: "none",
             background: "var(--ds-bg-1)",
             border: "1px solid var(--ds-border-strong)",
@@ -352,7 +458,7 @@ export function Sparkline({
             boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
             fontSize: 11,
             color: "var(--ds-fg)",
-            zIndex: 5,
+            zIndex: 60,
           }}
         >
           {labels?.[hover.i] && (
@@ -391,8 +497,10 @@ export function Sparkline({
             {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
-        </div>
-      )}
+          <ChartTooltipDetail data={data} i={hover.i} />
+        </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -413,12 +521,16 @@ export function AreaChart({
 }) {
   const gradId = useId().replace(/[:]/g, "");
   const wrapRef = useRef<HTMLDivElement>(null);
-  // `wrapW` captured in the handler, not read off the ref during render.
+  // `x`/`y` are SVG-local coords for the in-chart crosshair; `px`/`py` are the
+  // hovered point's viewport coords, used to position the portalled tooltip.
+  // All captured in the handler (which has the live rect), not read off the
+  // ref during render.
   const [hover, setHover] = useState<{
     i: number;
     x: number;
     y: number;
-    wrapW: number;
+    px: number;
+    py: number;
   } | null>(null);
   const w = 1000;
 
@@ -439,18 +551,22 @@ export function AreaChart({
     const rect = el.getBoundingClientRect();
     const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const i = Math.round(t * (data.length - 1));
+    const yLocal = (yFor(data[i]) / h) * rect.height;
     setHover({
       i,
       x: t * rect.width,
-      y: (yFor(data[i]) / h) * rect.height,
-      wrapW: rect.width,
+      y: yLocal,
+      // Viewport anchor for the portalled tooltip. Clamp X off the viewport
+      // edges so a wide tooltip stays fully on-screen.
+      px: Math.max(
+        90,
+        Math.min(window.innerWidth - 90, rect.left + t * rect.width),
+      ),
+      py: rect.top + yLocal,
     });
   };
 
   const TT_W = 120;
-  const ttLeft = hover
-    ? Math.max(4, Math.min(hover.wrapW - TT_W - 4, hover.x - TT_W / 2))
-    : 0;
 
   return (
     <div
@@ -524,13 +640,23 @@ export function AreaChart({
           </>
         )}
       </svg>
-      {hover && (
+      {hover &&
+        typeof document !== "undefined" &&
+        createPortal(
         <div
           style={{
-            position: "absolute",
-            left: ttLeft,
-            top: Math.max(2, hover.y - 46),
-            width: TT_W,
+            // Portalled to <body> with position:fixed so it escapes the
+            // app-shell scroll container (`<main overflow-y-auto>`), which
+            // otherwise clips any tooltip drawn outside the chart card.
+            // px/py are the hovered point's viewport coords; translate(-50%,
+            // -100%) centers the box on the point and floats it above.
+            position: "fixed",
+            left: hover.px,
+            top: hover.py - 12,
+            transform: "translate(-50%, -100%)",
+            minWidth: TT_W,
+            width: "max-content",
+            whiteSpace: "nowrap",
             pointerEvents: "none",
             background: "var(--ds-bg-1)",
             border: "1px solid var(--ds-border-strong)",
@@ -539,7 +665,7 @@ export function AreaChart({
             boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
             fontSize: 11,
             color: "var(--ds-fg)",
-            zIndex: 4,
+            zIndex: 60,
           }}
         >
           {labels?.[hover.i] && (
@@ -578,19 +704,57 @@ export function AreaChart({
             {data[hover.i].toLocaleString("en-US")}
             {valueSuffix}
           </div>
-        </div>
-      )}
+          <ChartTooltipDetail data={data} i={hover.i} />
+        </div>,
+          document.body,
+        )}
     </div>
   );
 }
 
 // `matrix` is 7 rows (Mon..Sun) × 24 cols (hour 0..23) of raw counts.
-export function HourHeatmap({ matrix }: { matrix: number[][] }) {
+export function HourHeatmap({
+  matrix,
+  detailBase,
+}: {
+  matrix: number[][];
+  // When provided, cells with plays become clickable and open the drill-down
+  // popover. `days` scopes the admin grid; per-user grids pass `userId` instead
+  // (all-history) — matches getHeatmapCellDetail's scoping. Omit for static.
+  detailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
+}) {
   const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const cell = 12;
   const gap = 2;
   const max = Math.max(1, ...matrix.flat());
+  const [selected, setSelected] = useState<
+    { queryString: string; anchor: HeatmapCellAnchor; label: string } | null
+  >(null);
+
+  // Matrix rows are Mon-first (0=Mon..6=Sun); Postgres DOW is 0=Sun..6=Sat, so
+  // pgDow = (row + 1) % 7 — the inverse of the (dow + 6) % 7 mapping the callers
+  // use to build the matrix.
+  function openCell(el: HTMLDivElement, r: number, c: number, v: number) {
+    if (!detailBase || v === 0) return;
+    const rect = el.getBoundingClientRect();
+    const params = new URLSearchParams({
+      mode: "hour",
+      dow: String((r + 1) % 7),
+      hour: String(c),
+    });
+    if (detailBase.userId) params.set("userId", detailBase.userId);
+    if (detailBase.source) params.set("source", detailBase.source);
+    if (detailBase.mediaType) params.set("mediaType", detailBase.mediaType);
+    if (detailBase.days) params.set("days", String(detailBase.days));
+    setSelected({
+      queryString: params.toString(),
+      anchor: { x: rect.left, y: rect.top, w: rect.width, h: rect.height },
+      label: `${DAYS[r]} ${String(c).padStart(2, "0")}:00`,
+    });
+  }
+
   return (
+    <>
     <div
       style={{
         display: "grid",
@@ -599,7 +763,13 @@ export function HourHeatmap({ matrix }: { matrix: number[][] }) {
         justifyContent: "start",
       }}
     >
-      <div />
+      <div
+        className="ds-mono"
+        title="Hours are bucketed in UTC"
+        style={{ fontSize: 7.5, color: "var(--ds-fg-disabled)", alignSelf: "end", lineHeight: 1 }}
+      >
+        UTC
+      </div>
       {Array.from({ length: 24 }).map((_, hr) => (
         <div
           key={hr}
@@ -628,24 +798,50 @@ export function HourHeatmap({ matrix }: { matrix: number[][] }) {
           >
             {DAYS[r]}
           </div>
-          {row.map((v, c) => (
-            <div
-              key={c}
-              title={`${DAYS[r]} ${c}:00 — ${v} plays`}
-              style={{
-                width: cell,
-                height: cell,
-                borderRadius: 2,
-                background:
-                  v === 0
-                    ? "oklch(1 0 0 / 0.025)"
-                    : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
-              }}
-            />
-          ))}
+          {row.map((v, c) => {
+            const clickable = !!detailBase && v > 0;
+            return (
+              <div
+                key={c}
+                title={`${DAYS[r]} ${c}:00 — ${v} plays`}
+                role={clickable ? "button" : undefined}
+                tabIndex={clickable ? 0 : undefined}
+                onClick={clickable ? (e) => openCell(e.currentTarget, r, c, v) : undefined}
+                onKeyDown={
+                  clickable
+                    ? (e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openCell(e.currentTarget, r, c, v);
+                        }
+                      }
+                    : undefined
+                }
+                style={{
+                  width: cell,
+                  height: cell,
+                  borderRadius: 2,
+                  cursor: clickable ? "pointer" : "default",
+                  background:
+                    v === 0
+                      ? "oklch(1 0 0 / 0.025)"
+                      : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
+                }}
+              />
+            );
+          })}
         </Fragment>
       ))}
     </div>
+    {selected && (
+      <HeatmapCellPopover
+        queryString={selected.queryString}
+        anchor={selected.anchor}
+        label={selected.label}
+        onClose={() => setSelected(null)}
+      />
+    )}
+    </>
   );
 }
 

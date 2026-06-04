@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
+import { shouldForceDbCheck } from "@/lib/session-revocation";
+import { getCachedPlexAllowlist } from "@/lib/plex-membership";
 
 // Verify-and-refresh for the Summonarr session JWT.
 //
@@ -56,8 +58,14 @@ export async function verifyAndRefreshSession(
     claims.role === "ADMIN" || claims.role === "ISSUE_ADMIN"
       ? FAST_CHECK_INTERVAL_SECONDS
       : SLOW_CHECK_INTERVAL_SECONDS;
+  // Honor the cache window only if this replica hasn't locally revoked the
+  // session/user since — otherwise force a DB hit so a "revoke this device" /
+  // "log out everywhere" issued here takes effect on the next request rather
+  // than up to checkInterval later.
   const skipDbCheck =
-    typeof dbCheckedAt === "number" && now - dbCheckedAt <= checkInterval;
+    typeof dbCheckedAt === "number" &&
+    now - dbCheckedAt <= checkInterval &&
+    !shouldForceDbCheck(claims.id, claims.sessionId);
 
   if (skipDbCheck) {
     // Still enforce the ADMIN 7d ceiling without hitting the DB.
@@ -79,6 +87,8 @@ export async function verifyAndRefreshSession(
         mediaServer: true,
         sessionsRevokedAt: true,
         passwordChangedAt: true,
+        email: true,
+        notificationEmail: true,
       },
     }),
   ]);
@@ -95,6 +105,33 @@ export async function verifyAndRefreshSession(
   const cutoff = Math.max(revokedSec, passwordSec);
   if (cutoff > 0 && typeof claims.iat === "number" && claims.iat < cutoff) {
     return null;
+  }
+
+  // Plex server-membership re-check. A user un-shared from the Plex server keeps
+  // a valid session JWT until it expires, so re-verify membership here on the
+  // slow DB-check path (~once/60s per session). The allowlist is cached per
+  // replica for 30 min, so plex.tv is hit at most once per replica per window
+  // regardless of how many Plex users are active. ADMINs are exempt (always on
+  // the allowlist anyway; never lock out the operator on an email mismatch).
+  // getCachedPlexAllowlist() returns null when membership can't be determined
+  // (unconfigured / plex.tv error) — fail open and don't revoke.
+  if (claims.provider === "plex" && dbUser.role !== "ADMIN") {
+    const allowlist = await getCachedPlexAllowlist();
+    if (allowlist) {
+      const candidateEmails = [dbUser.notificationEmail, dbUser.email, claims.email]
+        .filter((e): e is string => typeof e === "string" && e.length > 0)
+        .map((e) => e.toLowerCase().trim());
+      const stillMember = candidateEmails.some((e) => allowlist.has(e));
+      if (candidateEmails.length > 0 && !stillMember) {
+        // No longer shared on the Plex server — revoke ALL of this user's
+        // sessions (every device) by advancing sessionsRevokedAt past their
+        // tokens' iat, then reject this request.
+        await prisma.user
+          .update({ where: { id: claims.id }, data: { sessionsRevokedAt: new Date() } })
+          .catch(() => {});
+        return null;
+      }
+    }
   }
 
   void prisma.authSession
