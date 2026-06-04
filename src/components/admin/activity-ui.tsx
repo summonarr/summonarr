@@ -624,7 +624,12 @@ export function AreaChart({
           style={{
             position: "absolute",
             left: ttLeft,
-            top: Math.max(2, hover.y - 46),
+            // Float the tooltip above the hovered point; translateY(-100%)
+            // lifts it by its own height so it escapes the plot area upward
+            // (the card chain is overflow:visible) instead of overlapping the
+            // line or being clamped inside the graph.
+            top: hover.y - 12,
+            transform: "translateY(-100%)",
             minWidth: TT_W,
             width: "max-content",
             whiteSpace: "nowrap",
