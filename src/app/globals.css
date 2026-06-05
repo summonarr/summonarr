@@ -392,6 +392,18 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
   .ds-discover-hero { grid-template-columns: 180px 1fr; gap: 20px; }
 }
 
+/* Featured pair: trending movie + trending TV side by side. Stacks on phones. */
+.ds-discover-hero-pair {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-bottom: 28px;
+}
+.ds-discover-hero-pair > .ds-discover-hero { margin-bottom: 0; }
+@media (min-width: 900px) {
+  .ds-discover-hero-pair { grid-template-columns: 1fr 1fr; }
+}
+
 /* Activity overview — responsive grid overrides. Ported verbatim from the
    "Activity Page" design host styles: the desktop column counts live as
    inline `style` on the grids; these classes win via `!important` in the
