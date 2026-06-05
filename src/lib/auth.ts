@@ -11,6 +11,7 @@ import { signSessionJwt } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession } from "@/lib/session-server";
+import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -52,6 +53,10 @@ export async function findOrCreatePlexUser({
   image?: string | null;
 }): Promise<AuthorizedDbUser | ProviderRebindRequired> {
   const normalized = normalizeEmail(email);
+  // Provider-supplied display names are untrusted — strip HTML/control chars so
+  // the name can't carry markup into any downstream sink (email/Discord/push),
+  // mirroring the local-credentials register path.
+  name = sanitizeOptional(name);
 
   // 1) Bind on (provider, sub) first. This is the C-1 fix: never trust email as
   //    the primary identity anchor for an external IdP.
@@ -96,6 +101,9 @@ export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+  // Provider-supplied display name is untrusted — strip HTML/control chars so it
+  // can't carry markup into any downstream sink (email/Discord/push).
+  name = sanitizeText(name);
   // Synthetic address is retained as a backward-compat anchor for users that
   // signed in before the (provider, sub) binding columns existed.
   const syntheticEmail = `jellyfin-${jellyfinId}@jellyfin.local`;
@@ -226,7 +234,7 @@ export async function findOrCreateOidcUser(
   const created = await prisma.user.create({
     data: {
       email: normalizedEmail,
-      name: claims.name ?? claims.preferredUsername ?? null,
+      name: sanitizeOptional(claims.name ?? claims.preferredUsername),
       image: claims.picture,
       role: "USER",
       notificationEmail: normalizedEmail,
