@@ -7,7 +7,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, EnableMachineSessionToggle, Request4kAllToggle } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -83,6 +83,7 @@ const ALL_KEYS = [
   "webhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
   "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kWebhookSecret",
   "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kWebhookSecret",
+  "request4kAll",
   "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
@@ -655,6 +656,10 @@ export default async function SettingsPage({
                 initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
               />
+            </div>
+
+            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <Request4kAllToggle initialEnabled={cfg.request4kAll === "true"} />
             </div>
           </>
         )}

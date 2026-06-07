@@ -123,6 +123,7 @@ export function canRequest(
   userPerms: bigint,
   mediaType: "MOVIE" | "TV",
   is4k: boolean,
+  serverAll4k = false,
 ): boolean {
   const base =
     mediaType === "MOVIE"
@@ -130,6 +131,10 @@ export function canRequest(
       : hasPermission(userPerms, [Permission.REQUEST, Permission.REQUEST_TV]);
   if (!base) return false;
   if (!is4k) return true;
+  // Server-wide 4K (admin Setting): anyone who can request the base media type can
+  // also request it in 4K, without the per-user REQUEST_4K bit. Gating is then
+  // "per-user permission OR server-wide toggle" (admins always pass via ADMIN).
+  if (serverAll4k) return true;
   return mediaType === "MOVIE"
     ? hasPermission(userPerms, [Permission.REQUEST_4K, Permission.REQUEST_4K_MOVIE])
     : hasPermission(userPerms, [Permission.REQUEST_4K, Permission.REQUEST_4K_TV]);

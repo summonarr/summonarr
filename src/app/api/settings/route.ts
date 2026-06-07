@@ -40,6 +40,9 @@ const SETTINGS_SCHEMA = [
   ["sonarr4kRootFolder",            false],
   ["sonarr4kQualityProfileId",      false],
   ["sonarr4kWebhookSecret",         true ],
+  // Server-wide 4K: when "true", any user who can request the base media type
+  // can also request 4K, without the per-user REQUEST_4K permission.
+  ["request4kAll",                  false],
   ["plexAdminToken",                true ],
   ["plexAdminEmail",                false],
   ["plexServerUrl",                 false],

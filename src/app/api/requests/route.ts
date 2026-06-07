@@ -62,7 +62,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const [settingsRows, userRecord] = await Promise.all([
     prisma.setting.findMany({
-      where: { key: { in: ["rateLimitRequests", "discordRequireLinkedAccountSite", "quotaLimit", "quotaPeriod"] } },
+      where: { key: { in: ["rateLimitRequests", "discordRequireLinkedAccountSite", "quotaLimit", "quotaPeriod", "request4kAll"] } },
     }),
     prisma.user.findUnique({
       where: { id: session.user.id },
@@ -125,7 +125,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Capability gate — the permission bitmask is authoritative (admins pass via
   // the ADMIN superbit). A 4K request also needs REQUEST_4K (checked in canRequest)
   // AND a configured 4K instance.
-  if (!canRequest(session.user.permissions, mediaType, is4k)) {
+  if (!canRequest(session.user.permissions, mediaType, is4k, settings.request4kAll === "true")) {
     return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
   }
   if (is4k && !(await isArrConfigured(mediaType === "MOVIE" ? "radarr" : "sonarr", "4k"))) {

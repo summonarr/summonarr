@@ -75,7 +75,7 @@ export default async function MovieDetailPage({
 
   // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
   // configured AND the viewer holds REQUEST_4K.
-  const [has4k, userRequest4k] = await Promise.all([
+  const [has4k, userRequest4k, request4kAllRow] = await Promise.all([
     isArrConfigured("radarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
@@ -83,9 +83,10 @@ export default async function MovieDetailPage({
           select: { id: true },
         })
       : Promise.resolve(null),
+    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
   ]);
   const requested4k = !!userRequest4k;
-  const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true) : false;
+  const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true") : false;
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");

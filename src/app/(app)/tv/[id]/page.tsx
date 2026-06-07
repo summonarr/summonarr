@@ -91,7 +91,7 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
-  const [has4k, userRequest4k] = await Promise.all([
+  const [has4k, userRequest4k, request4kAllRow] = await Promise.all([
     isArrConfigured("sonarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
@@ -99,9 +99,10 @@ export default async function TVDetailPage({
           select: { id: true },
         })
       : Promise.resolve(null),
+    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
   ]);
   const requested4k = !!userRequest4k;
-  const canRequest4k = session ? canRequest(session.user.permissions, "TV", true) : false;
+  const canRequest4k = session ? canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true") : false;
 
   const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
 
