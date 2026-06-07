@@ -1,6 +1,8 @@
 import { getTVDetails, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
+import { Request4kButton } from "@/components/media/request-4k-button";
+import { isArrConfigured } from "@/lib/arr";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { CastSection } from "@/components/media/cast-section";
@@ -19,7 +21,7 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
-import { hasPermission, Permission } from "@/lib/permissions";
+import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 
 export default async function TVDetailPage({
   params,
@@ -56,14 +58,14 @@ export default async function TVDetailPage({
       select: { tvdbId: true },
     }),
     session ? prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, status: { not: "DECLINED" } },
+      where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, is4k: false, status: { not: "DECLINED" } },
       select: { id: true },
     }) : Promise.resolve(null),
     session ? prisma.deletionVote.findFirst({
       where: { tmdbId: media.id, mediaType: "TV", userId: session.user.id },
       select: { id: true },
     }) : Promise.resolve(null),
-    prisma.sonarrWantedItem.findUnique({ where: { tmdbId: media.id } }),
+    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: false } } }),
     getTVCredits(media.id).catch(() => []),
     getTVSuggestions(media.id).catch(() => []),
     prisma.tVEpisodeCache.findMany({
@@ -89,6 +91,17 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
+  const [has4k, userRequest4k] = await Promise.all([
+    isArrConfigured("sonarr", "4k"),
+    session
+      ? prisma.mediaRequest.findFirst({
+          where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, is4k: true, status: { not: "DECLINED" } },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+  ]);
+  const requested4k = !!userRequest4k;
+  const canRequest4k = session ? canRequest(session.user.permissions, "TV", true) : false;
 
   const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
 
@@ -261,6 +274,14 @@ export default async function TVDetailPage({
                 requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
               />
+              {has4k && canRequest4k && (
+                <Request4kButton
+                  tmdbId={media.id}
+                  mediaType="TV"
+                  requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
+                  requested={requested4k}
+                />
+              )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
                   tmdbId={media.id}

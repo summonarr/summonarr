@@ -167,10 +167,10 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     movieIds.length
-      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true } })
+      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length
-      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true } })
+      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 

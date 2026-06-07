@@ -1,7 +1,7 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -94,6 +94,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     mediaType?: string;
     note?: string;
     _token?: string;
+    is4k?: boolean;
   };
 
   try {
@@ -103,6 +104,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const { tmdbId, mediaType, note, _token } = body;
+  const is4k = body.is4k === true;
 
   if (!tmdbId || !mediaType) {
     return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
@@ -121,9 +123,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   // Capability gate — the permission bitmask is authoritative (admins pass via
-  // the ADMIN superbit baked into session.user.permissions).
-  if (!canRequest(session.user.permissions, mediaType, false)) {
+  // the ADMIN superbit). A 4K request also needs REQUEST_4K (checked in canRequest)
+  // AND a configured 4K instance.
+  if (!canRequest(session.user.permissions, mediaType, is4k)) {
     return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
+  }
+  if (is4k && !(await isArrConfigured(mediaType === "MOVIE" ? "radarr" : "sonarr", "4k"))) {
+    return NextResponse.json({ error: "4K requests aren't available — no 4K instance is configured" }, { status: 400 });
   }
 
   // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
@@ -174,7 +180,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const existing = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType, requestedBy: session.user.id },
+    where: { tmdbId, mediaType, requestedBy: session.user.id, is4k },
   });
 
   if (existing) {
@@ -184,21 +190,24 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Already requested" }, { status: 409 });
   }
 
-  const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, false);
+  const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, is4k);
 
+  // HD request: a Plex/Jellyfin library hit OR the HD *arr-available cache counts
+  // as already-here. 4K request: only the 4K instance's available cache counts —
+  // a Plex HD copy must not block requesting 4K.
   const [plexItem, arrAvailable] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId, mediaType } },
-    }),
+    is4k
+      ? Promise.resolve(null)
+      : prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
     isAutoApprove
       ? mediaType === "MOVIE"
-        ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId } }).then(r => r !== null)
-        : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId } }).then(r => r !== null)
+        ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
+        : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
       : Promise.resolve(false),
   ]);
   const alreadyAvailable = !!plexItem || arrAvailable;
 
-  const baseData = { tmdbId, mediaType, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+  const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
   let createdBranch: "auto-approve" | "pending" | null = null;
@@ -222,7 +231,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
       if (isAutoApprove) {
         createdRequest = await tx.mediaRequest.upsert({
-          where: { tmdbId_mediaType_requestedBy: { tmdbId, mediaType, requestedBy: session.user.id } },
+          where: { tmdbId_mediaType_requestedBy_is4k: { tmdbId, mediaType, requestedBy: session.user.id, is4k } },
           create: { ...baseData, status: "APPROVED" },
           update: {},
         });
@@ -262,9 +271,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId);
+        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd");
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId);
+        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd");
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {

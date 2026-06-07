@@ -34,13 +34,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
-  const [sourceRow, legacyRow] = await Promise.all([
+  const [sourceRow, source4kRow, legacyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "radarrWebhookSecret" } }),
+    prisma.setting.findUnique({ where: { key: "radarr4kWebhookSecret" } }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
-  const secret = sourceRow?.value || legacyRow?.value || "";
+  const hdSecret = sourceRow?.value || legacyRow?.value || "";
+  const fourKSecret = source4kRow?.value || "";
 
-  if (secret.length === 0) {
+  if (hdSecret.length === 0 && fourKSecret.length === 0) {
     console.warn("[webhook/radarr] secret not configured");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -51,10 +53,19 @@ export async function POST(req: NextRequest) {
   const token = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : queryToken;
-  if (!token || !safeCompare(token, secret)) {
+  // Secret-as-discriminator: the 4K instance is configured with the 4K secret, so
+  // the secret that matches tells us which instance fired. Compare against both
+  // without an early return (no timing oracle). Guardrail 2: keep ?token= + the
+  // timing-safe compare; no HMAC.
+  const matchedHd = token != null && hdSecret.length > 0 && safeCompare(token, hdSecret);
+  const matched4k = token != null && fourKSecret.length > 0 && safeCompare(token, fourKSecret);
+  if (!token || (!matchedHd && !matched4k)) {
     console.warn("[webhook/radarr] 401 unauthorized");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  // HD wins a tie (both secrets equal = misconfig) so we default to the HD instance.
+  const is4k = matched4k && !matchedHd;
+  const secret = is4k ? fourKSecret : hdSecret;
 
   // Radarr's webhook UI has no Authorization header field — ?token= is the only
   // option upstream supports. Don't warn about it; nothing the user can do.
@@ -115,15 +126,15 @@ export async function POST(req: NextRequest) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
     // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
     const resetNotify = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: null },
+      where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: null },
       data: { status: "AVAILABLE", availableAt: new Date() },
     });
     const alreadyAvailable = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "APPROVED", availableAt: { not: null } },
+      where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: { not: null } },
       data: { status: "AVAILABLE", availableAt: new Date() },
     });
     updated = { count: resetNotify.count + alreadyAvailable.count };
-    await tx.radarrWantedItem.deleteMany({ where: { tmdbId } });
+    await tx.radarrWantedItem.deleteMany({ where: { tmdbId, is4k } });
   }, { timeout: 30_000 });
 
   if (updated.count > 0) {

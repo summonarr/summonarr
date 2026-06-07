@@ -223,6 +223,11 @@ model MediaRequest {
 
   tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
 
+  // Which Radarr/Sonarr instance this request targets. false = HD (default),
+  // true = the optional 4K instance. Part of the unique key so one user can hold
+  // both an HD and a 4K request for the same title.
+  is4k Boolean @default(false)
+
   lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
@@ -231,7 +236,7 @@ model MediaRequest {
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
 
-  @@unique([tmdbId, mediaType, requestedBy])
+  @@unique([tmdbId, mediaType, requestedBy, is4k])
   @@index([requestedBy])
   @@index([status])
   @@index([tvdbId])
@@ -302,7 +307,10 @@ model TVEpisodeCache {
 // Populated by /api/sync/radarr; cleared per-movie by the Radarr webhook on Download.
 
 model RadarrWantedItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Radarr Available Cache ───────────────────────────────────────────────────
@@ -311,7 +319,10 @@ model RadarrWantedItem {
 // Enables DB-only availability checks — avoids per-movie ?tmdbId= API calls.
 
 model RadarrAvailableItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Sonarr Wanted Cache ──────────────────────────────────────────────────────
@@ -319,7 +330,10 @@ model RadarrAvailableItem {
 // Populated by /api/sync/sonarr; cleared per-series by the Sonarr webhook on Download.
 
 model SonarrWantedItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Sonarr Available Cache ───────────────────────────────────────────────────
@@ -328,7 +342,10 @@ model SonarrWantedItem {
 // Enables DB-only availability checks — avoids per-series ?tmdbId= API calls.
 
 model SonarrAvailableItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Upcoming Cache ───────────────────────────────────────────────────────────

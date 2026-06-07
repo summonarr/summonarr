@@ -12,23 +12,35 @@ export async function POST(req: NextRequest) {
     let wanted = 0;
     let available = 0;
     try {
-      const result = await getSonarrWantedTmdbIds();
+      const [result, result4k] = await Promise.all([
+        getSonarrWantedTmdbIds("hd"),
+        getSonarrWantedTmdbIds("4k"),
+      ]);
       if (result === null) {
         console.warn("[sync/sonarr] skipping cache update — ARR fetch failed");
         return NextResponse.json({ skipped: true, reason: "arr-unavailable" });
       }
-      const wantedRows = Array.from(result.wanted).map((tmdbId) => ({ tmdbId }));
-      const availableRows = Array.from(result.available).map((tmdbId) => ({ tmdbId }));
-      // Advisory lock 1001,2 coordinates with the Sonarr webhook handler and sync orchestrator
+      const wantedHd    = Array.from(result.wanted).map((tmdbId) => ({ tmdbId, is4k: false }));
+      const availableHd = Array.from(result.available).map((tmdbId) => ({ tmdbId, is4k: false }));
+      const wanted4k    = result4k ? Array.from(result4k.wanted).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+      const available4k = result4k ? Array.from(result4k.available).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+      // Advisory lock 1001,2 coordinates with the Sonarr webhook handler and sync orchestrator.
+      // Per-variant scoped clears so a 4K fetch failure doesn't empty the HD cache.
       await prisma.$transaction(async (tx) => {
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-        await tx.sonarrWantedItem.deleteMany();
-        await tx.sonarrAvailableItem.deleteMany();
-        if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
-        if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
+        await tx.sonarrWantedItem.deleteMany({ where: { is4k: false } });
+        await tx.sonarrAvailableItem.deleteMany({ where: { is4k: false } });
+        if (wantedHd.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedHd);
+        if (availableHd.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableHd);
+        if (wanted4k && available4k) {
+          await tx.sonarrWantedItem.deleteMany({ where: { is4k: true } });
+          await tx.sonarrAvailableItem.deleteMany({ where: { is4k: true } });
+          if (wanted4k.length > 0) await batchCreateMany(tx.sonarrWantedItem, wanted4k);
+          if (available4k.length > 0) await batchCreateMany(tx.sonarrAvailableItem, available4k);
+        }
       }, { timeout: BATCH_TX_TIMEOUT });
-      wanted = wantedRows.length;
-      available = availableRows.length;
+      wanted = wantedHd.length + (wanted4k?.length ?? 0);
+      available = availableHd.length + (available4k?.length ?? 0);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[sync/sonarr] failed:", msg);

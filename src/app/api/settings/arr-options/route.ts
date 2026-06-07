@@ -8,9 +8,11 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   if (service !== "radarr" && service !== "sonarr") {
     return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
   }
+  // ?variant=4k selects the optional 4K instance's namespaced settings keys.
+  const variant = req.nextUrl.searchParams.get("variant") === "4k" ? "4k" : "";
 
-  const urlKey = service === "radarr" ? "radarrUrl" : "sonarrUrl";
-  const keyKey = service === "radarr" ? "radarrApiKey" : "sonarrApiKey";
+  const urlKey = `${service}${variant}Url`;
+  const keyKey = `${service}${variant}ApiKey`;
   const rows = await prisma.setting.findMany({ where: { key: { in: [urlKey, keyKey] } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 

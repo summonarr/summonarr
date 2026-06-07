@@ -36,13 +36,15 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
-  const [sourceRow, legacyRow] = await Promise.all([
+  const [sourceRow, source4kRow, legacyRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "sonarrWebhookSecret" } }),
+    prisma.setting.findUnique({ where: { key: "sonarr4kWebhookSecret" } }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
-  const secret = sourceRow?.value || legacyRow?.value || "";
+  const hdSecret = sourceRow?.value || legacyRow?.value || "";
+  const fourKSecret = source4kRow?.value || "";
 
-  if (secret.length === 0) {
+  if (hdSecret.length === 0 && fourKSecret.length === 0) {
     console.warn("[webhook/sonarr] secret not configured");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -53,10 +55,16 @@ export async function POST(req: NextRequest) {
   const token = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : queryToken;
-  if (!token || !safeCompare(token, secret)) {
+  // Secret-as-discriminator (see webhooks/radarr): the matching secret selects the
+  // instance variant. Compare against both without an early return. Guardrail 2.
+  const matchedHd = token != null && hdSecret.length > 0 && safeCompare(token, hdSecret);
+  const matched4k = token != null && fourKSecret.length > 0 && safeCompare(token, fourKSecret);
+  if (!token || (!matchedHd && !matched4k)) {
     console.warn("[webhook/sonarr] 401 unauthorized");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const is4k = matched4k && !matchedHd;
+  const secret = is4k ? fourKSecret : hdSecret;
 
   // Sonarr's webhook UI has no Authorization header field — ?token= is the only
   // option upstream supports. Don't warn about it; nothing the user can do.
@@ -123,15 +131,15 @@ export async function POST(req: NextRequest) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
       // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
       const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: null },
+        where: { tmdbId: safeMdbId, mediaType: "TV", is4k, status: "APPROVED", availableAt: null },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
+        where: { tmdbId: safeMdbId, mediaType: "TV", is4k, status: "APPROVED", availableAt: { not: null } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
-      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId } });
+      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, is4k } });
       // Backfill tvdbId on the matched request(s). A later Download webhook for the same
       // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
       // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
@@ -153,20 +161,20 @@ export async function POST(req: NextRequest) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
 
       const req = await tx.mediaRequest.findFirst({
-        where: { tvdbId: safeVdbId!, mediaType: "TV" },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k },
         select: { tmdbId: true },
       });
       const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: null },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k, status: "APPROVED", availableAt: null },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", status: "APPROVED", availableAt: { not: null } },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k, status: "APPROVED", availableAt: { not: null } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
       if (req && updated.count > 0) {
-        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId } });
+        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, is4k } });
         tvdbPathTmdbId = req.tmdbId;
       } else if (!req) {
         console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId ${sanitizeForLog(safeVdbId)}`);

@@ -11,10 +11,10 @@ export async function attachArrPending(items: TmdbMedia[]): Promise<TmdbMedia[]>
 
   const [radarrRows, sonarrRows] = await Promise.all([
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 

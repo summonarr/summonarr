@@ -28,6 +28,18 @@ const SETTINGS_SCHEMA = [
   ["webhookSecret",                 true ],
   ["sonarrWebhookSecret",           true ],
   ["radarrWebhookSecret",           true ],
+  // Optional 4K instances (second Radarr/Sonarr). Sensitive keys must also be
+  // listed in SETTINGS_SENSITIVE_KEYS (boot alignment check enforces it).
+  ["radarr4kUrl",                   false],
+  ["radarr4kApiKey",                true ],
+  ["radarr4kRootFolder",            false],
+  ["radarr4kQualityProfileId",      false],
+  ["radarr4kWebhookSecret",         true ],
+  ["sonarr4kUrl",                   false],
+  ["sonarr4kApiKey",                true ],
+  ["sonarr4kRootFolder",            false],
+  ["sonarr4kQualityProfileId",      false],
+  ["sonarr4kWebhookSecret",         true ],
   ["plexAdminToken",                true ],
   ["plexAdminEmail",                false],
   ["plexServerUrl",                 false],
@@ -468,6 +480,32 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         testResults.sonarrVersion = await testSonarrConnection(map.sonarrUrl, map.sonarrApiKey);
       } catch {
         testResults.sonarrError = "Sonarr connection failed";
+        testFailed = true;
+      }
+    }
+  }
+
+  if (updated.radarr4kUrl || updated.radarr4kApiKey) {
+    const rows = await prisma.setting.findMany({ where: { key: { in: ["radarr4kUrl", "radarr4kApiKey"] } } });
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (map.radarr4kUrl && map.radarr4kApiKey) {
+      try {
+        testResults.radarr4kVersion = await testRadarrConnection(map.radarr4kUrl, map.radarr4kApiKey);
+      } catch {
+        testResults.radarr4kError = "Radarr 4K connection failed";
+        testFailed = true;
+      }
+    }
+  }
+
+  if (updated.sonarr4kUrl || updated.sonarr4kApiKey) {
+    const rows = await prisma.setting.findMany({ where: { key: { in: ["sonarr4kUrl", "sonarr4kApiKey"] } } });
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (map.sonarr4kUrl && map.sonarr4kApiKey) {
+      try {
+        testResults.sonarr4kVersion = await testSonarrConnection(map.sonarr4kUrl, map.sonarr4kApiKey);
+      } catch {
+        testResults.sonarr4kError = "Sonarr 4K connection failed";
         testFailed = true;
       }
     }

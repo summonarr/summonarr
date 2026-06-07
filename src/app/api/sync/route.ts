@@ -46,6 +46,11 @@ async function runConcurrent<T>(
   }
 }
 
+// ARR cache + requests are keyed by (tmdbId, is4k) so the HD and 4K instances
+// stay independent. Library marking stays variant-agnostic (keyed by tmdbId) —
+// a Plex/Jellyfin hit marks both an HD and a 4K request AVAILABLE.
+const vkey = (tmdbId: number, is4k: boolean) => `${tmdbId}:${is4k ? 1 : 0}`;
+
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -78,11 +83,11 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   const [approved, available] = await Promise.all([
     prisma.mediaRequest.findMany({
       where: { status: "APPROVED" },
-      select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, pendingNotifyAt: true, notifiedAvailable: true },
+      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, pendingNotifyAt: true, notifiedAvailable: true },
     }),
     prisma.mediaRequest.findMany({
       where: { status: "AVAILABLE" },
-      select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, notifiedAvailable: true },
+      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, notifiedAvailable: true },
     }),
   ]);
 
@@ -93,8 +98,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
-  let availableMovieSet = new Set<number>();
-  let availableTvSet    = new Set<number>();
+  let availableMovieSet = new Set<string>();
+  let availableTvSet    = new Set<string>();
   if (approvedMovieTmdbIds.length > 0 || approvedTvTmdbIds.length > 0) {
     const [availableMovieRows, availableTvRows] = await Promise.all([
       approvedMovieTmdbIds.length > 0
@@ -104,15 +109,15 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: approvedTvTmdbIds } } })
         : Promise.resolve([]),
     ]);
-    availableMovieSet = new Set(availableMovieRows.map((r) => r.tmdbId));
-    availableTvSet    = new Set(availableTvRows.map((r) => r.tmdbId));
+    availableMovieSet = new Set(availableMovieRows.map((r) => vkey(r.tmdbId, r.is4k)));
+    availableTvSet    = new Set(availableTvRows.map((r) => vkey(r.tmdbId, r.is4k)));
   }
 
   // C3: collapse the per-request update loop into two updateMany calls — one CAS for the
   // unnotified candidates (which produces the arrNotify list), one bulk catch-up for the
   // already-notified rows. Snapshot pre-state so we can attribute the CAS winners.
   const nowAvailableApproved = approved.filter((r) =>
-    r.mediaType === "MOVIE" ? availableMovieSet.has(r.tmdbId) : availableTvSet.has(r.tmdbId),
+    r.mediaType === "MOVIE" ? availableMovieSet.has(vkey(r.tmdbId, r.is4k)) : availableTvSet.has(vkey(r.tmdbId, r.is4k)),
   );
   if (nowAvailableApproved.length > 0) {
     const nowAvailableIds = nowAvailableApproved.map((r) => r.id);
@@ -151,9 +156,10 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
   await runConcurrent(overdue, async (req) => {
     try {
+      const variant = req.is4k ? "4k" : "hd";
       const downloading = req.mediaType === "MOVIE"
-        ? await isMovieDownloadingInRadarr(req.tmdbId)
-        : await isSeriesDownloadingInSonarr(req.tmdbId);
+        ? await isMovieDownloadingInRadarr(req.tmdbId, variant)
+        : await isSeriesDownloadingInSonarr(req.tmdbId, variant);
       if (downloading) {
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
         return;
@@ -206,21 +212,38 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   let radarrSyncSucceeded = false;
   if (radarrEnabled) {
     try {
-      const radarrResult = await getRadarrWantedTmdbIds();
+      // Fetch both instances; the 4K helper returns empty sets when unconfigured,
+      // so an HD-only deployment writes exactly what it did before (is4k=false).
+      const [radarrResult, radarr4kResult] = await Promise.all([
+        getRadarrWantedTmdbIds("hd"),
+        getRadarrWantedTmdbIds("4k"),
+      ]);
       if (radarrResult === null) {
         console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
       } else {
-        const wantedRows    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-        const availableRows = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId }));
-        // Advisory lock 1001,1 coordinates with the Radarr webhook handler to prevent partial reads
+        const wantedHd    = Array.from(radarrResult.wanted).map((tmdbId) => ({ tmdbId, is4k: false }));
+        const availableHd = Array.from(radarrResult.available).map((tmdbId) => ({ tmdbId, is4k: false }));
+        // null = the 4K fetch failed THIS run — leave the existing 4K rows intact
+        // rather than wiping them (which would wrongly revert AVAILABLE 4K requests).
+        const wanted4k    = radarr4kResult ? Array.from(radarr4kResult.wanted).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+        const available4k = radarr4kResult ? Array.from(radarr4kResult.available).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+        // Advisory lock 1001,1 coordinates with the Radarr webhook handler. Each variant's
+        // rows are cleared + rewritten independently (scoped by is4k) so a 4K fetch failure
+        // never empties the HD cache or vice versa.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
-          await tx.radarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedRows);
-          await tx.radarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableRows);
+          await tx.radarrWantedItem.deleteMany({ where: { is4k: false } });
+          if (wantedHd.length > 0) await batchCreateMany(tx.radarrWantedItem, wantedHd);
+          await tx.radarrAvailableItem.deleteMany({ where: { is4k: false } });
+          if (availableHd.length > 0) await batchCreateMany(tx.radarrAvailableItem, availableHd);
+          if (wanted4k && available4k) {
+            await tx.radarrWantedItem.deleteMany({ where: { is4k: true } });
+            if (wanted4k.length > 0) await batchCreateMany(tx.radarrWantedItem, wanted4k);
+            await tx.radarrAvailableItem.deleteMany({ where: { is4k: true } });
+            if (available4k.length > 0) await batchCreateMany(tx.radarrAvailableItem, available4k);
+          }
         }, { timeout: BATCH_TX_TIMEOUT });
-        radarrWanted = wantedRows.length;
+        radarrWanted = wantedHd.length + (wanted4k?.length ?? 0);
         radarrSyncSucceeded = true;
       }
     } catch (err) {
@@ -232,21 +255,33 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   let sonarrSyncSucceeded = false;
   if (sonarrEnabled) {
     try {
-      const sonarrResult = await getSonarrWantedTmdbIds();
+      const [sonarrResult, sonarr4kResult] = await Promise.all([
+        getSonarrWantedTmdbIds("hd"),
+        getSonarrWantedTmdbIds("4k"),
+      ]);
       if (sonarrResult === null) {
         console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
       } else {
-        const wantedRows    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId }));
-        const availableRows = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId }));
-        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler to prevent partial reads
+        const wantedHd    = Array.from(sonarrResult.wanted).map((tmdbId) => ({ tmdbId, is4k: false }));
+        const availableHd = Array.from(sonarrResult.available).map((tmdbId) => ({ tmdbId, is4k: false }));
+        const wanted4k    = sonarr4kResult ? Array.from(sonarr4kResult.wanted).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+        const available4k = sonarr4kResult ? Array.from(sonarr4kResult.available).map((tmdbId) => ({ tmdbId, is4k: true })) : null;
+        // Advisory lock 1001,2 coordinates with the Sonarr webhook handler; per-variant
+        // scoped clears so a 4K fetch failure never empties the HD cache or vice versa.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-          await tx.sonarrWantedItem.deleteMany();
-          if (wantedRows.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedRows);
-          await tx.sonarrAvailableItem.deleteMany();
-          if (availableRows.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableRows);
+          await tx.sonarrWantedItem.deleteMany({ where: { is4k: false } });
+          if (wantedHd.length > 0) await batchCreateMany(tx.sonarrWantedItem, wantedHd);
+          await tx.sonarrAvailableItem.deleteMany({ where: { is4k: false } });
+          if (availableHd.length > 0) await batchCreateMany(tx.sonarrAvailableItem, availableHd);
+          if (wanted4k && available4k) {
+            await tx.sonarrWantedItem.deleteMany({ where: { is4k: true } });
+            if (wanted4k.length > 0) await batchCreateMany(tx.sonarrWantedItem, wanted4k);
+            await tx.sonarrAvailableItem.deleteMany({ where: { is4k: true } });
+            if (available4k.length > 0) await batchCreateMany(tx.sonarrAvailableItem, available4k);
+          }
         }, { timeout: BATCH_TX_TIMEOUT });
-        sonarrWanted = wantedRows.length;
+        sonarrWanted = wantedHd.length + (wanted4k?.length ?? 0);
         sonarrSyncSucceeded = true;
       }
     } catch (err) {
@@ -270,12 +305,12 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       status: "APPROVED",
       OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
     },
-    select: { id: true, tmdbId: true, mediaType: true },
+    select: { id: true, tmdbId: true, mediaType: true, is4k: true },
   });
   const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
   const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
-  let knownRadarrSet = new Set<number>();
-  let knownSonarrSet = new Set<number>();
+  let knownRadarrSet = new Set<string>();
+  let knownSonarrSet = new Set<string>();
   if (repushMovieIds.length > 0 || repushTvIds.length > 0) {
     const [rAvail, rWant, sAvail, sWant] = await Promise.all([
       repushMovieIds.length > 0
@@ -291,22 +326,23 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: repushTvIds } } })
         : Promise.resolve([]),
     ]);
-    knownRadarrSet = new Set([...rAvail.map((r) => r.tmdbId), ...rWant.map((r) => r.tmdbId)]);
-    knownSonarrSet = new Set([...sAvail.map((r) => r.tmdbId), ...sWant.map((r) => r.tmdbId)]);
+    knownRadarrSet = new Set([...rAvail.map((r) => vkey(r.tmdbId, r.is4k)), ...rWant.map((r) => vkey(r.tmdbId, r.is4k))]);
+    knownSonarrSet = new Set([...sAvail.map((r) => vkey(r.tmdbId, r.is4k)), ...sWant.map((r) => vkey(r.tmdbId, r.is4k))]);
   }
   const toRepush = stillApproved.filter((r) =>
     r.mediaType === "MOVIE"
-      ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(r.tmdbId)
-      : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(r.tmdbId),
+      ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(vkey(r.tmdbId, r.is4k))
+      : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(vkey(r.tmdbId, r.is4k)),
   );
   const pushedAt = new Date();
   await runConcurrent(toRepush, async (req) => {
     try {
+      const variant = req.is4k ? "4k" : "hd";
       if (req.mediaType === "MOVIE") {
-        await addMovieToRadarr(req.tmdbId);
+        await addMovieToRadarr(req.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { lastArrPushAt: pushedAt } });
       } else {
-        const tvdbId = await addSeriesToSonarr(req.tmdbId);
+        const tvdbId = await addSeriesToSonarr(req.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { tvdbId, lastArrPushAt: pushedAt } });
       }
       repushed++;
@@ -321,8 +357,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
 
   const availableMovieTmdbIds = available.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const availableTvTmdbIds    = available.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
-  let inRadarrSet = new Set<number>();
-  let inSonarrSet = new Set<number>();
+  let inRadarrSet = new Set<string>();
+  let inSonarrSet = new Set<string>();
   if (availableMovieTmdbIds.length > 0 || availableTvTmdbIds.length > 0) {
     const [inRadarrAvail, inRadarrWanted, inSonarrAvail, inSonarrWanted] = await Promise.all([
       availableMovieTmdbIds.length > 0
@@ -338,8 +374,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: availableTvTmdbIds } } })
         : Promise.resolve([]),
     ]);
-    inRadarrSet = new Set([...inRadarrAvail.map((r) => r.tmdbId), ...inRadarrWanted.map((r) => r.tmdbId)]);
-    inSonarrSet = new Set([...inSonarrAvail.map((r) => r.tmdbId), ...inSonarrWanted.map((r) => r.tmdbId)]);
+    inRadarrSet = new Set([...inRadarrAvail.map((r) => vkey(r.tmdbId, r.is4k)), ...inRadarrWanted.map((r) => vkey(r.tmdbId, r.is4k))]);
+    inSonarrSet = new Set([...inSonarrAvail.map((r) => vkey(r.tmdbId, r.is4k)), ...inSonarrWanted.map((r) => vkey(r.tmdbId, r.is4k))]);
   }
 
   let plexMarked = 0;
@@ -482,8 +518,8 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
     if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
     const inArr = req.mediaType === "MOVIE"
-      ? inRadarrSet.has(req.tmdbId)
-      : inSonarrSet.has(req.tmdbId);
+      ? inRadarrSet.has(vkey(req.tmdbId, req.is4k))
+      : inSonarrSet.has(vkey(req.tmdbId, req.is4k));
     const inLibrary = req.mediaType === "MOVIE"
       ? plexMovieIds.has(req.tmdbId) || jfMovieIds.has(req.tmdbId)
       : plexTvIds.has(req.tmdbId)    || jfTvIds.has(req.tmdbId);

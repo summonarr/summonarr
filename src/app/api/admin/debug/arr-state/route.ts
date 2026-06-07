@@ -33,9 +33,10 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     voteAverage: 0,
   };
 
+  // Debug endpoint is HD-only for now (4K variant deferred — see Phase 3 notes).
   const wantedRow = type === "movie"
-    ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId } })
-    : await prisma.sonarrWantedItem.findUnique({ where: { tmdbId } });
+    ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } })
+    : await prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } });
 
   const mediaRequests = await prisma.mediaRequest.findMany({
     where: { tmdbId, mediaType: dbType },

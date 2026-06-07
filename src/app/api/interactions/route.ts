@@ -86,10 +86,10 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
       distinct: ["tmdbId", "mediaType"],
     }),
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 
@@ -382,10 +382,10 @@ async function handleCommand(interaction: any): Promise<void> {
       const approvedTvIds    = requests.filter(r => r.status === "APPROVED" && r.mediaType === "TV").map(r => r.tmdbId);
       const [radarrQueued, sonarrQueued] = await Promise.all([
         approvedMovieIds.length > 0
-          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds } }, select: { tmdbId: true } })
+          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds }, is4k: false }, select: { tmdbId: true } })
           : Promise.resolve([]),
         approvedTvIds.length > 0
-          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds } }, select: { tmdbId: true } })
+          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds }, is4k: false }, select: { tmdbId: true } })
           : Promise.resolve([]),
       ]);
       const radarrQueuedSet = new Set(radarrQueued.map(r => r.tmdbId));
