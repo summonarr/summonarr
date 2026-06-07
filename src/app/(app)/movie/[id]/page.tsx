@@ -19,6 +19,7 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
+import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 
 export default async function MovieDetailPage({
   params,
@@ -62,6 +63,8 @@ export default async function MovieDetailPage({
   const arrPending        = !!radarrWanted;
   const requested         = !!userRequest;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
+  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
 
   const [suggestions, collectionItems] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
@@ -221,6 +224,7 @@ export default async function MovieDetailPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
+                canRequestOnBehalf={canOnBehalf}
               />
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
@@ -270,6 +274,7 @@ export default async function MovieDetailPage({
           currentId={media.id}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
+          canRequest={canRequestMovies}
         />
       )}
 

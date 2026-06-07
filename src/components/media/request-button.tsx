@@ -22,6 +22,7 @@ type State =
   | "loading"
   | "requested"
   | "duplicate"
+  | "onbehalf"
   | "error";
 
 interface RequestButtonProps {
@@ -39,6 +40,10 @@ interface RequestButtonProps {
 
   // CSRF token generated server-side; the API rejects mutation requests that lack it
   requestToken?: string;
+
+  // When true, show a "Request for user…" affordance (REQUEST_ON_BEHALF holders).
+  // The on-behalf path posts to /api/requests/bulk, which re-checks the permission.
+  canRequestOnBehalf?: boolean;
 }
 
 const btnBase: React.CSSProperties = {
@@ -88,10 +93,15 @@ export function RequestButton({
   showPlex = true,
   showJellyfin = true,
   requestToken,
+  canRequestOnBehalf = false,
 }: RequestButtonProps) {
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
+  const [obUsers, setObUsers] = useState<{ id: string; name: string | null; email: string }[]>([]);
+  const [obUserId, setObUserId] = useState("");
+  const [obMsg, setObMsg] = useState("");
+  const [obSubmitting, setObSubmitting] = useState(false);
 
   async function submitRequest() {
     setState("loading");
@@ -121,6 +131,42 @@ export function RequestButton({
     } catch {
       setErrorMsg("Network error — please try again");
       setState("error");
+    }
+  }
+
+  function openOnBehalf() {
+    setObMsg("");
+    setState("onbehalf");
+    if (obUsers.length === 0) {
+      fetch("/api/requests/users")
+        .then((r) => (r.ok ? r.json() : { users: [] }))
+        .then((d: { users?: { id: string; name: string | null; email: string }[] }) =>
+          setObUsers(d.users ?? []),
+        )
+        .catch(() => {});
+    }
+  }
+
+  async function submitOnBehalf() {
+    if (!obUserId) return;
+    setObSubmitting(true);
+    setObMsg("");
+    try {
+      const res = await fetch("/api/requests/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [{ tmdbId, mediaType }], onBehalfOfUserId: obUserId }),
+      });
+      const data: { created?: number; error?: string } = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setObMsg(data.error ?? "Something went wrong");
+        return;
+      }
+      setObMsg(data.created ? "Requested for user ✓" : "Already requested or available for that user");
+    } catch {
+      setObMsg("Network error — please try again");
+    } finally {
+      setObSubmitting(false);
     }
   }
 
@@ -266,7 +312,65 @@ export function RequestButton({
             </div>
           )}
 
-          {state !== "note" && state !== "confirm" && (
+          {state === "onbehalf" && (
+            <div className="flex flex-col gap-2 w-full max-w-sm">
+              <select
+                value={obUserId}
+                onChange={(e) => setObUserId(e.target.value)}
+                aria-label="Select a user to request for"
+                className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                style={{
+                  padding: "8px 12px",
+                  fontSize: 13,
+                  color: "var(--ds-fg)",
+                  background: "var(--ds-bg-1)",
+                  border: "1px solid var(--ds-border)",
+                  borderRadius: 6,
+                }}
+              >
+                <option value="">Select a user…</option>
+                {obUsers.map((u) => (
+                  <option key={u.id} value={u.id}>
+                    {u.name ?? u.email}
+                  </option>
+                ))}
+              </select>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={submitOnBehalf}
+                  disabled={!obUserId || obSubmitting}
+                  style={{ ...primaryStyle, opacity: !obUserId || obSubmitting ? 0.7 : 1 }}
+                >
+                  {obSubmitting ? (
+                    <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
+                  ) : (
+                    <Plus style={{ width: 14, height: 14 }} />
+                  )}
+                  Request for user
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setState("idle");
+                    setObUserId("");
+                    setObMsg("");
+                  }}
+                  style={ghostStyle}
+                >
+                  <X style={{ width: 14, height: 14 }} />
+                  Cancel
+                </button>
+              </div>
+              {obMsg && (
+                <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+                  {obMsg}
+                </p>
+              )}
+            </div>
+          )}
+
+          {state !== "note" && state !== "confirm" && state !== "onbehalf" && (
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
@@ -290,15 +394,28 @@ export function RequestButton({
               </button>
 
               {(state === "idle" || state === "error") && (
-                <button
-                  type="button"
-                  onClick={() => setState("note")}
-                  title="Add a note to your request"
-                  style={secondaryStyle}
-                >
-                  <MessageSquare style={{ width: 14, height: 14 }} />
-                  Add note
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setState("note")}
+                    title="Add a note to your request"
+                    style={secondaryStyle}
+                  >
+                    <MessageSquare style={{ width: 14, height: 14 }} />
+                    Add note
+                  </button>
+                  {canRequestOnBehalf && (
+                    <button
+                      type="button"
+                      onClick={openOnBehalf}
+                      title="Request for another user"
+                      style={ghostStyle}
+                    >
+                      <Plus style={{ width: 14, height: 14 }} />
+                      Request for user…
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}

@@ -10,39 +10,9 @@ import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { verifyTmdbMedia } from "@/lib/tmdb";
 import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
 import { resolveUserQuota, type ResolvedQuota } from "@/lib/quota";
-
-async function resolveMediaMeta(
-  tmdbId: number,
-  mediaType: "MOVIE" | "TV",
-): Promise<{ title: string; posterPath: string | null; releaseYear: string } | null> {
-  // Prefer the pre-warmed TmdbMediaCore table, fall back to TmdbCache, then live TMDB API
-  const core = await prisma.tmdbMediaCore.findUnique({
-    where: { tmdbId_mediaType: { tmdbId, mediaType } },
-    select: { title: true, posterPath: true, releaseYear: true },
-  }).catch(() => null);
-  if (core?.title) {
-    return { title: core.title, posterPath: core.posterPath ?? null, releaseYear: core.releaseYear ?? "" };
-  }
-
-  const cacheKey = `${mediaType === "MOVIE" ? "movie" : "tv"}:${tmdbId}:details`;
-  const cacheRow = await prisma.tmdbCache.findUnique({
-    where: { key: cacheKey },
-    select: { data: true, expiresAt: true },
-  }).catch(() => null);
-  if (cacheRow && new Date() < cacheRow.expiresAt) {
-    try {
-      const parsed = JSON.parse(cacheRow.data) as { title?: string; posterPath?: string | null; releaseYear?: string };
-      if (parsed.title) {
-        return { title: parsed.title, posterPath: parsed.posterPath ?? null, releaseYear: parsed.releaseYear ?? "" };
-      }
-    } catch { }
-  }
-
-  return verifyTmdbMedia(tmdbId, mediaType === "MOVIE" ? "movie" : "tv");
-}
+import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 

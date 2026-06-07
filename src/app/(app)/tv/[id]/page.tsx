@@ -19,6 +19,7 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 export default async function TVDetailPage({
   params,
@@ -87,6 +88,7 @@ export default async function TVDetailPage({
   const requested         = !!userRequest;
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
 
   const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
 
@@ -257,6 +259,7 @@ export default async function TVDetailPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
+                canRequestOnBehalf={canOnBehalf}
               />
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
