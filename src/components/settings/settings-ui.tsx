@@ -213,6 +213,8 @@ interface ArrFormProps {
   initialApiKey: string;
   initialRootFolder: string;
   initialQualityProfileId: string;
+  // "4k" targets the optional second instance (radarr4k*/sonarr4k* keys).
+  variant?: "hd" | "4k";
 }
 
 interface ArrOptions {
@@ -226,13 +228,16 @@ export function ArrForm({
   initialApiKey,
   initialRootFolder,
   initialQualityProfileId,
+  variant = "hd",
 }: ArrFormProps) {
-  const label      = service === "radarr" ? "Radarr" : "Sonarr";
-  const urlKey     = service === "radarr" ? "radarrUrl"              : "sonarrUrl";
-  const keyKey     = service === "radarr" ? "radarrApiKey"           : "sonarrApiKey";
-  const folderKey  = service === "radarr" ? "radarrRootFolder"       : "sonarrRootFolder";
-  const profileKey = service === "radarr" ? "radarrQualityProfileId" : "sonarrQualityProfileId";
-  const versionKey = service === "radarr" ? "radarrVersion"          : "sonarrVersion";
+  const v          = variant === "4k" ? "4k" : "";
+  const label      = `${service === "radarr" ? "Radarr" : "Sonarr"}${variant === "4k" ? " 4K" : ""}`;
+  const idPrefix   = `${service}${v}`;
+  const urlKey     = `${service}${v}Url`;
+  const keyKey     = `${service}${v}ApiKey`;
+  const folderKey  = `${service}${v}RootFolder`;
+  const profileKey = `${service}${v}QualityProfileId`;
+  const versionKey = `${service}${v}Version`;
 
   const [url,    setUrl]    = useState(initialUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
@@ -248,7 +253,7 @@ export function ArrForm({
   const fetchOptions = useCallback(async () => {
     setOptionsStatus("loading");
     try {
-      const res = await fetch(`/api/settings/arr-options?service=${service}`);
+      const res = await fetch(`/api/settings/arr-options?service=${service}${variant === "4k" ? "&variant=4k" : ""}`);
       if (!res.ok) throw new Error();
       const data: ArrOptions = await res.json();
       setOptions(data);
@@ -256,7 +261,7 @@ export function ArrForm({
     } catch {
       setOptionsStatus("error");
     }
-  }, [service]);
+  }, [service, variant]);
 
   useEffect(() => {
     if (initialUrl && initialApiKey) {
@@ -306,9 +311,9 @@ export function ArrForm({
       <form onSubmit={handleSave} className="space-y-4">
         <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
           <div className="space-y-1.5">
-            <Label htmlFor={`${service}-url`}>{label} URL</Label>
+            <Label htmlFor={`${idPrefix}-url`}>{label} URL</Label>
             <Input
-              id={`${service}-url`}
+              id={`${idPrefix}-url`}
               type="url"
               value={url}
               onChange={(e) => { setUrl(e.target.value); setStatus("idle"); }}
@@ -317,9 +322,9 @@ export function ArrForm({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${service}-key`}>API Key</Label>
+            <Label htmlFor={`${idPrefix}-key`}>API Key</Label>
             <Input
-              id={`${service}-key`}
+              id={`${idPrefix}-key`}
               type="password"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); }}
@@ -361,9 +366,9 @@ export function ArrForm({
             <form onSubmit={handleSaveOptions} className="space-y-4">
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-folder`}>Root Folder</Label>
+                  <Label htmlFor={`${idPrefix}-folder`}>Root Folder</Label>
                   <select
-                    id={`${service}-folder`}
+                    id={`${idPrefix}-folder`}
                     value={rootFolder}
                     onChange={(e) => setRootFolder(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -375,9 +380,9 @@ export function ArrForm({
                   </select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-profile`}>Quality Profile</Label>
+                  <Label htmlFor={`${idPrefix}-profile`}>Quality Profile</Label>
                   <select
-                    id={`${service}-profile`}
+                    id={`${idPrefix}-profile`}
                     value={qualityProfileId}
                     onChange={(e) => setQualityProfileId(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -405,7 +410,7 @@ export function ArrForm({
         </div>
       )}
 
-      {optionsStatus === "loaded" && (
+      {optionsStatus === "loaded" && variant !== "4k" && (
         <ArrImportSection service={service} />
       )}
     </div>
@@ -543,10 +548,14 @@ export function WebhookSecretForm({
   initialSecret,
   initialSonarrSecret,
   initialRadarrSecret,
+  initialSonarr4kSecret,
+  initialRadarr4kSecret,
 }: {
   initialSecret: string;
   initialSonarrSecret?: string;
   initialRadarrSecret?: string;
+  initialSonarr4kSecret?: string;
+  initialRadarr4kSecret?: string;
 }) {
   return (
     <div className="space-y-6">
@@ -571,6 +580,20 @@ export function WebhookSecretForm({
             Used by the Radarr webhook endpoint. Falls back to the legacy secret below if blank.
           </>
         }
+      />
+      <WebhookSecretField
+        id="webhook-secret-radarr4k"
+        label="Radarr 4K webhook secret"
+        payloadKey="radarr4kWebhookSecret"
+        initialSecret={initialRadarr4kSecret ?? ""}
+        helpText={<>Used by the 4K Radarr instance&apos;s webhook. Set only if you run a separate 4K Radarr.</>}
+      />
+      <WebhookSecretField
+        id="webhook-secret-sonarr4k"
+        label="Sonarr 4K webhook secret"
+        payloadKey="sonarr4kWebhookSecret"
+        initialSecret={initialSonarr4kSecret ?? ""}
+        helpText={<>Used by the 4K Sonarr instance&apos;s webhook. Set only if you run a separate 4K Sonarr.</>}
       />
       <div className="border-t border-zinc-800 pt-5">
         <WebhookSecretField

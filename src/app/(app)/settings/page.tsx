@@ -81,6 +81,8 @@ const ALL_KEYS = [
   "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId",
   "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
   "webhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
+  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kWebhookSecret",
+  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kWebhookSecret",
   "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
@@ -596,6 +598,26 @@ export default async function SettingsPage({
               />
             </div>
 
+            <div id="radarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <div className="flex items-center gap-3 mb-0.5">
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>(optional)</span></h2>
+                  <StatusBadge connected={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)} />
+                </div>
+                <p className="text-sm text-zinc-500">
+                  A separate Radarr instance for 4K movies. Users with the “Request 4K” permission get a 4K request option.
+                </p>
+              </div>
+              <ArrForm
+                service="radarr"
+                variant="4k"
+                initialUrl={cfg.radarr4kUrl ?? ""}
+                initialApiKey={cfg.radarr4kApiKey ? "••••••••" : ""}
+                initialRootFolder={cfg.radarr4kRootFolder ?? ""}
+                initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
+              />
+            </div>
+
             <div id="sonarr" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
@@ -612,6 +634,26 @@ export default async function SettingsPage({
                 initialApiKey={cfg.sonarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
+              />
+            </div>
+
+            <div id="sonarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <div className="flex items-center gap-3 mb-0.5">
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>(optional)</span></h2>
+                  <StatusBadge connected={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)} />
+                </div>
+                <p className="text-sm text-zinc-500">
+                  A separate Sonarr instance for 4K TV. Users with the “Request 4K” permission get a 4K request option.
+                </p>
+              </div>
+              <ArrForm
+                service="sonarr"
+                variant="4k"
+                initialUrl={cfg.sonarr4kUrl ?? ""}
+                initialApiKey={cfg.sonarr4kApiKey ? "••••••••" : ""}
+                initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
+                initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
               />
             </div>
           </>
@@ -727,6 +769,8 @@ export default async function SettingsPage({
                   initialSecret={cfg.webhookSecret ? "••••••••" : ""}
                   initialSonarrSecret={cfg.sonarrWebhookSecret ? "••••••••" : ""}
                   initialRadarrSecret={cfg.radarrWebhookSecret ? "••••••••" : ""}
+                  initialSonarr4kSecret={cfg.sonarr4kWebhookSecret ? "••••••••" : ""}
+                  initialRadarr4kSecret={cfg.radarr4kWebhookSecret ? "••••••••" : ""}
                 />
                 <div className="border-t border-zinc-800 pt-5">
                   <WebhookUrls baseUrl={baseUrl} secret={cfg.webhookSecret ?? ""} />
