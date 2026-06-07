@@ -94,26 +94,26 @@ async function resolveCurated(item: StarterPackItem) {
   if (match.slug) candidates.push(match.slug);
 
   let spec = null as Awaited<
-    ReturnType<typeof prisma.trashSpec.findFirst<{ include: { application: true } }>>
+    ReturnType<typeof prisma.trashSpec.findFirst<{ include: { applications: true } }>>
   > | null;
   for (const trashId of candidates) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, trashId },
-      include: { application: true },
+      include: { applications: { where: { is4k: false } } },
     });
     if (spec) break;
   }
   if (!spec && match.name) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { equals: match.name, mode: "insensitive" } },
-      include: { application: true },
+      include: { applications: { where: { is4k: false } } },
     });
   }
   if (!spec && match.name) {
     // Fall back to partial name match so minor TRaSH upstream renames don't break the starter pack display
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { contains: match.name, mode: "insensitive" } },
-      include: { application: true },
+      include: { applications: { where: { is4k: false } } },
     });
   }
   return spec;
@@ -133,11 +133,11 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
     return {
       item,
       spec: spec ? { id: spec.id, name: spec.name, trashId: spec.trashId } : null,
-      application: spec?.application
+      application: spec?.applications[0]
         ? {
-            enabled: spec.application.enabled,
-            appliedAt: spec.application.appliedAt?.toISOString() ?? null,
-            lastError: spec.application.lastError,
+            enabled: spec.applications[0].enabled,
+            appliedAt: spec.applications[0].appliedAt?.toISOString() ?? null,
+            lastError: spec.applications[0].lastError,
           }
         : null,
     };
@@ -148,7 +148,7 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
       kind: { in: ["QUALITY_PROFILE", "NAMING", "QUALITY_SIZE"] },
       ...(curatedSpecIds.size > 0 ? { id: { notIn: [...curatedSpecIds] } } : {}),
     },
-    include: { application: true },
+    include: { applications: { where: { is4k: false } } },
     orderBy: [{ service: "asc" }, { kind: "asc" }, { name: "asc" }],
   });
 
@@ -162,11 +162,11 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
         recommended: false,
       },
       spec: { id: spec.id, name: spec.name, trashId: spec.trashId },
-      application: spec.application
+      application: spec.applications[0]
         ? {
-            enabled: spec.application.enabled,
-            appliedAt: spec.application.appliedAt?.toISOString() ?? null,
-            lastError: spec.application.lastError,
+            enabled: spec.applications[0].enabled,
+            appliedAt: spec.applications[0].appliedAt?.toISOString() ?? null,
+            lastError: spec.applications[0].lastError,
           }
         : null,
     });

@@ -12,6 +12,10 @@ const LAYOUT_KEYS = [
   "radarrApiKey",
   "sonarrUrl",
   "sonarrApiKey",
+  "radarr4kUrl",
+  "radarr4kApiKey",
+  "sonarr4kUrl",
+  "sonarr4kApiKey",
   "trashLastRefreshTruncatedAt",
 ] as const;
 
@@ -28,6 +32,8 @@ export default async function TrashGuidesLayout({ children }: { children: React.
 
   const radarrConfigured = !!(map.radarrUrl && map.radarrApiKey);
   const sonarrConfigured = !!(map.sonarrUrl && map.sonarrApiKey);
+  const radarr4kConfigured = !!(map.radarr4kUrl && map.radarr4kApiKey);
+  const sonarr4kConfigured = !!(map.sonarr4kUrl && map.sonarr4kApiKey);
 
   // Compute truncation staleness server-side — guardrail 16 forbids Date.now() in client render path.
   // The banner only fires if the last truncation was within the last 7 days; older markers are stale signal.
@@ -65,6 +71,8 @@ export default async function TrashGuidesLayout({ children }: { children: React.
       <TrashGuidesNav
         radarrConfigured={radarrConfigured}
         sonarrConfigured={sonarrConfigured}
+        radarr4kConfigured={radarr4kConfigured}
+        sonarr4kConfigured={sonarr4kConfigured}
       />
       {recentTruncation && <TruncationBanner at={recentTruncation.at} />}
       {children}

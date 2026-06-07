@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
+import type { ArrVariant } from "@/lib/arr";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 
 function busyResponse() {
@@ -12,7 +13,7 @@ function busyResponse() {
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  let body: { specIds?: unknown };
+  let body: { specIds?: unknown; variant?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -23,6 +24,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "specIds must be string[]" }, { status: 400 });
   }
   const ids = body.specIds as string[];
+  // Anything other than the literal "4k" routes to the HD instance — fail-safe default.
+  const variant: ArrVariant = body.variant === "4k" ? "4k" : "hd";
   if (ids.length === 0) {
     return NextResponse.json({ ok: true, results: [] });
   }
@@ -34,7 +37,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     TRASH_SYNC_LOCK_ID,
     async () => {
       const startTime = Date.now();
-      const results = await applySpecs(ids);
+      const results = await applySpecs(ids, variant);
       const durationMs = Date.now() - startTime;
 
       const failures = results.filter((r) => !r.ok);
@@ -45,6 +48,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         action: "SETTINGS_CHANGE",
         target: "trash:apply",
         details: {
+          variant,
           count: results.length,
           failures: failures.length,
           ...(recreated > 0 ? { recreated } : {}),

@@ -855,7 +855,7 @@ model TrashSpec {
   fetchedAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  application TrashApplication?
+  applications TrashApplication[]
 
   @@unique([service, kind, trashId])
   @@index([service, kind])
@@ -867,8 +867,12 @@ model TrashSpec {
 // syncs without depending on name lookups.
 model TrashApplication {
   id          String    @id @default(cuid(2))
-  trashSpecId String    @unique
+  trashSpecId String
   trashSpec   TrashSpec @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
+  // false = HD instance (radarrUrl/sonarrUrl); true = 4K instance (radarr4kUrl/sonarr4kUrl).
+  // A spec can be managed independently on each instance — each variant keeps its own remoteId,
+  // appliedAt, and error state. The catalog (TrashSpec) is shared across variants.
+  is4k        Boolean   @default(false)
   enabled     Boolean   @default(true)
   remoteId    Int?
   appliedAt   DateTime?
@@ -880,6 +884,8 @@ model TrashApplication {
   errorCount  Int       @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  @@unique([trashSpecId, is4k])
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
