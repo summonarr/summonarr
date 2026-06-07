@@ -16,6 +16,10 @@ export async function triggerFullSync(): Promise<void> {
 
   const port = process.env.PORT ?? "3000";
   const url = `http://127.0.0.1:${port}/api/sync`;
+  // Assumes the documented single long-lived process deployment model
+  // (Docker container listening on PORT, external crons hitting this instance).
+  // In that model the loopback hits the correct process; multi-instance would
+  // only affect the local container (same as the original inline code this replaced).
 
   // Cap the wait so a slow or stuck orchestrator run does not hold the
   // debounced Plex timeline handler indefinitely.
@@ -24,13 +28,21 @@ export async function triggerFullSync(): Promise<void> {
 
   try {
     // We await the request so errors are visible, but we do not care about
-    // the response body. The handler itself performs the work (or returns
-    // 200 { skipped: true } if the lock is held).
-    await fetch(url, {
+    // the response body on success. The handler itself performs the work
+    // (or returns 200 { skipped: true } if the lock is held).
+    const res = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${secret}` },
       signal: controller.signal,
     });
+    if (!res.ok) {
+      // Best-effort trigger: surface the HTTP error for operators but do not
+      // throw or block the timeline handler.
+      const body = await res.text().catch(() => '');
+      console.warn(
+        `[internal-trigger] full sync trigger got non-2xx ${res.status} from /api/sync: ${body.slice(0, 200)}`
+      );
+    }
   } catch (err) {
     // Do not throw — the caller (Plex timeline path) already treats this as
     // best-effort and only logs at warn level. Keep the same contract.

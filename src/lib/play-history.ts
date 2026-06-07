@@ -1413,6 +1413,11 @@ export type PlayHistoryStatsResult = {
 export async function getPlayHistoryStats(
   filters: PlayHistoryStatsFilters = {},
 ): Promise<PlayHistoryStatsResult> {
+  // NOTE: The many $queryRawUnsafe calls in this file (and the route handler)
+  // for activity stats/heatmaps use either fully static SQL + bound $1 params,
+  // or dynamic fragments built only from whitelisted enum values + parseInt +
+  // bound parameters. No user-controlled strings reach SQL structure or identifiers.
+  // Keep this discipline on any future edits. See also the route's groupedQuery.
   const cacheKey = getCacheKey("stats", filters as Record<string, unknown>);
   const cached = getCached<PlayHistoryStatsResult>(cacheKey);
   if (cached) return cached;

@@ -503,7 +503,9 @@ export async function processBackupImport(
 
   // INSERT INTO "public"."<Table>" (...) ...  — pull out the table name so we
   // can attribute conflict-skipped rows for the response summary.
-  const INSERT_TABLE_RE = /^INSERT\s+INTO\s+"public"\."([A-Za-z]+)"/i;
+  // Built from the same BACKUP_TABLES source of truth as the allowlist and TRUNCATE
+  // for future-proofing (no drift if tables are added/removed).
+  const INSERT_TABLE_RE = new RegExp(`^INSERT\\s+INTO\\s+"public"\\.(?:${tableAlt})`, 'i');
 
   let executed = 0;
   const conflictSkippedByTable: Record<string, number> = {};
