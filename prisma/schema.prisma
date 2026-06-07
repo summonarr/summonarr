@@ -27,8 +27,30 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   discordId     String?   @unique
+  // Legacy authorization booleans — migrated into permission bits
+  // (AUTO_APPROVE / QUOTA_UNLIMITED) by scripts/migrate-role-permissions.mjs.
+  // Kept (deprecated) so the migration can read them; dropped in a follow-up
+  // once every environment has migrated. New code reads `permissions` instead.
   autoApprove   Boolean   @default(false)
   quotaExempt   Boolean   @default(false)
+
+  // ─── Authorization (Overseerr-style) ─────────────────────────────────────
+  // `permissions` is the AUTHORITATIVE capability bitmask; `role` above is now a
+  // coarse PRESET that seeds it (see PRESETS in src/lib/permissions.ts) and a
+  // label still used for admin-area gating in proxy.ts. Stored as BIGINT because
+  // a JS Int bitmask overflows at bit 31 (bitwise ops are signed-32-bit) and the
+  // 4K block crosses 30 bits. Carried in the session JWT as a decimal string
+  // (BigInt is not JSON-serializable). 0 = unseeded → callers fall back to the
+  // role preset via effectivePermissions(), so an upgrade can run `prisma db
+  // push` before the migration without locking anyone out.
+  permissions   BigInt    @default(0)
+  // Per-user, per-media-type request-quota overrides. null ⇒ use the global
+  // quotaLimit/quotaPeriod Settings. QUOTA_UNLIMITED (or ADMIN) bypasses both.
+  movieQuotaLimit Int?
+  movieQuotaDays  Int?
+  tvQuotaLimit    Int?
+  tvQuotaDays     Int?
+
   // For local/OIDC users: which media server's availability badges to show ("plex" | "jellyfin" | null)
   // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
   mediaServer   String?
@@ -549,6 +571,7 @@ enum AuditAction {
   REQUEST_DECLINE
   REQUEST_DELETE
   USER_ROLE_CHANGE
+  USER_PERMISSIONS_CHANGE
   USER_DELETE
   SETTINGS_CHANGE
   LIBRARY_SYNC

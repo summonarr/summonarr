@@ -11,6 +11,8 @@ import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { verifyTmdbMedia } from "@/lib/tmdb";
+import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
+import { resolveUserQuota, type ResolvedQuota } from "@/lib/quota";
 
 async function resolveMediaMeta(
   tmdbId: number,
@@ -50,12 +52,12 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const page = Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
 
-  const where =
-    session.user.role === "ADMIN"
-      ? {}
-      : { requestedBy: session.user.id };
+  // MANAGE_REQUESTS sees every request (admins included via the ADMIN superbit);
+  // everyone else sees only their own.
+  const canManage = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
+  const where = canManage ? {} : { requestedBy: session.user.id };
 
-  const isAdmin = session.user.role === "ADMIN";
+  const isAdmin = canManage;
 
   const [requests, total] = await Promise.all([
     isAdmin
@@ -94,7 +96,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }),
     prisma.user.findUnique({
       where: { id: session.user.id },
-      select: { discordId: true, quotaExempt: true, autoApprove: true },
+      select: {
+        discordId: true,
+        movieQuotaLimit: true,
+        movieQuotaDays: true,
+        tvQuotaLimit: true,
+        tvQuotaDays: true,
+      },
     }),
   ]);
   const settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
@@ -108,34 +116,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "You must link your Discord account before making requests" }, { status: 403 });
   }
 
-  const quotaLimit = parseInt(settings.quotaLimit ?? "0", 10);
-  const quotaApplies = quotaLimit > 0 && session.user.role !== "ADMIN" && !userRecord?.quotaExempt;
-  let quotaPeriod: string | undefined;
-  let quotaSince: Date | undefined;
-  if (quotaApplies) {
-    const period = settings.quotaPeriod ?? "week";
-    quotaPeriod = period;
-    const now = new Date();
-    if (period === "day") {
-      quotaSince = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    } else if (period === "month") {
-      quotaSince = new Date(now.getFullYear(), now.getMonth(), 1);
-    } else {
-      // ISO week: Monday=0, so adjust JS Sunday (0) to position 6
-      const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
-      quotaSince = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day);
-    }
-
-    const preCount = await prisma.mediaRequest.count({
-      where: { requestedBy: session.user.id, createdAt: { gte: quotaSince }, status: { notIn: ["DECLINED"] } },
-    });
-    if (preCount >= quotaLimit) {
-      return NextResponse.json(
-        { error: `You have reached your request quota of ${quotaLimit} per ${period}` },
-        { status: 429 }
-      );
-    }
-  }
+  // Capability + per-media-type quota are evaluated below, once mediaType is
+  // known (see canRequest / resolveUserQuota after body validation).
 
   let body: {
     tmdbId?: number;
@@ -168,6 +150,44 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
   }
 
+  // Capability gate — the permission bitmask is authoritative (admins pass via
+  // the ADMIN superbit baked into session.user.permissions).
+  if (!canRequest(session.user.permissions, mediaType, false)) {
+    return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
+  }
+
+  // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
+  // the per-user override → global Settings window and pre-check before the
+  // (more expensive) TMDB verification below. Re-checked inside the tx.
+  const quotaApplies = !hasPermission(session.user.permissions, Permission.QUOTA_UNLIMITED);
+  let resolvedQuota: ResolvedQuota | null = null;
+  let enforceQuota = false;
+  if (quotaApplies) {
+    resolvedQuota = resolveUserQuota(
+      mediaType,
+      {
+        movieQuotaLimit: userRecord?.movieQuotaLimit ?? null,
+        movieQuotaDays: userRecord?.movieQuotaDays ?? null,
+        tvQuotaLimit: userRecord?.tvQuotaLimit ?? null,
+        tvQuotaDays: userRecord?.tvQuotaDays ?? null,
+      },
+      parseInt(settings.quotaLimit ?? "0", 10),
+      settings.quotaPeriod ?? "week",
+    );
+    enforceQuota = resolvedQuota.limit > 0;
+    if (enforceQuota) {
+      const preCount = await prisma.mediaRequest.count({
+        where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
+      });
+      if (preCount >= resolvedQuota.limit) {
+        return NextResponse.json(
+          { error: `You have reached your request quota of ${resolvedQuota.limit} per ${resolvedQuota.windowLabel}` },
+          { status: 429 },
+        );
+      }
+    }
+  }
+
   if (note !== undefined && (typeof note !== "string" || note.length > 500)) {
     return NextResponse.json({ error: "note must be a string under 500 characters" }, { status: 400 });
   }
@@ -194,7 +214,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Already requested" }, { status: 409 });
   }
 
-  const isAutoApprove = session.user.role === "ADMIN" || !!userRecord?.autoApprove;
+  const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, false);
 
   const [plexItem, arrAvailable] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
@@ -217,11 +237,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     await prisma.$transaction(async (tx) => {
 
       // Re-check quota inside the transaction to prevent races on concurrent requests
-      if (quotaApplies && quotaSince && quotaPeriod) {
+      if (enforceQuota && resolvedQuota) {
         const count = await tx.mediaRequest.count({
-          where: { requestedBy: session.user.id, createdAt: { gte: quotaSince }, status: { notIn: ["DECLINED"] } },
+          where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
         });
-        if (count >= quotaLimit) {
+        if (count >= resolvedQuota.limit) {
           throw new Error("QUOTA_EXCEEDED");
         }
       }
@@ -246,7 +266,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   } catch (err) {
     if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
       return NextResponse.json(
-        { error: `You have reached your request quota of ${quotaLimit} per ${quotaPeriod}` },
+        { error: `You have reached your request quota of ${resolvedQuota?.limit ?? 0} per ${resolvedQuota?.windowLabel ?? "period"}` },
         { status: 429 }
       );
     }

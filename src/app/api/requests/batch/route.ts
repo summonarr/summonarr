@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
@@ -12,7 +13,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
-export const PATCH = withAdmin(async (req, _ctx, session) => {
+export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
   }

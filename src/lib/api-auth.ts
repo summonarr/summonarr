@@ -16,6 +16,12 @@ import {
   extractUaFingerprint,
   serializeFingerprint,
 } from "@/lib/ua-fingerprint";
+import {
+  parsePermissions,
+  effectivePermissions,
+  hasPermission,
+  type PermissionValue,
+} from "@/lib/permissions";
 
 // The session passed to authenticated handlers. Shaped to match what
 // next-auth's Session was — `user.{id,role,provider,mediaServer}`,
@@ -25,6 +31,9 @@ export interface SummonarrSession {
   user: {
     id: string;
     role: string;
+    // Effective capability bitmask (ADMIN role → superbit; unseeded → role
+    // preset). Use hasPermission()/canRequest() from @/lib/permissions to check.
+    permissions: bigint;
     email?: string | null;
     name?: string | null;
     provider?: string;
@@ -46,6 +55,7 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
     user: {
       id: claims.id,
       role: claims.role,
+      permissions: effectivePermissions(claims.role, parsePermissions(claims.permissions)),
       email: claims.email ?? null,
       name: claims.name ?? null,
       provider: claims.provider,
@@ -192,3 +202,32 @@ export const withAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
 /** `withAuth` pinned to ISSUE_ADMIN (accepts ADMIN or ISSUE_ADMIN). */
 export const withIssueAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
   withAuth(handler, { role: "ISSUE_ADMIN" });
+
+/**
+ * `withAuth` plus a capability check against the user's permission bitmask
+ * (Overseerr-style). `session.user.permissions` is already the *effective* mask
+ * — ADMIN role resolves to the superbit and unseeded rows fall back to the role
+ * preset — so admins always pass and nobody is locked out mid-migration.
+ * Returns 403 when the required bit(s) aren't held. Curried so it composes like
+ * the role wrappers:
+ *
+ *   export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(
+ *     async (req, ctx, session) => { ... },
+ *   );
+ *
+ * `mode` "or" (default): any required bit satisfies; "and": all required.
+ */
+export function withPermission(
+  required: PermissionValue | PermissionValue[],
+  mode: "and" | "or" = "or",
+) {
+  // Ctx is generic on the RETURNED function so it's inferred from the handler
+  // (dynamic routes pass `{ params: Promise<{...}> }`).
+  return <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
+    withAuth<Ctx>(async (req, ctx, session) => {
+      if (!hasPermission(session.user.permissions, required, mode)) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
+      return handler(req, ctx, session);
+    });
+}

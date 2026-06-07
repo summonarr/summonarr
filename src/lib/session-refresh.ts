@@ -84,6 +84,7 @@ export async function verifyAndRefreshSession(
       where: { id: claims.id },
       select: {
         role: true,
+        permissions: true,
         mediaServer: true,
         sessionsRevokedAt: true,
         passwordChangedAt: true,
@@ -146,12 +147,21 @@ export async function verifyAndRefreshSession(
     }
   }
 
+  const dbPermsStr = (dbUser.permissions ?? 0n).toString();
+  const claimPermsStr =
+    typeof claims.permissions === "string" ? claims.permissions : "0";
+
   let workingClaims: SessionClaims & { dbCheckedAt?: number } = {
     ...claims,
+    // Always carry the current DB permissions (raw decimal) into the re-signed
+    // token. effectivePermissions() is applied later when building the session
+    // for handlers (claimsToSession / auth()), never to the stored value.
+    permissions: dbPermsStr,
     dbCheckedAt: now,
   };
 
-  // Role change → rotate sessionId so a leaked pre-change token cannot be replayed.
+  // Privilege change (role OR permissions) → rotate sessionId so a leaked
+  // pre-change token cannot be replayed.
   // ALSO bump sessionsRevokedAt so the old JWT's iat now falls below the cutoff and
   // refreshToken() on OTHER replicas rejects it within their own dbCheckedAt window.
   // Without this bump, the rotation only protects requests that go through THIS
@@ -164,7 +174,9 @@ export async function verifyAndRefreshSession(
   // freshly-minted token doesn't fail its own cutoff check when rotation
   // happens in the same wall-clock second as the original sign-in.
   let rotationCutoffSec: number | null = null;
-  if (dbUser.role !== claims.role) {
+  const privilegeChanged =
+    dbUser.role !== claims.role || dbPermsStr !== claimPermsStr;
+  if (privilegeChanged) {
     const newSessionId = randomUUID();
     const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
     const cutoffSec = oldIatSec + 1;
@@ -241,6 +253,7 @@ export async function verifyAndRefreshSession(
     {
       id: workingClaims.id,
       role: workingClaims.role,
+      permissions: workingClaims.permissions,
       email: workingClaims.email ?? null,
       name: workingClaims.name ?? null,
       provider: workingClaims.provider,

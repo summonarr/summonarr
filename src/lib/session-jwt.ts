@@ -11,6 +11,10 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 export interface SessionClaims extends JWTPayload {
   id: string;
   role: string;
+  // Authoritative capability bitmask, decimal-encoded (BigInt isn't JSON-
+  // serializable). Optional so older tokens still verify; absent ⇒ callers fall
+  // back to the role preset via effectivePermissions(). See src/lib/permissions.ts.
+  permissions?: string;
   email?: string | null;
   name?: string | null;
   provider?: string;

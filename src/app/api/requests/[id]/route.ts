@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
 import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
@@ -16,7 +17,7 @@ import { scheduleDelayed } from "@/lib/delayed-jobs";
 const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
-export const PATCH = withAdmin(async (
+export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
   session
@@ -303,7 +304,7 @@ export const PATCH = withAdmin(async (
   return NextResponse.json(updated);
 });
 
-export const DELETE = withAdmin(async (
+export const DELETE = withPermission(Permission.MANAGE_REQUESTS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
   session

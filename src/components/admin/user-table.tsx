@@ -10,8 +10,6 @@ import {
   ShieldAlert,
   ShieldOff,
   Zap,
-  ZapOff,
-  Infinity as InfinityIcon,
   Trash2,
   Loader2,
   Bell,
@@ -27,6 +25,7 @@ import {
   Clock,
   AlertTriangle,
 } from "@/components/icons";
+import { Permission, PRESETS, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/permissions";
 
 interface User {
   id: string;
@@ -36,8 +35,11 @@ interface User {
   createdAt: string;
   source: "local" | "plex" | "jellyfin";
   discordId: string | null;
-  autoApprove: boolean;
-  quotaExempt: boolean;
+  permissions: string;
+  movieQuotaLimit: number | null;
+  movieQuotaDays: number | null;
+  tvQuotaLimit: number | null;
+  tvQuotaDays: number | null;
   mediaServer: "plex" | "jellyfin" | null;
   notifyOnApproved: boolean;
   notifyOnAvailable: boolean;
@@ -230,6 +232,282 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
           </p>
           <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
         </div>
+
+        {saving && (
+          <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
+            <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; label: string }[] }[] = [
+  {
+    title: "Request",
+    bits: [
+      { key: "REQUEST", label: "Request (all media)" },
+      { key: "REQUEST_MOVIE", label: "Request movies" },
+      { key: "REQUEST_TV", label: "Request TV" },
+    ],
+  },
+  {
+    title: "Auto-approve",
+    bits: [
+      { key: "AUTO_APPROVE", label: "Auto-approve (all)" },
+      { key: "AUTO_APPROVE_MOVIE", label: "Auto-approve movies" },
+      { key: "AUTO_APPROVE_TV", label: "Auto-approve TV" },
+    ],
+  },
+  {
+    title: "Manage",
+    bits: [
+      { key: "MANAGE_REQUESTS", label: "Manage requests" },
+      { key: "MANAGE_USERS", label: "Manage users" },
+      { key: "MANAGE_ISSUES", label: "Manage issues" },
+    ],
+  },
+  {
+    title: "Other",
+    bits: [
+      { key: "REQUEST_ON_BEHALF", label: "Request on behalf of others" },
+      { key: "QUOTA_UNLIMITED", label: "Exempt from request quotas" },
+    ],
+  },
+];
+
+// 4K group — rendered only when a configured 4K instance exists (Phase 3 passes
+// show4k). The bits are defined now so the editor is ready.
+const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission; label: string }[] } = {
+  title: "4K",
+  bits: [
+    { key: "REQUEST_4K", label: "Request 4K (all)" },
+    { key: "REQUEST_4K_MOVIE", label: "Request 4K movies" },
+    { key: "REQUEST_4K_TV", label: "Request 4K TV" },
+    { key: "AUTO_APPROVE_4K", label: "Auto-approve 4K (all)" },
+  ],
+};
+
+function QuotaRow({
+  label,
+  limit,
+  days,
+  onLimit,
+  onDays,
+  onBlurLimit,
+  onBlurDays,
+  disabled,
+}: {
+  label: string;
+  limit: string;
+  days: string;
+  onLimit: (v: string) => void;
+  onDays: (v: string) => void;
+  onBlurLimit: () => void;
+  onBlurDays: () => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2 py-1.5">
+      <span className="text-xs text-zinc-300 w-10 shrink-0">{label}</span>
+      <input
+        type="number"
+        min={0}
+        inputMode="numeric"
+        placeholder="limit"
+        value={limit}
+        disabled={disabled}
+        onChange={(e) => onLimit(e.target.value)}
+        onBlur={onBlurLimit}
+        className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+      />
+      <span className="text-[10px] text-zinc-500">per</span>
+      <input
+        type="number"
+        min={1}
+        inputMode="numeric"
+        placeholder="days"
+        value={days}
+        disabled={disabled}
+        onChange={(e) => onDays(e.target.value)}
+        onBlur={onBlurDays}
+        className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+      />
+      <span className="text-[10px] text-zinc-500">days</span>
+    </div>
+  );
+}
+
+function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: () => void; show4k?: boolean }) {
+  const router = useRouter();
+  const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
+  const [saving, setSaving] = useState(false);
+  const [quota, setQuota] = useState({
+    movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
+    movieQuotaDays: u.movieQuotaDays?.toString() ?? "",
+    tvQuotaLimit: u.tvQuotaLimit?.toString() ?? "",
+    tvQuotaDays: u.tvQuotaDays?.toString() ?? "",
+  });
+  const titleId = `perm-modal-title-${u.id}`;
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const isSuperAdmin = (perms & Permission.ADMIN) !== 0n;
+
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    closeBtnRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      opener?.focus?.();
+    };
+  }, [onClose]);
+
+  async function savePerms(next: bigint, prev: bigint) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/admin/users/${u.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permissions: next.toString() }),
+      });
+      if (!res.ok) {
+        setPerms(prev);
+        return;
+      }
+      router.refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggle(bit: bigint) {
+    const prev = perms;
+    const next = (perms & bit) !== 0n ? perms & ~bit : perms | bit;
+    setPerms(next);
+    void savePerms(next, prev);
+  }
+
+  function applyPreset() {
+    const prev = perms;
+    const next = PRESETS[u.role] ?? PRESETS.USER;
+    setPerms(next);
+    void savePerms(next, prev);
+  }
+
+  async function saveQuota(
+    field: "movieQuotaLimit" | "movieQuotaDays" | "tvQuotaLimit" | "tvQuotaDays",
+    raw: string,
+  ) {
+    const trimmed = raw.trim();
+    const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
+    if (value !== null && !Number.isFinite(value)) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/admin/users/${u.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+      if (res.ok) router.refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const displayName = u.name ?? u.email;
+  const groups = show4k ? [...PERMISSION_GROUPS, PERMISSION_GROUP_4K] : PERMISSION_GROUPS;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-1">
+          <h3 id={titleId} className="text-sm font-semibold text-white flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4 text-zinc-400" />
+            Permissions &amp; Quota
+          </h3>
+          <button
+            ref={closeBtnRef}
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="text-zinc-500 hover:text-white transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-xs text-zinc-500 mb-4 truncate">{displayName}</p>
+
+        {isSuperAdmin ? (
+          <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-300">
+            This user is an <strong>Administrator</strong> with full access. Capabilities are
+            governed by the Admin role — change the role to adjust access.
+          </div>
+        ) : (
+          <>
+            <div className="flex justify-end mb-2">
+              <button
+                type="button"
+                onClick={applyPreset}
+                disabled={saving}
+                className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+              >
+                Reset to {roleLabel[u.role]} preset
+              </button>
+            </div>
+            {groups.map((g) => (
+              <div key={g.title} className="mb-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{g.title}</p>
+                {g.bits.map((b) => (
+                  <AdminToggleRow
+                    key={b.key}
+                    label={b.label}
+                    checked={(perms & Permission[b.key]) !== 0n}
+                    onChange={() => toggle(Permission[b.key])}
+                    disabled={saving}
+                  />
+                ))}
+              </div>
+            ))}
+
+            <div className="mt-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Quota overrides</p>
+              <p className="text-[10px] text-zinc-600 mb-2">Blank = use the global quota. Limit = max requests in a rolling window of N days.</p>
+              <QuotaRow
+                label="Movies"
+                limit={quota.movieQuotaLimit}
+                days={quota.movieQuotaDays}
+                onLimit={(v) => setQuota((q) => ({ ...q, movieQuotaLimit: v }))}
+                onDays={(v) => setQuota((q) => ({ ...q, movieQuotaDays: v }))}
+                onBlurLimit={() => saveQuota("movieQuotaLimit", quota.movieQuotaLimit)}
+                onBlurDays={() => saveQuota("movieQuotaDays", quota.movieQuotaDays)}
+                disabled={saving}
+              />
+              <QuotaRow
+                label="TV"
+                limit={quota.tvQuotaLimit}
+                days={quota.tvQuotaDays}
+                onLimit={(v) => setQuota((q) => ({ ...q, tvQuotaLimit: v }))}
+                onDays={(v) => setQuota((q) => ({ ...q, tvQuotaDays: v }))}
+                onBlurLimit={() => saveQuota("tvQuotaLimit", quota.tvQuotaLimit)}
+                onBlurDays={() => saveQuota("tvQuotaDays", quota.tvQuotaDays)}
+                disabled={saving}
+              />
+            </div>
+          </>
+        )}
 
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
@@ -486,6 +764,7 @@ function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [permOpen, setPermOpen]     = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -554,16 +833,9 @@ function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
           <div className="my-1 border-t border-zinc-800" />
 
           {item(
-            () => onPatch("auto", { autoApprove: !u.autoApprove }),
-            u.autoApprove
-              ? <ZapOff className="w-3.5 h-3.5 text-green-400 shrink-0" />
-              : <Zap className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            u.autoApprove ? "Remove auto-approve" : "Auto-approve",
-          )}
-          {item(
-            () => onPatch("quota", { quotaExempt: !u.quotaExempt }),
-            <InfinityIcon className={`w-3.5 h-3.5 shrink-0 ${u.quotaExempt ? "text-sky-400" : "text-zinc-400"}`} />,
-            u.quotaExempt ? "Remove quota exempt" : "Exempt from quota",
+            () => setPermOpen(true),
+            <Zap className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+            "Permissions & Quota",
           )}
 
           {u.source === "local" && (
@@ -617,6 +889,7 @@ function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
 
       {notifOpen    && <NotificationsModal u={u} onClose={() => setNotifOpen(false)} />}
       {sessionsOpen && <SessionsModal      u={u} onClose={() => setSessionsOpen(false)} />}
+      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} />}
     </div>
   );
 }
@@ -670,6 +943,11 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
         const isBusy = busy?.startsWith(u.id) ?? false;
         const displayName = u.name ?? u.email;
         const initial = displayName[0].toUpperCase();
+        // Capability badges read the RAW mask (no ADMIN short-circuit) so they
+        // reflect explicitly-granted bits; the role badge already implies admin.
+        const rawPerms = parsePermissions(u.permissions);
+        const showAutoApprove = (rawPerms & AUTO_APPROVE_MASK) !== 0n;
+        const showNoQuota = (rawPerms & Permission.QUOTA_UNLIMITED) !== 0n;
 
         return (
           <div
@@ -745,7 +1023,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
                     </span>
                   </>
                 )}
-                {u.autoApprove && (
+                {showAutoApprove && (
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-success)" }}>
@@ -753,7 +1031,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
                     </span>
                   </>
                 )}
-                {u.quotaExempt && (
+                {showNoQuota && (
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-info)" }}>No quota</span>
