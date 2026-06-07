@@ -57,6 +57,9 @@ interface User {
 interface UserTableProps {
   users: User[];
   currentUserId: string;
+  // When a 4K Radarr/Sonarr instance is configured, the permission editor shows
+  // the 4K capability toggles (REQUEST_4K / AUTO_APPROVE_4K).
+  has4k?: boolean;
 }
 
 const sourceStyles: Record<User["source"], string> = {
@@ -758,9 +761,10 @@ interface ActionsMenuProps {
   u: User;
   onPatch: (key: string, body: object) => void;
   onDelete: () => void;
+  has4k?: boolean;
 }
 
-function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDelete, has4k }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -889,12 +893,12 @@ function ActionsMenu({ u, onPatch, onDelete }: ActionsMenuProps) {
 
       {notifOpen    && <NotificationsModal u={u} onClose={() => setNotifOpen(false)} />}
       {sessionsOpen && <SessionsModal      u={u} onClose={() => setSessionsOpen(false)} />}
-      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} />}
+      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} show4k={has4k} />}
     </div>
   );
 }
 
-export function UserTable({ users, currentUserId }: UserTableProps) {
+export function UserTable({ users, currentUserId, has4k }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1107,6 +1111,7 @@ export function UserTable({ users, currentUserId }: UserTableProps) {
                 u={u}
                 onPatch={(key, body) => patch(u.id, key, body)}
                 onDelete={() => setConfirmingDelete(u.id)}
+                has4k={has4k}
               />
             )}
           </div>
