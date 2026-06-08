@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { signSessionJwt, verifySessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { shouldForceDbCheck } from "@/lib/session-revocation";
 import { getCachedPlexAllowlist } from "@/lib/plex-membership";
+import { serializePermissions } from "@/lib/permissions";
 
 // Verify-and-refresh for the Summonarr session JWT.
 //
@@ -147,7 +148,7 @@ export async function verifyAndRefreshSession(
     }
   }
 
-  const dbPermsStr = (dbUser.permissions ?? 0n).toString();
+  const dbPermsStr = serializePermissions(dbUser.permissions ?? 0n);
   const claimPermsStr =
     typeof claims.permissions === "string" ? claims.permissions : "0";
 

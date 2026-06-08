@@ -11,7 +11,7 @@ import { signSessionJwt } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession } from "@/lib/session-server";
-import { defaultPermissionsForRole, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
@@ -861,7 +861,7 @@ export async function signInAndMintSession(params: {
   let permissionsClaim = "0";
   if (userId) {
     const permRow = await prisma.user.findUnique({ where: { id: userId }, select: { permissions: true } });
-    if (permRow) permissionsClaim = permRow.permissions.toString();
+    if (permRow) permissionsClaim = serializePermissions(permRow.permissions);
   }
 
   void logAudit({
