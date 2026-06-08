@@ -4387,7 +4387,7 @@ limitations under the License.
 
 ------------------------------------------------------------------------------
 
-@types/node@25.9.1
+@types/node@25.9.2
 License: MIT
 
 MIT License
