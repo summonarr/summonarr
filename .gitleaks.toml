@@ -1,23 +1,35 @@
-# Inherit the full default ruleset and add a narrow allowlist for two
-# intentional non-secret placeholder strings used in scripts/smoke-test.sh
-# to verify that the API rejects bad bearer tokens with 401/403.
+# Inherit the full default ruleset and add a narrow allowlist for
+# intentional non-secret strings that the default rules flag on shape or
+# entropy rather than on any real secret value.
 #
-# The flagged strings literally describe themselves as non-secrets:
-#   - "not-a-real-secret-not-even-close"
-#   - "wrong-secret-no-way-this-matches"
-# Gitleaks' curl-auth-header rule matches the structural shape of an
-# Authorization: Bearer header, not the value's actual entropy, so these
-# negative-test fixtures get flagged. The allowlist below matches only
-# those exact placeholder strings — it does not whitelist the file or
-# the rule, so any future real secret added to the same file would still
-# be caught.
+# The allowlist matches only specific, self-describing non-secret strings
+# — it does not whitelist a file or a rule, so a genuine secret added to
+# the same files would still be caught.
+#
+# 1. scripts/smoke-test.sh feeds deliberately-wrong bearer tokens to
+#    assert the API answers bad auth with 401/403. The strings literally
+#    name themselves as non-secrets, but the curl-auth-header rule matches
+#    the structural shape of an `Authorization: Bearer` header, not
+#    entropy, so these negative-test fixtures get flagged:
+#      - "not-a-real-secret-not-even-close"
+#      - "wrong-secret-no-way-this-matches"
+#
+# 2. src/lib/settings-sensitive-keys.ts is a list of *Setting key names*
+#    (identifiers like "sonarr4kApiKey"), never secret values. The
+#    generic-api-key rule pairs one line's `...ApiKey` keyword with the
+#    next line's quoted identifier as the "value" and flags it once
+#    entropy clears 3.5 — which only "sonarr4kApiKey" (3.66) does; the
+#    lower-entropy siblings ("radarr4kApiKey" 3.33, "radarrApiKey", …)
+#    never trip it. The pattern allowlists that captured identifier (plus
+#    its radarr twin, in case the list is ever reordered).
 
 [extend]
 useDefault = true
 
 [allowlist]
-description = "Smoke-test bad-auth fixtures (intentional non-secret placeholders)"
+description = "Intentional non-secret fixtures (smoke-test bad-auth placeholders + Setting key-name identifiers)"
 regexes = [
   '''not-a-real-secret-not-even-close''',
   '''wrong-secret-no-way-this-matches''',
+  '''(?:radarr|sonarr)4kApiKey''',
 ]
