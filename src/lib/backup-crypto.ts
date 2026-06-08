@@ -20,7 +20,6 @@ const TAG_LEN = 16;
 const KDF_ITERATIONS = 600_000;
 const KEY_LEN = 32;
 
-export const ENCRYPTED_HEADER_LEN = HEADER_LEN;
 export const ENCRYPTED_MAGIC = MAGIC;
 
 export class BackupCryptoError extends Error {

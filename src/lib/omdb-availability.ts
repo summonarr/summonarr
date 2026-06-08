@@ -41,10 +41,6 @@ function applyOmdb(item: TmdbMedia, d: OmdbRatings): TmdbMedia {
   };
 }
 
-export async function attachOmdbRatingsBlocking(items: TmdbMedia[]): Promise<TmdbMedia[]> {
-  return attachRatingsUnified(items, { blocking: true });
-}
-
 export async function attachRatingsUnified(
   items: TmdbMedia[],
   opts: { blocking?: boolean } = {},
@@ -182,8 +178,4 @@ function mergeWarm(item: TmdbMedia, warm: WarmCache): TmdbMedia {
   if (mdb)  return applyMdblist(item, mdb);
   if (omdb) return applyOmdb(item, omdb);
   return item;
-}
-
-export async function attachOmdbRatings(items: TmdbMedia[]): Promise<TmdbMedia[]> {
-  return attachRatingsUnified(items, { blocking: false });
 }

@@ -424,28 +424,6 @@ export async function isSeriesWantedInSonarr(tmdbId: number): Promise<boolean> {
   }
 }
 
-export async function isMovieInRadarrLibrary(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
-  if (!cfg) return false;
-  try {
-    const movies = await arrFetch<{ tmdbId: number }[]>(
-      cfg, `/api/v3/movie?tmdbId=${tmdbId}`
-    );
-    return movies.some((m) => m.tmdbId === tmdbId);
-  } catch { return false; }
-}
-
-export async function isMovieAvailableInRadarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
-  if (!cfg) return false;
-  try {
-    const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
-      cfg, `/api/v3/movie?tmdbId=${tmdbId}`
-    );
-    return movies.some((m) => m.tmdbId === tmdbId && m.hasFile);
-  } catch { return false; }
-}
-
 export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error("Radarr is not configured");
@@ -706,37 +684,6 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
   }
 
   return series.tvdbId;
-}
-
-export async function isSeriesInSonarrLibrary(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
-  if (!cfg) return false;
-  try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
-    const library = await arrFetch<{ tvdbId: number }[]>(cfg, "/api/v3/series");
-    return library.some((s) => s.tvdbId === tvdbId);
-  } catch { return false; }
-}
-
-export async function isSeriesAvailableInSonarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
-  if (!cfg) return false;
-  try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
-    const library = await arrFetch<{ tvdbId: number; statistics: { episodeFileCount: number } }[]>(
-      cfg, "/api/v3/series"
-    );
-    const match = library.find((s) => s.tvdbId === tvdbId);
-    return !!match && match.statistics.episodeFileCount > 0;
-  } catch { return false; }
 }
 
 export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant = "hd"): Promise<void> {

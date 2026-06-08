@@ -200,10 +200,6 @@ export type FeatureKey = (typeof FEATURE_DEFINITIONS)[number]["key"];
 
 export type FeatureFlags = Record<string, boolean>;
 
-export function getFeatureDefaults(): FeatureFlags {
-  return Object.fromEntries(FEATURE_DEFINITIONS.map((f) => [f.key, f.defaultEnabled]));
-}
-
 /**
  * Read all feature flags in a single query. Missing rows fall back to the
  * registered default. Pass an already-loaded `cfg` map (from an existing

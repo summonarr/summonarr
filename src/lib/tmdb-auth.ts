@@ -15,11 +15,3 @@ export function tmdbAuth(): TmdbAuth | null {
   }
   return null;
 }
-
-export function buildTmdbUrl(path: string): { url: string; headers: Record<string, string> } | null {
-  const auth = tmdbAuth();
-  if (!auth) return null;
-  const url = new URL(path.startsWith("http") ? path : `https://api.themoviedb.org/3${path}`);
-  for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
-  return { url: url.toString(), headers: auth.headers };
-}
