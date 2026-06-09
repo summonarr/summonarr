@@ -17,6 +17,7 @@ import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader } from "@/components/ui/design";
 
@@ -102,7 +103,8 @@ export default async function DiscoverPage({
     { raw: topTV, limit: RAIL_SIZE },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
-  const enriched = await attachAllAvailability(displaySet, session?.user.id);
+  const show4k = await getShow4kVisibility(session);
+  const enriched = await attachAllAvailability(displaySet, session?.user.id, { show4k });
   const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
   const trendingItems = project(trending,  emap, hideAvailable, trending.length);

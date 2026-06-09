@@ -10,6 +10,7 @@ import { Suspense } from "react";
 import { TopFilterBar } from "@/components/media/top-filter-bar";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
@@ -151,6 +152,7 @@ export default async function TopRatedPage({
   const sortBy: SortBy = validSorts.has(sp.sortBy as SortBy) ? (sp.sortBy as SortBy) : "imdb";
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const show4k = await getShow4kVisibility(session);
 
   const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
@@ -186,10 +188,10 @@ export default async function TopRatedPage({
 
   let [movies, tv] = await Promise.all([
     showMovies && moviePage.length > 0
-      ? attachAllAvailability(moviePage, session?.user.id)
+      ? attachAllAvailability(moviePage, session?.user.id, { show4k })
       : Promise.resolve([] as TmdbMedia[]),
     showTV && tvPage.length > 0
-      ? attachAllAvailability(tvPage, session?.user.id)
+      ? attachAllAvailability(tvPage, session?.user.id, { show4k })
       : Promise.resolve([] as TmdbMedia[]),
   ]);
 

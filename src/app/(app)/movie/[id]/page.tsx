@@ -75,7 +75,7 @@ export default async function MovieDetailPage({
 
   // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
   // configured AND the viewer holds REQUEST_4K.
-  const [has4k, userRequest4k, request4kAllRow] = await Promise.all([
+  const [has4k, userRequest4k, request4kAllRow, radarr4kAvailable, radarr4kWanted] = await Promise.all([
     isArrConfigured("radarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
@@ -84,9 +84,15 @@ export default async function MovieDetailPage({
         })
       : Promise.resolve(null),
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
+    prisma.radarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
+    prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
   ]);
   const requested4k = !!userRequest4k;
   const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true") : false;
+  // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
+  const show4k = has4k && canRequest4k;
+  const arr4kAvailable = show4k && !!radarr4kAvailable;
+  const arr4kPending = show4k && !!radarr4kWanted;
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -135,8 +141,11 @@ export default async function MovieDetailPage({
                 jellyfinAvailable={jellyfinAvailable}
                 arrPending={arrPending}
                 requested={requested}
+                arr4kAvailable={arr4kAvailable}
+                arr4kPending={arr4kPending}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
+                show4k={show4k}
               />
             </div>
 
@@ -249,6 +258,7 @@ export default async function MovieDetailPage({
                   mediaType="MOVIE"
                   requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                   requested={requested4k}
+                  available={arr4kAvailable}
                 />
               )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (

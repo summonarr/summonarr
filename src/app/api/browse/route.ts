@@ -6,6 +6,7 @@ import {
   type TmdbMedia, type DiscoverFilters,
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 
 const TMDB_PAGES_PER_VIRTUAL = 5;
 const PAGE_SIZE = 20;
@@ -52,6 +53,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
   const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
+  const show4k = await getShow4kVisibility(session);
 
   const needsLoop = hideAvailable || !!ratingFilter;
   const tmdbStartPage = needsLoop ? (page - 1) * TMDB_PAGES_PER_VIRTUAL + 1 : page;
@@ -73,7 +75,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
       while (items.length < PAGE_SIZE && tmdbPage <= Math.min(firstPaged.totalPages, tmdbEndPage)) {
         const paged = tmdbPage === tmdbStartPage ? firstPaged : await fetchPage(tmdbPage);
-        let batch = await attachAllAvailability(paged.items, session.user.id);
+        let batch = await attachAllAvailability(paged.items, session.user.id, { show4k });
         if (ratingFilter) batch = applyExternalRatingFilter(batch, ratingFilter);
         if (hideAvailable) batch = batch.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
         items = items.concat(batch);
@@ -82,7 +84,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       items = items.slice(0, PAGE_SIZE);
     } else {
       totalPages = firstPaged.totalPages;
-      items = await attachAllAvailability(firstPaged.items, session.user.id);
+      items = await attachAllAvailability(firstPaged.items, session.user.id, { show4k });
     }
 
     return NextResponse.json({ items, totalPages, page });

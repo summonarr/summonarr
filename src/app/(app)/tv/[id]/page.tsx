@@ -91,7 +91,7 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
-  const [has4k, userRequest4k, request4kAllRow] = await Promise.all([
+  const [has4k, userRequest4k, request4kAllRow, sonarr4kAvailable, sonarr4kWanted] = await Promise.all([
     isArrConfigured("sonarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
@@ -100,9 +100,15 @@ export default async function TVDetailPage({
         })
       : Promise.resolve(null),
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
+    prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
+    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
   ]);
   const requested4k = !!userRequest4k;
   const canRequest4k = session ? canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true") : false;
+  // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
+  const show4k = has4k && canRequest4k;
+  const arr4kAvailable = show4k && !!sonarr4kAvailable;
+  const arr4kPending = show4k && !!sonarr4kWanted;
 
   const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
 
@@ -153,8 +159,11 @@ export default async function TVDetailPage({
                 jellyfinAvailable={jellyfinAvailable}
                 arrPending={arrPending}
                 requested={requested}
+                arr4kAvailable={arr4kAvailable}
+                arr4kPending={arr4kPending}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
+                show4k={show4k}
               />
             </div>
 
@@ -281,6 +290,7 @@ export default async function TVDetailPage({
                   mediaType="TV"
                   requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                   requested={requested4k}
+                  available={arr4kAvailable}
                 />
               )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (

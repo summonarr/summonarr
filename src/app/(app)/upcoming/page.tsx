@@ -8,6 +8,7 @@ import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
@@ -78,7 +79,8 @@ export default async function UpcomingPage({
 
   }
 
-  let items = await attachAllAvailability(raw, session?.user.id);
+  const show4k = await getShow4kVisibility(session);
+  let items = await attachAllAvailability(raw, session?.user.id, { show4k });
 
   if (hideAvailable) {
     items = items.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
