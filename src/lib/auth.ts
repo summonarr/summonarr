@@ -11,6 +11,8 @@ import { signSessionJwt } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession } from "@/lib/session-server";
+import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
+import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -52,6 +54,10 @@ export async function findOrCreatePlexUser({
   image?: string | null;
 }): Promise<AuthorizedDbUser | ProviderRebindRequired> {
   const normalized = normalizeEmail(email);
+  // Provider-supplied display names are untrusted — strip HTML/control chars so
+  // the name can't carry markup into any downstream sink (email/Discord/push),
+  // mirroring the local-credentials register path.
+  name = sanitizeOptional(name);
 
   // 1) Bind on (provider, sub) first. This is the C-1 fix: never trust email as
   //    the primary identity anchor for an external IdP.
@@ -84,6 +90,7 @@ export async function findOrCreatePlexUser({
       name: name ?? null,
       image: image ?? null,
       role: "USER",
+      permissions: defaultPermissionsForRole("USER"),
       plexUserId,
       notificationEmail: normalized,
     },
@@ -96,6 +103,9 @@ export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+  // Provider-supplied display name is untrusted — strip HTML/control chars so it
+  // can't carry markup into any downstream sink (email/Discord/push).
+  name = sanitizeText(name);
   // Synthetic address is retained as a backward-compat anchor for users that
   // signed in before the (provider, sub) binding columns existed.
   const syntheticEmail = `jellyfin-${jellyfinId}@jellyfin.local`;
@@ -151,6 +161,7 @@ export async function findOrCreateJellyfinUser(
       email: realEmail ? normalizeEmail(realEmail) : syntheticEmail,
       name: name ?? null,
       role: "USER",
+      permissions: defaultPermissionsForRole("USER"),
       jellyfinUserId: jellyfinId,
     },
     select: { id: true, email: true, name: true, role: true },
@@ -226,9 +237,10 @@ export async function findOrCreateOidcUser(
   const created = await prisma.user.create({
     data: {
       email: normalizedEmail,
-      name: claims.name ?? claims.preferredUsername ?? null,
+      name: sanitizeOptional(claims.name ?? claims.preferredUsername),
       image: claims.picture,
       role: "USER",
+      permissions: defaultPermissionsForRole("USER"),
       notificationEmail: normalizedEmail,
       accounts: {
         create: {
@@ -300,6 +312,7 @@ export async function auth(): Promise<SummonarrSession | null> {
     user: {
       id: claims.id,
       role: claims.role,
+      permissions: effectivePermissions(claims.role, parsePermissions(claims.permissions)),
       email: claims.email ?? null,
       name: claims.name ?? null,
       provider: claims.provider,
@@ -795,7 +808,7 @@ async function runFirstAdminPromotion(
     if (existingAdmin) return false;
     const self = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!self) return false;
-    await tx.user.update({ where: { id: userId }, data: { role: "ADMIN" } });
+    await tx.user.update({ where: { id: userId }, data: { role: "ADMIN", permissions: defaultPermissionsForRole("ADMIN") } });
     await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
     return true;
   });
@@ -841,6 +854,16 @@ export async function signInAndMintSession(params: {
     if (promoted) token.role = "ADMIN";
   }
 
+  // Carry the user's stored permission bitmask (raw decimal) in the token. New
+  // users were seeded at the create site; a just-promoted first admin was
+  // re-seeded in runFirstAdminPromotion. If this read somehow returns 0,
+  // effectivePermissions() on the read side still falls back to the role preset.
+  let permissionsClaim = "0";
+  if (userId) {
+    const permRow = await prisma.user.findUnique({ where: { id: userId }, select: { permissions: true } });
+    if (permRow) permissionsClaim = serializePermissions(permRow.permissions);
+  }
+
   void logAudit({
     userId: (user.id as string) ?? "unknown",
     userName: (user.name as string) ?? (user.email as string) ?? "unknown",
@@ -866,6 +889,7 @@ export async function signInAndMintSession(params: {
     {
       id: token.id as string,
       role: token.role as string,
+      permissions: permissionsClaim,
       email: (user.email as string | null) ?? null,
       name: (user.name as string | null) ?? null,
       provider: token.provider as string,

@@ -5,6 +5,7 @@ import { UserTable } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { PageHeader } from "@/components/ui/design";
+import { isArrConfigured } from "@/lib/arr";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,7 @@ export default async function UsersPage() {
   const session = await auth();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
-  const [users, localAuthRows, serverUsers, autoDisableRow] = await Promise.all([
+  const [users, localAuthRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -21,8 +22,11 @@ export default async function UsersPage() {
         role: true,
         createdAt: true,
         discordId: true,
-        autoApprove: true,
-        quotaExempt: true,
+        permissions: true,
+        movieQuotaLimit: true,
+        movieQuotaDays: true,
+        tvQuotaLimit: true,
+        tvQuotaDays: true,
         mediaServer: true,
         notifyOnApproved: true,
         notifyOnAvailable: true,
@@ -59,12 +63,17 @@ export default async function UsersPage() {
       orderBy: [{ source: "asc" }, { username: "asc" }],
     }),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
+    isArrConfigured("radarr", "4k"),
+    isArrConfigured("sonarr", "4k"),
   ]);
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
 
   const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
   const autoDisableNew = autoDisableRow?.value === "true";
+  // Show the 4K capability toggles in the permission editor only when a 4K
+  // instance exists (no point granting REQUEST_4K with nowhere to route it).
+  const has4k = radarr4kConfigured || sonarr4kConfigured;
 
   return (
     <div className="ds-page-enter">
@@ -83,8 +92,11 @@ export default async function UsersPage() {
             role: u.role,
             createdAt: u.createdAt.toISOString(),
             discordId: u.discordId,
-            autoApprove: u.autoApprove,
-            quotaExempt: u.quotaExempt,
+            permissions: u.permissions.toString(),
+            movieQuotaLimit: u.movieQuotaLimit,
+            movieQuotaDays: u.movieQuotaDays,
+            tvQuotaLimit: u.tvQuotaLimit,
+            tvQuotaDays: u.tvQuotaDays,
             _count: u._count,
             notifyOnApproved: u.notifyOnApproved,
             notifyOnAvailable: u.notifyOnAvailable,
@@ -104,6 +116,7 @@ export default async function UsersPage() {
               : "plex",
           }))}
           currentUserId={session.user.id}
+          has4k={has4k}
         />
       </div>
 

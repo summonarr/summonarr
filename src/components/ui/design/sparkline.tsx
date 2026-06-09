@@ -37,35 +37,3 @@ export function Sparkline({
     </svg>
   );
 }
-
-export function BarChart({
-  data,
-  color,
-  height = 60,
-}: {
-  data: readonly number[];
-  color?: string;
-  height?: number;
-}) {
-  if (!data.length) return null;
-  const max = Math.max(...data);
-  const bg = color ?? "var(--ds-accent)";
-  return (
-    <div className="flex items-end gap-0.5" style={{ height }}>
-      {data.map((v, i) => (
-        <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: bar charts don't reorder
-          key={i}
-          style={{
-            flex: 1,
-            background: bg,
-            opacity: 0.4 + (v / max) * 0.6,
-            height: `${(v / max) * 100}%`,
-            borderRadius: 2,
-            minHeight: 2,
-          }}
-        />
-      ))}
-    </div>
-  );
-}

@@ -1,6 +1,8 @@
 import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
+import { Request4kButton } from "@/components/media/request-4k-button";
+import { isArrConfigured } from "@/lib/arr";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { CastSection } from "@/components/media/cast-section";
@@ -19,6 +21,7 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
+import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 
 export default async function MovieDetailPage({
   params,
@@ -42,9 +45,9 @@ export default async function MovieDetailPage({
     prisma.jellyfinLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
     }),
-    prisma.radarrWantedItem.findUnique({ where: { tmdbId: media.id } }),
+    prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: false } } }),
     session ? prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, status: { not: "DECLINED" } },
+      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, is4k: false, status: { not: "DECLINED" } },
       select: { id: true },
     }) : Promise.resolve(null),
     session ? prisma.deletionVote.findFirst({
@@ -62,11 +65,28 @@ export default async function MovieDetailPage({
   const arrPending        = !!radarrWanted;
   const requested         = !!userRequest;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
+  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
 
   const [suggestions, collectionItems] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
     attachAllAvailability(rawCollection, session?.user.id, { skipRatings: true }),
   ]);
+
+  // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
+  // configured AND the viewer holds REQUEST_4K.
+  const [has4k, userRequest4k, request4kAllRow] = await Promise.all([
+    isArrConfigured("radarr", "4k"),
+    session
+      ? prisma.mediaRequest.findFirst({
+          where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, is4k: true, status: { not: "DECLINED" } },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
+  ]);
+  const requested4k = !!userRequest4k;
+  const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true") : false;
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -221,7 +241,16 @@ export default async function MovieDetailPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
+                canRequestOnBehalf={canOnBehalf}
               />
+              {has4k && canRequest4k && (
+                <Request4kButton
+                  tmdbId={media.id}
+                  mediaType="MOVIE"
+                  requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
+                  requested={requested4k}
+                />
+              )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
                   tmdbId={media.id}
@@ -270,6 +299,7 @@ export default async function MovieDetailPage({
           currentId={media.id}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
+          canRequest={canRequestMovies}
         />
       )}
 

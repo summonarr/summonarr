@@ -4,30 +4,6 @@ import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { AlertTriangle, XCircle } from "@/components/icons";
 
-export function SchemaDiagnosticBanner({
-  message,
-  onDismiss,
-}: {
-  message: string;
-  onDismiss: () => void;
-}) {
-  return (
-    <Card className="bg-amber-500/10 border-amber-500/40 p-4 text-sm">
-      <div className="flex items-start gap-3">
-        <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-        <div className="flex-1 min-w-0">
-          <p className="font-medium text-amber-200">Database schema out of sync</p>
-          <p className="mt-1 text-amber-100/90">{message}</p>
-          <p className="mt-2 text-xs text-amber-300/80">
-            Once the tables exist, click <span className="font-semibold">Refresh Catalog</span> on the Settings tab to populate them.
-          </p>
-        </div>
-        <button onClick={onDismiss} className="text-xs text-amber-400 hover:text-amber-200">dismiss</button>
-      </div>
-    </Card>
-  );
-}
-
 export function RefreshErrorBanner({
   error,
   onDismiss,

@@ -128,29 +128,6 @@ function jellyfinAdminHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-// Fetch the Jellyfin server's machine identifier. The /System/Info endpoint
-// requires admin token; the `Id` field on the response is the server's stable
-// machineId — same value the Jellyfin webhook plugin sends. We use this as the
-// pin on MediaServerUser.serverMachineId so any cross-server webhook/sync
-// payload aimed at the same userId is rejected (see MediaServerMismatchError
-// in src/lib/play-history.ts).
-export async function getJellyfinServerMachineId(
-  baseUrl: string,
-  apiKey: string,
-): Promise<string | null> {
-  try {
-    const res = await safeFetchAdminConfigured(`${baseUrl.replace(/\/$/, "")}/System/Info`, {
-      headers: jellyfinAdminHeaders(apiKey),
-      timeoutMs: FETCH_TIMEOUT_MS,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { Id?: string };
-    return typeof data.Id === "string" && data.Id.length > 0 ? data.Id : null;
-  } catch {
-    return null;
-  }
-}
-
 interface JellyfinItem {
   Id?:              string;
   ProviderIds?:     Record<string, string>;
@@ -478,70 +455,6 @@ export async function getJellyfinEpisodesForShow(
     },
   );
   return episodes;
-}
-
-interface JellyfinEpisodeWithSeries {
-  Id?: string;
-  SeriesId?: string;
-  SeriesName?: string;
-  ParentIndexNumber?: number;
-  IndexNumber?: number;
-  Name?: string;
-  ProductionYear?: number;
-}
-
-export interface JellyfinEpisodeSeriesInfo {
-  seriesId: string;
-  seriesName?: string;
-  seasonNumber?: number;
-  episodeNumber?: number;
-  episodeName?: string;
-  year?: number;
-}
-
-export async function getJellyfinEpisodeSeriesIds(
-  baseUrl: string,
-  apiKey: string,
-  // Jellyfin admin userId. The /Items endpoint without a user scope is rejected
-  // (or returns empty) on multiple Jellyfin server versions even with an admin
-  // token — /Users/{userId}/Items?Ids=... is the cross-version-safe form. Any
-  // user the admin token can read works; the existing PR-import call site
-  // picks the first user from getJellyfinAllUsers.
-  userId: string,
-  itemIds: string[],
-): Promise<Map<string, JellyfinEpisodeSeriesInfo>> {
-  const result = new Map<string, JellyfinEpisodeSeriesInfo>();
-  if (itemIds.length === 0 || !userId) return result;
-
-  const base = baseUrl.replace(/\/$/, "");
-  const CHUNK = 100;
-  for (let i = 0; i < itemIds.length; i += CHUNK) {
-    const chunk = itemIds.slice(i, i + CHUNK);
-    const url = `${base}/Users/${encodeURIComponent(userId)}/Items?Ids=${chunk.map(encodeURIComponent).join(",")}&Fields=SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Name,ProductionYear&IncludeItemTypes=Episode&Recursive=true`;
-    try {
-      const res = await safeFetchAdminConfigured(url, {
-        headers: jellyfinAdminHeaders(apiKey),
-        timeoutMs: FETCH_TIMEOUT_MS,
-      });
-      if (!res.ok) continue;
-      const data = (await res.json()) as { Items?: JellyfinEpisodeWithSeries[] };
-      for (const item of data.Items ?? []) {
-        if (item.Id && item.SeriesId) {
-          result.set(item.Id, {
-            seriesId: item.SeriesId,
-            seriesName: item.SeriesName,
-            seasonNumber: item.ParentIndexNumber,
-            episodeNumber: item.IndexNumber,
-            episodeName: item.Name,
-            year: item.ProductionYear,
-          });
-        }
-      }
-    } catch (err) {
-      console.warn("[jellyfin] Failed to fetch episode series data page:", err);
-    }
-  }
-  return result;
 }
 
 export interface JellyfinSessionData {

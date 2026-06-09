@@ -5,6 +5,7 @@ import { checkRateLimit, getClientIp, parseRateLimit } from "@/lib/rate-limit";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
+import { defaultPermissionsForRole } from "@/lib/permissions";
 
 // In-process mutex: DB advisory lock is the real guard, but this catches obvious double-submits quickly
 let registrationInFlight = false;
@@ -102,6 +103,7 @@ export async function POST(req: NextRequest) {
           email: normalizeEmail(email),
           passwordHash,
           role: "ADMIN",
+          permissions: defaultPermissionsForRole("ADMIN"),
         },
         select: { id: true, email: true, name: true, role: true },
       });

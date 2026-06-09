@@ -4,7 +4,7 @@ import { isCronAuthorized } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
 const EXPECTED: Record<string, string[]> = {
-  User:                ["id","name","email","passwordHash","role","mediaServer","discordId","autoApprove","quotaExempt"],
+  User:                ["id","name","email","passwordHash","role","permissions","mediaServer","discordId","autoApprove","quotaExempt"],
   PlexLibraryItem:     ["tmdbId","mediaType","filePath","plexRatingKey","title","year","overview"],
   JellyfinLibraryItem: ["tmdbId","mediaType","filePath","jellyfinItemId","title","year","overview"],
   TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber"],

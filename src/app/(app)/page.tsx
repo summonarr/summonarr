@@ -106,6 +106,16 @@ export default async function DiscoverPage({
   const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
   const trendingItems = project(trending,  emap, hideAvailable, trending.length);
+  const featuredMovie = trendingItems.find((m) => m.mediaType === "movie");
+  const featuredTV = trendingItems.find((m) => m.mediaType === "tv");
+  const featuredKeys = new Set(
+    [featuredMovie, featuredTV]
+      .filter((m): m is TmdbMedia => m != null)
+      .map((m) => `${m.mediaType}-${m.id}`),
+  );
+  const trendingRest = trendingItems.filter(
+    (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
+  );
   const rails: { title: string; subtitle: string; href: string; items: TmdbMedia[] }[] = [
     { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
     { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
@@ -138,15 +148,28 @@ export default async function DiscoverPage({
         </div>
       ) : (
         <>
-          <DiscoverHero
-            media={trendingItems[0]}
-            showPlex={showPlex}
-            showJellyfin={showJellyfin}
-          />
+          <div className="ds-discover-hero-pair">
+            {featuredMovie && (
+              <DiscoverHero
+                media={featuredMovie}
+                label="TRENDING MOVIE"
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+              />
+            )}
+            {featuredTV && (
+              <DiscoverHero
+                media={featuredTV}
+                label="TRENDING TV"
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+              />
+            )}
+          </div>
           <DiscoverRow
             title="Trending this week"
-            subtitle={`${trendingItems.length} results`}
-            items={trendingItems.slice(1)}
+            subtitle={`${trendingRest.length} results`}
+            items={trendingRest}
             showPlex={showPlex}
             showJellyfin={showJellyfin}
           />

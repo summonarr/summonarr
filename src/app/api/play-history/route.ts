@@ -246,6 +246,13 @@ async function groupedQuery(
   sortBy: string,
   sortDir: "asc" | "desc",
 ) {
+  // NOTE on raw SQL here (and in lib/play-history.ts stats paths):
+  // All user-influenced filters (source, tmdbId, mediaType, dates, search, etc.)
+  // come from a strict whitelist or parseInt + bound parameters (via ? -> $N
+  // renumbering in composeWhere). ORDER BY column is taken from a server-side
+  // safeSortBy whitelist only. No user data is interpolated into SQL identifiers
+  // or structure. This is the complex dynamic-stats area; changes must preserve
+  // the whitelist + parameterization discipline to avoid injection.
   const fragments = parseFilters(params);
   const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
 

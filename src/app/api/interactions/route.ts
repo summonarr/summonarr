@@ -15,6 +15,8 @@ import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { canAutoApprove, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
+import { resolveUserQuota } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
 
@@ -84,10 +86,10 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
       distinct: ["tmdbId", "mediaType"],
     }),
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 
@@ -380,10 +382,10 @@ async function handleCommand(interaction: any): Promise<void> {
       const approvedTvIds    = requests.filter(r => r.status === "APPROVED" && r.mediaType === "TV").map(r => r.tmdbId);
       const [radarrQueued, sonarrQueued] = await Promise.all([
         approvedMovieIds.length > 0
-          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds } }, select: { tmdbId: true } })
+          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds }, is4k: false }, select: { tmdbId: true } })
           : Promise.resolve([]),
         approvedTvIds.length > 0
-          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds } }, select: { tmdbId: true } })
+          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds }, is4k: false }, select: { tmdbId: true } })
           : Promise.resolve([]),
       ]);
       const radarrQueuedSet = new Set(radarrQueued.map(r => r.tmdbId));
@@ -536,6 +538,7 @@ async function handleComponent(interaction: any): Promise<void> {
             discordId: discordUserId,
             name: liveUsername,
             email: `discord_${discordUserId}@discord.local`,
+            permissions: defaultPermissionsForRole("USER"),
           },
         });
       }
@@ -555,31 +558,33 @@ async function handleComponent(interaction: any): Promise<void> {
         return;
       }
 
+      // Effective permissions (ADMIN superbit / unseeded → role preset). Drives
+      // both the quota bypass and the auto-approve decision below.
+      const effPerms = effectivePermissions(dbUser.role, dbUser.permissions);
+
       const [quotaLimitRow, quotaPeriodRow] = await Promise.all([
         prisma.setting.findUnique({ where: { key: "quotaLimit" } }),
         prisma.setting.findUnique({ where: { key: "quotaPeriod" } }),
       ]);
-      const quotaLimit = parseInt(quotaLimitRow?.value ?? "0", 10);
-      if (quotaLimit > 0 && dbUser.role !== "ADMIN") {
-        const isQuotaExempt = dbUser.quotaExempt ?? false;
-        if (!isQuotaExempt) {
-          const period = quotaPeriodRow?.value ?? "week";
-          const now = new Date();
-          let since: Date;
-          if (period === "day") {
-            since = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          } else if (period === "month") {
-            since = new Date(now.getFullYear(), now.getMonth(), 1);
-          } else {
-            const day = now.getDay() === 0 ? 6 : now.getDay() - 1;
-            since = new Date(now.getFullYear(), now.getMonth(), now.getDate() - day);
-          }
+      if (!hasPermission(effPerms, Permission.QUOTA_UNLIMITED)) {
+        const rq = resolveUserQuota(
+          mediaType,
+          {
+            movieQuotaLimit: dbUser.movieQuotaLimit ?? null,
+            movieQuotaDays: dbUser.movieQuotaDays ?? null,
+            tvQuotaLimit: dbUser.tvQuotaLimit ?? null,
+            tvQuotaDays: dbUser.tvQuotaDays ?? null,
+          },
+          parseInt(quotaLimitRow?.value ?? "0", 10),
+          quotaPeriodRow?.value ?? "week",
+        );
+        if (rq.limit > 0) {
           const count = await prisma.mediaRequest.count({
-            where: { requestedBy: dbUser.id, createdAt: { gte: since } },
+            where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
           });
-          if (count >= quotaLimit) {
+          if (count >= rq.limit) {
             confirmEmbed.color = 0xed4245;
-            confirmEmbed.description = `You have reached your request quota of ${quotaLimit} per ${period}.`;
+            confirmEmbed.description = `You have reached your request quota of ${rq.limit} per ${rq.windowLabel}.`;
             await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
             return;
           }
@@ -610,7 +615,7 @@ async function handleComponent(interaction: any): Promise<void> {
         .filter(Boolean);
       const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
 
-      const canAutoApprove = dbUser.role === "ADMIN" || hasAutoApproveRole || dbUser.autoApprove;
+      const mayAutoApprove = hasAutoApproveRole || canAutoApprove(effPerms, mediaType, false);
 
       let note: string;
       try {
@@ -619,7 +624,7 @@ async function handleComponent(interaction: any): Promise<void> {
           void clearDeletionVotesForTmdbs([{ tmdbId: selected.id, mediaType }]);
           note = "It's already in the library!";
           confirmEmbed.color = 0x57f287;
-        } else if (canAutoApprove) {
+        } else if (mayAutoApprove) {
           const request = await prisma.mediaRequest.create({ data: { ...baseData, status: "APPROVED" } });
           try {
             if (mediaType === "MOVIE") {

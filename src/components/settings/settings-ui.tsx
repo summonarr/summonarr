@@ -213,6 +213,8 @@ interface ArrFormProps {
   initialApiKey: string;
   initialRootFolder: string;
   initialQualityProfileId: string;
+  // "4k" targets the optional second instance (radarr4k*/sonarr4k* keys).
+  variant?: "hd" | "4k";
 }
 
 interface ArrOptions {
@@ -226,13 +228,16 @@ export function ArrForm({
   initialApiKey,
   initialRootFolder,
   initialQualityProfileId,
+  variant = "hd",
 }: ArrFormProps) {
-  const label      = service === "radarr" ? "Radarr" : "Sonarr";
-  const urlKey     = service === "radarr" ? "radarrUrl"              : "sonarrUrl";
-  const keyKey     = service === "radarr" ? "radarrApiKey"           : "sonarrApiKey";
-  const folderKey  = service === "radarr" ? "radarrRootFolder"       : "sonarrRootFolder";
-  const profileKey = service === "radarr" ? "radarrQualityProfileId" : "sonarrQualityProfileId";
-  const versionKey = service === "radarr" ? "radarrVersion"          : "sonarrVersion";
+  const v          = variant === "4k" ? "4k" : "";
+  const label      = `${service === "radarr" ? "Radarr" : "Sonarr"}${variant === "4k" ? " 4K" : ""}`;
+  const idPrefix   = `${service}${v}`;
+  const urlKey     = `${service}${v}Url`;
+  const keyKey     = `${service}${v}ApiKey`;
+  const folderKey  = `${service}${v}RootFolder`;
+  const profileKey = `${service}${v}QualityProfileId`;
+  const versionKey = `${service}${v}Version`;
 
   const [url,    setUrl]    = useState(initialUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
@@ -248,7 +253,7 @@ export function ArrForm({
   const fetchOptions = useCallback(async () => {
     setOptionsStatus("loading");
     try {
-      const res = await fetch(`/api/settings/arr-options?service=${service}`);
+      const res = await fetch(`/api/settings/arr-options?service=${service}${variant === "4k" ? "&variant=4k" : ""}`);
       if (!res.ok) throw new Error();
       const data: ArrOptions = await res.json();
       setOptions(data);
@@ -256,7 +261,7 @@ export function ArrForm({
     } catch {
       setOptionsStatus("error");
     }
-  }, [service]);
+  }, [service, variant]);
 
   useEffect(() => {
     if (initialUrl && initialApiKey) {
@@ -306,9 +311,9 @@ export function ArrForm({
       <form onSubmit={handleSave} className="space-y-4">
         <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
           <div className="space-y-1.5">
-            <Label htmlFor={`${service}-url`}>{label} URL</Label>
+            <Label htmlFor={`${idPrefix}-url`}>{label} URL</Label>
             <Input
-              id={`${service}-url`}
+              id={`${idPrefix}-url`}
               type="url"
               value={url}
               onChange={(e) => { setUrl(e.target.value); setStatus("idle"); }}
@@ -317,9 +322,9 @@ export function ArrForm({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${service}-key`}>API Key</Label>
+            <Label htmlFor={`${idPrefix}-key`}>API Key</Label>
             <Input
-              id={`${service}-key`}
+              id={`${idPrefix}-key`}
               type="password"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); }}
@@ -361,9 +366,9 @@ export function ArrForm({
             <form onSubmit={handleSaveOptions} className="space-y-4">
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-folder`}>Root Folder</Label>
+                  <Label htmlFor={`${idPrefix}-folder`}>Root Folder</Label>
                   <select
-                    id={`${service}-folder`}
+                    id={`${idPrefix}-folder`}
                     value={rootFolder}
                     onChange={(e) => setRootFolder(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -375,9 +380,9 @@ export function ArrForm({
                   </select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-profile`}>Quality Profile</Label>
+                  <Label htmlFor={`${idPrefix}-profile`}>Quality Profile</Label>
                   <select
-                    id={`${service}-profile`}
+                    id={`${idPrefix}-profile`}
                     value={qualityProfileId}
                     onChange={(e) => setQualityProfileId(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -405,7 +410,7 @@ export function ArrForm({
         </div>
       )}
 
-      {optionsStatus === "loaded" && (
+      {optionsStatus === "loaded" && variant !== "4k" && (
         <ArrImportSection service={service} />
       )}
     </div>
@@ -543,10 +548,14 @@ export function WebhookSecretForm({
   initialSecret,
   initialSonarrSecret,
   initialRadarrSecret,
+  initialSonarr4kSecret,
+  initialRadarr4kSecret,
 }: {
   initialSecret: string;
   initialSonarrSecret?: string;
   initialRadarrSecret?: string;
+  initialSonarr4kSecret?: string;
+  initialRadarr4kSecret?: string;
 }) {
   return (
     <div className="space-y-6">
@@ -571,6 +580,20 @@ export function WebhookSecretForm({
             Used by the Radarr webhook endpoint. Falls back to the legacy secret below if blank.
           </>
         }
+      />
+      <WebhookSecretField
+        id="webhook-secret-radarr4k"
+        label="Radarr 4K webhook secret"
+        payloadKey="radarr4kWebhookSecret"
+        initialSecret={initialRadarr4kSecret ?? ""}
+        helpText={<>Used by the 4K Radarr instance&apos;s webhook. Set only if you run a separate 4K Radarr.</>}
+      />
+      <WebhookSecretField
+        id="webhook-secret-sonarr4k"
+        label="Sonarr 4K webhook secret"
+        payloadKey="sonarr4kWebhookSecret"
+        initialSecret={initialSonarr4kSecret ?? ""}
+        helpText={<>Used by the 4K Sonarr instance&apos;s webhook. Set only if you run a separate 4K Sonarr.</>}
       />
       <div className="border-t border-zinc-800 pt-5">
         <WebhookSecretField
@@ -3434,6 +3457,52 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
           className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${disabled ? "bg-indigo-600" : "bg-zinc-700"}`}
         >
           <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${disabled ? "translate-x-4" : "translate-x-0.5"}`} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean }) {
+  const [enabled, setEnabled] = useState(initialEnabled);
+  const [status, setStatus] = useState<SaveStatus>("idle");
+
+  async function toggle() {
+    const next = !enabled;
+    setEnabled(next);
+    setStatus("saving");
+    const res = await fetch("/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request4kAll: next ? "true" : "false" }),
+    });
+    const data: { ok: boolean } = await res.json();
+    setStatus(data.ok ? "ok" : "error");
+    setTimeout(() => setStatus("idle"), 3000);
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <div>
+        <p className="text-sm font-medium text-zinc-200">Allow everyone to request 4K</p>
+        <p className="text-xs text-zinc-500 mt-0.5">
+          When on, any user who can request a given media type can also request it in 4K — no
+          per-user “Request 4K” permission needed. When off, 4K requires the per-user permission
+          (or admin). Either way a 4K Radarr/Sonarr instance must be configured above.
+        </p>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
+        {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
+        {status === "error"  && <XCircle className="w-3.5 h-3.5 text-red-400" />}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          onClick={toggle}
+          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${enabled ? "bg-indigo-600" : "bg-zinc-700"}`}
+        >
+          <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-4" : "translate-x-0.5"}`} />
         </button>
       </div>
     </div>

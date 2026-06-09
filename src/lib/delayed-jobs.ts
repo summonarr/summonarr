@@ -57,7 +57,3 @@ export function scheduleDelayed(
   }, delayMs).unref();
   return true;
 }
-
-export function __delayedJobsStats() {
-  return { pendingTimers, queued: runQueue.length, activeWorkers, MAX_PENDING, MAX_QUEUE, MAX_CONCURRENCY };
-}

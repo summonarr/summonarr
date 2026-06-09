@@ -85,17 +85,30 @@ export type ArrCfg = { url: string; apiKey: string };
 
 type ArrCfgFull = ArrCfg & { rootFolder?: string; qualityProfileId?: number };
 
-export async function getArrCfg(service: "radarr" | "sonarr"): Promise<ArrCfg | null> {
-  const cfg = await getCfg(service);
+// HD is the default instance; "4k" selects the optional second instance whose
+// settings are namespaced radarr4k*/sonarr4k*. Functions that target a specific
+// instance take an optional `variant` defaulting to "hd", so every existing
+// caller compiles and behaves identically until it opts into 4K.
+export type ArrVariant = "hd" | "4k";
+
+export async function getArrCfg(service: "radarr" | "sonarr", variant: ArrVariant = "hd"): Promise<ArrCfg | null> {
+  const cfg = await getCfg(service, variant);
   if (!cfg) return null;
   return { url: cfg.url, apiKey: cfg.apiKey };
 }
 
-async function getCfg(service: "radarr" | "sonarr"): Promise<ArrCfgFull | null> {
-  const urlKey      = service === "radarr" ? "radarrUrl"              : "sonarrUrl";
-  const keyKey      = service === "radarr" ? "radarrApiKey"           : "sonarrApiKey";
-  const folderKey   = service === "radarr" ? "radarrRootFolder"       : "sonarrRootFolder";
-  const profileKey  = service === "radarr" ? "radarrQualityProfileId" : "sonarrQualityProfileId";
+// Whether a given instance variant is configured (the 4K instance is optional).
+export async function isArrConfigured(service: "radarr" | "sonarr", variant: ArrVariant = "hd"): Promise<boolean> {
+  return (await getCfg(service, variant)) !== null;
+}
+
+async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = "hd"): Promise<ArrCfgFull | null> {
+  // HD keys are e.g. "radarrUrl"; 4K keys insert the "4k" segment → "radarr4kUrl".
+  const suffix      = variant === "4k" ? "4k" : "";
+  const urlKey      = `${service}${suffix}Url`;
+  const keyKey      = `${service}${suffix}ApiKey`;
+  const folderKey   = `${service}${suffix}RootFolder`;
+  const profileKey  = `${service}${suffix}QualityProfileId`;
   const rows = await prisma.setting.findMany({
     where: { key: { in: [urlKey, keyKey, folderKey, profileKey] } },
   });
@@ -223,9 +236,9 @@ export interface ArrRelease {
   downloadAllowed: boolean;
 }
 
-export async function addMovieToRadarr(tmdbId: number): Promise<void> {
-  const cfg = await getCfg("radarr");
-  if (!cfg) throw new Error("Radarr is not configured");
+export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<void> {
+  const cfg = await getCfg("radarr", variant);
+  if (!cfg) throw new Error(variant === "4k" ? "Radarr 4K is not configured" : "Radarr is not configured");
 
   const [movies, rootFolders, profiles] = await Promise.all([
     arrFetch<{ title: string; tmdbId: number; year: number; images: object[]; titleSlug: string; digitalRelease?: string; physicalRelease?: string }[]>(
@@ -283,8 +296,8 @@ export async function addMovieToRadarr(tmdbId: number): Promise<void> {
   }
 }
 
-export async function getRadarrWantedTmdbIds(): Promise<{ wanted: Set<number>; available: Set<number> } | null> {
-  const cfg = await getCfg("radarr");
+export async function getRadarrWantedTmdbIds(variant: ArrVariant = "hd"): Promise<{ wanted: Set<number>; available: Set<number> } | null> {
+  const cfg = await getCfg("radarr", variant);
   if (!cfg) return { wanted: new Set(), available: new Set() };
   try {
     const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(cfg, "/api/v3/movie");
@@ -297,8 +310,8 @@ export async function getRadarrWantedTmdbIds(): Promise<{ wanted: Set<number>; a
   }
 }
 
-export async function getSonarrWantedTmdbIds(): Promise<{ wanted: Set<number>; available: Set<number> } | null> {
-  const cfg = await getCfg("sonarr");
+export async function getSonarrWantedTmdbIds(variant: ArrVariant = "hd"): Promise<{ wanted: Set<number>; available: Set<number> } | null> {
+  const cfg = await getCfg("sonarr", variant);
   if (!cfg) return { wanted: new Set(), available: new Set() };
   try {
     const series = await arrFetch<{ tvdbId: number; tmdbId?: number; status: string; statistics: { episodeFileCount: number; totalEpisodeCount: number } }[]>(
@@ -411,30 +424,8 @@ export async function isSeriesWantedInSonarr(tmdbId: number): Promise<boolean> {
   }
 }
 
-export async function isMovieInRadarrLibrary(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
-  if (!cfg) return false;
-  try {
-    const movies = await arrFetch<{ tmdbId: number }[]>(
-      cfg, `/api/v3/movie?tmdbId=${tmdbId}`
-    );
-    return movies.some((m) => m.tmdbId === tmdbId);
-  } catch { return false; }
-}
-
-export async function isMovieAvailableInRadarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
-  if (!cfg) return false;
-  try {
-    const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
-      cfg, `/api/v3/movie?tmdbId=${tmdbId}`
-    );
-    return movies.some((m) => m.tmdbId === tmdbId && m.hasFile);
-  } catch { return false; }
-}
-
-export async function searchMovieInRadarr(tmdbId: number): Promise<void> {
-  const cfg = await getCfg("radarr");
+export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<void> {
+  const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error("Radarr is not configured");
   const movies = await arrFetch<{ id: number; tmdbId: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
   const movie = movies.find((m) => m.tmdbId === tmdbId);
@@ -525,8 +516,8 @@ async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
   }
 }
 
-export async function isMovieDownloadingInRadarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
+export async function isMovieDownloadingInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("radarr", variant);
   if (!cfg) return false;
   try {
     const queueSet = await getRadarrQueueSet(cfg);
@@ -543,8 +534,8 @@ export async function countRadarrQueue(): Promise<number | null> {
   } catch { return null; }
 }
 
-export async function isSeriesDownloadingInSonarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
+export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
     const lookup = await arrFetch<{ tvdbId: number }[]>(
@@ -636,9 +627,9 @@ export async function grabSeriesRelease(
   });
 }
 
-export async function addSeriesToSonarr(tmdbId: number): Promise<number> {
-  const cfg = await getCfg("sonarr");
-  if (!cfg) throw new Error("Sonarr is not configured");
+export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<number> {
+  const cfg = await getCfg("sonarr", variant);
+  if (!cfg) throw new Error(variant === "4k" ? "Sonarr 4K is not configured" : "Sonarr is not configured");
 
   const [results, rootFolders, profiles] = await Promise.all([
     arrFetch<{ title: string; tvdbId: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string }[]>(
@@ -695,39 +686,8 @@ export async function addSeriesToSonarr(tmdbId: number): Promise<number> {
   return series.tvdbId;
 }
 
-export async function isSeriesInSonarrLibrary(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
-  if (!cfg) return false;
-  try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
-    const library = await arrFetch<{ tvdbId: number }[]>(cfg, "/api/v3/series");
-    return library.some((s) => s.tvdbId === tvdbId);
-  } catch { return false; }
-}
-
-export async function isSeriesAvailableInSonarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
-  if (!cfg) return false;
-  try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
-    const library = await arrFetch<{ tvdbId: number; statistics: { episodeFileCount: number } }[]>(
-      cfg, "/api/v3/series"
-    );
-    const match = library.find((s) => s.tvdbId === tvdbId);
-    return !!match && match.statistics.episodeFileCount > 0;
-  } catch { return false; }
-}
-
-export async function searchSeriesInSonarr(tvdbId: number): Promise<void> {
-  const cfg = await getCfg("sonarr");
+export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant = "hd"): Promise<void> {
+  const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
   const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
   const series = library.find((s) => s.tvdbId === tvdbId);

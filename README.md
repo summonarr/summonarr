@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.12.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.12.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,20 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.12.3
+
+**Added**
+
+- Optional 4K Radarr/Sonarr instances: requests can route to a dedicated 4K instance, with a server-wide "allow everyone to request 4K" toggle, per-user 4K permission toggles in the admin editor, and TRaSH Guides custom formats and quality profiles applied to the 4K instances automatically.
+- Overseerr-style granular permissions with per-request-type quotas.
+- Request an entire collection in one click with "Request all", and admins can submit requests on behalf of another user.
+- Discover now features trending movies and TV side by side.
+
+**Fixed**
+
+- Backup restore is hardened: the import INSERT regex is derived from the table allowlist and the internal loopback sync trigger is encapsulated, with non-2xx responses now logged.
+- Issue-notification emails escape the recipient's display name.
 
 ### v0.12.2
 
@@ -515,7 +529,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.12.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.12.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

@@ -5,12 +5,6 @@ import { normalizeEmail } from "./email-normalize";
 import { posterUrl } from "./tmdb-types";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
-export function safeBigInt(x: unknown): bigint {
-  const n = typeof x === "number" ? x : Number(x);
-  if (!Number.isFinite(n)) return BigInt(0);
-  return BigInt(Math.max(0, Math.floor(n)));
-}
-
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
 // day in the window so gaps render as 0 instead of collapsing the x-axis.
 function padDailySeries<T extends { day: string }>(
@@ -125,10 +119,13 @@ export async function resolveShowTmdbId(
   return item?.tmdbId ?? null;
 }
 
-// Thrown by resolveMediaServerUser when a webhook payload's serverMachineId doesn't match the
-// machineId previously bound to a (source, sourceUserId) row. Webhook handlers translate this
-// into a 403; other callers (sync, cron) don't pass serverMachineId so this path never fires
-// for them.
+// Thrown by resolveMediaServerUser when a caller passes a serverMachineId that doesn't match the
+// machineId previously bound to a (source, sourceUserId) row — defense-in-depth against a payload
+// from a different server impersonating an already-pinned (source, sourceUserId). Currently DORMANT:
+// the sole caller (the play-history poller) is trusted and does not pass serverMachineId, and the
+// Plex/Jellyfin webhook routes that once fed an untrusted machineId here were removed. Retained as
+// scaffolding — reactivate by passing serverMachineId from a future untrusted ingestion path (NOT
+// the poller, which would false-trip on a legitimate server migration).
 export class MediaServerMismatchError extends Error {
   constructor(public readonly source: string, public readonly sourceUserId: string) {
     super(`MediaServerUser ${source}:${sourceUserId} bound to a different server`);
@@ -1413,6 +1410,11 @@ export type PlayHistoryStatsResult = {
 export async function getPlayHistoryStats(
   filters: PlayHistoryStatsFilters = {},
 ): Promise<PlayHistoryStatsResult> {
+  // NOTE: The many $queryRawUnsafe calls in this file (and the route handler)
+  // for activity stats/heatmaps use either fully static SQL + bound $1 params,
+  // or dynamic fragments built only from whitelisted enum values + parseInt +
+  // bound parameters. No user-controlled strings reach SQL structure or identifiers.
+  // Keep this discipline on any future edits. See also the route's groupedQuery.
   const cacheKey = getCacheKey("stats", filters as Record<string, unknown>);
   const cached = getCached<PlayHistoryStatsResult>(cacheKey);
   if (cached) return cached;

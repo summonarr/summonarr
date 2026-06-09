@@ -2,8 +2,9 @@
 //
 // Both the admin restore (/api/admin/backup/db-import) and the first-run
 // setup-mode restore (/api/setup/import) call processBackupImport. The
-// security-sensitive bits — magic-header check, decryption, allowlist of SQL
-// patterns, schema-fingerprint guard, atomic TRUNCATE+INSERT transaction —
+// security-sensitive bits — magic-header check, decryption, data-driven
+// allowlist of SQL patterns (derived from BACKUP_TABLES/BACKUP_ENUMS),
+// schema-fingerprint guard, atomic TRUNCATE+INSERT transaction —
 // live here so they can't drift between the two callers.
 
 import { prisma } from "@/lib/prisma";
@@ -13,7 +14,7 @@ import {
   BackupCryptoError,
   ENCRYPTED_MAGIC,
 } from "@/lib/backup-crypto";
-import { BACKUP_TABLES, computeSchemaFingerprint } from "@/lib/backup-schema";
+import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
 
 // Verbose INSERT-per-row encoding inflates row data 3–5×; 500 MB plaintext
 // covers a fully-loaded Summonarr instance with audit log + play history.
@@ -21,9 +22,19 @@ export const MAX_PLAINTEXT_BYTES = 500 * 1024 * 1024;
 export const MAX_CIPHERTEXT_BYTES = MAX_PLAINTEXT_BYTES + 4096;
 const RESTORE_TX_TIMEOUT_MS = 10 * 60 * 1000;
 
+// Build the allowlist from the single source of truth (BACKUP_TABLES / BACKUP_ENUMS).
+// This prevents a future table/enum addition in the exporter from accidentally
+// being allowed (or a removed one from still being accepted) by a stale regex.
+const tableAlt = BACKUP_TABLES.map((t) => `"${t.replace(/"/g, '""')}"`).join("|");
+const enumAlt = BACKUP_ENUMS.map((e) => e.replace(/'/g, "''")).join("|");
+
 const ALLOWED_PATTERNS = [
-  /^INSERT INTO "public"\."[A-Za-z]+" \([\s\S]*\) VALUES \([\s\S]*\)(?:\s+ON CONFLICT(?:\s*\([^)]*\))?\s+DO NOTHING)?$/,
-  /^DO \$\$ BEGIN IF NOT EXISTS \(\s*SELECT 1 FROM pg_type WHERE typname = '[A-Za-z_]+'\) THEN CREATE TYPE "[A-Za-z_]+" AS ENUM \([^)]+\); END IF; END \$\$$/,
+  new RegExp(
+    `^INSERT INTO "public"\\.(?:${tableAlt}) \\([\\s\\S]*\\) VALUES \\([\\s\\S]*\\)(?:\\s+ON CONFLICT(?:\\s*\\([^)]*\\))?\\s+DO NOTHING)?$`,
+  ),
+  new RegExp(
+    `^DO \\$\\$ BEGIN IF NOT EXISTS \\(\\s*SELECT 1 FROM pg_type WHERE typname = '(?:${enumAlt})'\\) THEN CREATE TYPE "(?:${enumAlt})" AS ENUM \\([^)]+\\); END IF; END \\$\\$$`,
+  ),
 ];
 
 const DANGEROUS_SQL_PATTERN = /\b(SELECT|UPDATE|DELETE|DROP|ALTER|EXECUTE|COPY|CREATE\s+FUNCTION|SET\s+SESSION|SET\s+ROLE|GRANT|REVOKE|TRUNCATE|pg_read_file|pg_write_file|lo_import|lo_export|pg_execute_server_program|dblink|LOAD|pg_lo_import|pg_lo_export|current_setting|set_config)\b/i;
@@ -221,6 +232,13 @@ function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: stri
   if (ALLOWED_PATTERNS[0].test(stmt)) {
     // INSERT — verify VALUES clause contains only literals so a malicious
     // dump can't smuggle a sub-SELECT or function call past the allowlist.
+    // Extra belt-and-suspenders: extract the table and require it to be in the
+    // current BACKUP_TABLES (in case a future regex looseness or tampering sneaks past).
+    const tableMatch = /^INSERT INTO "public"\."([^"]+)"/i.exec(stmt);
+    if (tableMatch && !BACKUP_TABLES.includes(tableMatch[1] as (typeof BACKUP_TABLES)[number])) {
+      return { ok: false, reason: `Blocked INSERT for table not in BACKUP_TABLES: ${tableMatch[1]}` };
+    }
+
     const valuesIdx = stmt.indexOf(") VALUES (");
     if (valuesIdx !== -1) {
       const valuesClause = stmt.slice(valuesIdx + 9);
@@ -485,7 +503,9 @@ export async function processBackupImport(
 
   // INSERT INTO "public"."<Table>" (...) ...  — pull out the table name so we
   // can attribute conflict-skipped rows for the response summary.
-  const INSERT_TABLE_RE = /^INSERT\s+INTO\s+"public"\."([A-Za-z]+)"/i;
+  // Built from the same BACKUP_TABLES source of truth as the allowlist and TRUNCATE
+  // for future-proofing (no drift if tables are added/removed).
+  const INSERT_TABLE_RE = new RegExp(`^INSERT\\s+INTO\\s+"public"\\.(?:${tableAlt})`, 'i');
 
   let executed = 0;
   const conflictSkippedByTable: Record<string, number> = {};

@@ -16,26 +16,6 @@ function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWhereInput 
   };
 }
 
-// DECLINED requests are excluded so a re-requested item is correctly shown as un-requested
-export async function filterRequestedItems(items: TmdbMedia[]): Promise<TmdbMedia[]> {
-  if (items.length === 0) return items;
-  const baseWhere = buildMediaTypeWhere(items);
-  if (!baseWhere) return items;
-
-  const rows = await prisma.mediaRequest.findMany({
-    where: { status: { not: "DECLINED" }, ...baseWhere },
-    select: { tmdbId: true, mediaType: true },
-    distinct: ["tmdbId", "mediaType"],
-  });
-
-  const requestedSet = new Set(rows.map((r) => `${r.tmdbId}:${r.mediaType}`));
-
-  return items.filter((item) => {
-    const key = `${item.id}:${item.mediaType === "movie" ? "MOVIE" : "TV"}`;
-    return !requestedSet.has(key);
-  });
-}
-
 export async function attachRequestedStatus(items: TmdbMedia[], userId?: string): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
   const baseWhere = buildMediaTypeWhere(items);

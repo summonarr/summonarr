@@ -19,6 +19,7 @@ import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import { getPlexSessions } from "./plex";
+import { triggerFullSync } from "./internal-trigger";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
 // (mobile/TV clients that close without a clean Stop). When the playhead has
@@ -473,15 +474,13 @@ class PlexEventStreamManager {
   }
 
   private async triggerLibrarySync(): Promise<void> {
+    // Uses the single allowed internal loopback trigger (see src/lib/internal-trigger.ts
+    // and Claude.md guardrail 5a). This ensures the full public /api/sync path
+    // (auth, advisory lock, orchestrator, audit recording) is exercised.
     try {
-      const secret = process.env.CRON_SECRET;
-      if (!secret) return; // no auth token available — silently skip.
-      const port = process.env.PORT ?? "3000";
-      await fetch(`http://127.0.0.1:${port}/api/sync`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${secret}` },
-      });
+      await triggerFullSync();
     } catch (err) {
+      // triggerFullSync already swallows and warns; this is defensive.
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[plex-events] timeline-triggered library sync failed: ${msg}`);
     }

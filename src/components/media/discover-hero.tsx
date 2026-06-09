@@ -20,6 +20,7 @@ interface DiscoverHeroProps {
   media: TmdbMedia;
   showPlex?: boolean;
   showJellyfin?: boolean;
+  label?: string;
 }
 
 /* Featured #1-trending block. Mirrors the prototype's `.discover-hero`:
@@ -30,6 +31,7 @@ export function DiscoverHero({
   media,
   showPlex = true,
   showJellyfin = true,
+  label = "TRENDING #1",
 }: DiscoverHeroProps) {
   const poster = posterUrl(media.posterPath, "w500");
   const [liveRatings, setLiveRatings] = useState<RatingsPayload | null>(null);
@@ -127,7 +129,7 @@ export function DiscoverHero({
         style={{ gap: 10, minWidth: 0 }}
       >
         <div className="flex flex-wrap items-center" style={{ gap: 6 }}>
-          <span className="ds-chip ds-chip-accent">TRENDING #1</span>
+          <span className="ds-chip ds-chip-accent">{label}</span>
           {showPlex && media.plexAvailable && (
             <span
               className="ds-chip ds-chip-plex"

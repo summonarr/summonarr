@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { listSpecs, describeSchemaError } from "@/lib/trash";
+import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/generated/prisma";
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
@@ -10,16 +11,17 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   if (!service) {
     return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
   }
+  const variant: ArrVariant = req.nextUrl.searchParams.get("variant") === "4k" ? "4k" : "hd";
 
   try {
-    const specs = await listSpecs(service);
-    return NextResponse.json({ service, specs });
+    const specs = await listSpecs(service, variant);
+    return NextResponse.json({ service, variant, specs });
   } catch (err) {
     const schemaDiagnostic = describeSchemaError(err);
     if (schemaDiagnostic) {
-      return NextResponse.json({ service, specs: [], schemaDiagnostic });
+      return NextResponse.json({ service, variant, specs: [], schemaDiagnostic });
     }
     const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ service, specs: [], error: message }, { status: 500 });
+    return NextResponse.json({ service, variant, specs: [], error: message }, { status: 500 });
   }
 });

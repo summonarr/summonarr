@@ -27,8 +27,30 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   discordId     String?   @unique
+  // Legacy authorization booleans — migrated into permission bits
+  // (AUTO_APPROVE / QUOTA_UNLIMITED) by scripts/migrate-role-permissions.mjs.
+  // Kept (deprecated) so the migration can read them; dropped in a follow-up
+  // once every environment has migrated. New code reads `permissions` instead.
   autoApprove   Boolean   @default(false)
   quotaExempt   Boolean   @default(false)
+
+  // ─── Authorization (Overseerr-style) ─────────────────────────────────────
+  // `permissions` is the AUTHORITATIVE capability bitmask; `role` above is now a
+  // coarse PRESET that seeds it (see PRESETS in src/lib/permissions.ts) and a
+  // label still used for admin-area gating in proxy.ts. Stored as BIGINT because
+  // a JS Int bitmask overflows at bit 31 (bitwise ops are signed-32-bit) and the
+  // 4K block crosses 30 bits. Carried in the session JWT as a decimal string
+  // (BigInt is not JSON-serializable). 0 = unseeded → callers fall back to the
+  // role preset via effectivePermissions(), so an upgrade can run `prisma db
+  // push` before the migration without locking anyone out.
+  permissions   BigInt    @default(0)
+  // Per-user, per-media-type request-quota overrides. null ⇒ use the global
+  // quotaLimit/quotaPeriod Settings. QUOTA_UNLIMITED (or ADMIN) bypasses both.
+  movieQuotaLimit Int?
+  movieQuotaDays  Int?
+  tvQuotaLimit    Int?
+  tvQuotaDays     Int?
+
   // For local/OIDC users: which media server's availability badges to show ("plex" | "jellyfin" | null)
   // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
   mediaServer   String?
@@ -201,6 +223,11 @@ model MediaRequest {
 
   tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
 
+  // Which Radarr/Sonarr instance this request targets. false = HD (default),
+  // true = the optional 4K instance. Part of the unique key so one user can hold
+  // both an HD and a 4K request for the same title.
+  is4k Boolean @default(false)
+
   lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
@@ -209,7 +236,7 @@ model MediaRequest {
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
 
-  @@unique([tmdbId, mediaType, requestedBy])
+  @@unique([tmdbId, mediaType, requestedBy, is4k])
   @@index([requestedBy])
   @@index([status])
   @@index([tvdbId])
@@ -280,7 +307,10 @@ model TVEpisodeCache {
 // Populated by /api/sync/radarr; cleared per-movie by the Radarr webhook on Download.
 
 model RadarrWantedItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Radarr Available Cache ───────────────────────────────────────────────────
@@ -289,7 +319,10 @@ model RadarrWantedItem {
 // Enables DB-only availability checks — avoids per-movie ?tmdbId= API calls.
 
 model RadarrAvailableItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Sonarr Wanted Cache ──────────────────────────────────────────────────────
@@ -297,7 +330,10 @@ model RadarrAvailableItem {
 // Populated by /api/sync/sonarr; cleared per-series by the Sonarr webhook on Download.
 
 model SonarrWantedItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Sonarr Available Cache ───────────────────────────────────────────────────
@@ -306,7 +342,10 @@ model SonarrWantedItem {
 // Enables DB-only availability checks — avoids per-series ?tmdbId= API calls.
 
 model SonarrAvailableItem {
-  tmdbId Int @id
+  tmdbId Int
+  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+
+  @@id([tmdbId, is4k])
 }
 
 // ─── Upcoming Cache ───────────────────────────────────────────────────────────
@@ -548,7 +587,9 @@ enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
   REQUEST_DELETE
+  REQUEST_ON_BEHALF
   USER_ROLE_CHANGE
+  USER_PERMISSIONS_CHANGE
   USER_DELETE
   SETTINGS_CHANGE
   LIBRARY_SYNC
@@ -814,7 +855,7 @@ model TrashSpec {
   fetchedAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
-  application TrashApplication?
+  applications TrashApplication[]
 
   @@unique([service, kind, trashId])
   @@index([service, kind])
@@ -826,8 +867,12 @@ model TrashSpec {
 // syncs without depending on name lookups.
 model TrashApplication {
   id          String    @id @default(cuid(2))
-  trashSpecId String    @unique
+  trashSpecId String
   trashSpec   TrashSpec @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
+  // false = HD instance (radarrUrl/sonarrUrl); true = 4K instance (radarr4kUrl/sonarr4kUrl).
+  // A spec can be managed independently on each instance — each variant keeps its own remoteId,
+  // appliedAt, and error state. The catalog (TrashSpec) is shared across variants.
+  is4k        Boolean   @default(false)
   enabled     Boolean   @default(true)
   remoteId    Int?
   appliedAt   DateTime?
@@ -839,6 +884,8 @@ model TrashApplication {
   errorCount  Int       @default(0)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
+
+  @@unique([trashSpecId, is4k])
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────

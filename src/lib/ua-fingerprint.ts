@@ -77,8 +77,3 @@ export function fingerprintToLabel(fp: UaFingerprint): string {
 
   return `${browserLabel[fp.browser] ?? "Browser"} on ${osLabel[fp.os] ?? "Unknown"}`;
 }
-
-export function isMobileUa(ua: string): boolean {
-  const fp = extractUaFingerprint(ua);
-  return fp.device === "mobile" || fp.device === "tablet";
-}

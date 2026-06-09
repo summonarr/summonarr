@@ -473,7 +473,7 @@ export async function notifyAdminsIssueMessageEmail(data: {
       preheader: `${data.userName} replied to the issue "${data.issueTitle}"`,
       accent: "amber",
       heading: data.fromAdmin ? "Admin Reply on Issue" : "New Issue Reply",
-      subheading: `${data.userName} replied to an open issue.`,
+      subheading: `${esc(data.userName)} replied to an open issue.`,
       details: [
         ["Issue", esc(data.issueTitle)],
         ["From", esc(data.userName)],
@@ -505,7 +505,7 @@ export async function notifyUserIssueMessageEmail(data: {
       preheader: `${data.authorName} replied to your issue "${data.issueTitle}"`,
       accent: "indigo",
       heading: "Admin Replied to Your Issue",
-      subheading: `${data.authorName} sent you a message about your open issue.`,
+      subheading: `${esc(data.authorName)} sent you a message about your open issue.`,
       details: [
         ["Issue", esc(data.issueTitle)],
         ["From", esc(data.authorName)],

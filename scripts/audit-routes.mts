@@ -69,7 +69,10 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
 /** Tokens that prove an ADMIN-capable guard is present. */
 const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "requireAuth", "isCronAuthorized"];
 /** Tokens that prove SOME auth guard is present (superset of ADMIN_TOKENS). */
-const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "timingSafeEqual"];
+// `withPermission` wraps withAuth and gates on a capability bit — it proves
+// authentication but not a specific role, so it stays out of ADMIN_TOKENS
+// (/api/admin/* routes still need a role wrapper or the proxy backstop).
+const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission", "timingSafeEqual"];
 
 interface Finding {
   route: string;

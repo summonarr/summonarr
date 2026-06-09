@@ -817,8 +817,11 @@ const spec = {
                 type: "object",
                 properties: {
                   role: { $ref: "#/components/schemas/UserRole" },
-                  autoApprove: { type: "boolean" },
-                  quotaExempt: { type: "boolean" },
+                  permissions: { type: "string", description: "Decimal-encoded capability bitmask (see src/lib/permissions.ts)" },
+                  movieQuotaLimit: { type: "integer", nullable: true },
+                  movieQuotaDays: { type: "integer", nullable: true },
+                  tvQuotaLimit: { type: "integer", nullable: true },
+                  tvQuotaDays: { type: "integer", nullable: true },
                   mediaServer: { type: "string", enum: ["plex", "jellyfin"], nullable: true },
                   notifyOnApproved: { type: "boolean" },
                   notifyOnAvailable: { type: "boolean" },

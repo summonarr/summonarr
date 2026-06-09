@@ -138,6 +138,7 @@ async function handle(request: NextRequest) {
       where: { lastError: { not: null } },
       select: {
         trashSpec: { select: { kind: true, name: true, service: true } },
+        is4k: true,
         errorCount: true,
         lastErrorAt: true,
         lastError: true,
@@ -153,6 +154,7 @@ async function handle(request: NextRequest) {
       .filter((a) => a.errorCount >= 3 && a.lastErrorAt && a.lastErrorAt.getTime() > dayAgo)
       .map((a) => ({
         service: a.trashSpec.service,
+        variant: a.is4k ? "4k" : "hd",
         kind: a.trashSpec.kind,
         name: a.trashSpec.name,
         errorCount: a.errorCount,

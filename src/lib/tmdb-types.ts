@@ -166,21 +166,11 @@ export function stillUrl(path: string | null, size: "w185" | "w300" | "original"
 // ISO-code → English display name, with the raw code as fallback. Intl.DisplayNames is available in
 // both the Node and browser runtimes; lazily constructed and reused.
 let _languageNames: Intl.DisplayNames | null = null;
-let _regionNames: Intl.DisplayNames | null = null;
 export function languageName(code: string | null | undefined): string | null {
   if (!code) return null;
   try {
     _languageNames ??= new Intl.DisplayNames(["en"], { type: "language" });
     return _languageNames.of(code) ?? code;
-  } catch {
-    return code;
-  }
-}
-export function regionName(code: string | null | undefined): string | null {
-  if (!code) return null;
-  try {
-    _regionNames ??= new Intl.DisplayNames(["en"], { type: "region" });
-    return _regionNames.of(code.toUpperCase()) ?? code;
   } catch {
     return code;
   }

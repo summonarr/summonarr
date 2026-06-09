@@ -1,11 +1,4 @@
 
-export function parsePositiveInt(value: string | null | undefined, fallback: number | null = null): number | null {
-  if (value == null) return fallback;
-  const n = parseInt(value, 10);
-  if (!Number.isFinite(n) || n <= 0) return fallback;
-  return n;
-}
-
 export function sanitizeText(input: string): string {
   return input
     .replace(/[<>]/g, "")
