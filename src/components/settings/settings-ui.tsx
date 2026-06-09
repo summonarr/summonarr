@@ -639,12 +639,25 @@ function CopyRow({ label, displayUrl, copyUrl }: { label: string; displayUrl: st
 // HD rows prefer the per-source secret and fall back to the legacy shared secret (matching how the
 // webhook handler resolves tokens). The 4K rows point at the SAME endpoint with the 4K instance's own
 // secret — the handler uses secret-as-discriminator to set is4k — and only appear once that secret is set.
+function SecretNeededRow({ label }: { label: string }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-xs font-medium text-zinc-400">{label}</p>
+      <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
+        <span className="flex-1 text-xs text-amber-500">Set the 4K webhook secret above to generate this URL.</span>
+      </div>
+    </div>
+  );
+}
+
 export function WebhookUrls({
   baseUrl,
   radarrSecret,
   sonarrSecret,
   radarr4kSecret,
   sonarr4kSecret,
+  radarr4kConfigured,
+  sonarr4kConfigured,
   legacySecret,
 }: {
   baseUrl: string;
@@ -652,6 +665,10 @@ export function WebhookUrls({
   sonarrSecret?: string;
   radarr4kSecret?: string;
   sonarr4kSecret?: string;
+  // The 4K rows appear once a 4K instance is configured (URL + API key) — same trigger as the HD
+  // rows — not only once the 4K webhook secret is saved.
+  radarr4kConfigured?: boolean;
+  sonarr4kConfigured?: boolean;
   legacySecret?: string;
 }) {
   const radarrBase = `${baseUrl}/api/webhooks/radarr`;
@@ -667,11 +684,15 @@ export function WebhookUrls({
     <div className="space-y-4">
       <CopyRow label="Radarr webhook URL" displayUrl={`${radarrBase}${displaySuffix(radarrTok)}`} copyUrl={`${radarrBase}${copySuffix(radarrTok)}`} />
       <CopyRow label="Sonarr webhook URL" displayUrl={`${sonarrBase}${displaySuffix(sonarrTok)}`} copyUrl={`${sonarrBase}${copySuffix(sonarrTok)}`} />
-      {radarr4kSecret && (
-        <CopyRow label="Radarr 4K webhook URL" displayUrl={`${radarrBase}${displaySuffix(radarr4kSecret)}`} copyUrl={`${radarrBase}${copySuffix(radarr4kSecret)}`} />
+      {radarr4kConfigured && (
+        radarr4kSecret
+          ? <CopyRow label="Radarr 4K webhook URL" displayUrl={`${radarrBase}${displaySuffix(radarr4kSecret)}`} copyUrl={`${radarrBase}${copySuffix(radarr4kSecret)}`} />
+          : <SecretNeededRow label="Radarr 4K webhook URL" />
       )}
-      {sonarr4kSecret && (
-        <CopyRow label="Sonarr 4K webhook URL" displayUrl={`${sonarrBase}${displaySuffix(sonarr4kSecret)}`} copyUrl={`${sonarrBase}${copySuffix(sonarr4kSecret)}`} />
+      {sonarr4kConfigured && (
+        sonarr4kSecret
+          ? <CopyRow label="Sonarr 4K webhook URL" displayUrl={`${sonarrBase}${displaySuffix(sonarr4kSecret)}`} copyUrl={`${sonarrBase}${copySuffix(sonarr4kSecret)}`} />
+          : <SecretNeededRow label="Sonarr 4K webhook URL" />
       )}
       {noHdSecret && (
         <p className="text-xs text-amber-500">
@@ -679,7 +700,7 @@ export function WebhookUrls({
         </p>
       )}
       <p className="text-xs text-zinc-600">
-        In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Download · Use the URLs above (token is included).
+        In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Download · Use the URLs above (token is included). 4K rows point at the same endpoint with the 4K instance&apos;s own token.
       </p>
     </div>
   );

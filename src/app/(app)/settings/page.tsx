@@ -784,6 +784,8 @@ export default async function SettingsPage({
                     sonarrSecret={cfg.sonarrWebhookSecret ?? ""}
                     radarr4kSecret={cfg.radarr4kWebhookSecret ?? ""}
                     sonarr4kSecret={cfg.sonarr4kWebhookSecret ?? ""}
+                    radarr4kConfigured={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)}
+                    sonarr4kConfigured={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)}
                     legacySecret={cfg.webhookSecret ?? ""}
                   />
                 </div>
