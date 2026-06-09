@@ -110,10 +110,12 @@ const DNS_CACHE_TTL_MS = 5 * 60 * 1000;
 const DNS_CACHE_MAX = 512;
 const dnsCache = new Map<string, { addrs: string[]; expiresAt: number }>();
 
-async function lookupHostCached(host: string): Promise<string[]> {
+async function lookupHostCached(host: string, bypassCache = false): Promise<string[]> {
   const now = Date.now();
-  const cached = dnsCache.get(host);
-  if (cached && cached.expiresAt > now) return cached.addrs;
+  if (!bypassCache) {
+    const cached = dnsCache.get(host);
+    if (cached && cached.expiresAt > now) return cached.addrs;
+  }
 
   // Use getaddrinfo (dns.lookup) rather than c-ares (dns.resolve4/6) so resolution
   // matches what fetch() itself does — respects /etc/hosts, mDNS (.local/.lan),
@@ -182,9 +184,11 @@ export async function resolveToSafeUrl(
 // incompatibility (see safe-fetch.ts), so we instead shrink the window to
 // milliseconds and refuse the request if the address set changed.
 //
-// The cache TTL on lookupHostCached is 5 minutes, so within that window this
-// hits the same cached answer; in the worst case (cache miss right before
-// fetch) we still see whatever undici will see milliseconds later.
+// This re-resolves FRESH (bypassing the 5-minute cache) so it genuinely queries
+// DNS again immediately before fetch(), rather than echoing the answer the
+// resolve step just primed into the cache — a cached read here could never
+// observe a rebind, defeating the whole check. The residual gap is only between
+// this getaddrinfo and undici's own at connect, typically sub-millisecond.
 export async function verifyResolvedHost(
   host: string,
   expectedAddrs: readonly string[],
@@ -194,7 +198,7 @@ export async function verifyResolvedHost(
   // both forms defensively so callers don't have to special-case it.
   const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
 
-  const addrs = isIP(h) ? [h] : await lookupHostCached(h);
+  const addrs = isIP(h) ? [h] : await lookupHostCached(h, /* bypassCache */ true);
   if (addrs.length === 0) return false;
 
   const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;

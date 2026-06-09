@@ -10,14 +10,38 @@ export type SafeFetchErrorReason =
   | "redirect"
   | "network";
 
+// Strip the query string and any embedded credentials from a URL before it can
+// reach a log line. Several upstreams carry secrets in the query string (Plex
+// `?X-Plex-Token=`, OMDb `?apikey=`, MDBList/ipinfo `?token=`), and SafeFetchError
+// is routinely logged — sometimes as the whole error object — so the raw URL must
+// never travel inside `.message` or `.url`.
+export function redactUrlForLog(raw: string): string {
+  try {
+    const u = new URL(raw);
+    u.search = "";
+    u.username = "";
+    u.password = "";
+    return u.toString();
+  } catch {
+    return "[unparseable-url]";
+  }
+}
+
 export class SafeFetchError extends Error {
   readonly reason: SafeFetchErrorReason;
   readonly url: string;
   constructor(reason: SafeFetchErrorReason, url: string, message: string) {
-    super(message);
+    // Redact both the `.url` field and any occurrence of the raw URL the caller
+    // interpolated into `message`. Call sites pass the same `url` value they
+    // interpolated, so a literal split/join scrubs it regardless of how
+    // redaction reformats the URL. This makes EVERY SafeFetchError safe to log
+    // verbatim — including future call sites — rather than relying on each
+    // logger to reduce to `.reason`.
+    const safeUrl = redactUrlForLog(url);
+    super(url && safeUrl !== url ? message.split(url).join(safeUrl) : message);
     this.name = "SafeFetchError";
     this.reason = reason;
-    this.url = url;
+    this.url = safeUrl;
   }
 }
 
