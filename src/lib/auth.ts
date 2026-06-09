@@ -492,15 +492,23 @@ export async function authorizeWithCredentials(
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
   const email = normalizeEmail(credentials.email as string);
 
-  // When TRUST_PROXY is unset (single-host deployments behind no reverse proxy), getClientIp
-  // returns the literal "unknown" — keying a single `login-ip:unknown` bucket would mean five
-  // typos from any one client locks out the whole instance for 5 minutes. Fall back to a
-  // per-email bucket so the attack surface is limited to the targeted account.
+  // Two independent throttles, both consumed on every attempt:
+  //   • Per-IP — bounds rapid attempts from one source. Skipped when the IP is
+  //     unknowable (TRUST_PROXY unset → getClientIp returns "unknown"); keying a
+  //     single `login-ip:unknown` bucket would let a few typos from any one
+  //     client lock out the whole instance.
+  //   • Per-account — ALWAYS enforced so a password-spray distributed across
+  //     many IPs against one account is still bounded (the per-IP bucket can't
+  //     see that). Generous window so ordinary mistyping doesn't lock a user
+  //     out. Trade-off: an attacker can burn a victim's account bucket to impose
+  //     a temporary (≤15 min) login delay on that one account — the standard
+  //     cost of account-level throttling, and far cheaper than unbounded spray.
+  //     In-memory and per-replica like the rest of the limiter.
   const emailHash = hashAuditEmail(email);
-  const rateKey = ip === "unknown" ? `login-email:${emailHash}` : `login-ip:${ip}`;
-  const rateMax  = ip === "unknown" ? 10 : 20;
+  const ipAllowed = ip === "unknown" ? true : checkRateLimit(`login-ip:${ip}`, 20, 5 * 60 * 1000);
+  const accountAllowed = checkRateLimit(`login-email:${emailHash}`, 50, 15 * 60 * 1000);
 
-  if (!checkRateLimit(rateKey, rateMax, 5 * 60 * 1000)) {
+  if (!ipAllowed || !accountAllowed) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
     return null;
   }

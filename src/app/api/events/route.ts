@@ -1,4 +1,5 @@
-import { auth, isTokenExpired } from "@/lib/auth";
+import { NextResponse } from "next/server";
+import { requireAuth } from "@/lib/api-auth";
 import { sseEmitter, SSE_MAX_LISTENERS, type SSEEvent } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 
@@ -35,8 +36,12 @@ function decrementConnection(userId: string) {
 }
 
 export async function GET() {
-  const session = await auth();
-  if (!session || isTokenExpired(session)) return new Response("Unauthorized", { status: 401 });
+  // DB-checked auth (revocation + role-rotation + UA-fingerprint), not JWT-only
+  // auth(). This route is reachable on the prefetch-header path that proxy.ts's
+  // matcher skips, so a plain auth() check would honor a revoked or role-demoted
+  // session until its natural exp. requireAuth re-runs verifyAndRefreshSession.
+  const session = await requireAuth();
+  if (session instanceof NextResponse) return session;
 
   const maint = await maintenanceGuard();
   if (maint) return maint;

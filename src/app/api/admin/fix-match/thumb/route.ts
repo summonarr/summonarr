@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
+import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -18,10 +18,11 @@ const MAX_THUMB_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
 
 export async function GET(request: NextRequest) {
-  const session = await auth();
-  if (!session || isTokenExpired(session) || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) {
-    return new NextResponse("Forbidden", { status: 403 });
-  }
+  // DB-checked auth — see /api/events for why inline JWT-only auth() is
+  // insufficient on the prefetch-header path. role:"ISSUE_ADMIN" admits ADMIN
+  // too. requireAuth returns 401 (no/expired/revoked session) or 403 (wrong role).
+  const gate = await requireAuth({ role: "ISSUE_ADMIN" });
+  if (gate instanceof NextResponse) return gate;
 
   const thumbPath = new URL(request.url).searchParams.get("path");
   if (!thumbPath) return new NextResponse("Missing path", { status: 400 });
