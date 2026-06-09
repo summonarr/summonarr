@@ -23,6 +23,8 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Don't advertise the framework — drops the default `X-Powered-By: Next.js`.
+  poweredByHeader: false,
   experimental: {
     // Cap proxy body buffering — defence-in-depth against oversized request payloads.
     // Route handlers enforce their own limits; this prevents the proxy layer from
