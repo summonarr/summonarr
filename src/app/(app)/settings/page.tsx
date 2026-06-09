@@ -778,7 +778,14 @@ export default async function SettingsPage({
                   initialRadarr4kSecret={cfg.radarr4kWebhookSecret ? "••••••••" : ""}
                 />
                 <div className="border-t border-zinc-800 pt-5">
-                  <WebhookUrls baseUrl={baseUrl} secret={cfg.webhookSecret ?? ""} />
+                  <WebhookUrls
+                    baseUrl={baseUrl}
+                    radarrSecret={cfg.radarrWebhookSecret ?? ""}
+                    sonarrSecret={cfg.sonarrWebhookSecret ?? ""}
+                    radarr4kSecret={cfg.radarr4kWebhookSecret ?? ""}
+                    sonarr4kSecret={cfg.sonarr4kWebhookSecret ?? ""}
+                    legacySecret={cfg.webhookSecret ?? ""}
+                  />
                 </div>
               </div>
             </div>

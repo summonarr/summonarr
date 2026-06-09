@@ -635,17 +635,45 @@ function CopyRow({ label, displayUrl, copyUrl }: { label: string; displayUrl: st
   );
 }
 
-// The ?token= query param is the only auth option because Radarr/Sonarr webhook UIs have no header field
-export function WebhookUrls({ baseUrl, secret }: { baseUrl: string; secret: string }) {
-  const copySuffix = secret ? `?token=${encodeURIComponent(secret)}` : "";
-  const displaySuffix = secret ? "?token=••••••••" : "";
+// The ?token= query param is the only auth option because Radarr/Sonarr webhook UIs have no header field.
+// HD rows prefer the per-source secret and fall back to the legacy shared secret (matching how the
+// webhook handler resolves tokens). The 4K rows point at the SAME endpoint with the 4K instance's own
+// secret — the handler uses secret-as-discriminator to set is4k — and only appear once that secret is set.
+export function WebhookUrls({
+  baseUrl,
+  radarrSecret,
+  sonarrSecret,
+  radarr4kSecret,
+  sonarr4kSecret,
+  legacySecret,
+}: {
+  baseUrl: string;
+  radarrSecret?: string;
+  sonarrSecret?: string;
+  radarr4kSecret?: string;
+  sonarr4kSecret?: string;
+  legacySecret?: string;
+}) {
   const radarrBase = `${baseUrl}/api/webhooks/radarr`;
   const sonarrBase = `${baseUrl}/api/webhooks/sonarr`;
+  const copySuffix = (s?: string) => (s ? `?token=${encodeURIComponent(s)}` : "");
+  const displaySuffix = (s?: string) => (s ? "?token=••••••••" : "");
+
+  const radarrTok = radarrSecret || legacySecret || "";
+  const sonarrTok = sonarrSecret || legacySecret || "";
+  const noHdSecret = !radarrTok && !sonarrTok;
+
   return (
     <div className="space-y-4">
-      <CopyRow label="Radarr webhook URL" displayUrl={`${radarrBase}${displaySuffix}`} copyUrl={`${radarrBase}${copySuffix}`} />
-      <CopyRow label="Sonarr webhook URL" displayUrl={`${sonarrBase}${displaySuffix}`} copyUrl={`${sonarrBase}${copySuffix}`} />
-      {!secret && (
+      <CopyRow label="Radarr webhook URL" displayUrl={`${radarrBase}${displaySuffix(radarrTok)}`} copyUrl={`${radarrBase}${copySuffix(radarrTok)}`} />
+      <CopyRow label="Sonarr webhook URL" displayUrl={`${sonarrBase}${displaySuffix(sonarrTok)}`} copyUrl={`${sonarrBase}${copySuffix(sonarrTok)}`} />
+      {radarr4kSecret && (
+        <CopyRow label="Radarr 4K webhook URL" displayUrl={`${radarrBase}${displaySuffix(radarr4kSecret)}`} copyUrl={`${radarrBase}${copySuffix(radarr4kSecret)}`} />
+      )}
+      {sonarr4kSecret && (
+        <CopyRow label="Sonarr 4K webhook URL" displayUrl={`${sonarrBase}${displaySuffix(sonarr4kSecret)}`} copyUrl={`${sonarrBase}${copySuffix(sonarr4kSecret)}`} />
+      )}
+      {noHdSecret && (
         <p className="text-xs text-amber-500">
           No secret token set — webhook endpoints are unauthenticated. Set a token above.
         </p>
