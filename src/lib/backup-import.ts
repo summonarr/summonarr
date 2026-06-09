@@ -187,6 +187,19 @@ function flushSqlChunk(
 
 const SAFE_LITERAL_RE = /^(NULL|TRUE|FALSE|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|'(?:[^']|'')*')$/;
 
+// What may legitimately follow the single VALUES tuple. The exporter emits
+// exactly one `(...)` tuple optionally followed by `ON CONFLICT DO NOTHING`
+// (whose exact shape is already pinned by ALLOWED_PATTERNS[0]). Anything else —
+// in particular a second `, (...)` tuple, which the greedy `VALUES \([\s\S]*\)`
+// regex would otherwise admit — must be rejected. validateValuesTokens used to
+// `return true` at the first tuple's closing `)`, so it never inspected a
+// smuggled second tuple like `('a'), ((SELECT ...))`.
+function remainderAfterTupleIsSafe(rest: string): boolean {
+  const trimmed = rest.trim();
+  if (trimmed === "") return true;
+  return /^ON CONFLICT\b/i.test(trimmed);
+}
+
 function validateValuesTokens(valuesClause: string): boolean {
   let i = 0;
   while (i < valuesClause.length && valuesClause[i] === " ") i++;
@@ -196,7 +209,7 @@ function validateValuesTokens(valuesClause: string): boolean {
   while (i < valuesClause.length) {
     while (i < valuesClause.length && /[ \t\n\r]/.test(valuesClause[i])) i++;
     if (i >= valuesClause.length) return false;
-    if (valuesClause[i] === ")") return true;
+    if (valuesClause[i] === ")") return remainderAfterTupleIsSafe(valuesClause.slice(i + 1));
 
     let token = "";
     if (valuesClause[i] === "'") {
@@ -222,7 +235,7 @@ function validateValuesTokens(valuesClause: string): boolean {
     if (i >= valuesClause.length) return false;
     const sep = valuesClause[i];
     if (sep === ",") { i++; continue; }
-    if (sep === ")") return true;
+    if (sep === ")") return remainderAfterTupleIsSafe(valuesClause.slice(i + 1));
     return false;
   }
   return false;
