@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { notifyAdminGrabCompletedPush } from "@/lib/push";
+import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
@@ -25,6 +25,8 @@ interface SonarrWebhookPayload {
     tmdbId?: number;
     title: string;
   };
+  episodes?: Array<{ seasonNumber?: number; episodeNumber?: number }>;
+  downloadClient?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -106,6 +108,28 @@ export async function POST(req: NextRequest) {
   // replay digest so Sonarr's source-side retry can re-deliver.
   let syncCompleted = false;
   try {
+
+  // Sonarr fires ManualInteractionRequired when a grabbed release can't be imported
+  // automatically and is parked in the queue. There's nothing to mark available — alert admins
+  // (best-effort) so they can resolve it in Sonarr's queue.
+  if (payload.eventType === "ManualInteractionRequired") {
+    const seriesTitle = payload.series?.title ?? "A series";
+    const eps = payload.episodes ?? [];
+    let scope = "";
+    if (eps.length === 1 && eps[0].seasonNumber != null && eps[0].episodeNumber != null) {
+      scope = ` S${String(eps[0].seasonNumber).padStart(2, "0")}E${String(eps[0].episodeNumber).padStart(2, "0")}`;
+    } else if (eps.length > 1) {
+      scope = ` (${eps.length} episodes)`;
+    }
+    const title = `${seriesTitle}${scope}`;
+    console.warn("[webhook/sonarr] manual interaction required:", sanitizeForLog(title));
+    after(() =>
+      notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
+        .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),
+    );
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, manualInteraction: true });
+  }
 
   if (payload.eventType !== "Download" || !payload.series) {
     syncCompleted = true;

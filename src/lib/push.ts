@@ -475,6 +475,36 @@ export async function notifyAdminsNewIssuePush(data: {
   }
 }
 
+// Radarr/Sonarr fire ManualInteractionRequired when a grabbed release can't be imported
+// automatically and is parked in the queue waiting for an operator. Best-effort push to all
+// admins so they know to go resolve it; there's nothing to mark available.
+export async function notifyAdminsManualInteractionRequiredPush(data: {
+  service: "Radarr" | "Sonarr";
+  title: string;
+  detail?: string;
+}) {
+  try {
+    const keys = await getVapidKeys();
+    if (!keys) return;
+
+    const subs = await getAdminSubscriptions();
+    if (!subs.length) return;
+
+    const title = data.title.length > 100 ? data.title.slice(0, 97) + "…" : data.title;
+    const payload = {
+      title: `${data.service}: manual import needed`,
+      body: data.detail
+        ? `${title} — stuck in ${data.detail}, needs manual intervention`
+        : `${title} needs manual intervention in ${data.service}`,
+      url: "/admin",
+    };
+
+    await Promise.allSettled(subs.map((s: { endpoint: string; p256dh: string; auth: string }) => sendPush(keys, s, payload)));
+  } catch (err) {
+    console.error("[push] Failed to notify admins (manual interaction):", err);
+  }
+}
+
 export async function notifyAdminsDeletionVoteThresholdPush(data: {
   title: string;
   mediaType: string;

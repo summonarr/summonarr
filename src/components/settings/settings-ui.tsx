@@ -700,7 +700,7 @@ export function WebhookUrls({
         </p>
       )}
       <p className="text-xs text-zinc-600">
-        In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Download · Use the URLs above (token is included). 4K rows point at the same endpoint with the 4K instance&apos;s own token.
+        In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Import + On Manual Interaction Required · Use the URLs above (token is included). 4K rows point at the same endpoint with the 4K instance&apos;s own token.
       </p>
     </div>
   );

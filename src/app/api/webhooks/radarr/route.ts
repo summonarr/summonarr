@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { notifyAdminGrabCompletedPush } from "@/lib/push";
+import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
+import { sanitizeForLog } from "@/lib/sanitize";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
@@ -23,6 +24,7 @@ interface RadarrWebhookPayload {
     tmdbId: number;
     title: string;
   };
+  downloadClient?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -107,6 +109,20 @@ export async function POST(req: NextRequest) {
   // replay digest so Radarr's source-side retry can re-deliver.
   let syncCompleted = false;
   try {
+
+  // Radarr fires ManualInteractionRequired when a grabbed release can't be imported
+  // automatically (mismatch, sample, etc.) and is parked in the queue. There's nothing to
+  // mark available — alert admins (best-effort) so they can resolve it in Radarr's queue.
+  if (payload.eventType === "ManualInteractionRequired") {
+    const title = payload.movie?.title ?? "A movie";
+    console.warn("[webhook/radarr] manual interaction required:", sanitizeForLog(title));
+    after(() =>
+      notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
+        .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err)),
+    );
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, manualInteraction: true });
+  }
 
   if (payload.eventType !== "Download" || !payload.movie?.tmdbId) {
     syncCompleted = true;
