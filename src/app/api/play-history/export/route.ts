@@ -69,6 +69,7 @@ export async function GET(request: NextRequest) {
   if (search) {
     where.OR = [
       { title: { contains: search, mode: "insensitive" } },
+      { ipAddress: { contains: search, mode: "insensitive" } },
       { mediaServerUser: { username: { contains: search, mode: "insensitive" } } },
     ];
   }
