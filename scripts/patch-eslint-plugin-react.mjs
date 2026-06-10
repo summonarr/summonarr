@@ -13,7 +13,7 @@
 // Remove this script + the postinstall entry once eslint-plugin-react ships
 // a release with the upstream patch and eslint-config-next bumps to it.
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, ftruncateSync, openSync, readFileSync, writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -30,28 +30,43 @@ let skipped = 0;
 
 for (const rel of TARGETS) {
   const path = resolve(ROOT, rel);
-  if (!existsSync(path)) {
-    skipped += 1;
-    continue;
+  // Open once and do the existence check, read, and write through the same
+  // descriptor — no check-then-use window on the path (CodeQL
+  // js/file-system-race).
+  let fd;
+  try {
+    fd = openSync(path, "r+");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      // Production install without eslint-plugin-react.
+      skipped += 1;
+      continue;
+    }
+    throw error;
   }
-  const src = readFileSync(path, "utf8");
-  if (src.includes(MARKER)) {
-    skipped += 1;
-    continue;
-  }
-  const next = src.replaceAll(
-    /\b(\w+)\.getFilename\(\)/g,
-    "($1.filename ?? $1.getFilename?.())",
-  );
-  if (next === src) {
-    console.warn(
-      `[patch-eslint-plugin-react] no getFilename() calls found in ${rel} — has upstream changed?`,
+  try {
+    const src = readFileSync(fd, "utf8");
+    if (src.includes(MARKER)) {
+      skipped += 1;
+      continue;
+    }
+    const next = src.replaceAll(
+      /\b(\w+)\.getFilename\(\)/g,
+      "($1.filename ?? $1.getFilename?.())",
     );
-    skipped += 1;
-    continue;
+    if (next === src) {
+      console.warn(
+        `[patch-eslint-plugin-react] no getFilename() calls found in ${rel} — has upstream changed?`,
+      );
+      skipped += 1;
+      continue;
+    }
+    ftruncateSync(fd, 0);
+    writeSync(fd, `${MARKER}\n${next}`, 0, "utf8");
+    patched += 1;
+  } finally {
+    closeSync(fd);
   }
-  writeFileSync(path, `${MARKER}\n${next}`);
-  patched += 1;
 }
 
 if (patched === 0 && skipped === TARGETS.length) {
