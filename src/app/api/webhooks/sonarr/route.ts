@@ -122,7 +122,9 @@ export async function POST(req: NextRequest) {
       scope = ` (${eps.length} episodes)`;
     }
     const title = `${seriesTitle}${scope}`;
-    console.warn("[webhook/sonarr] manual interaction required:", sanitizeForLog(title));
+    // Don't log the payload-supplied series title (CodeQL js/log-injection — it's
+    // a remote source). The title still reaches admins via the push below.
+    console.warn("[webhook/sonarr] manual interaction required — resolve it in Sonarr's queue");
     after(() =>
       notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
         .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),

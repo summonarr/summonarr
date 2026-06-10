@@ -2,7 +2,6 @@ import { NextRequest, NextResponse, after } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
-import { sanitizeForLog } from "@/lib/sanitize";
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
@@ -115,7 +114,9 @@ export async function POST(req: NextRequest) {
   // mark available — alert admins (best-effort) so they can resolve it in Radarr's queue.
   if (payload.eventType === "ManualInteractionRequired") {
     const title = payload.movie?.title ?? "A movie";
-    console.warn("[webhook/radarr] manual interaction required:", sanitizeForLog(title));
+    // Don't log the payload-supplied title (CodeQL js/log-injection — it's a
+    // remote source). The title still reaches admins via the push below.
+    console.warn("[webhook/radarr] manual interaction required — resolve it in Radarr's queue");
     after(() =>
       notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
         .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err)),
