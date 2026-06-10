@@ -9,6 +9,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import Link from "next/link";
@@ -46,6 +47,7 @@ export default async function PopularOnServerPage({
   const [sp, session] = await Promise.all([searchParams, auth()]);
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const show4k = await getShow4kVisibility(session);
 
   const mediaTypeFilter = sp.mediaType || undefined;
   const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);
@@ -124,7 +126,7 @@ export default async function PopularOnServerPage({
   ]);
 
   async function enrich(items: EnrichedMedia[]): Promise<EnrichedMedia[]> {
-    return (await attachAllAvailability(items, session?.user.id)) as EnrichedMedia[];
+    return (await attachAllAvailability(items, session?.user.id, { show4k })) as EnrichedMedia[];
   }
 
   [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);

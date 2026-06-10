@@ -13,11 +13,14 @@ export function Request4kButton({
   mediaType,
   requestToken,
   requested,
+  available,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
   requestToken?: string;
   requested?: boolean;
+  // The 4K instance already has the file — show an "Available in 4K" state instead of a CTA.
+  available?: boolean;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
@@ -62,6 +65,23 @@ export function Request4kButton({
     fontWeight: 500,
     whiteSpace: "nowrap",
   };
+
+  // Availability wins over request state — once the 4K copy is fetched there's nothing to request.
+  if (available) {
+    return (
+      <span
+        style={{
+          ...base,
+          background: "var(--ds-accent-soft)",
+          color: "var(--ds-accent)",
+          border: "1px solid var(--ds-accent-ring)",
+        }}
+      >
+        <Check style={{ width: 14, height: 14 }} />
+        Available in 4K
+      </span>
+    );
+  }
 
   if (state === "requested") {
     return (

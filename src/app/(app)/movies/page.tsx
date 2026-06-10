@@ -7,6 +7,7 @@ import {
 import { attachAllAvailability } from "@/lib/attach-all";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
@@ -44,6 +45,7 @@ export default async function MoviesPage({
 }) {
   const [sp, session] = await Promise.all([searchParams, auth()]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const show4k = await getShow4kVisibility(session);
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;
@@ -85,7 +87,7 @@ export default async function MoviesPage({
 
     while (items.length < 20 && tmdbPage <= Math.min(firstPaged.totalPages, tmdbEndPage)) {
       const paged = tmdbPage === tmdbStartPage ? firstPaged : await fetchPage(tmdbPage);
-      let batch = await attachAllAvailability(paged.items, session?.user.id);
+      let batch = await attachAllAvailability(paged.items, session?.user.id, { show4k });
       if (ratingFilter) batch = applyExternalRatingFilter(batch, ratingFilter);
       if (hideAvailable) batch = batch.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
       items = items.concat(batch);
@@ -94,7 +96,7 @@ export default async function MoviesPage({
     items = items.slice(0, 20);
   } else {
     totalPages = firstPaged.totalPages;
-    items = await attachAllAvailability(firstPaged.items, session?.user.id);
+    items = await attachAllAvailability(firstPaged.items, session?.user.id, { show4k });
   }
 
   return (

@@ -18,6 +18,10 @@ export interface TmdbMedia {
   plexAvailable?: boolean;
   jellyfinAvailable?: boolean;
   arrPending?: boolean;
+  // 4K-instance state, only populated when the viewer has 4K access (see getShow4kVisibility).
+  // arr4kAvailable = the 4K Radarr/Sonarr has the file; arr4kPending = wanted but not yet fetched.
+  arr4kPending?: boolean;
+  arr4kAvailable?: boolean;
   requested?: boolean;
   requestedByMe?: boolean;
   imdbId?: string | null;

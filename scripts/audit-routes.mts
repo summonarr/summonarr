@@ -58,11 +58,11 @@ const ALLOWLIST: Array<{ prefix: string; reason: string }> = [
 const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
   {
     route: "/api/admin/fix-match/thumb",
-    reason: "binary image stream; inline auth() + isTokenExpired + ADMIN/ISSUE_ADMIN check (guardrail 6a)",
+    reason: "binary image stream; inline DB-checked requireAuth({role:'ISSUE_ADMIN'}) (guardrail 6a)",
   },
   {
     route: "/api/events",
-    reason: "SSE stream; inline auth() + isTokenExpired + per-role event filtering (guardrail 6a)",
+    reason: "SSE stream; inline DB-checked requireAuth() + per-role event filtering (guardrail 6a)",
   },
 ];
 
@@ -72,7 +72,12 @@ const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "requireAuth", "isCronAutho
 // `withPermission` wraps withAuth and gates on a capability bit — it proves
 // authentication but not a specific role, so it stays out of ADMIN_TOKENS
 // (/api/admin/* routes still need a role wrapper or the proxy backstop).
-const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission", "timingSafeEqual"];
+//
+// `timingSafeEqual` is deliberately NOT here: it's the webhook-token compare and
+// is already required in the `isWebhook` branch below. Accepting it as a generic
+// guard would let a future non-webhook route that imports it for an unrelated
+// string compare pass with no session guard at all.
+const ANY_AUTH_TOKENS = [...ADMIN_TOKENS, "withAuth", "withPermission"];
 
 interface Finding {
   route: string;

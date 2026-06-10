@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.12.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.12.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -152,6 +152,26 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
 ## Changelog
+
+### v0.12.4
+
+**Added**
+
+- 4K availability is now surfaced on browse and detail pages for users with 4K access.
+- Per-source webhook tokens with copy-paste Radarr/Sonarr webhook URLs (HD and 4K) under Settings → Media.
+- Admins are notified when Radarr/Sonarr flag a download as "manual interaction required".
+
+**Changed**
+
+- Behind a reverse proxy, the client IP is now read from the correct X-Forwarded-For position. Multi-proxy deployments (e.g. Cloudflare → Nginx) should set the new `TRUSTED_PROXY_HOPS` to the number of proxies in front of the app.
+
+**Fixed**
+
+- Session revocation is enforced immediately on sign-out and across the admin area, and logout now fully revokes the session server-side.
+- Login is throttled per account in addition to per IP, blunting distributed password-spray.
+- Webhook secrets are no longer embedded in the settings page — they are fetched only when a URL is copied.
+- Outbound-request error logs no longer include credential-bearing URLs (Plex token, OMDb/MDBList/ipinfo keys).
+- Backup import rejects malformed multi-row INSERT statements.
 
 ### v0.12.3
 
@@ -529,7 +549,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.12.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.12.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
