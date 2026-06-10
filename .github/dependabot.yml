@@ -14,10 +14,10 @@ updates:
     # Delay PRs for very fresh releases so an attacker-published or
     # accidentally-broken version has time to be yanked upstream
     # before it lands in a PR here. Patch updates wait the least
-    # (we want CVE fixes fast); majors wait longest.
-    # (zizmor:dependabot-cooldown)
+    # (we want CVE fixes fast); majors wait longest. Default must be
+    # >= 7 to satisfy zizmor. (zizmor:dependabot-cooldown)
     cooldown:
-      default-days: 5
+      default-days: 7
       semver-major-days: 14
       semver-minor-days: 5
       semver-patch-days: 2
@@ -58,10 +58,11 @@ updates:
       - "dependencies"
       - "docker"
     # Base-image tags occasionally regress (e.g. a node-25 minor that
-    # ships a new alpine variant). 5 days gives the community time to
-    # surface breakage. (zizmor:dependabot-cooldown)
+    # ships a new alpine variant). 7 days gives the community time to
+    # surface breakage and satisfies zizmor's >= 7-day floor.
+    # (zizmor:dependabot-cooldown)
     cooldown:
-      default-days: 5
+      default-days: 7
       semver-major-days: 14
       semver-minor-days: 5
       semver-patch-days: 3

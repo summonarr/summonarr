@@ -30,25 +30,19 @@ WORKDIR /app
 
 RUN apk upgrade --no-cache
 
-COPY package-lock.json ./
+COPY package.json package-lock.json ./
+COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
 # `prisma generate` needs only the prisma CLI + @prisma/client (which the
 # generator imports types from) — installing the full 700-package tree here
 # was wasted work (~90s of duplicate downloads with the `deps` stage).
-# Synthesize a minimal package.json pinning both to exact lockfile versions,
-# then install just those. Cache mount shares ~/.npm with the deps stage so
-# repeat builds are near-instant.
-RUN node -e "const lock = require('./package-lock.json').packages; \
-             const v = (n) => lock['node_modules/' + n].version; \
-             require('fs').writeFileSync('package.json', JSON.stringify({ \
-               private: true, \
-               dependencies: { \
-                 prisma: v('prisma'), \
-                 '@prisma/client': v('@prisma/client'), \
-                 dotenv: v('dotenv') \
-               } \
-             }))"
+# prune-lockfile.mjs carves those packages plus their transitive closure out
+# of the repo lockfile so `npm ci` installs them hash-pinned to the vetted
+# resolutions instead of re-resolving transitives at build time (OpenSSF
+# Scorecard: Pinned-Dependencies). Cache mount shares ~/.npm with the deps
+# stage so repeat builds are near-instant.
+RUN node scripts/prune-lockfile.mjs --out . prisma @prisma/client dotenv
 RUN --mount=type=cache,target=/root/.npm \
-    npm install --no-audit --no-fund --prefer-offline
+    npm ci --no-audit --no-fund --prefer-offline
 
 COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
@@ -81,27 +75,19 @@ FROM node:26.3.0-alpine3.23@sha256:144769ec3f32e8ee36b3cfde91e82bee25d9367b20f31
 WORKDIR /app
 
 RUN apk upgrade --no-cache
-COPY package-lock.json ./
-# Pin prisma + dotenv + pg to exact lockfile versions. Single npm install
-# replaces the prior two-call sequence (saves ~10s of npm startup).
+COPY package.json package-lock.json ./
+COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
+# prisma + dotenv + pg, hash-pinned: prune-lockfile.mjs carves them plus
+# their transitive closure out of the repo lockfile so `npm ci` installs the
+# vetted resolutions instead of re-resolving at build time (OpenSSF
+# Scorecard: Pinned-Dependencies). Overrides (hono, @hono/node-server, …)
+# come from the root package.json automatically — the previous inline copy
+# of that list had already drifted from it. These node_modules ship into the
+# runner image, so build-time resolution here was a real supply-chain gap.
 # Cache mount shares ~/.npm with deps + prisma-gen stages.
-RUN node -e " \
-  const lock = JSON.parse(require('fs').readFileSync('package-lock.json', 'utf8')); \
-  const v = (name) => lock.packages['node_modules/' + name].version; \
-  const pkg = { \
-    private: true, \
-    dependencies: { prisma: v('prisma'), dotenv: v('dotenv'), pg: v('pg') }, \
-    overrides: { \
-      '@hono/node-server': '^1.19.13', \
-      'hono': '^4.12.12', \
-      'picomatch': '^4.0.4', \
-      'brace-expansion@5': '^5.0.6' \
-    } \
-  }; \
-  require('fs').writeFileSync('package.json', JSON.stringify(pkg)); \
-"
+RUN node scripts/prune-lockfile.mjs --out . prisma dotenv pg
 RUN --mount=type=cache,target=/root/.npm \
-    npm install --legacy-peer-deps --no-audit --no-fund --prefer-offline
+    npm ci --no-audit --no-fund --prefer-offline
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
 FROM node:26.3.0-alpine3.23@sha256:144769ec3f32e8ee36b3cfde91e82bee25d9367b20f31a151f3f7eea3a2a8541 AS runner

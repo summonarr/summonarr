@@ -281,6 +281,16 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     Rule: call `reanchorActiveSessionsOnBoot()` ([play-history.ts](src/lib/play-history.ts)) — an in-memory once-guarded `updateMany` that sets `lastSeenAt = now` for every row — at the top of BOTH `bootstrapReconcile` and the poller's `syncPlayHistory`, before either reads rows for its stale sweep. Whichever runs first wins; it covers Plex and Jellyfin in one write. A genuinely-ended session is still finalized ~60s after boot once confirmed absent across real post-boot observations. Don't move the finalize ahead of the re-anchor, and don't measure the grace off a pre-restart timestamp.
 
+22. **Docker's prisma-gen and migrate-deps stages must `npm ci` against pruned lockfiles from [scripts/prune-lockfile.mjs](scripts/prune-lockfile.mjs) — never a synthesized package.json + bare `npm install`.**
+
+    Why:
+    - `npm install` against a synthesized package.json re-resolves every transitive dep at build time — unpinned (OpenSSF Scorecard: Pinned-Dependencies), and the migrate-deps `node_modules` ships into the runner image, so an attacker-published transitive release would land in production without any lockfile review.
+    - The old inline overrides copy in migrate-deps silently drifted from package.json (stale `hono`/`@hono/node-server` pins, a `picomatch` override that no longer existed). The prune script carries overrides from the root package.json automatically, so there is nothing to keep in sync by hand.
+
+    Rules:
+    - The dep lists live in two places: the `RUN node scripts/prune-lockfile.mjs` lines in [Dockerfile](Dockerfile) and the "Pruned Docker lockfiles install cleanly" step in [.github/workflows/ci.yml](.github/workflows/ci.yml). Change one → change both. The CI step (prune + `npm ci --dry-run`) is what catches a dep bump breaking the pruned graphs *before* docker-publish builds on main.
+    - If a stage ever needs another package, add it to the prune invocation — do not fall back to `npm install` or hand-edit the generated package.json.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
