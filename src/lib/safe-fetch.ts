@@ -82,22 +82,31 @@ async function doFetch(
   // and the npm `undici` package disagree on the Dispatcher handler shape
   // (assertRequestHandler throws "invalid onRequestStart method"). `node:undici`
   // is not exposed as a builtin module on Node 22 either, so we can't reach the
-  // bundled copy from userland. The remaining viable option is to shrink the
-  // TOCTOU window from minutes-to-hours (the original gap between SSRF resolve
-  // and the actual connect) to milliseconds, and reject the request if DNS
-  // disagrees between the two checks.
+  // bundled copy from userland. The remaining viable option is to re-resolve the
+  // hostname FRESH immediately before fetch() and reject if any currently-
+  // resolving address is unsafe — shrinking the TOCTOU window between our SSRF
+  // check and undici's connect-time getaddrinfo to sub-millisecond.
   //
-  // Both modes therefore converge: validate, resolve+SSRF-check, capture the
-  // expected address set, then immediately before fetch() re-resolve and
-  // require the address set to be unchanged and still safe. A hostile DNS
-  // server flipping its answer between the two lookups is detected and the
-  // request is blocked. Note hardcoded mode resolves with allowPrivate=false:
-  // a hostname like `api.themoviedb.org` is never legitimately backed by a
-  // private IP, so this also stops DNS-rebind attacks against trusted hosts.
+  // All modes therefore converge: validate, resolve+SSRF-check (cached), then
+  // immediately before fetch() re-resolve FRESH and require every address to
+  // still be safe under the policy. A hostile DNS server that has flipped its
+  // answer to an internal/private address is caught here. Note hardcoded mode
+  // resolves with allowPrivate=false: a hostname like `api.themoviedb.org` is
+  // never legitimately backed by a private IP, so this also stops DNS-rebind
+  // attacks against trusted hosts.
+  //
+  // We deliberately do NOT require the re-resolved address SET to be identical to
+  // the first lookup. CDN-fronted hosts (api.themoviedb.org, *.push.apple.com,
+  // fcm.googleapis.com, …) return rotating/partial answer sets with low TTLs, so
+  // two lookups seconds-to-minutes apart routinely disagree on a healthy host — a
+  // set-equality check false-positives and hard-blocks TMDB search and all web
+  // push. Set-equality only ever guarded a rebind from one PUBLIC ip to a DIFFERENT
+  // PUBLIC ip, which under allowPrivate=false reaches no internal target and is not
+  // an SSRF escalation; the per-address safety re-check is what stops rebind-to-
+  // internal. (See verifyResolvedHost in ssrf.ts.)
 
   const allowPrivate = mode === "admin";
   let targetUrl: string;
-  let expectedAddrs: readonly string[];
 
   if (mode === "user") {
     // User-supplied URL with no hostname allowlist — used by Web Push, whose
@@ -114,7 +123,6 @@ async function doFetch(
       );
     }
     targetUrl = safe.url;
-    expectedAddrs = safe.addrs;
   } else if (mode === "hardcoded") {
     if (!allowedHosts || allowedHosts.size === 0) {
       throw new SafeFetchError(
@@ -148,7 +156,6 @@ async function doFetch(
     // `allowedHosts` — that breaks CodeQL's request-forgery taint flow
     // (CodeQL js/request-forgery, alert #4).
     targetUrl = parsedUrl.toString();
-    expectedAddrs = safe.addrs;
   } else {
     // mode === "admin"
     const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true });
@@ -160,7 +167,6 @@ async function doFetch(
       );
     }
     targetUrl = safe.url;
-    expectedAddrs = safe.addrs;
   }
 
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -184,11 +190,12 @@ async function doFetch(
     signal,
   };
 
-  // Final TOCTOU check: re-resolve immediately before fetch. If DNS now answers
-  // with a different address set, or any address has become unsafe, refuse.
-  // This shrinks the rebind window from "however long until connect" to "the
-  // time between this call and undici's own getaddrinfo" — typically <1ms.
-  const verified = await verifyResolvedHost(parsedUrl.hostname, expectedAddrs, {
+  // Final TOCTOU check: re-resolve FRESH immediately before fetch. If any
+  // currently-resolving address is unsafe under the policy, refuse. This shrinks
+  // the rebind window from "however long until connect" to "the time between this
+  // call and undici's own getaddrinfo" — typically <1ms. (We don't require the
+  // set to be unchanged — see the doFetch header comment for why.)
+  const verified = await verifyResolvedHost(parsedUrl.hostname, {
     allowPrivate,
   });
   if (!verified) {
