@@ -533,6 +533,10 @@ async function handleComponent(interaction: any): Promise<void> {
         const liveUsername = (discordUser.username as string | undefined) ?? pending.discordUsername;
         dbUser = await prisma.user.upsert({
           where: { discordId: discordUserId },
+          // `permissions` is seeded on create only — deliberately NOT re-set on update, so an
+          // admin's per-user permission edits aren't clobbered on every Discord interaction.
+          // Legacy rows with permissions=0 stay correct via the effectivePermissions(role, …)
+          // fallback below; don't "fix" this by adding permissions to `update`.
           update: { name: liveUsername },
           create: {
             discordId: discordUserId,

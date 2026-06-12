@@ -70,6 +70,14 @@ export const PATCH = withAdmin(async (
       return NextResponse.json({ error: "Demote this admin's role before removing the ADMIN permission." }, { status: 400 });
     }
 
+    // Inverse guard: never *grant* the ADMIN superbit to a non-admin-role user. The ADMIN
+    // bit short-circuits hasPermission() everywhere, so it must stay in lockstep with
+    // role=ADMIN (which the proxy backstop + withAdmin gate on). Promote the role first —
+    // that routes through the same last-admin CAS rather than desyncing the bit from role.
+    if (targetUser.role !== "ADMIN" && (parsed & Permission.ADMIN) !== 0n) {
+      return NextResponse.json({ error: "Promote this user's role to Admin before granting the ADMIN permission." }, { status: 400 });
+    }
+
     try {
       await prisma.user.update({ where: { id }, data: { permissions: parsed } });
     } catch (err) {
