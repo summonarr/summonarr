@@ -68,13 +68,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
+    const variant = existing.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await searchMovieInRadarr(existing.tmdbId);
+        await searchMovieInRadarr(existing.tmdbId, variant);
       } else {
         if (!existing.tvdbId) throw new Error("No TVDB ID stored — re-push the request first");
-        await searchSeriesInSonarr(existing.tvdbId);
+        await searchSeriesInSonarr(existing.tvdbId, variant);
       }
     } catch (err) {
       console.error("[arr] Search failed:", err);
@@ -104,12 +105,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
+    const variant = existing.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId);
+        await addMovieToRadarr(existing.tmdbId, variant);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId);
+        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
     } catch (err) {
@@ -203,13 +205,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
+    const variant = updated.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId);
+        await addMovieToRadarr(updated.tmdbId, variant);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;
@@ -237,8 +240,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         if (current?.status !== "APPROVED") return;
 
         const downloading = updated.mediaType === "MOVIE"
-          ? await isMovieDownloadingInRadarr(updated.tmdbId)
-          : await isSeriesDownloadingInSonarr(updated.tmdbId);
+          ? await isMovieDownloadingInRadarr(updated.tmdbId, variant)
+          : await isSeriesDownloadingInSonarr(updated.tmdbId, variant);
         if (downloading) return;
 
         const now = new Date();
