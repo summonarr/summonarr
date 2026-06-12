@@ -45,10 +45,6 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (issue.status === "RESOLVED") {
-    return NextResponse.json({ error: "Cannot add messages to a resolved issue" }, { status: 422 });
-  }
-
   if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -97,6 +93,27 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         action: "ISSUE_STATUS_CHANGE",
         target: `issue:${id}`,
         details: { trigger: "admin-reply-auto-promote", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } },
+        ...auditContext(req, session),
+      });
+    }
+  }
+
+  // A reporter replying to a RESOLVED issue reopens it (mirror of the admin
+  // OPEN→IN_PROGRESS auto-promote above). An admin reply on a resolved issue adds a
+  // closing note without changing status. CAS on RESOLVED so a concurrent change wins.
+  if (!isAdmin && issue.status === "RESOLVED" && issue.reportedBy === session.user.id) {
+    const reopened = await prisma.issue.updateMany({
+      where: { id, status: "RESOLVED" },
+      data: { status: "OPEN", resolution: null },
+    });
+    if (reopened.count > 0) {
+      emitSSE({ type: "issue:updated", issueId: id, status: "OPEN", userId: issue.reportedBy });
+      void logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? null,
+        action: "ISSUE_STATUS_CHANGE",
+        target: `issue:${id}`,
+        details: { trigger: "reporter-reply-reopen", before: { status: "RESOLVED" }, after: { status: "OPEN" } },
         ...auditContext(req, session),
       });
     }
