@@ -161,7 +161,10 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const [existingReqs, plexItems, jellyfinItems, radarrAvail, sonarrAvail] = await Promise.all([
     prisma.mediaRequest.findMany({
-      where: { requestedBy: targetUserId, OR: orPairs },
+      // Bulk requests are HD-only (is4k defaults false), so scope the existing-request
+      // lookup to HD rows too — otherwise a target who holds only a 4K request for a
+      // title is wrongly classified "already-requested" and the HD create is skipped.
+      where: { requestedBy: targetUserId, is4k: false, OR: orPairs },
       select: { tmdbId: true, mediaType: true, permanentlyDeclined: true },
     }),
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),

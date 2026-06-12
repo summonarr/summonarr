@@ -308,8 +308,13 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
         pendingDlnaSessions.delete(sessionId);
       }
 
-      await prisma.activeSession.create({
-        data: {
+      // Single-row createMany({skipDuplicates}) → INSERT ... ON CONFLICT DO NOTHING:
+      // two overlapping poll ticks can both reach here for a brand-new sessionKey;
+      // a bare create() would throw P2002 on the loser, rejecting the tick's
+      // Promise.all and skipping its stale-session finalize sweep. (Mirrors the
+      // dedup already used by recordCompletedSession in play-history.ts.)
+      await prisma.activeSession.createMany({
+        data: [{
           id: sessionId,
           source: "plex",
           sessionKey: s.sessionKey,
@@ -348,7 +353,8 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           bandwidth: s.bandwidth ?? null,
           secure: s.secure ?? null,
           relayed: s.relayed ?? null,
-        },
+        }],
+        skipDuplicates: true,
       });
 
       // Best-effort: fetch intro/credits markers in the background and stamp
@@ -578,8 +584,10 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         return "updated";
       }
 
-      await prisma.activeSession.create({
-        data: {
+      // See the Plex create above: single-row createMany({skipDuplicates}) so
+      // overlapping poll ticks can't reject each other on a duplicate insert.
+      await prisma.activeSession.createMany({
+        data: [{
           id: sessionId,
           source: "jellyfin",
           sessionKey: s.playSessionId,
@@ -612,7 +620,8 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           bitrate: s.bitrate ?? null,
           container: s.container ?? null,
           transcodeReason: s.transcodeReason ?? null,
-        },
+        }],
+        skipDuplicates: true,
       });
       return "started";
     }),

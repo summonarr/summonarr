@@ -200,9 +200,11 @@ async function syncPlex(request: NextRequest) {
 
     const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
     if (alreadyNotified.length > 0) {
+      // Stamp availableAt on the flip (matches the orchestrator's markLibraryRequests).
+      // The status guard keeps it from rewriting the timestamp on every sync tick.
       const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
-        data: { status: "AVAILABLE" },
+        data: { status: "AVAILABLE", availableAt: new Date() },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }
