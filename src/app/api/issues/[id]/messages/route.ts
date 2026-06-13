@@ -56,8 +56,14 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const rawText = body.body?.trim();
-  if (!rawText || typeof rawText !== "string") {
+  // Validate the type BEFORE calling a string method: req.json() is untyped at
+  // runtime, so a non-string body (number/object/null) would throw on .trim() and
+  // surface as a 500 instead of this 400. Mirrors the guard in releases/route.ts.
+  if (typeof body.body !== "string") {
+    return NextResponse.json({ error: "body is required" }, { status: 400 });
+  }
+  const rawText = body.body.trim();
+  if (!rawText) {
     return NextResponse.json({ error: "body is required" }, { status: 400 });
   }
   if (rawText.length > 2000) {
