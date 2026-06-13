@@ -117,8 +117,11 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   }
 
   if (typedStatus === "DECLINED") {
+    // Mirror the APPROVED path: notify only the rows this batch actually transitioned
+    // (PENDING → DECLINED), not ids that were already DECLINED before the call — those
+    // were left untouched by updateMany and must not get a duplicate decline ping.
     const declined = await prisma.mediaRequest.findMany({
-      where: { id: { in: typedIds }, status: "DECLINED" },
+      where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
       select: { requestedBy: true, title: true, mediaType: true },
     });
     notifyUsersRequestsDeclined(declined, typedAdminNote).catch(() => {});
