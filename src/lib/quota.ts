@@ -71,3 +71,12 @@ export function resolveUserQuota(
   const { since, label } = globalWindow(globalPeriod, now);
   return { limit: globalLimit, since, windowLabel: label };
 }
+
+// Parse the global `quotaLimit` Setting into a non-negative integer. A non-numeric
+// or corrupted value coerces to 0 ("quota disabled") deliberately rather than NaN:
+// NaN slips past every `limit > 0` enforcement check and silently turns quotas off
+// with no error or signal.
+export function parseQuotaLimit(value: string | null | undefined): number {
+  const n = Number.parseInt(value ?? "0", 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}

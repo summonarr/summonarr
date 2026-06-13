@@ -16,7 +16,7 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
-import { resolveUserQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
 
@@ -579,7 +579,7 @@ async function handleComponent(interaction: any): Promise<void> {
             tvQuotaLimit: dbUser.tvQuotaLimit ?? null,
             tvQuotaDays: dbUser.tvQuotaDays ?? null,
           },
-          parseInt(quotaLimitRow?.value ?? "0", 10),
+          parseQuotaLimit(quotaLimitRow?.value),
           quotaPeriodRow?.value ?? "week",
         );
         if (rq.limit > 0) {

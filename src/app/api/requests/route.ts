@@ -11,7 +11,7 @@ import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
-import { resolveUserQuota, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
@@ -147,7 +147,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         tvQuotaLimit: userRecord?.tvQuotaLimit ?? null,
         tvQuotaDays: userRecord?.tvQuotaDays ?? null,
       },
-      parseInt(settings.quotaLimit ?? "0", 10),
+      parseQuotaLimit(settings.quotaLimit),
       settings.quotaPeriod ?? "week",
     );
     enforceQuota = resolvedQuota.limit > 0;

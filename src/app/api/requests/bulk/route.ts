@@ -15,7 +15,7 @@ import {
   effectivePermissions,
   Permission,
 } from "@/lib/permissions";
-import { resolveUserQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -283,7 +283,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     if (enforceQuota) {
       const qrows = await prisma.setting.findMany({ where: { key: { in: ["quotaLimit", "quotaPeriod"] } } });
       const qmap = Object.fromEntries(qrows.map((s) => [s.key, s.value]));
-      gLimit = parseInt(qmap.quotaLimit ?? "0", 10);
+      gLimit = parseQuotaLimit(qmap.quotaLimit);
       gPeriod = qmap.quotaPeriod ?? "week";
     }
     const pairs = prepared.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType }));
