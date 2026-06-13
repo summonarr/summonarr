@@ -12,7 +12,10 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json(
     sessions.map((s) => ({
       ...s,
+      // All three BigInt columns must be coerced — the `...s` spread would
+      // otherwise leak playtimeMs as a BigInt and blow up JSON.stringify.
       progressMs: Number(s.progressMs),
+      playtimeMs: Number(s.playtimeMs),
       durationMs: Number(s.durationMs),
     })),
   );
