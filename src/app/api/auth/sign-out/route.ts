@@ -3,6 +3,7 @@ import {
   parseSessionCookie,
   serializeClearedSessionCookies,
 } from "@/lib/session-cookie";
+import { parseBearerToken } from "@/lib/mobile-auth";
 import { verifySessionJwt } from "@/lib/session-jwt";
 import { revokeSessionById } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
@@ -13,7 +14,11 @@ import { logAudit } from "@/lib/audit";
 // Summonarr session cookie variants. Dead in prod until PR 5 swaps the client's
 // signOut() call.
 export async function POST(req: NextRequest) {
-  const token = parseSessionCookie(req.headers.get("cookie"));
+  // Bearer (native clients) preferred over the cookie (browsers) so a native
+  // sign-out revokes the session server-side, not just client-side.
+  const token =
+    parseBearerToken(req.headers.get("authorization")) ??
+    parseSessionCookie(req.headers.get("cookie"));
   if (token) {
     const claims = await verifySessionJwt(token);
     if (claims?.sessionId) {

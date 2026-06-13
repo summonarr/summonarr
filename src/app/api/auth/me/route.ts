@@ -3,6 +3,7 @@ import {
   parseSessionCookie,
   serializeSessionCookie,
 } from "@/lib/session-cookie";
+import { parseBearerToken } from "@/lib/mobile-auth";
 import { verifyAndRefreshSession } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
 
@@ -52,7 +53,9 @@ function applyPrivacyHeaders(res: NextResponse): NextResponse {
 // check + sliding window + role refresh), returns the session and threads
 // any refreshed JWT back as Set-Cookie.
 export async function GET(req: NextRequest) {
-  const token = parseSessionCookie(req.headers.get("cookie"));
+  // Bearer (native clients) preferred over the cookie (browsers).
+  const bearer = parseBearerToken(req.headers.get("authorization"));
+  const token = bearer ?? parseSessionCookie(req.headers.get("cookie"));
   if (!token) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
@@ -61,7 +64,7 @@ export async function GET(req: NextRequest) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
   const res = applyPrivacyHeaders(NextResponse.json({ session: serialize(result.claims) }));
-  if (result.refreshed) {
+  if (result.refreshed && !bearer) {
     res.headers.append(
       "Set-Cookie",
       serializeSessionCookie(result.refreshed.token, {

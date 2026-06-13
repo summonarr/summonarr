@@ -6,6 +6,7 @@ import {
   parseSessionCookie,
   serializeSessionCookie,
 } from "@/lib/session-cookie";
+import { parseBearerToken } from "@/lib/mobile-auth";
 import {
   verifyAndRefreshSession,
   type RefreshedToken,
@@ -78,8 +79,12 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
 export async function requireAuth(
   opts: RequireAuthOptions = {},
 ): Promise<SummonarrSession | NextResponse> {
-  const cookieStore = await cookies();
-  const token = cookieStore.get(getSessionCookieName())?.value;
+  // Prefer a bearer token (native clients) over the cookie (browsers). See
+  // authenticateRequest for the full rationale.
+  const { headers: getHeaders } = await import("next/headers");
+  const h = await getHeaders();
+  const bearer = parseBearerToken(h.get("authorization"));
+  const token = bearer ?? (await cookies()).get(getSessionCookieName())?.value;
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -91,10 +96,9 @@ export async function requireAuth(
   // routes, the play-history export, SSE). The proxy's matcher excludes
   // prefetch-header requests entirely, so we re-check here so the binding
   // is enforced on every authenticated path. Matches the duplicate in
-  // authenticateRequest below.
-  const { headers: getHeaders } = await import("next/headers");
-  const h = await getHeaders();
-  if (!matchesStoredFingerprint(result.claims.uaFingerprint, h.get("user-agent"))) {
+  // authenticateRequest below. Bearer sessions skip it (app-secure storage,
+  // not an ambiently-replayed cookie).
+  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, h.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {
@@ -132,8 +136,12 @@ type AuthedHandler<Ctx> = (
 async function authenticateRequest(
   req: NextRequest,
   opts: RequireAuthOptions,
-): Promise<{ session: SummonarrSession; refreshed?: RefreshedToken } | NextResponse> {
-  const token = parseSessionCookie(req.headers.get("cookie"));
+): Promise<{ session: SummonarrSession; refreshed?: RefreshedToken; fromBearer: boolean } | NextResponse> {
+  // Prefer a bearer token (native clients) over the cookie (browsers). The two
+  // never coexist for one principal; resolving bearer-first means a forged
+  // cookie can't ride a request that a bearer made CSRF-exempt upstream.
+  const bearer = parseBearerToken(req.headers.get("authorization"));
+  const token = bearer ?? parseSessionCookie(req.headers.get("cookie"));
   if (!token) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -143,7 +151,8 @@ async function authenticateRequest(
   }
   // UA-fingerprint check. See matchesStoredFingerprint above for the rationale —
   // belt-and-suspenders with proxy.ts which the prefetch-header matcher exempts.
-  if (!matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
+  // Bearer sessions skip it (app-secure storage, not an ambient browser cookie).
+  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {
@@ -152,6 +161,7 @@ async function authenticateRequest(
   return {
     session: claimsToSession(result.claims),
     refreshed: result.refreshed,
+    fromBearer: !!bearer,
   };
 }
 
@@ -183,7 +193,9 @@ export function withAuth<Ctx = unknown>(
     const result = await authenticateRequest(req, opts);
     if (result instanceof NextResponse) return result;
     const response = await handler(req, ctx, result.session);
-    if (result.refreshed) {
+    // Thread the slid token back as Set-Cookie for browser sessions only; a
+    // bearer client can't read it and rides its fixed-lifetime token to expiry.
+    if (result.refreshed && !result.fromBearer) {
       response.headers.append(
         "Set-Cookie",
         serializeSessionCookie(result.refreshed.token, {

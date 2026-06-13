@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithJellyfinQuickConnect, signInAndMintSession } from "@/lib/auth";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { serializeSessionCookie } from "@/lib/session-cookie";
+import { buildSignInResponse } from "@/lib/sign-in-response";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 import {
   buildQcFlowClearedSetCookie,
@@ -66,16 +66,12 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await signInAndMintSession({ user, providerId: "jellyfin-quickconnect" });
-  const res = NextResponse.json({ ok: true, user: result.user });
-  res.headers.append(
-    "Set-Cookie",
-    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
-  );
   // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
   // a client that ignores the Set-Cookie can resubmit until the 10-min TTL. True
   // single-use is enforced one layer up: Jellyfin invalidates the QuickConnect
   // secret on first redemption, so a replayed (cookie, secret) pair fails at
   // authorizeWithJellyfinQuickConnect().
-  res.headers.append("Set-Cookie", buildQcFlowClearedSetCookie());
-  return res;
+  return buildSignInResponse(req, result, {
+    extraSetCookies: [buildQcFlowClearedSetCookie()],
+  });
 }
