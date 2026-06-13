@@ -136,38 +136,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Cannot vote to delete your own request" }, { status: 403 });
   }
 
-  let thresholdNotifyData: { title: string; mediaType: string; voteCount: number; posterPath: string | null; tmdbId: number } | null = null;
-
   let vote: Awaited<ReturnType<typeof prisma.deletionVote.create>>;
   try {
-    vote = await prisma.$transaction(async (tx) => {
-      const created = await tx.deletionVote.create({
-        data: {
-          tmdbId,
-          mediaType,
-          title: verified.title,
-          posterPath: verified.posterPath,
-          userId: session.user.id,
-          reason: sanitizedReason ?? null,
-        },
-      });
-
-      const thresholdRow = await tx.setting.findUnique({ where: { key: "deletionVoteThreshold" } });
-      const threshold = parseInt(thresholdRow?.value ?? "0", 10);
-      if (threshold > 0) {
-        const voteCount = await tx.deletionVote.count({ where: { tmdbId, mediaType } });
-        if (voteCount >= threshold) {
-          // Unique constraint on claimKey acts as a one-shot gate: create fails on a second insertion
-          const claimKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
-          try {
-            await tx.setting.create({ data: { key: claimKey, value: "1" } });
-            thresholdNotifyData = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
-          } catch { }
-        }
-      }
-
-      return created;
-    }, { isolationLevel: "Serializable", timeout: 15_000 });
+    vote = await prisma.deletionVote.create({
+      data: {
+        tmdbId,
+        mediaType,
+        title: verified.title,
+        posterPath: verified.posterPath,
+        userId: session.user.id,
+        reason: sanitizedReason ?? null,
+      },
+    });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return NextResponse.json({ error: "Already voted" }, { status: 409 });
@@ -175,14 +155,35 @@ export const POST = withAuth(async (req, _ctx, session) => {
     throw err;
   }
 
-  if (thresholdNotifyData) {
-    const data = thresholdNotifyData;
-    after(async () => {
-      await Promise.allSettled([
-        notifyAdminsDeletionVoteThreshold(data),
-        notifyAdminsDeletionVoteThresholdPush(data),
-      ]);
-    });
+  // Fire the "deletion threshold reached" admin alert exactly once per item. The
+  // claimKey row is an idempotent one-shot gate: createMany(skipDuplicates) reports
+  // count === 1 for the single caller that wins the insert and 0 for everyone after.
+  // This MUST stay out of the vote-insert transaction — a bare create() whose
+  // duplicate-key error is caught-and-ignored inside a single-level interactive tx
+  // leaves Postgres in the aborted state (there is no per-statement SAVEPOINT at
+  // depth 1), so the trailing COMMIT becomes a ROLLBACK and silently discards the
+  // vote too. Running it afterwards is also self-healing: if the process dies before
+  // the claim, the next vote re-evaluates the threshold and fires the alert.
+  const thresholdRow = await prisma.setting.findUnique({ where: { key: "deletionVoteThreshold" } });
+  const threshold = parseInt(thresholdRow?.value ?? "0", 10);
+  if (threshold > 0) {
+    const voteCount = await prisma.deletionVote.count({ where: { tmdbId, mediaType } });
+    if (voteCount >= threshold) {
+      const claimKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
+      const claim = await prisma.setting.createMany({
+        data: [{ key: claimKey, value: "1" }],
+        skipDuplicates: true,
+      });
+      if (claim.count === 1) {
+        const data = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
+        after(async () => {
+          await Promise.allSettled([
+            notifyAdminsDeletionVoteThreshold(data),
+            notifyAdminsDeletionVoteThresholdPush(data),
+          ]);
+        });
+      }
+    }
   }
 
   return NextResponse.json(vote, { status: 201 });

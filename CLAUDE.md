@@ -291,6 +291,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The dep lists live in two places: the `RUN node scripts/prune-lockfile.mjs` lines in [Dockerfile](Dockerfile) and the "Pruned Docker lockfiles install cleanly" step in [.github/workflows/ci.yml](.github/workflows/ci.yml). Change one → change both. The CI step (prune + `npm ci --dry-run`) is what catches a dep bump breaking the pruned graphs *before* docker-publish builds on main.
     - If a stage ever needs another package, add it to the prune invocation — do not fall back to `npm install` or hand-edit the generated package.json.
 
+23. **NEVER swallow a write error with `try/catch` *inside* a single-level interactive `$transaction`.**
+
+    Why:
+    - Prisma 7 + `@prisma/adapter-pg` emits SQL `SAVEPOINT`s only for *nested* transactions. A top-level `prisma.$transaction(async (tx) => …)` runs its statements straight on the connection with no per-statement savepoint.
+    - In PostgreSQL the first statement that errors puts the whole transaction into the *aborted* state. A `try { await tx.x.create(...) } catch {}` hides the JS error but issues no `ROLLBACK TO SAVEPOINT` (there is none), so when the callback returns the adapter's `COMMIT` is silently converted to a **ROLLBACK** — every earlier write in the tx is discarded while the handler still returns success.
+    - This shipped in `/api/votes`: a one-shot "notify admins at threshold" gate did a caught `tx.setting.create` of a unique key *after* the vote insert. Once the key existed, every later vote hit the unique violation, aborted the tx, and the vote was rolled back behind a `201`. Fixed in this commit by moving the gate out of the tx.
+
+    Rules — a unique-violation you intend to tolerate must either:
+    - be the transaction's **last** op and **propagate** so the outer `catch` maps `P2002` (the `/api/requests` pattern — nothing runs after the throw in-tx), OR
+    - live **outside** the transaction as an idempotent `createMany({ data: [...], skipDuplicates: true })` one-shot gate (`count === 1` ⇒ this caller won), OR
+    - use `upsert`. Never a bare `create` whose error is caught-and-ignored mid-transaction.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
