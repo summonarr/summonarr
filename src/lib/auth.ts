@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { dummyVerify, verifyPassword } from "@/lib/password-hash";
+import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
@@ -482,7 +482,7 @@ export async function authorizeWithCredentials(
   req: Request,
 ): Promise<Record<string, unknown> | null> {
   if (!credentials?.email || !credentials?.password) return null;
-  if ((credentials.password as string).length > 1000) return null;
+  if ((credentials.password as string).length > MAX_PASSWORD_LENGTH) return null;
 
   const disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
   if (disableRow?.value === "true") return null;
@@ -687,7 +687,7 @@ export async function authorizeWithJellyfin(
 ): Promise<Record<string, unknown> | null> {
   if (!credentials?.username || !credentials?.password) return null;
   const username = credentials.username as string;
-  if (username.length > 200 || (credentials.password as string).length > 1000) {
+  if (username.length > 200 || (credentials.password as string).length > MAX_PASSWORD_LENGTH) {
     return null;
   }
   const headers = (req as Request).headers as Headers;

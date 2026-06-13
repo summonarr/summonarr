@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import { hashPassword, verifyPassword } from "@/lib/password-hash";
+import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
@@ -30,8 +30,8 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "New password must be at least 8 characters" }, { status: 400 });
   }
 
-  if (newPassword.length > 1024) {
-    return NextResponse.json({ error: "New password must be at most 1024 characters" }, { status: 400 });
+  if (newPassword.length > MAX_PASSWORD_LENGTH) {
+    return NextResponse.json({ error: `New password must be at most ${MAX_PASSWORD_LENGTH} characters` }, { status: 400 });
   }
 
   const user = await prisma.user.findUnique({
