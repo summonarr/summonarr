@@ -38,7 +38,11 @@ export async function POST(req: NextRequest) {
   // an attacker who phishes a Plex user into approving an attacker-created
   // PIN can submit the resulting token directly from their own browser and
   // end up with a Summonarr session as that user.
-  const cookieToken = readPlexFlowCookie(req.headers.get("cookie"));
+  // Cookie for browsers; native clients submit the flow-state token in the body
+  // (they can't carry the HttpOnly cookie set at /start).
+  const cookieToken =
+    readPlexFlowCookie(req.headers.get("cookie")) ??
+    (typeof body.flowState === "string" ? body.flowState : null);
   if (!cookieToken) {
     return NextResponse.json({ error: "Plex sign-in flow expired" }, { status: 400 });
   }
