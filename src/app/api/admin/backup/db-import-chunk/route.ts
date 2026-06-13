@@ -67,6 +67,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     );
   }
 
+  if (!req.body) {
+    return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
+  }
+
+  // Header-only size check BEFORE claiming the single upload slot. startSession()
+  // mkdtemps a temp dir and occupies the one global slot; an oversized chunk 0 that
+  // bailed after it would strand that slot (409 for everyone else) until the 30-min TTL.
+  const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
+  if (sizeCheck) return sizeCheck;
+
   if (chunkIndex === 0) {
     const start = await startSession({ uploadId, totalSize: fileSize, totalChunks: chunkTotal });
     if (!start.ok) {
@@ -87,17 +97,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  if (!req.body) {
-    return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
-  }
-
-  const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
-  if (sizeCheck) return sizeCheck;
-
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
   if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
     // Belt-and-suspenders for transfer-encoding: chunked uploads where the
-    // Content-Length-based check above can't trigger.
+    // Content-Length-based check above can't trigger. Release the slot we just
+    // claimed on chunk 0 so an oversized first chunk doesn't strand the uploader.
+    if (chunkIndex === 0) await clearSession(uploadId);
     return NextResponse.json(
       { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
       { status: 413 },
