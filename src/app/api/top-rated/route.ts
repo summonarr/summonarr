@@ -1,0 +1,199 @@
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
+import { getTopRatedMovies, getTopRatedTV, type TmdbMedia } from "@/lib/tmdb";
+import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
+import { getMdblistTopRated } from "@/lib/mdblist";
+import { attachAllAvailability } from "@/lib/attach-all";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { prisma } from "@/lib/prisma";
+
+// Native-client mirror of src/app/(app)/top/page.tsx — deduplicated top-rated
+// titles across TMDB + Trakt + MDBList, sorted by a chosen rating source. Keep
+// the dedupe / backfill / filter / sort logic in sync with that page.
+const PER_PAGE = 36;
+
+type SortBy = "imdb" | "letterboxd" | "rt" | "trakt" | "mdblist";
+
+function sortByRating(items: TmdbMedia[], sortBy: SortBy): TmdbMedia[] {
+  return [...items].sort((a, b) => {
+    let av: number, bv: number;
+    switch (sortBy) {
+      case "letterboxd":
+        av = parseFloat(a.letterboxdRating ?? "");
+        bv = parseFloat(b.letterboxdRating ?? "");
+        break;
+      case "rt":
+        av = parseInt(a.rottenTomatoes?.replace("%", "") ?? "", 10);
+        bv = parseInt(b.rottenTomatoes?.replace("%", "") ?? "", 10);
+        break;
+      case "trakt":
+        av = parseFloat(a.traktRating ?? "");
+        bv = parseFloat(b.traktRating ?? "");
+        break;
+      case "mdblist":
+        av = parseFloat(a.mdblistScore ?? "");
+        bv = parseFloat(b.mdblistScore ?? "");
+        break;
+      default:
+        av = parseFloat(a.imdbRating ?? "");
+        bv = parseFloat(b.imdbRating ?? "");
+    }
+    if (!isNaN(av) && !isNaN(bv)) return bv - av;
+    if (!isNaN(av)) return -1;
+    if (!isNaN(bv)) return 1;
+    return b.voteAverage - a.voteAverage;
+  });
+}
+
+function dedup(sources: TmdbMedia[][]): TmdbMedia[] {
+  const seen = new Set<string>();
+  const result: TmdbMedia[] = [];
+  for (const items of sources) {
+    for (const item of items) {
+      const key = `${item.mediaType}:${item.id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(item);
+      }
+    }
+  }
+  return result;
+}
+
+async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
+  const missing = items.filter((i) => !i.posterPath);
+  if (missing.length === 0) return items;
+
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: {
+      OR: missing.map((i) => ({
+        tmdbId: i.id,
+        mediaType: i.mediaType === "movie" ? "MOVIE" : "TV",
+      })),
+    },
+  });
+  const coreMap = new Map(coreRows.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));
+
+  return items.map((item) => {
+    if (item.posterPath) return item;
+    const core = coreMap.get(`${item.mediaType === "movie" ? "MOVIE" : "TV"}:${item.id}`);
+    if (!core) return item;
+    return {
+      ...item,
+      title: core.title || item.title,
+      posterPath: core.posterPath ?? item.posterPath,
+      releaseYear: core.releaseYear ?? item.releaseYear,
+      voteAverage: core.voteAverage ?? item.voteAverage,
+    };
+  });
+}
+
+function applyFilters(
+  items: TmdbMedia[],
+  opts: { hideAvailable: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },
+): TmdbMedia[] {
+  let result = items;
+  if (opts.hideAvailable) {
+    result = result.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+  }
+  if (opts.minImdb) {
+    const threshold = parseFloat(opts.minImdb);
+    if (!isNaN(threshold)) {
+      result = result.filter((m) => {
+        const r = parseFloat(m.imdbRating ?? "");
+        return !isNaN(r) && r >= threshold;
+      });
+    }
+  }
+  if (opts.minVotes) {
+    const threshold = parseInt(opts.minVotes, 10);
+    if (!isNaN(threshold)) {
+      result = result.filter((m) => (m.voteCount ?? 0) >= threshold);
+    }
+  }
+  if (opts.fromYear) {
+    result = result.filter((m) => (m.releaseYear ?? "") >= opts.fromYear!);
+  }
+  if (opts.toYear) {
+    result = result.filter((m) => (m.releaseYear ?? "") <= opts.toYear!);
+  }
+  return result;
+}
+
+export const GET = withAuth(async (request, _ctx, session) => {
+  const sp = request.nextUrl.searchParams;
+  const hideAvailable = sp.get("hideAvailable") === "1";
+  const mediaType = sp.get("mediaType") || undefined; // "movies" | "tv" | undefined
+  const minImdb = sp.get("minImdb") || undefined;
+  const minVotes = sp.get("minVotes") || undefined;
+  const fromYear = sp.get("fromYear") || undefined;
+  const toYear = sp.get("toYear") || undefined;
+  const validSorts = new Set<SortBy>(["imdb", "letterboxd", "rt", "trakt", "mdblist"]);
+  const sortParam = sp.get("sortBy");
+  const sortBy: SortBy = validSorts.has(sortParam as SortBy) ? (sortParam as SortBy) : "imdb";
+  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const show4k = await getShow4kVisibility(session);
+
+  const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
+
+  try {
+    const [
+      rawTmdbMovies, rawTmdbTV,
+      rawTraktMovies, rawTraktTV,
+      rawMdbMovies, rawMdbTV,
+    ] = await Promise.all([
+      mediaType === "tv" ? [] : getTopRatedMovies().catch(() => [] as TmdbMedia[]),
+      mediaType === "movies" ? [] : getTopRatedTV().catch(() => [] as TmdbMedia[]),
+      mediaType === "tv" ? [] : getTraktPopularMovies().catch(() => [] as TmdbMedia[]),
+      mediaType === "movies" ? [] : getTraktPopularTV().catch(() => [] as TmdbMedia[]),
+      mediaType === "tv" ? [] : getMdblistTopRated("movie").catch(() => [] as TmdbMedia[]),
+      mediaType === "movies" ? [] : getMdblistTopRated("tv").catch(() => [] as TmdbMedia[]),
+    ]);
+
+    const allMovies = dedup([rawTmdbMovies, rawTraktMovies, rawMdbMovies]);
+    const allTV = dedup([rawTmdbTV, rawTraktTV, rawMdbTV]);
+
+    const showMovies = mediaType !== "tv";
+    const showTV = mediaType !== "movies";
+
+    const offset = (page - 1) * PER_PAGE;
+    let moviePage = allMovies.slice(offset, offset + PER_PAGE);
+    let tvPage = allTV.slice(offset, offset + PER_PAGE);
+
+    [moviePage, tvPage] = await Promise.all([
+      backfillMetadata(moviePage),
+      backfillMetadata(tvPage),
+    ]);
+
+    let [movies, tv] = await Promise.all([
+      showMovies && moviePage.length > 0
+        ? attachAllAvailability(moviePage, session.user.id, { show4k })
+        : Promise.resolve([] as TmdbMedia[]),
+      showTV && tvPage.length > 0
+        ? attachAllAvailability(tvPage, session.user.id, { show4k })
+        : Promise.resolve([] as TmdbMedia[]),
+    ]);
+
+    movies = sortByRating(applyFilters(movies, filterOpts), sortBy);
+    tv = sortByRating(applyFilters(tv, filterOpts), sortBy);
+
+    const totalPages = Math.max(
+      1,
+      Math.ceil(allMovies.length / PER_PAGE),
+      Math.ceil(allTV.length / PER_PAGE),
+    );
+
+    return NextResponse.json({
+      movies,
+      tv,
+      totalMovies: allMovies.length,
+      totalTv: allTV.length,
+      totalPages,
+      page,
+      sortBy,
+    });
+  } catch (err) {
+    console.error("[top-rated] Failed:", err);
+    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+  }
+});
