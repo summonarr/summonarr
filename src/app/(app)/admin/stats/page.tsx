@@ -29,7 +29,7 @@ export default async function StatsPage() {
     prisma.jellyfinLibraryItem.groupBy({ by: ["mediaType"], _count: { _all: true } }),
     prisma.tVEpisodeCache.groupBy({ by: ["source"], _count: { _all: true }, _sum: { runtime: true } }),
     prisma.$queryRaw<{ avg_hours: number | null }[]>`
-      SELECT EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600 AS avg_hours
+      SELECT (EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600)::float8 AS avg_hours
       FROM "MediaRequest"
       WHERE status = 'AVAILABLE' AND "availableAt" IS NOT NULL
     `,
