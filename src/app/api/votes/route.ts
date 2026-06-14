@@ -12,20 +12,39 @@ import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
 
 const PAGE_SIZE = 40;
+const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const page = Math.min(Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1), 10_000);
+  const sp = req.nextUrl.searchParams;
+  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const mine = sp.get("mine") === "1";
+  const sortParam = sp.get("sort");
+  const sort =
+    sortParam && (VALID_VOTE_SORTS as readonly string[]).includes(sortParam)
+      ? (sortParam as (typeof VALID_VOTE_SORTS)[number])
+      : "votes";
+  const q = (sp.get("q") ?? "").trim();
+
+  // Mirrors the web /votes page: `mine` scopes to the caller's votes, `q` matches
+  // the title, `recent` orders groups by their most-recent vote.
+  const where: Prisma.DeletionVoteWhereInput = {
+    ...(mine ? { userId: session.user.id } : {}),
+    ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
+  };
 
   const [grouped, totalItems] = await Promise.all([
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
+      where,
       _count: { id: true },
-      orderBy: { _count: { id: "desc" } },
+      _max: { createdAt: true },
+      orderBy: sort === "recent" ? { _max: { createdAt: "desc" } } : { _count: { id: "desc" } },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
+      where,
       _count: { id: true },
     }),
   ]);
