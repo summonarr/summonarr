@@ -55,7 +55,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
   const pairsFilter = grouped.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
 
-  const [reps, userVotes] = await Promise.all([
+  const [reps, userVotes, otherReasons] = await Promise.all([
     prisma.deletionVote.findMany({
       where: { OR: pairsFilter },
       select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
@@ -65,10 +65,34 @@ export const GET = withAuth(async (req, _ctx, session) => {
       where: { userId: session.user.id, OR: pairsFilter },
       select: { tmdbId: true, mediaType: true, id: true, reason: true },
     }),
+    // A few recent non-empty reasons from OTHER users per title, surfaced as
+    // `reasons` on each item (the caller's own reason stays in `userReason`).
+    // Not distinct/grouped in SQL — we cap to 3 per group in JS below.
+    prisma.deletionVote.findMany({
+      where: {
+        OR: pairsFilter,
+        userId: { not: session.user.id },
+        reason: { not: null },
+      },
+      select: { tmdbId: true, mediaType: true, reason: true },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
 
   const repMap = new Map(reps.map((r) => [`${r.tmdbId}:${r.mediaType}`, r]));
   const userVoteMap = new Map(userVotes.map((v) => [`${v.tmdbId}:${v.mediaType}`, v]));
+
+  // Build up to 3 deduped, non-empty reasons per title from other users'.
+  const reasonsMap = new Map<string, string[]>();
+  for (const r of otherReasons) {
+    const reason = r.reason?.trim();
+    if (!reason) continue;
+    const key = `${r.tmdbId}:${r.mediaType}`;
+    const list = reasonsMap.get(key) ?? [];
+    if (list.length >= 3 || list.includes(reason)) continue;
+    list.push(reason);
+    reasonsMap.set(key, list);
+  }
 
   const items = grouped.map((g) => {
     const key = `${g.tmdbId}:${g.mediaType}`;
@@ -82,6 +106,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
       voteCount: g._count.id,
       userVoted: !!userVote,
       userReason: userVote?.reason ?? null,
+      reasons: reasonsMap.get(key) ?? [],
     };
   });
 
