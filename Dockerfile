@@ -133,6 +133,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/THIRD_PARTY_LICENSES.txt ./THIRD_
 # Standalone-traced — only what's listed here ships. `pg` ships in node_modules
 # already (migrate-deps stage), so these scripts have what they need.
 COPY --from=builder --chown=nextjs:nodejs /app/scripts/reset-password.mjs ./scripts/reset-password.mjs
+COPY --from=builder --chown=nextjs:nodejs /app/scripts/create-user.mjs ./scripts/create-user.mjs
 
 # Merge prisma CLI deps on top of the standalone's node_modules.
 # COPY into an existing directory adds files without removing what's already there,
