@@ -21,7 +21,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "jose": "^6.2.3",
-    "next": "16.2.7",
+    "next": "16.2.9",
     "openid-client": "^6.8.4",
     "pg": "^8.21.0",
     "prisma": "^7.8.0",
