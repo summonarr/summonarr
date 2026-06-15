@@ -325,7 +325,10 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   };
   // These fields are only present on the single-title detail response, not on list/search items —
   // set them only when present so cached list payloads stay lean.
-  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  if (r.genres?.length) {
+    media.genres = r.genres.map((g) => g.name);
+    media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
+  }
   if (r.production_companies?.length) media.studios = r.production_companies.map((c) => c.name);
   if (r.tagline) media.tagline = r.tagline;
   if (r.status) media.status = r.status;
@@ -357,7 +360,10 @@ function normalizeTV(r: RawTV): TmdbMedia {
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
-  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  if (r.genres?.length) {
+    media.genres = r.genres.map((g) => g.name);
+    media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
+  }
   const studios = (r.networks?.length ? r.networks : r.production_companies) ?? [];
   if (studios.length) media.studios = studios.map((c) => c.name);
   if (r.tagline) media.tagline = r.tagline;

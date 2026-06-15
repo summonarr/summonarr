@@ -61,6 +61,10 @@ export const GET = withAuth(async (
     // append_to_response) plus the suggestions fetch above.
     const similar = suggestions.slice(0, 12).map(lite);
     const keywords = (detail.keywords ?? []).map((k) => k.name).filter(Boolean);
+    // Name+id variants so native clients can deep-link into filtered browse.
+    // `keywords`/`genres` (names only) stay for back-compat.
+    const keywordList = (detail.keywords ?? []).map((k) => ({ id: k.id, name: k.name }));
+    const genreList = detail.genreList ?? [];
     // Streaming/flatrate ("stream") providers for the US region only — the
     // detail payload's watchProviders are already US-scoped (extractWatchProviders).
     const watchProviders = (detail.watchProviders ?? [])
@@ -103,6 +107,8 @@ export const GET = withAuth(async (
       cast,
       similar,
       keywords,
+      keywordList,
+      genreList,
       watchProviders,
       homepage,
       collection,

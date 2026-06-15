@@ -45,6 +45,9 @@ export interface TmdbMedia {
   seasons?: TmdbSeason[];
 
   genres?: string[];
+  // Same genres as `genres`, but with TMDB ids retained so native clients can
+  // deep-link into filtered browse. `genres` (names) stays for back-compat.
+  genreList?: { id: number; name: string }[];
   studios?: string[];
   tagline?: string | null;
   status?: string | null;
