@@ -64,7 +64,19 @@ async function gate(): Promise<NextResponse | { password: string }> {
 //   X-File-Size     total file size in bytes
 // Body: raw chunk bytes (application/octet-stream)
 export async function POST(req: NextRequest) {
-  if (!checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
+  const uploadId = req.headers.get("x-upload-id") ?? "";
+  const chunkIndex = Number(req.headers.get("x-chunk-index") ?? "");
+  const chunkTotal = Number(req.headers.get("x-chunk-total") ?? "");
+  const fileSize = Number(req.headers.get("x-file-size") ?? "");
+
+  if (!uploadId || !Number.isFinite(chunkIndex) || !Number.isFinite(chunkTotal) || !Number.isFinite(fileSize)) {
+    return NextResponse.json({ error: "Missing or invalid upload headers." }, { status: 400 });
+  }
+
+  // Rate-limit the upload *attempt*, not each chunk: consume one slot when the client
+  // opens the session (chunk 0). A real backup is split into many 16 MiB chunks, so a
+  // per-chunk limiter would burn the whole bucket and 429 the restore partway through.
+  if (chunkIndex === 0 && !checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
   }
 
@@ -75,14 +87,6 @@ export async function POST(req: NextRequest) {
   if (g instanceof NextResponse) return g;
   const { password } = g;
 
-  const uploadId = req.headers.get("x-upload-id") ?? "";
-  const chunkIndex = Number(req.headers.get("x-chunk-index") ?? "");
-  const chunkTotal = Number(req.headers.get("x-chunk-total") ?? "");
-  const fileSize = Number(req.headers.get("x-file-size") ?? "");
-
-  if (!uploadId || !Number.isFinite(chunkIndex) || !Number.isFinite(chunkTotal) || !Number.isFinite(fileSize)) {
-    return NextResponse.json({ error: "Missing or invalid upload headers." }, { status: 400 });
-  }
   if (fileSize > MAX_CIPHERTEXT_BYTES) {
     return NextResponse.json(
       { error: `File exceeds the ${Math.round(MAX_CIPHERTEXT_BYTES / (1024 * 1024))} MB limit.` },

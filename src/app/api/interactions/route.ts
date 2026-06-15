@@ -16,7 +16,7 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
-import { resolveUserQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
 
@@ -533,6 +533,10 @@ async function handleComponent(interaction: any): Promise<void> {
         const liveUsername = (discordUser.username as string | undefined) ?? pending.discordUsername;
         dbUser = await prisma.user.upsert({
           where: { discordId: discordUserId },
+          // `permissions` is seeded on create only — deliberately NOT re-set on update, so an
+          // admin's per-user permission edits aren't clobbered on every Discord interaction.
+          // Legacy rows with permissions=0 stay correct via the effectivePermissions(role, …)
+          // fallback below; don't "fix" this by adding permissions to `update`.
           update: { name: liveUsername },
           create: {
             discordId: discordUserId,
@@ -575,7 +579,7 @@ async function handleComponent(interaction: any): Promise<void> {
             tvQuotaLimit: dbUser.tvQuotaLimit ?? null,
             tvQuotaDays: dbUser.tvQuotaDays ?? null,
           },
-          parseInt(quotaLimitRow?.value ?? "0", 10),
+          parseQuotaLimit(quotaLimitRow?.value),
           quotaPeriodRow?.value ?? "week",
         );
         if (rq.limit > 0) {

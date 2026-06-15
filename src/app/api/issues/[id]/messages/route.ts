@@ -45,10 +45,6 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (issue.status === "RESOLVED") {
-    return NextResponse.json({ error: "Cannot add messages to a resolved issue" }, { status: 422 });
-  }
-
   if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
@@ -60,8 +56,14 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const rawText = body.body?.trim();
-  if (!rawText || typeof rawText !== "string") {
+  // Validate the type BEFORE calling a string method: req.json() is untyped at
+  // runtime, so a non-string body (number/object/null) would throw on .trim() and
+  // surface as a 500 instead of this 400. Mirrors the guard in releases/route.ts.
+  if (typeof body.body !== "string") {
+    return NextResponse.json({ error: "body is required" }, { status: 400 });
+  }
+  const rawText = body.body.trim();
+  if (!rawText) {
     return NextResponse.json({ error: "body is required" }, { status: 400 });
   }
   if (rawText.length > 2000) {
@@ -97,6 +99,27 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         action: "ISSUE_STATUS_CHANGE",
         target: `issue:${id}`,
         details: { trigger: "admin-reply-auto-promote", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } },
+        ...auditContext(req, session),
+      });
+    }
+  }
+
+  // A reporter replying to a RESOLVED issue reopens it (mirror of the admin
+  // OPEN→IN_PROGRESS auto-promote above). An admin reply on a resolved issue adds a
+  // closing note without changing status. CAS on RESOLVED so a concurrent change wins.
+  if (!isAdmin && issue.status === "RESOLVED" && issue.reportedBy === session.user.id) {
+    const reopened = await prisma.issue.updateMany({
+      where: { id, status: "RESOLVED" },
+      data: { status: "OPEN", resolution: null },
+    });
+    if (reopened.count > 0) {
+      emitSSE({ type: "issue:updated", issueId: id, status: "OPEN", userId: issue.reportedBy });
+      void logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? null,
+        action: "ISSUE_STATUS_CHANGE",
+        target: `issue:${id}`,
+        details: { trigger: "reporter-reply-reopen", before: { status: "RESOLVED" }, after: { status: "OPEN" } },
         ...auditContext(req, session),
       });
     }

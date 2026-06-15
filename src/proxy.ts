@@ -8,6 +8,11 @@ import {
 } from "@/lib/session-cookie";
 import { verifyAndRefreshSession } from "@/lib/session-refresh";
 import {
+  parseBearerToken,
+  hasNativeClientHeader,
+  NATIVE_CLIENT_HEADER,
+} from "@/lib/mobile-auth";
+import {
   extractUaFingerprint,
   serializeFingerprint,
 } from "@/lib/ua-fingerprint";
@@ -99,6 +104,18 @@ export async function proxy(request: NextRequest) {
   }
 
   const { pathname } = request.nextUrl;
+
+  // Native/API clients authenticate with `Authorization: Bearer <session-jwt>`
+  // and tag requests with X-Summonarr-Client instead of the browser cookie.
+  // Both are custom headers a cross-origin page can't attach to a credentialed
+  // request (CORS preflight blocks them), so either one means this request is
+  // not a cookie-riding CSRF vector AND the UA-fingerprint cookie-binding does
+  // not apply. See src/lib/mobile-auth.ts.
+  const bearerToken = parseBearerToken(request.headers.get("authorization"));
+  const isNativeClient = hasNativeClientHeader(
+    request.headers.get(NATIVE_CLIENT_HEADER),
+  );
+
   // Auth routes that legitimately have no Origin header:
   //   - oidc/callback: top-level redirect initiated by the IdP.
   //   - oidc/start: same-site top-level navigation (no Origin sent by browsers
@@ -121,8 +138,12 @@ export async function proxy(request: NextRequest) {
 
   const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
 
-  // Origin check guards against CSRF on mutation endpoints; webhook and sync routes use their own auth
-  if (isMutating && isProtectedApi) {
+  // Origin check guards against CSRF on mutation endpoints; webhook and sync
+  // routes use their own auth. Bearer/native-client requests are exempt — a
+  // custom-header request can't be forged cross-origin, so it carries no
+  // ambient-cookie CSRF risk (this also lets a native client POST the sign-in
+  // route, which has no Origin header).
+  if (isMutating && isProtectedApi && !bearerToken && !isNativeClient) {
     const origin = request.headers.get("origin");
     let effectiveOrigin = origin;
     if (!effectiveOrigin) {
@@ -145,23 +166,34 @@ export async function proxy(request: NextRequest) {
   // pass through verifyAndRefreshSession so the cookie gets refreshed even
   // when visiting /login — keeps the slide alive while a logged-in user
   // navigates around the public surface.
-  const cookieToken = parseSessionCookie(request.headers.get("cookie"));
-  const refreshResult = cookieToken
-    ? await verifyAndRefreshSession(cookieToken)
+  // Prefer the bearer token (native clients) over the cookie (browsers); the
+  // two never coexist for one principal, and resolving the bearer first means a
+  // forged cookie can never ride a CSRF-exempt bearer request.
+  const sessionToken =
+    bearerToken ?? parseSessionCookie(request.headers.get("cookie"));
+  const refreshResult = sessionToken
+    ? await verifyAndRefreshSession(sessionToken)
     : null;
   const isLoggedIn = !!refreshResult;
   const role = refreshResult?.claims.role;
 
   if (!isPublicPath(pathname)) {
     if (!isLoggedIn) {
+      // API clients (native apps, XHR) need a machine-readable 401, not a 302
+      // to the HTML login page. Browser page navigations still get the redirect.
+      if (pathname.startsWith("/api/")) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
       return clearedCookieResponse(buildLoginRedirect(request));
     }
 
-    // UA fingerprint check. Machine sessions (auth.config.ts had a special
-    // marker for these) — for now we just skip the check entirely; PR 6 can
-    // restore them if needed. Browser sessions get the full check.
+    // UA fingerprint check. Skipped for machine sessions (CRON_SECRET-bound) and
+    // for bearer sessions: a native client holds its JWT in app-secure storage
+    // and presents it explicitly, so the device-class binding that hardens an
+    // ambiently-replayed browser cookie doesn't apply. Browser cookie sessions
+    // get the full check.
     const storedFp = refreshResult.claims.uaFingerprint;
-    if (storedFp && !storedFp.startsWith("machine:")) {
+    if (!bearerToken && storedFp && !storedFp.startsWith("machine:")) {
       const currentFp = serializeFingerprint(
         extractUaFingerprint(request.headers.get("user-agent") ?? ""),
       );
@@ -221,7 +253,9 @@ export async function proxy(request: NextRequest) {
 
   // Carry the refreshed JWT through to the client whenever verifyAndRefresh
   // produced one — sliding window or sessionId rotation or dbCheckedAt bump.
-  if (refreshResult?.refreshed) {
+  // Only for cookie sessions: a bearer client can't read Set-Cookie, so it
+  // rides its original fixed-lifetime token until expiry, then re-authenticates.
+  if (refreshResult?.refreshed && !bearerToken) {
     response.headers.append(
       "Set-Cookie",
       serializeSessionCookie(refreshResult.refreshed.token, {

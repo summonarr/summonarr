@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithPlex, signInAndMintSession } from "@/lib/auth";
-import { serializeSessionCookie } from "@/lib/session-cookie";
+import { buildSignInResponse } from "@/lib/sign-in-response";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 import {
   buildPlexFlowClearedSetCookie,
@@ -38,7 +38,11 @@ export async function POST(req: NextRequest) {
   // an attacker who phishes a Plex user into approving an attacker-created
   // PIN can submit the resulting token directly from their own browser and
   // end up with a Summonarr session as that user.
-  const cookieToken = readPlexFlowCookie(req.headers.get("cookie"));
+  // Cookie for browsers; native clients submit the flow-state token in the body
+  // (they can't carry the HttpOnly cookie set at /start).
+  const cookieToken =
+    readPlexFlowCookie(req.headers.get("cookie")) ??
+    (typeof body.flowState === "string" ? body.flowState : null);
   if (!cookieToken) {
     return NextResponse.json({ error: "Plex sign-in flow expired" }, { status: 400 });
   }
@@ -69,15 +73,11 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await signInAndMintSession({ user, providerId: "plex" });
-  const res = NextResponse.json({ ok: true, user: result.user });
-  res.headers.append(
-    "Set-Cookie",
-    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
-  );
   // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
   // a client that ignores the Set-Cookie can resubmit until the 10-min TTL. True
   // single-use is enforced one layer up: Plex invalidates the PIN token on first
   // redemption, so a replayed (cookie, token) pair fails at authorizeWithPlex().
-  res.headers.append("Set-Cookie", buildPlexFlowClearedSetCookie());
-  return res;
+  return buildSignInResponse(req, result, {
+    extraSetCookies: [buildPlexFlowClearedSetCookie()],
+  });
 }

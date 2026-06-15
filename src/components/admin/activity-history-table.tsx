@@ -821,7 +821,7 @@ export function ActivityHistoryTable({
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by title or user…"
+                placeholder="Search by title, user, or IP…"
                 style={{
                   fontFamily: "inherit",
                   fontSize: 12.5,

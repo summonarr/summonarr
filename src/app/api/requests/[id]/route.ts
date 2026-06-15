@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { withPermission } from "@/lib/api-auth";
-import { Permission } from "@/lib/permissions";
+import { withAuth, withPermission } from "@/lib/api-auth";
+import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
 import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
@@ -68,13 +68,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
+    const variant = existing.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await searchMovieInRadarr(existing.tmdbId);
+        await searchMovieInRadarr(existing.tmdbId, variant);
       } else {
         if (!existing.tvdbId) throw new Error("No TVDB ID stored — re-push the request first");
-        await searchSeriesInSonarr(existing.tvdbId);
+        await searchSeriesInSonarr(existing.tvdbId, variant);
       }
     } catch (err) {
       console.error("[arr] Search failed:", err);
@@ -104,12 +105,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
+    const variant = existing.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId);
+        await addMovieToRadarr(existing.tmdbId, variant);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId);
+        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
     } catch (err) {
@@ -203,13 +205,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
+    const variant = updated.is4k ? "4k" : "hd";
     let arrError: string | null = null;
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId);
+        await addMovieToRadarr(updated.tmdbId, variant);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;
@@ -237,8 +240,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         if (current?.status !== "APPROVED") return;
 
         const downloading = updated.mediaType === "MOVIE"
-          ? await isMovieDownloadingInRadarr(updated.tmdbId)
-          : await isSeriesDownloadingInSonarr(updated.tmdbId);
+          ? await isMovieDownloadingInRadarr(updated.tmdbId, variant)
+          : await isSeriesDownloadingInSonarr(updated.tmdbId, variant);
         if (downloading) return;
 
         const now = new Date();
@@ -304,7 +307,15 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   return NextResponse.json(updated);
 });
 
-export const DELETE = withPermission(Permission.MANAGE_REQUESTS)(async (
+// Two callers share this handler:
+//   - An admin (MANAGE_REQUESTS) can delete any request (existing behavior;
+//     consumed by the admin request-actions UI). Audited as REQUEST_DELETE.
+//   - The request owner can self-cancel their OWN request, but only while it is
+//     still PENDING — once approved/available, cancellation goes through the
+//     admin PATCH path. Added for native clients.
+// Anyone else gets 403. Using withAuth (not withPermission) keeps the route a
+// single DELETE export while letting the owner branch through.
+export const DELETE = withAuth(async (
   req,
   { params }: { params: Promise<{ id: string }> },
   session
@@ -313,8 +324,19 @@ export const DELETE = withPermission(Permission.MANAGE_REQUESTS)(async (
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
+  const isOwnerSelfCancel =
+    existing.requestedBy === session.user.id && existing.status === "PENDING";
+  if (!isAdmin && !isOwnerSelfCancel) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   await prisma.mediaRequest.delete({ where: { id } });
   emitSSE({ type: "request:deleted", requestId: id, userId: existing.requestedBy });
-  await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
+  // Only an admin-initiated delete is an audit-worthy moderation action; a user
+  // cancelling their own pending request is routine and stays out of the log.
+  if (isAdmin) {
+    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
+  }
   return NextResponse.json({ ok: true });
 });

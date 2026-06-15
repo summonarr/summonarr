@@ -18,6 +18,13 @@ const SCRYPT_MAXMEM = 64 * 1024 * 1024;
 
 const PREFIX = "scrypt:1:";
 
+// Shared upper bound for user-supplied passwords. Enforced identically on every
+// write (register, password change) AND on credential sign-in, so a password that
+// is accepted can always authenticate — a write cap above the sign-in cap would
+// silently lock out anyone whose password landed in the gap. scrypt has no length
+// limit of its own; this just bounds the work an unauthenticated caller can demand.
+export const MAX_PASSWORD_LENGTH = 1024;
+
 // Dummy used in failure paths so the response time is independent of whether
 // the user exists. Computed once on first call from a fixed salt and the
 // production scrypt parameters, so timing matches a real verify exactly.

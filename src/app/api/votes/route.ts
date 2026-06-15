@@ -12,20 +12,39 @@ import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
 
 const PAGE_SIZE = 40;
+const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const page = Math.min(Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1), 10_000);
+  const sp = req.nextUrl.searchParams;
+  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const mine = sp.get("mine") === "1";
+  const sortParam = sp.get("sort");
+  const sort =
+    sortParam && (VALID_VOTE_SORTS as readonly string[]).includes(sortParam)
+      ? (sortParam as (typeof VALID_VOTE_SORTS)[number])
+      : "votes";
+  const q = (sp.get("q") ?? "").trim();
+
+  // Mirrors the web /votes page: `mine` scopes to the caller's votes, `q` matches
+  // the title, `recent` orders groups by their most-recent vote.
+  const where: Prisma.DeletionVoteWhereInput = {
+    ...(mine ? { userId: session.user.id } : {}),
+    ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
+  };
 
   const [grouped, totalItems] = await Promise.all([
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
+      where,
       _count: { id: true },
-      orderBy: { _count: { id: "desc" } },
+      _max: { createdAt: true },
+      orderBy: sort === "recent" ? { _max: { createdAt: "desc" } } : { _count: { id: "desc" } },
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
+      where,
       _count: { id: true },
     }),
   ]);
@@ -36,7 +55,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
   const pairsFilter = grouped.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
 
-  const [reps, userVotes] = await Promise.all([
+  const [reps, userVotes, otherReasons] = await Promise.all([
     prisma.deletionVote.findMany({
       where: { OR: pairsFilter },
       select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
@@ -46,10 +65,34 @@ export const GET = withAuth(async (req, _ctx, session) => {
       where: { userId: session.user.id, OR: pairsFilter },
       select: { tmdbId: true, mediaType: true, id: true, reason: true },
     }),
+    // A few recent non-empty reasons from OTHER users per title, surfaced as
+    // `reasons` on each item (the caller's own reason stays in `userReason`).
+    // Not distinct/grouped in SQL — we cap to 3 per group in JS below.
+    prisma.deletionVote.findMany({
+      where: {
+        OR: pairsFilter,
+        userId: { not: session.user.id },
+        reason: { not: null },
+      },
+      select: { tmdbId: true, mediaType: true, reason: true },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
 
   const repMap = new Map(reps.map((r) => [`${r.tmdbId}:${r.mediaType}`, r]));
   const userVoteMap = new Map(userVotes.map((v) => [`${v.tmdbId}:${v.mediaType}`, v]));
+
+  // Build up to 3 deduped, non-empty reasons per title from other users'.
+  const reasonsMap = new Map<string, string[]>();
+  for (const r of otherReasons) {
+    const reason = r.reason?.trim();
+    if (!reason) continue;
+    const key = `${r.tmdbId}:${r.mediaType}`;
+    const list = reasonsMap.get(key) ?? [];
+    if (list.length >= 3 || list.includes(reason)) continue;
+    list.push(reason);
+    reasonsMap.set(key, list);
+  }
 
   const items = grouped.map((g) => {
     const key = `${g.tmdbId}:${g.mediaType}`;
@@ -63,6 +106,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
       voteCount: g._count.id,
       userVoted: !!userVote,
       userReason: userVote?.reason ?? null,
+      reasons: reasonsMap.get(key) ?? [],
     };
   });
 
@@ -136,38 +180,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Cannot vote to delete your own request" }, { status: 403 });
   }
 
-  let thresholdNotifyData: { title: string; mediaType: string; voteCount: number; posterPath: string | null; tmdbId: number } | null = null;
-
   let vote: Awaited<ReturnType<typeof prisma.deletionVote.create>>;
   try {
-    vote = await prisma.$transaction(async (tx) => {
-      const created = await tx.deletionVote.create({
-        data: {
-          tmdbId,
-          mediaType,
-          title: verified.title,
-          posterPath: verified.posterPath,
-          userId: session.user.id,
-          reason: sanitizedReason ?? null,
-        },
-      });
-
-      const thresholdRow = await tx.setting.findUnique({ where: { key: "deletionVoteThreshold" } });
-      const threshold = parseInt(thresholdRow?.value ?? "0", 10);
-      if (threshold > 0) {
-        const voteCount = await tx.deletionVote.count({ where: { tmdbId, mediaType } });
-        if (voteCount >= threshold) {
-          // Unique constraint on claimKey acts as a one-shot gate: create fails on a second insertion
-          const claimKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
-          try {
-            await tx.setting.create({ data: { key: claimKey, value: "1" } });
-            thresholdNotifyData = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
-          } catch { }
-        }
-      }
-
-      return created;
-    }, { isolationLevel: "Serializable", timeout: 15_000 });
+    vote = await prisma.deletionVote.create({
+      data: {
+        tmdbId,
+        mediaType,
+        title: verified.title,
+        posterPath: verified.posterPath,
+        userId: session.user.id,
+        reason: sanitizedReason ?? null,
+      },
+    });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return NextResponse.json({ error: "Already voted" }, { status: 409 });
@@ -175,14 +199,35 @@ export const POST = withAuth(async (req, _ctx, session) => {
     throw err;
   }
 
-  if (thresholdNotifyData) {
-    const data = thresholdNotifyData;
-    after(async () => {
-      await Promise.allSettled([
-        notifyAdminsDeletionVoteThreshold(data),
-        notifyAdminsDeletionVoteThresholdPush(data),
-      ]);
-    });
+  // Fire the "deletion threshold reached" admin alert exactly once per item. The
+  // claimKey row is an idempotent one-shot gate: createMany(skipDuplicates) reports
+  // count === 1 for the single caller that wins the insert and 0 for everyone after.
+  // This MUST stay out of the vote-insert transaction — a bare create() whose
+  // duplicate-key error is caught-and-ignored inside a single-level interactive tx
+  // leaves Postgres in the aborted state (there is no per-statement SAVEPOINT at
+  // depth 1), so the trailing COMMIT becomes a ROLLBACK and silently discards the
+  // vote too. Running it afterwards is also self-healing: if the process dies before
+  // the claim, the next vote re-evaluates the threshold and fires the alert.
+  const thresholdRow = await prisma.setting.findUnique({ where: { key: "deletionVoteThreshold" } });
+  const threshold = parseInt(thresholdRow?.value ?? "0", 10);
+  if (threshold > 0) {
+    const voteCount = await prisma.deletionVote.count({ where: { tmdbId, mediaType } });
+    if (voteCount >= threshold) {
+      const claimKey = `deletionVoteNotified:${tmdbId}:${mediaType}`;
+      const claim = await prisma.setting.createMany({
+        data: [{ key: claimKey, value: "1" }],
+        skipDuplicates: true,
+      });
+      if (claim.count === 1) {
+        const data = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
+        after(async () => {
+          await Promise.allSettled([
+            notifyAdminsDeletionVoteThreshold(data),
+            notifyAdminsDeletionVoteThresholdPush(data),
+          ]);
+        });
+      }
+    }
   }
 
   return NextResponse.json(vote, { status: 201 });

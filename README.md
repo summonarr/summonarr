@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.12.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -151,7 +151,36 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - The container runs as non-root (`nextjs:nodejs`, UID 1001), with `npm`/`npx` removed from the runtime image.
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
 
+## Privacy
+
+Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
+
 ## Changelog
+
+### v0.13.0
+
+**Added**
+
+- Groundwork for a native **Summonarr iOS app**: a full set of API endpoints the client uses — TMDB discovery (home, upcoming, popular, top-rated), single-title detail, bearer-token sessions, native Plex sign-in, a user-readable public config endpoint, plus native endpoints for requests, votes, issues, Discord link/unlink, and admin (users list with permissions + notification prefs, library bad-matches).
+- Filter, sort, and search on the requests and votes lists.
+- IP address is now a filter option in play-history search.
+- Reporters can reopen a resolved issue by replying to it.
+- Privacy policy ([`PRIVACY.md`](./PRIVACY.md)), also used as the App Store privacy URL.
+
+**Changed**
+
+- 4K admin actions (approve / retry / search) now route to the 4K Radarr/Sonarr instance.
+
+**Fixed**
+
+- Deletion votes are now persisted once an item passes the vote threshold (a transaction abort could previously roll the vote back behind a success response).
+- Bulk requests: closed a quota race with a serializable transaction; batch decline now notifies only the newly-declined rows; a non-numeric quota limit is treated as disabled instead of NaN.
+- Granting the admin permission bit now requires the admin role.
+- SSRF policy allows rotating-CDN DNS while still blocking private ranges on the public fetch path.
+- Sync de-duplicates ActiveSession inserts, stamps `availableAt`, and re-arms the vote gate.
+- Backup/restore: release the import slot on an oversized first chunk, rate-limit restores per attempt, and attribute conflict-skips to the correct table.
+- Admin stats no longer overflow when averaging fulfillment hours; the active-sessions response coerces BigInt playtime safely.
+- Password-length cap is consistent across sign-in and account writes; issue replies with a non-string body return 400 instead of 500.
 
 ### v0.12.4
 
@@ -549,7 +578,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.12.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

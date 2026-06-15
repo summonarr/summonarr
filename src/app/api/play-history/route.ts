@@ -111,11 +111,11 @@ function parseFilters(params: URLSearchParams): SqlFragment[] {
     // by emitting a subquery test so the filter composes cleanly.
     const like = `%${search}%`;
     fragments.push({
-      sql: `(h."title" ILIKE ? OR EXISTS (
+      sql: `(h."title" ILIKE ? OR h."ipAddress" ILIKE ? OR EXISTS (
               SELECT 1 FROM "MediaServerUser" msu2
               WHERE msu2.id = h."mediaServerUserId" AND msu2."username" ILIKE ?
             ))`,
-      binds: [like, like],
+      binds: [like, like, like],
     });
   }
 
@@ -196,6 +196,7 @@ async function ungroupedQuery(
   if (search) {
     where.OR = [
       { title: { contains: search, mode: "insensitive" } },
+      { ipAddress: { contains: search, mode: "insensitive" } },
       { mediaServerUser: { username: { contains: search, mode: "insensitive" } } },
     ];
   }

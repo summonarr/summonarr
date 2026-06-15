@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { hashPassword } from "@/lib/password-hash";
+import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { checkRateLimit, getClientIp, parseRateLimit } from "@/lib/rate-limit";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -66,8 +66,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
   }
 
-  if (password.length > 1024) {
-    return NextResponse.json({ error: "Password must be at most 1024 characters" }, { status: 400 });
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return NextResponse.json({ error: `Password must be at most ${MAX_PASSWORD_LENGTH} characters` }, { status: 400 });
   }
 
   const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });

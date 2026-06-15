@@ -6,6 +6,7 @@ import {
 } from "@/lib/plex-flow-state";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 // Server-side PIN creation for the Plex sign-in flow. Returns the PIN id +
 // code AND sets a short-lived signed cookie binding the pinId to this
@@ -88,7 +89,14 @@ export async function POST(req: NextRequest) {
     clientId,
   });
 
-  const response = NextResponse.json({ pinId: data.id, code: data.code });
+  // Native clients can't receive the HttpOnly flow cookie, so hand them the
+  // signed flow-state token in the body to submit back at sign-in.
+  const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
+  const response = NextResponse.json({
+    pinId: data.id,
+    code: data.code,
+    ...(isNative ? { flowState: cookieValue } : {}),
+  });
   response.headers.append(
     "Set-Cookie",
     buildPlexFlowSetCookie(cookieValue, isSecureCookieContext()),

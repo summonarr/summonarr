@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
-import { serializeSessionCookie } from "@/lib/session-cookie";
+import { buildSignInResponse } from "@/lib/sign-in-response";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 
 // Summonarr-native credentials sign-in. Hits the same authorize() body that
@@ -42,10 +42,5 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await signInAndMintSession({ user, providerId: "credentials" });
-  const res = NextResponse.json({ ok: true, user: result.user });
-  res.headers.append(
-    "Set-Cookie",
-    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
-  );
-  return res;
+  return buildSignInResponse(req, result);
 }

@@ -70,6 +70,14 @@ function isSafeAddr(addr: string): boolean {
   if (/^169\.254\./.test(addr)) return false;
   // Deprecated IPv6 site-local (fec0::/10) — still in some stacks; treat as private
   if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
+  // RFC1918 private IPv4 (10/8, 172.16/12, 192.168/16). These back the LAN that a
+  // self-hosted deployment runs on (router, other containers, NAS, the very
+  // Radarr/Sonarr/Jellyfin/Plex boxes), so leaving them reachable is a blind-SSRF
+  // hole on the user-supplied-URL path (Web Push endpoints). Admins legitimately
+  // point at these — that lives in isSafeAddrForAdmin, NOT here.
+  if (/^10\./.test(addr)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(addr)) return false;
+  if (/^192\.168\./.test(addr)) return false;
   // CGNAT shared address space (100.64/10) — also used for Docker internal ranges on some hosts
   if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr)) return false;
   // Multicast
@@ -172,26 +180,33 @@ export async function resolveToSafeUrl(
   return r ? r.url : null;
 }
 
-// Re-resolve `host` and verify (a) every currently-resolving address is still
-// safe under the chosen policy, and (b) the resolved address set has not
-// changed since `expectedAddrs` was captured. Returns true on success.
+// Re-resolve `host` FRESH and verify every currently-resolving address is safe
+// under the chosen policy. Returns true on success.
 //
 // This is the TOCTOU mitigation for the gap between the initial SSRF resolve
 // and the actual fetch() connect: `fetch()` hands the hostname to undici and
 // undici re-resolves at connect time, so a hostile DNS server can flip the
 // answer mid-request ("DNS rebinding"). We can't pin the IP at the dispatcher
 // layer without re-introducing the npm-undici-vs-Node-bundled-undici Dispatcher
-// incompatibility (see safe-fetch.ts), so we instead shrink the window to
-// milliseconds and refuse the request if the address set changed.
+// incompatibility (see safe-fetch.ts), so we instead re-resolve immediately
+// before fetch() and refuse if any address now points somewhere unsafe.
 //
 // This re-resolves FRESH (bypassing the 5-minute cache) so it genuinely queries
 // DNS again immediately before fetch(), rather than echoing the answer the
 // resolve step just primed into the cache — a cached read here could never
 // observe a rebind, defeating the whole check. The residual gap is only between
 // this getaddrinfo and undici's own at connect, typically sub-millisecond.
+//
+// NOTE: we intentionally do NOT compare the re-resolved set against the initial
+// one. CDN-fronted hosts (api.themoviedb.org, *.push.apple.com, fcm.googleapis.com,
+// …) return rotating/partial answer sets with low TTLs, so two lookups seconds-to-
+// minutes apart routinely disagree on a healthy host — a set-equality check
+// false-positives and hard-blocks TMDB search and all web push. Per-address safety
+// is the property that actually stops rebind-to-internal; a public→public rebind is
+// not an SSRF escalation under allowPrivate=false (no internal target is reachable).
+// See the longer rationale in safe-fetch.ts doFetch().
 export async function verifyResolvedHost(
   host: string,
-  expectedAddrs: readonly string[],
   opts: ResolveSafeUrlOptions = {},
 ): Promise<boolean> {
   // Bracketed IPv6 literal — caller is responsible for unwrapping, but accept
@@ -202,13 +217,5 @@ export async function verifyResolvedHost(
   if (addrs.length === 0) return false;
 
   const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
-  if (!addrs.every(check)) return false;
-
-  // Address-set equality (order-independent). A rebind from {1.2.3.4} to
-  // {1.2.3.4, 5.6.7.8} or vice-versa is just as suspicious as a full swap.
-  if (addrs.length !== expectedAddrs.length) return false;
-  const expectedSet = new Set(expectedAddrs);
-  for (const a of addrs) if (!expectedSet.has(a)) return false;
-
-  return true;
+  return addrs.every(check);
 }

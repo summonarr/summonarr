@@ -528,7 +528,10 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   const revertedIds = new Set<string>();
   if (toRevert.length > 0) {
     const result = await prisma.mediaRequest.updateMany({
-      where: { id: { in: toRevert.map((r) => r.id) } },
+      // CAS on status: only demote rows still AVAILABLE. toRevert is built from the
+      // run-start `available` snapshot, so a row that a concurrent path moved out of
+      // AVAILABLE must not be blind-written back to APPROVED.
+      where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE" },
       data: { status: "APPROVED" },
     });
     reverted = result.count;

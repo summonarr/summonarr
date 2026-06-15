@@ -11,30 +11,54 @@ import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
-import { resolveUserQuota, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 
 const PAGE_SIZE = 20;
+const VALID_STATUSES = ["PENDING", "APPROVED", "AVAILABLE", "DECLINED"] as const;
+const VALID_SORTS = ["newest", "oldest"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const page = Math.max(1, parseInt(req.nextUrl.searchParams.get("page") ?? "1", 10) || 1);
+  const sp = req.nextUrl.searchParams;
+  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
   const skip = (page - 1) * PAGE_SIZE;
+
+  const statusParam = sp.get("status");
+  const status =
+    statusParam && (VALID_STATUSES as readonly string[]).includes(statusParam)
+      ? (statusParam as (typeof VALID_STATUSES)[number])
+      : null;
+  const sortParam = sp.get("sort");
+  const sort =
+    sortParam && (VALID_SORTS as readonly string[]).includes(sortParam)
+      ? (sortParam as (typeof VALID_SORTS)[number])
+      : "newest";
+  const q = (sp.get("q") ?? "").trim();
 
   // MANAGE_REQUESTS sees every request (admins included via the ADMIN superbit);
   // everyone else sees only their own.
   const canManage = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
-  const where = canManage ? {} : { requestedBy: session.user.id };
-
   const isAdmin = canManage;
 
-  const [requests, total] = await Promise.all([
+  // `scope` is the base visibility (all vs own). The filter-chip counts ignore
+  // the selected `status` but honor the search `q`, mirroring the web /requests page.
+  const scope: Prisma.MediaRequestWhereInput = canManage ? {} : { requestedBy: session.user.id };
+  const qWhere: Prisma.MediaRequestWhereInput = q
+    ? { title: { contains: q, mode: "insensitive" } }
+    : {};
+  const where: Prisma.MediaRequestWhereInput = { ...scope, ...qWhere, ...(status ? { status } : {}) };
+  const orderBy: Prisma.MediaRequestOrderByWithRelationInput = {
+    createdAt: sort === "oldest" ? "asc" : "desc",
+  };
+
+  const [requests, total, statusCountsRaw] = await Promise.all([
     isAdmin
       ? prisma.mediaRequest.findMany({
           where,
           include: { user: { select: { name: true, email: true } } },
-          orderBy: { createdAt: "desc" },
+          orderBy,
           skip,
           take: PAGE_SIZE,
         })
@@ -46,14 +70,21 @@ export const GET = withAuth(async (req, _ctx, session) => {
             note: true, availableAt: true, tvdbId: true, permanentlyDeclined: true,
             user: { select: { name: true } },
           },
-          orderBy: { createdAt: "desc" },
+          orderBy,
           skip,
           take: PAGE_SIZE,
         }),
     prisma.mediaRequest.count({ where }),
+    prisma.mediaRequest.groupBy({
+      by: ["status"],
+      where: { ...scope, ...qWhere },
+      _count: { status: true },
+    }),
   ]);
 
-  return NextResponse.json({ requests, total, page, pageSize: PAGE_SIZE });
+  const statusCounts = Object.fromEntries(statusCountsRaw.map((r) => [r.status, r._count.status]));
+
+  return NextResponse.json({ requests, total, page, pageSize: PAGE_SIZE, statusCounts });
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
@@ -147,7 +178,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         tvQuotaLimit: userRecord?.tvQuotaLimit ?? null,
         tvQuotaDays: userRecord?.tvQuotaDays ?? null,
       },
-      parseInt(settings.quotaLimit ?? "0", 10),
+      parseQuotaLimit(settings.quotaLimit),
       settings.quotaPeriod ?? "week",
     );
     enforceQuota = resolvedQuota.limit > 0;

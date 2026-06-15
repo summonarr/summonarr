@@ -514,11 +514,12 @@ export async function processBackupImport(
   const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
   const truncateStmt = `TRUNCATE TABLE ${truncateList} RESTART IDENTITY`;
 
-  // INSERT INTO "public"."<Table>" (...) ...  — pull out the table name so we
-  // can attribute conflict-skipped rows for the response summary.
-  // Built from the same BACKUP_TABLES source of truth as the allowlist and TRUNCATE
-  // for future-proofing (no drift if tables are added/removed).
-  const INSERT_TABLE_RE = new RegExp(`^INSERT\\s+INTO\\s+"public"\\.(?:${tableAlt})`, 'i');
+  // INSERT INTO "public"."<Table>" (...) ...  — capture the table name to attribute
+  // conflict-skipped rows in the response summary. Statements are already validated
+  // against the BACKUP_TABLES allowlist (the VALIDATE regex above), so a plain
+  // capturing match suffices here. The group MUST be capturing: a prior (?:...) form
+  // left m[1] undefined, bucketing every skipped row under a single "undefined" key.
+  const INSERT_TABLE_RE = /^INSERT INTO "public"\."([^"]+)"/i;
 
   let executed = 0;
   const conflictSkippedByTable: Record<string, number> = {};

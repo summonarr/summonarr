@@ -36,7 +36,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     prisma.issue.count(),
     prisma.issue.count({ where: { status: "OPEN" } }),
     prisma.$queryRaw<{ avg_hours: number | null }[]>`
-      SELECT EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600 AS avg_hours
+      SELECT (EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600)::float8 AS avg_hours
       FROM "MediaRequest"
       WHERE status = 'AVAILABLE' AND "availableAt" IS NOT NULL
     `,

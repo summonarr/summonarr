@@ -39,6 +39,11 @@ async function main() {
   await expect("blocks ::1 (IPv6 loopback)",       async () => (await resolveToSafeUrl("http://[::1]/")) === null);
   await expect("blocks 169.254.169.254 (IMDS)",    async () => (await resolveToSafeUrl("http://169.254.169.254/")) === null);
   await expect("blocks fe80:: (link-local)",       async () => (await resolveToSafeUrl("http://[fe80::1]/")) === null);
+  await expect("blocks 10.0.0.1 (RFC1918 /8)",     async () => (await resolveToSafeUrl("http://10.0.0.1/")) === null);
+  await expect("blocks 172.16.0.1 (RFC1918 /12)",  async () => (await resolveToSafeUrl("http://172.16.0.1/")) === null);
+  await expect("blocks 172.31.255.1 (RFC1918 /12)", async () => (await resolveToSafeUrl("http://172.31.255.1/")) === null);
+  await expect("allows 172.15/172.32 (outside /12)", async () => (await resolveToSafeUrl("http://172.15.0.1/")) !== null && (await resolveToSafeUrl("http://172.32.0.1/")) !== null);
+  await expect("blocks 192.168.1.1 (RFC1918 /16)", async () => (await resolveToSafeUrl("http://192.168.1.1/")) === null);
   await expect("rejects file:// scheme",           async () => (await resolveToSafeUrl("file:///etc/passwd")) === null);
   await expect("allows public IP literal",         async () => (await resolveToSafeUrl("http://1.1.1.1/")) !== null);
 

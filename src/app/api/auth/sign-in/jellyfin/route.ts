@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithJellyfin, signInAndMintSession } from "@/lib/auth";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { serializeSessionCookie } from "@/lib/session-cookie";
+import { buildSignInResponse } from "@/lib/sign-in-response";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 
 // Jellyfin sign-in body carries username/password/rememberMe — 16 KB cap
@@ -44,10 +44,5 @@ export async function POST(req: NextRequest) {
   }
 
   const result = await signInAndMintSession({ user, providerId: "jellyfin" });
-  const res = NextResponse.json({ ok: true, user: result.user });
-  res.headers.append(
-    "Set-Cookie",
-    serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),
-  );
-  return res;
+  return buildSignInResponse(req, result);
 }

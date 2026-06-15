@@ -18,12 +18,18 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { source, downloadsEnabled = false } = body;
+  const { source } = body;
 
   // Plex is intentionally not supported — its sharing API has no working remote toggle.
   if (source !== "jellyfin") {
     return NextResponse.json({ error: "source must be 'jellyfin'" }, { status: 400 });
   }
+  // Validate at runtime (req.json() is untyped): a non-boolean would reach Prisma's
+  // Boolean? column and the Jellyfin policy push as a 500. Mirrors [id]/route.ts.
+  if (typeof body.downloadsEnabled !== "boolean") {
+    return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
+  }
+  const downloadsEnabled = body.downloadsEnabled;
 
   const where = { isServerAdmin: false, source: "jellyfin" };
 

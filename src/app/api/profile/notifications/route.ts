@@ -7,6 +7,22 @@ import { prisma } from "@/lib/prisma";
 // Intentionally loose — SMTP will reject anything the regex lets through.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Current notification preferences for the signed-in user. The web settings
+// page reads these server-side; native clients need a REST surface.
+export const GET = withAuth(async (_req, _ctx, session) => {
+  const prefs = await prisma.user.findUnique({
+    where: { id: session.user.id },
+    select: {
+      notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true,
+      emailOnApproved:  true, emailOnAvailable:  true, emailOnDeclined:  true,
+      pushOnApproved:   true, pushOnAvailable:   true, pushOnDeclined:   true,
+      notifyOnIssue:    true, notificationEmail: true,
+    },
+  });
+  if (!prefs) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(prefs);
+});
+
 export const PATCH = withAuth(async (req, _ctx, session) => {
   let body: {
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
