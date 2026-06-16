@@ -177,8 +177,9 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   const countries = raw.production_countries?.length
     ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
     : (raw.origin_country?.map(pwRegion) ?? []);
-  // Match the normalize shape (src/lib/tmdb.ts): `keywords` = names (back-compat),
-  // `keywordList` = id+name. Both writers persist the same `:details` cache key.
+  // Match the normalize shape (src/lib/tmdb.ts): `genres`/`keywords` = names (back-compat),
+  // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
+  const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
   const keywordObjs = pwKeywords(raw.keywords) ?? [];
   await setCache(`${type}:${tmdbId}:details`, {
     id: raw.id,
@@ -192,7 +193,8 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     voteAverage: raw.vote_average ?? 0,
     ...(seasons !== undefined && { seasons }),
 
-    genres:          raw.genres?.map((g) => g.name) ?? [],
+    genres:          genreObjs.map((g) => g.name),
+    genreList:       genreObjs,
     studios:         studios.map((c) => c.name),
     tagline:         raw.tagline ?? null,
     status:          raw.status ?? null,
