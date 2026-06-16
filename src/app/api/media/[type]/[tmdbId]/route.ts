@@ -69,10 +69,10 @@ export const GET = withAuth(async (
     // already carries keywords / watchProviders / homepage / collection ids via
     // append_to_response) plus the suggestions fetch above.
     const similar = suggestions.slice(0, 12).map(lite);
-    const keywords = (detail.keywords ?? []).map((k) => k.name).filter(Boolean);
-    // Name+id variants so native clients can deep-link into filtered browse.
-    // `keywords`/`genres` (names only) stay for back-compat.
-    const keywordList = (detail.keywords ?? []).map((k) => ({ id: k.id, name: k.name }));
+    // normalize emits `keywords`/`genres` (names, back-compat) alongside
+    // `keywordList`/`genreList` (id+name for deep-linking) directly, so ship as-is.
+    const keywords = detail.keywords ?? [];
+    const keywordList = detail.keywordList ?? [];
     const genreList = detail.genreList ?? [];
     // All US-region provider types (stream / rent / buy), each tagged with its
     // `type` so native clients can group them like the web detail page. The

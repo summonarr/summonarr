@@ -177,6 +177,9 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   const countries = raw.production_countries?.length
     ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
     : (raw.origin_country?.map(pwRegion) ?? []);
+  // Match the normalize shape (src/lib/tmdb.ts): `keywords` = names (back-compat),
+  // `keywordList` = id+name. Both writers persist the same `:details` cache key.
+  const keywordObjs = pwKeywords(raw.keywords) ?? [];
   await setCache(`${type}:${tmdbId}:details`, {
     id: raw.id,
     mediaType: type,
@@ -205,7 +208,8 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     homepage:            raw.homepage || null,
     budget:              raw.budget || null,
     revenue:             raw.revenue || null,
-    keywords:            pwKeywords(raw.keywords) ?? [],
+    keywords:            keywordObjs.map((k) => k.name),
+    keywordList:         keywordObjs,
     watchProviders:      pwWatchProviders(raw["watch/providers"]) ?? [],
     tvdbId:              raw.external_ids?.tvdb_id ?? null,
     lastAirDate:         raw.last_air_date ?? null,

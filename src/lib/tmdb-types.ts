@@ -63,7 +63,10 @@ export interface TmdbMedia {
   homepage?: string | null;
   budget?: number | null;
   revenue?: number | null;
-  keywords?: { id: number; name: string }[];
+  keywords?: string[];
+  // Same keywords as `keywords`, but with TMDB ids retained so native clients can
+  // deep-link into filtered browse. `keywords` (names) stays for back-compat.
+  keywordList?: { id: number; name: string }[];
   watchProviders?: { type: "stream" | "rent" | "buy"; name: string; logoPath: string | null }[];
   tvdbId?: number | null;
   // TV cadence
