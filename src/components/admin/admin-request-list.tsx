@@ -22,6 +22,7 @@ const STATUS_TONE: Record<string, ChipTone> = {
 export interface Requester {
   requestId: string;
   status: string;
+  is4k: boolean;
   note: string | null;
   adminNote: string | null;
   createdAt: string;
@@ -359,6 +360,11 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           const representativeAdminNote =
             group.requesters.find((r) => r.status === group.aggregateStatus)?.adminNote ??
             primaryRequester.adminNote;
+          // Which Radarr/Sonarr instance the approve picker should read profiles
+          // from — follows the same representative request as the rest of the row.
+          const representativeIs4k =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.is4k ??
+            primaryRequester.is4k;
           const groupAllPendingSelected =
             pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
@@ -603,6 +609,8 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               <RequestActions
                 requestId={representativeId}
                 currentStatus={group.aggregateStatus}
+                mediaType={group.mediaType}
+                is4k={representativeIs4k}
                 existingAdminNote={representativeAdminNote}
                 groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
               />

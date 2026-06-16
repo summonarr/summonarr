@@ -28,17 +28,26 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   const { id } = await params;
 
-  let body: { status?: string; retry?: boolean; search?: boolean; adminNote?: string; permanent?: boolean };
+  let body: { status?: string; retry?: boolean; search?: boolean; adminNote?: string; permanent?: boolean; qualityProfileId?: number; qualityProfileName?: string };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { status, retry, search, adminNote, permanent } = body;
+  const { status, retry, search, adminNote, permanent, qualityProfileId, qualityProfileName } = body;
 
   if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
     return NextResponse.json({ error: "adminNote must be a string under 1000 characters" }, { status: 400 });
+  }
+  // Optional one-time quality-profile override for the ARR push on approval. Only
+  // consumed by the APPROVE transition below; ignored on other transitions. The
+  // name is carried purely so the audit log reads "720p" instead of a bare id.
+  if (qualityProfileId !== undefined && (!Number.isInteger(qualityProfileId) || qualityProfileId <= 0)) {
+    return NextResponse.json({ error: "qualityProfileId must be a positive integer" }, { status: 400 });
+  }
+  if (qualityProfileName !== undefined && (typeof qualityProfileName !== "string" || qualityProfileName.length > 100)) {
+    return NextResponse.json({ error: "qualityProfileName must be a string under 100 characters" }, { status: 400 });
   }
   const sanitizedAdminNote = sanitizeOptional(adminNote);
 
@@ -199,7 +208,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   const requestedByName = existing.user?.name ?? existing.user?.email ?? existing.requestedBy;
   if (status === "APPROVED" && existing.status !== "APPROVED") {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
+    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
   } else if (status === "DECLINED" && existing.status !== "DECLINED") {
     await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
   }
@@ -210,9 +219,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant);
+        await addMovieToRadarr(updated.tmdbId, variant, qualityProfileId);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, qualityProfileId);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;

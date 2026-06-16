@@ -122,6 +122,20 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = "hd"):
   };
 }
 
+// Quality profiles for one instance variant, plus the configured default id so a
+// picker can mark/pre-select it. Returns null when that instance isn't configured.
+// Permission-agnostic — callers gate access (e.g. MANAGE_REQUESTS for the approve
+// picker, ADMIN for settings).
+export async function listQualityProfiles(
+  service: "radarr" | "sonarr",
+  variant: ArrVariant = "hd",
+): Promise<{ profiles: { id: number; name: string }[]; defaultId: number | null } | null> {
+  const cfg = await getCfg(service, variant);
+  if (!cfg) return null;
+  const profiles = await arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile");
+  return { profiles, defaultId: cfg.qualityProfileId ?? null };
+}
+
 export class ArrResponseError extends Error {
   constructor(
     public readonly status: number,
@@ -236,10 +250,13 @@ export interface ArrRelease {
   downloadAllowed: boolean;
 }
 
-export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<void> {
+export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error(variant === "4k" ? "Radarr 4K is not configured" : "Radarr is not configured");
 
+  // An explicit override (admin "approve with profile X") wins over the
+  // configured default; only fetch the instance's profiles when neither is set.
+  const needProfiles = !qualityProfileIdOverride && !cfg.qualityProfileId;
   const [movies, rootFolders, profiles] = await Promise.all([
     arrFetch<{ title: string; tmdbId: number; year: number; images: object[]; titleSlug: string; digitalRelease?: string; physicalRelease?: string }[]>(
       cfg, `/api/v3/movie/lookup?term=tmdb:${tmdbId}`
@@ -247,17 +264,17 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd
     cfg.rootFolder
       ? Promise.resolve<{ path: string }[]>([])
       : arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
-    cfg.qualityProfileId
-      ? Promise.resolve<{ id: number }[]>([])
-      : arrFetch<{ id: number }[]>(cfg, "/api/v3/qualityprofile"),
+    needProfiles
+      ? arrFetch<{ id: number }[]>(cfg, "/api/v3/qualityprofile")
+      : Promise.resolve<{ id: number }[]>([]),
   ]);
 
   if (!movies.length) throw new Error(`Radarr: no movie found for tmdbId ${tmdbId}`);
   if (!cfg.rootFolder && !rootFolders.length) throw new Error("Radarr: no root folders configured");
-  if (!cfg.qualityProfileId && !profiles.length) throw new Error("Radarr: no quality profiles configured");
+  if (needProfiles && !profiles.length) throw new Error("Radarr: no quality profiles configured");
 
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
-  const qualityProfileId = cfg.qualityProfileId ?? profiles[0].id;
+  const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
 
   const movie = movies[0];
   const now = new Date();
@@ -627,10 +644,13 @@ export async function grabSeriesRelease(
   });
 }
 
-export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<number> {
+export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number): Promise<number> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error(variant === "4k" ? "Sonarr 4K is not configured" : "Sonarr is not configured");
 
+  // An explicit override (admin "approve with profile X") wins over the
+  // configured default; only fetch the instance's profiles when neither is set.
+  const needProfiles = !qualityProfileIdOverride && !cfg.qualityProfileId;
   const [results, rootFolders, profiles] = await Promise.all([
     arrFetch<{ title: string; tvdbId: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string }[]>(
       cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
@@ -638,14 +658,14 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
     cfg.rootFolder
       ? Promise.resolve<{ path: string }[]>([])
       : arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
-    cfg.qualityProfileId
-      ? Promise.resolve<{ id: number }[]>([])
-      : arrFetch<{ id: number }[]>(cfg, "/api/v3/qualityprofile"),
+    needProfiles
+      ? arrFetch<{ id: number }[]>(cfg, "/api/v3/qualityprofile")
+      : Promise.resolve<{ id: number }[]>([]),
   ]);
 
   if (!results.length) throw new Error(`Sonarr: no series found for tmdbId ${tmdbId}`);
   if (!cfg.rootFolder && !rootFolders.length) throw new Error("Sonarr: no root folders configured");
-  if (!cfg.qualityProfileId && !profiles.length) throw new Error("Sonarr: no quality profiles configured");
+  if (needProfiles && !profiles.length) throw new Error("Sonarr: no quality profiles configured");
 
   const series = results[0];
   const seriesReleased = series.firstAired
@@ -653,7 +673,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
     : series.year < new Date().getFullYear();
 
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
-  const qualityProfileId = cfg.qualityProfileId ?? profiles[0].id;
+  const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
 
   try {
     // Explicit allowlist of POST body fields — previous code spread the entire
