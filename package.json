@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.13.1",
+  "version": "0.13.2",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -21,7 +21,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "jose": "^6.2.3",
-    "next": "16.2.7",
+    "next": "16.2.9",
     "openid-client": "^6.8.4",
     "pg": "^8.21.0",
     "prisma": "^7.8.0",
@@ -29,23 +29,24 @@
     "react-dom": "^19.2.7"
   },
   "overrides": {
+    "@babel/core": "^7.29.6",
     "defu": ">=6.1.5",
     "@hono/node-server": "^1.19.14",
     "brace-expansion@5": "^5.0.6",
-    "hono": "^4.12.14",
+    "hono": "^4.12.25",
     "postcss": "^8.5.10"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.0",
+    "@tailwindcss/postcss": "^4.3.1",
     "@types/node": "^25",
     "@types/pg": "^8.11.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.4.1",
-    "eslint-config-next": "16.2.7",
+    "eslint": "^10.5.0",
+    "eslint-config-next": "16.2.9",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "playwright": "^1.60.0",
-    "tailwindcss": "^4.3.0",
+    "playwright": "^1.61.0",
+    "tailwindcss": "^4.3.1",
     "typescript": "^6"
   }
 }

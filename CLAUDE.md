@@ -315,6 +315,31 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - live **outside** the transaction as an idempotent `createMany({ data: [...], skipDuplicates: true })` one-shot gate (`count === 1` ⇒ this caller won), OR
     - use `upsert`. Never a bare `create` whose error is caught-and-ignored mid-transaction.
 
+24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
+
+    Why:
+    - The 426 force-upgrade gate in [proxy.ts](src/proxy.ts) exists to stop an *honest, stale* native build from running known-bad client code. It is NOT a security control — a hostile client spoofs any `build=`. Auth, DB revocation, `passwordChangedAt`/`sessionsRevokedAt` cutoffs, and TLS are the real boundaries; none look at the version.
+    - A too-aggressive gate bricks users: blocking an unknown/legacy/unparseable client, or blocking reads, leaves the app unable to even fetch the data it needs to render a graceful "update" screen.
+
+    Rules:
+    - **Version never gates authorization, the CSRF Origin check, or the UA-fingerprint check.** Those skips key off bearer / `X-Summonarr-Client` *presence* (CORS-sound — guardrail 6b), never off the parsed version. Do not add an "if old client, relax X" path.
+    - **Only a positively-identified stale build is gated.** `isClientBelowMinimum` ([src/lib/api-version.ts](src/lib/api-version.ts)) returns true ONLY when the platform is known AND `build` parsed AND `build < MIN_CLIENT[platform]`. A missing/unparseable build (e.g. a legacy bare `ios` header) ⇒ false ⇒ never blocked. Keep `parseNativeClient` tolerant.
+    - **Only MUTATING `/api/*` requests get 426.** Reads are never blocked. Do not widen the gate to GETs.
+    - **Ships dormant; arm deliberately.** `MIN_CLIENT.ios` starts at `1` (no install is below the first App Store build). To force-upgrade builds below `N`, raise `MIN_CLIENT.ios = N` and redeploy the server — no app release is needed to fire the gate (the gate UI already ships in the client). NEVER set it above the lowest build still in the wild, or you brick current installs.
+
+25. **API contract version is a protocol constant; `/api/config/compat` stays public + coarse; the upgrade URL is client-hardcoded.**
+
+    Why:
+    - `API_VERSION` ([src/lib/api-version.ts](src/lib/api-version.ts)) is a *capability-negotiation* integer, NOT the marketing version. It is the deliberate exception to the Releasing section's "no version constant in `src/`" rule (which forbids a third copy of the *marketing* version). Bump it only on a breaking wire-contract change; never auto-derive it from `package.json`.
+    - The compat descriptor is a pre-auth surface any internet scanner can hit; a precise version string there is a CVE-targeting aid (defense-in-depth — the login page already leaks hints, so it's not treated as a secret).
+    - A server-supplied "update here" link would let a malicious/compromised server redirect the upgrade flow to a phishing or sideload URL.
+
+    Rules:
+    - **`GET /api/config/compat` returns integers only** (`apiVersion` / `minApiVersion` / `minClient`) — no marketing version, no secrets, no server URL, no DB read. It is intentionally public: listed in `isPublicPath` ([proxy.ts](src/proxy.ts)) AND as a documented `ROUTE_EXCEPTIONS` entry in [scripts/audit-routes.mts](scripts/audit-routes.mts). Native clients probe it BEFORE sign-in; fail-soft — a 404 (legacy server) or any reachable response ⇒ proceed.
+    - **`X-Summonarr-Api` is stamped on responses** in `proxy.ts` so clients can learn the contract passively. Keep it a coarse integer.
+    - **The force-upgrade CTA URL is hardcoded in the client** (iOS `AppInfo.appStoreURL`), NEVER taken from a server response. The server may send a message string, never a link the client opens.
+    - **Floors are for breaking changes; feature-gate for graceful degradation.** `MIN_API_VERSION`, the client's `requiredServerApiVersion`, and `MIN_CLIENT` are HARD floors — the accepted version *range* is `[floor, ∞)`, not an exact pin. Raise a floor ONLY when a peer genuinely cannot function. To keep supporting an older peer that merely *lacks* a newer feature, leave the floor and gate that feature on the reported `apiVersion` (the iOS client reads `X-Summonarr-Api` → `SessionStore.serverSupports(N)`). Bumping a floor per feature collapses the range into a hard cutoff — the opposite of "support a prior version for a while."
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
