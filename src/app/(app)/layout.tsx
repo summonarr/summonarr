@@ -10,6 +10,7 @@ import { MaintenanceBanner } from "@/components/layout/maintenance-banner";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
+import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -31,7 +32,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let featureFlags: FeatureFlags | undefined;
   try {
     const [rows, session, flags] = await Promise.all([
-      prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage"] } } }),
+      prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage", ...DONATION_SETTING_KEYS] } } }),
       auth(),
       getFeatureFlags(),
     ]);
@@ -43,7 +44,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     maintenanceEnabled  = cfg.maintenanceEnabled === "true";
     maintenanceMessage  = cfg.maintenanceMessage  ?? "";
     isAdmin             = session?.user?.role === "ADMIN";
-    featureFlags        = flags;
+    // Auto-hide the Donate nav link when no donation methods are configured —
+    // nothing to link to, regardless of the feature toggle.
+    featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
     if (discordInviteUrl && session?.user?.id) {
       const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } });
       userDiscordId = user?.discordId ?? null;

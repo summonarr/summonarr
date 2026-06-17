@@ -1,8 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { redirect } from "next/navigation";
+import { redirect, notFound } from "next/navigation";
 import { ExternalLink, Heart } from "@/components/icons";
 import { requireFeature } from "@/lib/features";
+import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
@@ -21,18 +22,14 @@ export default async function DonatePage() {
   const session = await auth();
   if (!session) redirect("/login");
 
-  const keys = [
-    "donationPaypal",
-    "donationVenmo",
-    "donationZelle",
-    "donationAmazon",
-    "donationPatreon",
-    "donationBuyMeACoffee",
-  ] as const;
   const rows = await prisma.setting.findMany({
-    where: { key: { in: [...keys] } },
+    where: { key: { in: [...DONATION_SETTING_KEYS] } },
   });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+
+  // No donation methods configured → page (and its nav link) are hidden. Renders
+  // the 404 so a direct URL visit can't reach an empty Support Us page.
+  if (!hasDonationLinks(cfg)) notFound();
 
   const methods = [
     {
