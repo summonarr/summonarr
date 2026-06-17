@@ -4493,7 +4493,7 @@ THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-baseline-browser-mapping@2.10.11
+baseline-browser-mapping@2.10.37
 License: Apache-2.0
 
 Apache License
@@ -4754,7 +4754,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-caniuse-lite@1.0.30001781
+caniuse-lite@1.0.30001799
 License: CC-BY-4.0
 
 Attribution 4.0 International
@@ -6193,7 +6193,7 @@ DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-hono@4.12.23
+hono@4.12.25
 License: MIT
 
 MIT License
