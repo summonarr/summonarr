@@ -45,6 +45,9 @@ export interface TmdbMedia {
   seasons?: TmdbSeason[];
 
   genres?: string[];
+  // Same genres as `genres`, but with TMDB ids retained so native clients can
+  // deep-link into filtered browse. `genres` (names) stays for back-compat.
+  genreList?: { id: number; name: string }[];
   studios?: string[];
   tagline?: string | null;
   status?: string | null;
@@ -60,7 +63,10 @@ export interface TmdbMedia {
   homepage?: string | null;
   budget?: number | null;
   revenue?: number | null;
-  keywords?: { id: number; name: string }[];
+  keywords?: string[];
+  // Same keywords as `keywords`, but with TMDB ids retained so native clients can
+  // deep-link into filtered browse. `keywords` (names) stays for back-compat.
+  keywordList?: { id: number; name: string }[];
   watchProviders?: { type: "stream" | "rent" | "buy"; name: string; logoPath: string | null }[];
   tvdbId?: number | null;
   // TV cadence

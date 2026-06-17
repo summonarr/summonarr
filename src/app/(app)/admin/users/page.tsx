@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { UserTable } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
+import { CreateUserButton } from "@/components/admin/create-user-button";
 import { PageHeader } from "@/components/ui/design";
 import { isArrConfigured } from "@/lib/arr";
 
@@ -80,7 +81,12 @@ export default async function UsersPage() {
       <PageHeader
         title="Users"
         subtitle={`${users.length} registered user${users.length !== 1 ? "s" : ""}`}
-        right={<SyncRolesButton />}
+        right={
+          <div className="flex items-center gap-2">
+            <CreateUserButton />
+            <SyncRolesButton />
+          </div>
+        }
       />
 
       <div>

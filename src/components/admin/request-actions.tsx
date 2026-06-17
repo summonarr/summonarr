@@ -3,17 +3,21 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users } from "@/components/icons";
+import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
 
 interface RequestActionsProps {
   requestId: string;
   currentStatus: string;
+  /** "MOVIE" | "TV" — picks Radarr vs Sonarr for the quality-profile picker. */
+  mediaType: string;
+  /** Whether this request targets the optional 4K instance (picks which instance's profiles to list). */
+  is4k: boolean;
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
 }
 
-export function RequestActions({ requestId, currentStatus, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, is4k, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
 
@@ -27,6 +31,37 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
   const [showReply, setShowReply] = useState(false);
   const [replyText, setReplyText] = useState(existingAdminNote ?? "");
   const [replySaved, setReplySaved] = useState(false);
+
+  // Approve-with-a-specific-quality-profile picker (single requests only).
+  const [showProfilePicker, setShowProfilePicker] = useState(false);
+  const [profiles, setProfiles] = useState<{ id: number; name: string }[] | null>(null);
+  const [defaultProfileId, setDefaultProfileId] = useState<number | null>(null);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
+  const [approvingProfileId, setApprovingProfileId] = useState<number | null>(null);
+
+  async function openProfilePicker() {
+    setShowProfilePicker(true);
+    setArrError(null);
+    if (profiles) return; // already loaded for this row
+    setProfilesLoading(true);
+    setProfilesError(null);
+    try {
+      const res = await fetch(`/api/requests/quality-profiles?mediaType=${mediaType}&is4k=${is4k}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setProfilesError((data as { error?: string }).error ?? "Couldn't load quality profiles");
+        return;
+      }
+      const data: { qualityProfiles: { id: number; name: string }[]; defaultId: number | null } = await res.json();
+      setProfiles(data.qualityProfiles);
+      setDefaultProfileId(data.defaultId);
+    } catch {
+      setProfilesError("Couldn't load quality profiles");
+    } finally {
+      setProfilesLoading(false);
+    }
+  }
 
   async function saveReply() {
     setLoading("NOTE");
@@ -57,7 +92,12 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
     }
   }
 
-  async function updateStatus(newStatus: "APPROVED" | "DECLINED", adminNote?: string, permanent?: boolean) {
+  async function updateStatus(
+    newStatus: "APPROVED" | "DECLINED",
+    adminNote?: string,
+    permanent?: boolean,
+    override?: { qualityProfileId: number; qualityProfileName: string },
+  ) {
     setLoading(newStatus);
     setArrError(null);
     setRetryOk(false);
@@ -78,7 +118,12 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
         : await fetch(`/api/requests/${requestId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status: newStatus, ...(adminNote !== undefined ? { adminNote } : {}), ...(permanent !== undefined ? { permanent } : {}) }),
+            body: JSON.stringify({
+              status: newStatus,
+              ...(adminNote !== undefined ? { adminNote } : {}),
+              ...(permanent !== undefined ? { permanent } : {}),
+              ...(override ? { qualityProfileId: override.qualityProfileId, qualityProfileName: override.qualityProfileName } : {}),
+            }),
           });
       if (!res.ok) {
         setOptimisticStatus(null);
@@ -90,6 +135,7 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
       if (data.arrError) setArrError(data.arrError);
       setShowDeclineNote(false);
       setDeclineNote("");
+      setShowProfilePicker(false);
       router.refresh();
     } catch {
       setOptimisticStatus(null);
@@ -371,6 +417,58 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
     );
   }
 
+  if (showProfilePicker) {
+    return (
+      <div className="flex flex-col items-end gap-2 w-56">
+        <span className="text-xs text-zinc-400">Approve with quality profile</span>
+        {profilesLoading ? (
+          <Loader2 className="w-4 h-4 animate-spin text-zinc-500" />
+        ) : profilesError ? (
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 text-right">
+            <AlertTriangle className="w-3 h-3 shrink-0" />{profilesError}
+          </span>
+        ) : (profiles?.length ?? 0) === 0 ? (
+          <span className="text-[11px] text-zinc-500 text-right">No quality profiles found</span>
+        ) : (
+          <div className="flex flex-col items-stretch gap-1 w-full">
+            {(profiles ?? []).map((p) => (
+              <Button
+                key={p.id}
+                size="sm"
+                variant="outline"
+                onClick={() => { setApprovingProfileId(p.id); updateStatus("APPROVED", undefined, undefined, { qualityProfileId: p.id, qualityProfileName: p.name }); }}
+                disabled={loading !== null}
+                className="h-7 px-3 text-xs border-zinc-700 text-zinc-200 hover:bg-zinc-800 justify-between gap-2"
+              >
+                <span className="flex items-center gap-1 truncate">
+                  {loading === "APPROVED" && approvingProfileId === p.id ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : null}
+                  <span className="truncate">{p.name}</span>
+                </span>
+                {p.id === defaultProfileId && <span className="text-[10px] uppercase tracking-wide text-zinc-500 shrink-0">default</span>}
+              </Button>
+            ))}
+          </div>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => { setShowProfilePicker(false); setArrError(null); }}
+          disabled={loading !== null}
+          className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-white"
+        >
+          Cancel
+        </Button>
+        {arrError && (
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-56 text-right">
+            <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
+          </span>
+        )}
+      </div>
+    );
+  }
+
+  const allowProfilePick = (groupPendingIds?.length ?? 0) <= 1;
+
   return (
     <div className="flex flex-col items-end gap-1.5">
       <div className="flex items-center gap-2">
@@ -383,6 +481,19 @@ export function RequestActions({ requestId, currentStatus, existingAdminNote, gr
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
           Approve
         </Button>
+        {allowProfilePick && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={openProfilePicker}
+            disabled={loading !== null}
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-300 hover:bg-zinc-800 gap-1"
+            title="Approve and add to Radarr/Sonarr with a specific quality profile"
+          >
+            <Settings className="w-3 h-3" />
+            Approve as…
+          </Button>
+        )}
         <Button
           size="sm"
           variant="outline"

@@ -325,7 +325,10 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   };
   // These fields are only present on the single-title detail response, not on list/search items —
   // set them only when present so cached list payloads stay lean.
-  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  if (r.genres?.length) {
+    media.genres = r.genres.map((g) => g.name);
+    media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
+  }
   if (r.production_companies?.length) media.studios = r.production_companies.map((c) => c.name);
   if (r.tagline) media.tagline = r.tagline;
   if (r.status) media.status = r.status;
@@ -342,7 +345,10 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   if (r.budget) media.budget = r.budget;
   if (r.revenue) media.revenue = r.revenue;
   const kw = extractKeywords(r.keywords);
-  if (kw) media.keywords = kw;
+  if (kw) {
+    media.keywords = kw.map((k) => k.name);
+    media.keywordList = kw;
+  }
   const wp = extractWatchProviders(r["watch/providers"]);
   if (wp) media.watchProviders = wp;
   return media;
@@ -357,7 +363,10 @@ function normalizeTV(r: RawTV): TmdbMedia {
     voteAverage: r.vote_average ?? 0,
     voteCount: r.vote_count ?? 0,
   };
-  if (r.genres?.length) media.genres = r.genres.map((g) => g.name);
+  if (r.genres?.length) {
+    media.genres = r.genres.map((g) => g.name);
+    media.genreList = r.genres.map((g) => ({ id: g.id, name: g.name }));
+  }
   const studios = (r.networks?.length ? r.networks : r.production_companies) ?? [];
   if (studios.length) media.studios = studios.map((c) => c.name);
   if (r.tagline) media.tagline = r.tagline;
@@ -381,7 +390,10 @@ function normalizeTV(r: RawTV): TmdbMedia {
   if (r.type) media.tvType = r.type;
   if (r.next_episode_to_air?.air_date) media.nextEpisodeAirDate = r.next_episode_to_air.air_date;
   const kw = extractKeywords(r.keywords);
-  if (kw) media.keywords = kw;
+  if (kw) {
+    media.keywords = kw.map((k) => k.name);
+    media.keywordList = kw;
+  }
   const wp = extractWatchProviders(r["watch/providers"]);
   if (wp) media.watchProviders = wp;
   if (r.external_ids?.tvdb_id) media.tvdbId = r.external_ids.tvdb_id;
@@ -567,24 +579,41 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
     .map(normalizeTV);
 }
 
+// Detail cache rows written before keywords were split into `keywords` (names) +
+// `keywordList` (objects) hold object-form `keywords` and no `keywordList`. Coerce
+// them on read in the cached branch below so every consumer (web keyword chips,
+// native detail/popular routes) sees the current shape — native clients decode
+// `keywords` as [String]? and choke on objects. Returns true if it mutated `m`.
+function migrateKeywordShape(m: TmdbMedia): boolean {
+  const kw: unknown = m.keywords;
+  if (!Array.isArray(kw) || kw.length === 0) return false;
+  if (typeof kw[0] !== "object" || kw[0] === null) return false;
+  const objs = kw as { id: number; name: string }[];
+  m.keywordList = objs.map((k) => ({ id: k.id, name: k.name }));
+  m.keywords = objs.map((k) => k.name);
+  return true;
+}
+
 export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   const key = `movie:${id}:details`;
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia>(key);
 
   if (cached) {
+    let needsWrite = migrateKeywordShape(cached);
     if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined) {
       const r = await fetchUnifiedRatings(id, "movie", cached.releaseDate);
       if (r.found && r.data) {
         Object.assign(cached, r.data);
-        await setCache(key, cached, TTL.DETAILS);
+        needsWrite = true;
       } else if (r.keyConfigured) {
         cached.imdbRating = null;
         cached.rtAudienceScore = null;
         cached.traktRating = null;
-        await setCache(key, cached, TTL.DETAILS);
+        needsWrite = true;
       }
     }
+    if (needsWrite) await setCache(key, cached, TTL.DETAILS);
     return cached;
   }
 
@@ -647,18 +676,20 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     if (cached.seasons === undefined) {
       prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
     } else {
+      let needsWrite = migrateKeywordShape(cached);
       if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined) {
         const r = await fetchUnifiedRatings(id, "tv", cached.releaseDate);
         if (r.found && r.data) {
           Object.assign(cached, r.data);
-          await setCache(key, cached, TTL.DETAILS);
+          needsWrite = true;
         } else if (r.keyConfigured) {
           cached.imdbRating = null;
           cached.rtAudienceScore = null;
           cached.traktRating = null;
-          await setCache(key, cached, TTL.DETAILS);
+          needsWrite = true;
         }
       }
+      if (needsWrite) await setCache(key, cached, TTL.DETAILS);
       return cached;
     }
   }

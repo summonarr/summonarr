@@ -19,7 +19,8 @@ const PROVIDER_GROUP_LABEL: Record<NonNullable<TmdbMedia["watchProviders"]>[numb
 export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType: "movie" | "tv" }) {
   const browseBase = mediaType === "tv" ? "/tv" : "/movies";
   const providers = media.watchProviders ?? [];
-  const keywords = media.keywords ?? [];
+  // keywordList carries id+name (media.keywords is the names-only back-compat array).
+  const keywords = media.keywordList ?? [];
   const homepage = media.homepage ?? null;
   const hasProviders = providers.length > 0;
   const hasKeywords = keywords.length > 0;

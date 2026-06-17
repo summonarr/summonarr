@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -156,6 +156,19 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.1
+
+**Added**
+
+- Approve a request with a chosen quality profile — admins can override the Radarr/Sonarr default at approval time (e.g. approve at 720p when the instance defaults to 1080p). Applied once at approval and recorded in the audit log.
+- Create local username/password accounts from the admin **Users** page — fills the gap left by closed registration (handy for an App Review demo login). A `create-user` operator script does the same headlessly.
+- Admin stats: top requesters and a per-server library breakdown (movies / series / episodes / runtime) for each Plex and Jellyfin server.
+- More native **iOS app** API parity: vote state on media detail, grouped watch-provider types (stream / rent / buy), genre and keyword IDs for deep-linking into filtered browse, account source (local / Plex / Jellyfin) in the admin users list, and the auto-disable-new-Jellyfin-users toggle state.
+
+**Fixed**
+
+- TMDB keyword and genre fields now return a consistent shape across every list and detail endpoint, so native clients decode them reliably; legacy cached rows are coerced on read.
 
 ### v0.13.0
 
@@ -578,7 +591,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

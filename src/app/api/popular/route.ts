@@ -97,6 +97,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
     [movies, tv] = await Promise.all([enrich(movies), enrich(tv)]);
 
+    // normalize emits `keywords` as a names array (string[]) at the source, so
+    // the getMovieDetails/getTVDetails shape ships straight through — no per-route
+    // flattening needed (it previously held object form and broke native decode).
     return NextResponse.json({
       movies,
       tv,

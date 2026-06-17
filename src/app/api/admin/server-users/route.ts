@@ -4,23 +4,28 @@ import { prisma } from "@/lib/prisma";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
-  const users = await prisma.mediaServerUser.findMany({
-    select: {
-      id: true,
-      source: true,
-      sourceUserId: true,
-      username: true,
-      email: true,
-      thumbUrl: true,
-      downloadsEnabled: true,
-      isServerAdmin: true,
-      userId: true,
-      user: { select: { name: true, email: true } },
-    },
-    orderBy: [{ source: "asc" }, { username: "asc" }],
-  });
+  const [users, autoDisableRow] = await Promise.all([
+    prisma.mediaServerUser.findMany({
+      select: {
+        id: true,
+        source: true,
+        sourceUserId: true,
+        username: true,
+        email: true,
+        thumbUrl: true,
+        downloadsEnabled: true,
+        isServerAdmin: true,
+        userId: true,
+        user: { select: { name: true, email: true } },
+      },
+      orderBy: [{ source: "asc" }, { username: "asc" }],
+    }),
+    prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" }, select: { value: true } }),
+  ]);
 
-  return NextResponse.json(users);
+  // Object shape (was a bare array) so the auto-disable-new-Jellyfin-users flag
+  // travels with the list — the native admin client reads + toggles it.
+  return NextResponse.json({ users, autoDisableNew: autoDisableRow?.value === "true" });
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { prisma } from "@/lib/prisma";
 import {
   getMovieDetails,
   getTVDetails,
@@ -56,16 +57,28 @@ export const GET = withAuth(async (
     ]);
     const [withAvailability] = await attachAllAvailability([detail], session.user.id, { show4k });
 
+    // Whether this viewer has an open deletion vote on the title — lets the
+    // native detail screen show "Voted to delete" + offer to retract (web parity).
+    const votedByMe =
+      (await prisma.deletionVote.findFirst({
+        where: { tmdbId, mediaType: type === "tv" ? "TV" : "MOVIE", userId: session.user.id },
+        select: { id: true },
+      })) !== null;
+
     // Additive native-client enrichment derived from the detail payload (which
     // already carries keywords / watchProviders / homepage / collection ids via
     // append_to_response) plus the suggestions fetch above.
     const similar = suggestions.slice(0, 12).map(lite);
-    const keywords = (detail.keywords ?? []).map((k) => k.name).filter(Boolean);
-    // Streaming/flatrate ("stream") providers for the US region only — the
+    // normalize emits `keywords`/`genres` (names, back-compat) alongside
+    // `keywordList`/`genreList` (id+name for deep-linking) directly, so ship as-is.
+    const keywords = detail.keywords ?? [];
+    const keywordList = detail.keywordList ?? [];
+    const genreList = detail.genreList ?? [];
+    // All US-region provider types (stream / rent / buy), each tagged with its
+    // `type` so native clients can group them like the web detail page. The
     // detail payload's watchProviders are already US-scoped (extractWatchProviders).
     const watchProviders = (detail.watchProviders ?? [])
-      .filter((p) => p.type === "stream")
-      .map((p) => ({ name: p.name, logoPath: p.logoPath }));
+      .map((p) => ({ name: p.name, logoPath: p.logoPath, type: p.type }));
     const homepage = detail.homepage ?? null;
 
     // Movies only: resolve belongs_to_collection (collectionId/Name on detail)
@@ -103,9 +116,12 @@ export const GET = withAuth(async (
       cast,
       similar,
       keywords,
+      keywordList,
+      genreList,
       watchProviders,
       homepage,
       collection,
+      votedByMe,
     });
   } catch (err) {
     console.error("[media] detail fetch failed:", err);
