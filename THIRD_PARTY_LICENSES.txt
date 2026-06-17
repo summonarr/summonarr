@@ -998,63 +998,63 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ------------------------------------------------------------------------------
 
-@next/env@16.2.7
+@next/env@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.2.7
+@next/swc-darwin-arm64@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.2.7
+@next/swc-darwin-x64@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.2.7
+@next/swc-linux-arm64-gnu@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.2.7
+@next/swc-linux-arm64-musl@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.2.7
+@next/swc-linux-x64-gnu@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.2.7
+@next/swc-linux-x64-musl@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.2.7
+@next/swc-win32-arm64-msvc@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.2.7
+@next/swc-win32-x64-msvc@16.2.9
 License: MIT
 
 (No license file shipped in the package.)
@@ -4387,7 +4387,7 @@ limitations under the License.
 
 ------------------------------------------------------------------------------
 
-@types/node@25.9.2
+@types/node@25.9.3
 License: MIT
 
 MIT License
@@ -6319,7 +6319,7 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-jiti@2.6.1
+jiti@2.7.0
 License: MIT
 
 MIT License
@@ -6712,7 +6712,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.2.7
+next@16.2.9
 License: MIT
 
 The MIT License (MIT)
