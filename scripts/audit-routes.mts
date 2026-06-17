@@ -64,6 +64,10 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
     route: "/api/events",
     reason: "SSE stream; inline DB-checked requireAuth() + per-role event filtering (guardrail 6a)",
   },
+  {
+    route: "/api/config/compat",
+    reason: "intentionally public, coarse API-version descriptor (no secrets/DB) — native clients gate BEFORE sign-in; pre-auth via isPublicPath in proxy.ts",
+  },
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */

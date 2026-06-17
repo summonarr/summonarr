@@ -16,6 +16,11 @@ import {
   extractUaFingerprint,
   serializeFingerprint,
 } from "@/lib/ua-fingerprint";
+import {
+  API_VERSION,
+  parseNativeClient,
+  isClientBelowMinimum,
+} from "@/lib/api-version";
 
 const trustProxy = process.env.TRUST_PROXY === "true";
 
@@ -63,7 +68,8 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith("/api/sync/") ||
     pathname.startsWith("/api/cron/") ||
     pathname === "/api/interactions" ||
-    pathname === "/api/health"
+    pathname === "/api/health" ||
+    pathname === "/api/config/compat"
   );
 }
 
@@ -115,6 +121,12 @@ export async function proxy(request: NextRequest) {
   const isNativeClient = hasNativeClientHeader(
     request.headers.get(NATIVE_CLIENT_HEADER),
   );
+  // Parsed form of the same header (platform/build/api) for the version gate
+  // below. Presence (isNativeClient) drives the CSRF/fingerprint skips; the
+  // parsed build drives the 426 force-upgrade gate.
+  const nativeClient = parseNativeClient(
+    request.headers.get(NATIVE_CLIENT_HEADER),
+  );
 
   // Auth routes that legitimately have no Origin header:
   //   - oidc/callback: top-level redirect initiated by the IdP.
@@ -137,6 +149,26 @@ export async function proxy(request: NextRequest) {
     pathname !== "/api/interactions";
 
   const isMutating = ["POST", "PUT", "PATCH", "DELETE"].includes(request.method);
+
+  // Force-upgrade kill-switch: a native client that positively identifies a
+  // build below the per-platform minimum is refused on MUTATING requests with
+  // 426 Upgrade Required. Reads are never blocked, so the app can still fetch
+  // GET /api/config/compat and render a graceful "update" screen. Version is
+  // NEVER an authz input — this gates only an honest, identifiable stale build;
+  // an unknown/legacy build is allowed through. See src/lib/api-version.ts.
+  if (
+    isMutating &&
+    pathname.startsWith("/api/") &&
+    isClientBelowMinimum(nativeClient)
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "This version of the Summonarr app is no longer supported. Please update to the latest version.",
+      },
+      { status: 426 },
+    );
+  }
 
   // Origin check guards against CSRF on mutation endpoints; webhook and sync
   // routes use their own auth. Bearer/native-client requests are exempt — a
@@ -250,6 +282,10 @@ export async function proxy(request: NextRequest) {
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("Content-Security-Policy", cspValue);
+  // Advertise the API contract version so a native client can passively learn
+  // server capability on any response. Authoritative source is the public
+  // GET /api/config/compat; this is a coarse integer, never the marketing version.
+  response.headers.set("X-Summonarr-Api", String(API_VERSION));
 
   // Carry the refreshed JWT through to the client whenever verifyAndRefresh
   // produced one — sliding window or sessionId rotation or dbCheckedAt bump.
