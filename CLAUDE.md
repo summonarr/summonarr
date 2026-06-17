@@ -338,6 +338,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **`GET /api/config/compat` returns integers only** (`apiVersion` / `minApiVersion` / `minClient`) — no marketing version, no secrets, no server URL, no DB read. It is intentionally public: listed in `isPublicPath` ([proxy.ts](src/proxy.ts)) AND as a documented `ROUTE_EXCEPTIONS` entry in [scripts/audit-routes.mts](scripts/audit-routes.mts). Native clients probe it BEFORE sign-in; fail-soft — a 404 (legacy server) or any reachable response ⇒ proceed.
     - **`X-Summonarr-Api` is stamped on responses** in `proxy.ts` so clients can learn the contract passively. Keep it a coarse integer.
     - **The force-upgrade CTA URL is hardcoded in the client** (iOS `AppInfo.appStoreURL`), NEVER taken from a server response. The server may send a message string, never a link the client opens.
+    - **Floors are for breaking changes; feature-gate for graceful degradation.** `MIN_API_VERSION`, the client's `requiredServerApiVersion`, and `MIN_CLIENT` are HARD floors — the accepted version *range* is `[floor, ∞)`, not an exact pin. Raise a floor ONLY when a peer genuinely cannot function. To keep supporting an older peer that merely *lacks* a newer feature, leave the floor and gate that feature on the reported `apiVersion` (the iOS client reads `X-Summonarr-Api` → `SessionStore.serverSupports(N)`). Bumping a floor per feature collapses the range into a hard cutoff — the opposite of "support a prior version for a while."
 
 ## Working principles
 
