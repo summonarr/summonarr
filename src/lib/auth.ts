@@ -755,6 +755,7 @@ export async function authorizeWithJellyfinQuickConnect(
   const jellyfinUrl = await getConfiguredJellyfinUrl();
   if (!jellyfinUrl) {
     console.error("[jellyfin quickconnect auth] Jellyfin URL is not configured");
+    await dummyVerify();
     return null;
   }
 
