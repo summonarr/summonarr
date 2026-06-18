@@ -182,7 +182,9 @@ const SENSITIVE_KEYS = new Set<string>(
 const URL_KEYS = new Set<string>([
   "siteUrl",
   "radarrUrl",
+  "radarr4kUrl",
   "sonarrUrl",
+  "sonarr4kUrl",
   "plexServerUrl",
   "jellyfinUrl",
   "discordInviteUrl",

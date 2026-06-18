@@ -124,7 +124,9 @@ export async function POST(req: NextRequest) {
   // slot claimed on chunk 0 so an oversized first chunk doesn't strand the
   // uploader for the session TTL.
   if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
-    if (chunkIndex === 0) await clearSession(uploadId);
+    // An oversized chunk corrupts the upload — release the slot for ANY index
+    // (not just chunk 0) so it isn't stranded until the session TTL.
+    await clearSession(uploadId);
     return NextResponse.json(
       { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
       { status: 413 },

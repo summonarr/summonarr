@@ -17,7 +17,7 @@ function escapeCSV(value: string): string {
   if (/^[=+\-@\t\r]/.test(safe)) {
     safe = `'${safe}`;
   }
-  if (safe.includes(",") || safe.includes('"') || safe.includes("\n")) {
+  if (safe.includes(",") || safe.includes('"') || safe.includes("\n") || safe.includes("\r")) {
     return `"${safe.replace(/"/g, '""')}"`;
   }
   return safe;

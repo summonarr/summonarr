@@ -100,9 +100,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
   if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
     // Belt-and-suspenders for transfer-encoding: chunked uploads where the
-    // Content-Length-based check above can't trigger. Release the slot we just
-    // claimed on chunk 0 so an oversized first chunk doesn't strand the uploader.
-    if (chunkIndex === 0) await clearSession(uploadId);
+    // Content-Length-based check above can't trigger. An oversized chunk corrupts
+    // the upload, so release the slot for ANY index (not just chunk 0) — otherwise
+    // an oversized non-zero chunk strands the global slot until its TTL.
+    await clearSession(uploadId);
     return NextResponse.json(
       { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
       { status: 413 },

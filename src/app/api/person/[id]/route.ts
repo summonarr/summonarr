@@ -103,7 +103,10 @@ export const GET = withAuth(async (
     });
 
     return NextResponse.json({ ...person, credits: enrichedCredits });
-  } catch {
+  } catch (err) {
+    // TMDB 404s for unknown person ids (the common case → 404 is right). Log so a
+    // 5xx/DB failure masquerading as a 404 is at least diagnosable (GR7).
+    console.error("[person] lookup failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 });
