@@ -1038,6 +1038,9 @@ const ALLOWED_DISCOVER_SORT = new Set([
   "popularity.desc", "popularity.asc",
   "vote_average.desc", "vote_average.asc",
   "primary_release_date.desc", "primary_release_date.asc",
+  // The web filter-bar sends release_date.* for Newest/Oldest (iOS sends
+  // primary_release_date.*); both are valid TMDB discover sorts — keep both.
+  "release_date.desc", "release_date.asc",
   "first_air_date.desc", "first_air_date.asc",
   "revenue.desc", "revenue.asc",
   "original_title.desc", "original_title.asc",
