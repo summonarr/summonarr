@@ -51,7 +51,9 @@ export async function attachRatingsUnified(
   const warm = await readCachedRatings(items);
 
   if (!blocking) {
-    const uncached = items.filter((item) => !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item)));
+    const uncached = items.filter((item) =>
+      !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item))
+      && !warm.negativeKeys.has(mdblistKey(item)) && !warm.negativeKeys.has(omdbKey(item)));
     if (uncached.length > 0) {
       // Non-blocking path: fire background fetches after the response is sent so the user isn't
       // held waiting; the next page load will hit the warm cache.
@@ -136,7 +138,7 @@ export async function attachRatingsUnified(
 function mdblistKey(item: TmdbMedia): string { return `mdblist:tmdb:${item.mediaType}:${item.id}`; }
 function omdbKey(item: TmdbMedia): string    { return `omdb:tmdb:${item.mediaType}:${item.id}`; }
 
-type WarmCache = { byMdblist: Map<string, MdblistRatings>; byOmdb: Map<string, OmdbRatings> };
+type WarmCache = { byMdblist: Map<string, MdblistRatings>; byOmdb: Map<string, OmdbRatings>; negativeKeys: Set<string> };
 
 async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
   const mdblistKeys = items.map(mdblistKey);
@@ -153,11 +155,17 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
     }),
   ]);
 
+  // Items with a live _notFound sentinel are definitively-missing, not cache
+  // misses — track their keys so the non-blocking path doesn't re-fetch them on
+  // every page load and burn MDBList quota.
+  const negativeKeys = new Set<string>();
+
   const byMdblist = new Map<string, MdblistRatings>();
   for (const row of mdblistRows) {
     try {
       const parsed = JSON.parse(row.data) as MdblistRatings | { _notFound: true };
-      if (!("_notFound" in parsed)) byMdblist.set(row.key, parsed);
+      if ("_notFound" in parsed) negativeKeys.add(row.key);
+      else byMdblist.set(row.key, parsed);
     } catch { }
   }
 
@@ -165,11 +173,12 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
   for (const row of omdbRows) {
     try {
       const parsed = JSON.parse(row.data) as OmdbRatings | { _notFound: true };
-      if (!("_notFound" in parsed)) byOmdb.set(row.key, parsed);
+      if ("_notFound" in parsed) negativeKeys.add(row.key);
+      else byOmdb.set(row.key, parsed);
     } catch { }
   }
 
-  return { byMdblist, byOmdb };
+  return { byMdblist, byOmdb, negativeKeys };
 }
 
 function mergeWarm(item: TmdbMedia, warm: WarmCache): TmdbMedia {
