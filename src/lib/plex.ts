@@ -124,7 +124,12 @@ async function plexFetchAllPages<T>(
     const container = data.MediaContainer;
     if (!container) throw new Error(`Plex paginated fetch returned no MediaContainer at start=${start}`);
     const items = container.Metadata ?? [];
-    if (start === 0) total = container.totalSize ?? container.size ?? items.length;
+    // Use totalSize as the authoritative count. Do NOT fall back to container.size
+    // (the current PAGE's item count, ≤ PLEX_PAGE_SIZE) — that makes `start < total`
+    // false after one page and silently truncates any library larger than a page
+    // when a Plex build omits totalSize. Infinity defers termination to the
+    // empty-page break below, the correct terminator on that path.
+    if (start === 0) total = container.totalSize ?? Infinity;
     processItems(items);
     start += items.length;
     if (items.length === 0) break;
