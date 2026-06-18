@@ -739,12 +739,7 @@ export async function authorizeWithJellyfinQuickConnect(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
 ): Promise<Record<string, unknown> | null> {
-  if (!credentials?.secret) {
-    // Equalize latency with the credential-checking path so a missing secret
-    // isn't distinguishable by timing (matches authorizeWithJellyfin).
-    await dummyVerify();
-    return null;
-  }
+  if (!credentials?.secret) return null;
   const headers = (req as Request).headers as Headers;
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
