@@ -3,6 +3,7 @@ import { verifyPassword } from "@/lib/password-hash";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
+import { markUserForceRevalidate } from "@/lib/session-revocation";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
@@ -126,6 +127,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
       }
     });
   }
+
+  // Close the dbCheckedAt fast-path window on THIS replica immediately. The rows
+  // are gone, but a session validated within the last cache interval (≤60s, ≤10s
+  // admin) would otherwise keep riding the cached state. A per-user mark forces a
+  // DB re-check for all of this user's sessions on the next request; the surviving
+  // caller row still passes. Other replicas converge via the row deletion +
+  // sessionsRevokedAt cutoff.
+  markUserForceRevalidate(session.user.id);
 
   void logAudit({
     userId: session.user.id,

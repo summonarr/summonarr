@@ -115,7 +115,15 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     }
   }
 
-  await revokeSessionById(sessionId);
+  try {
+    await revokeSessionById(sessionId);
+  } catch (err) {
+    // revokeSessionById no longer swallows tx failures — surface a 500 rather
+    // than auditing a revocation that may not have committed (the row could
+    // still be live).
+    console.error("[sessions] revoke failed:", err);
+    return NextResponse.json({ error: "Failed to revoke session" }, { status: 500 });
+  }
 
   void logAudit({
     userId:    session.user.id,

@@ -328,15 +328,16 @@ export function invalidateUserSession(userId: string): void {
 }
 
 export async function revokeSessionById(sessionId: string): Promise<void> {
-  markSessionForceRevoked(sessionId);
-
   // Bump sessionsRevokedAt to the revoked session's createdAt so refreshToken()'s
   // cutoff check on OTHER replicas rejects the revoked session's JWT even within
   // the 60s dbCheckedAt cache window (otherwise the cached token passes for up to
-  // 60s after row deletion). Newer sessions of the same user (iat > createdAt)
-  // survive; older sessions are caught — acceptable for an admin "revoke this
-  // device" action, since per-session granularity isn't expressible against a
-  // per-user timestamp anyway.
+  // 60s after row deletion). The refresh cutoff is `iat <= sessionsRevokedAt` and
+  // the JWT is signed in (almost always) the same wall-clock second the row is
+  // created, so createdAt catches the revoked token while sparing newer sessions
+  // (iat > createdAt). Older sessions are caught too — acceptable for "revoke this
+  // device", since per-session granularity isn't expressible against a per-user
+  // timestamp. We deliberately do NOT push the cutoff to `now`: that would
+  // invalidate every current session of the user (revoke-one → revoke-everywhere).
   await prisma.$transaction(async (tx) => {
     const row = await tx.authSession.findUnique({
       where: { sessionId },
@@ -357,7 +358,12 @@ export async function revokeSessionById(sessionId: string): Promise<void> {
         data: { sessionsRevokedAt: row.createdAt },
       });
     }
-  }).catch(() => {});
+  });
+  // Mark in-memory only AFTER the DB revocation commits (matches
+  // revokeAllUserSessions). The error is intentionally not swallowed: a failed
+  // revoke now propagates so the caller returns 500 instead of auditing a phantom
+  // revocation that left the AuthSession row live (it would resurrect on restart).
+  markSessionForceRevoked(sessionId);
 }
 
 export async function revokeAllUserSessions(userId: string): Promise<void> {
@@ -817,7 +823,16 @@ async function runFirstAdminPromotion(
     const self = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!self) return false;
     await tx.user.update({ where: { id: userId }, data: { role: "ADMIN", permissions: defaultPermissionsForRole("ADMIN") } });
-    await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } }).catch(() => {});
+    // upsert, not create().catch(): a P2002 from a concurrent setup race (the
+    // /api/auth/register path holds a DIFFERENT advisory lock and can create this
+    // key between our findUnique and create) would abort the transaction and
+    // silently roll back the ADMIN promotion above (guardrail 23). upsert is
+    // idempotent and never trips the unique constraint.
+    await tx.setting.upsert({
+      where: { key: "setup_completed_at" },
+      update: {},
+      create: { key: "setup_completed_at", value: new Date().toISOString() },
+    });
     return true;
   });
 }
