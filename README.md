@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -156,6 +156,22 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.3
+
+**Fixed**
+
+- Sessions: "sign out", "sign out this device", and "sign out everywhere" now reliably revoke the session server-side — a transient database error could previously leave a revoked session usable.
+- Plex/Jellyfin sync: libraries larger than 1,000 items no longer silently truncate when the server omits a total count.
+- Requests: titles already in a Jellyfin-only library are detected (no more duplicate requests); the "now available" push reaches all of your devices, not just one; and an approve/decline that fails to reach Radarr/Sonarr now reflects the real status instead of appearing stuck on "Approved".
+- Now Playing: active sessions no longer occasionally disappear from the activity card for an hour after a transient error.
+- Trash Guides: the starter pack applies only its curated items (no longer overwriting your existing custom profiles); the configured GitHub token is used for the full catalog refresh; and a transient fetch failure no longer creates duplicate custom formats or quality profiles.
+- Admin: destructive actions (delete user, restore backup, terminate a stream, clear cache, change a role) no longer report an error when they actually succeeded; and the cron/sync status now shows failed when an upstream fetch genuinely fails.
+- Discover: the web "Newest"/"Oldest" sort works again, and a title with no listed cast no longer errors the detail page.
+- Ratings: a transient MDBList/TMDB error no longer suppresses an item's ratings for 24 hours or drops a whole ratings batch.
+- Email: new-issue notifications now also reach Issue Admins, and a misconfigured SMTP port gives a clear error instead of a cryptic crash.
+- Jellyfin QuickConnect sign-in works from the iOS app, and its attempt cap is enforced.
+- Hardening across sync, auth, and the web UI: clearer error states, no false "success" responses, and fewer edge-case crashes.
 
 ### v0.13.2
 
@@ -601,7 +617,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
