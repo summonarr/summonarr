@@ -188,7 +188,11 @@ async function ghRawFile(repo: string, branch: string, path: string): Promise<st
   const url = `https://raw.githubusercontent.com/${repo}/${branch}/${path}`;
   const res = await safeFetchTrusted(url, {
     allowedHosts: ["raw.githubusercontent.com"],
-    headers: { "User-Agent": USER_AGENT },
+    // Send the GitHub token here too (ghAuthHeaders), not only on the api.github.com
+    // tree call — a full refresh pulls hundreds of files from raw.githubusercontent.com,
+    // so the configured token should authenticate the high-volume path (private
+    // repos + higher rate limits), not just the single tree request.
+    headers: await ghAuthHeaders(),
     timeoutMs: RAW_FETCH_TIMEOUT_MS,
     maxResponseBytes: RAW_FETCH_MAX_BYTES,
   });
