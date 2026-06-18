@@ -91,7 +91,11 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
     const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
     for (const item of items) {
       if (!item.tmdbId || !item.path) continue;
-      map.set(item.path.replace(/\\/g, "/").replace(/\/$/, ""), item.tmdbId);
+      // Key by the folder BASENAME, not the absolute path — Plex and Radarr/Sonarr
+      // usually have different bind-mount roots (/plexmedia vs /data), so absolute
+      // paths never match. Basenames ("Movie (2020)") line up across mounts.
+      const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
+      if (folderName) map.set(folderName, item.tmdbId);
     }
     await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
   } catch (err) {
@@ -211,7 +215,9 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
 
   return filtered.map((m) => {
     const arrMap = m.plex.mediaType === "MOVIE" ? movieArr : tvArr;
-    const folder = folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath);
+    // Basename match (see buildArrPathMap): compare folder names, not absolute
+    // paths, so differing Plex/arr mount roots still line up.
+    const folder = (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
     const arrTmdbId = arrMap.get(folder) ?? null;
 
     let arrVerdict: "plex" | "jellyfin" | null = null;
