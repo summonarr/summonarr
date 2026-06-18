@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { checkBodySize } from "@/lib/body-size";
 import {
   processBackupImport,
@@ -162,29 +162,26 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: result.error, complete: true }, { status: result.status });
   }
 
-  try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "BACKUP_IMPORT",
-      target: "backup:full-db",
-      details: {
-        format: "sql",
-        encrypted: true,
-        mode: "admin-chunked",
-        after: {
-          totalStatements: result.summary.total,
-          executed: result.summary.executed,
-          skipped: result.summary.skipped,
-          errors: result.summary.errors,
-        },
+  // The DB restore already executed; a failed audit write must not 500 a
+  // successful import (GR26). logAudit swallows write failures internally.
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "BACKUP_IMPORT",
+    target: "backup:full-db",
+    details: {
+      format: "sql",
+      encrypted: true,
+      mode: "admin-chunked",
+      after: {
+        totalStatements: result.summary.total,
+        executed: result.summary.executed,
+        skipped: result.summary.skipped,
+        errors: result.summary.errors,
       },
-      ...auditContext(req, session),
-    });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+    },
+    ...auditContext(req, session),
+  });
 
   return NextResponse.json({
     ok: true,

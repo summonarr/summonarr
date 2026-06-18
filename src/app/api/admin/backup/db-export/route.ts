@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
@@ -181,19 +181,16 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     throw err;
   }
 
-  try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "BACKUP_EXPORT",
-      target: "backup:full-db",
-      details: { format: "sql", tables: BACKUP_TABLES.length, encrypted: true },
-      ...auditContext(req, session),
-    });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+  // The backup stream is already built; a failed audit write must not 500 a
+  // successful export (GR26). logAudit swallows write failures internally.
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "BACKUP_EXPORT",
+    target: "backup:full-db",
+    details: { format: "sql", tables: BACKUP_TABLES.length, encrypted: true },
+    ...auditContext(req, session),
+  });
 
   const date = new Date().toISOString().slice(0, 10);
   const filename = `summonarr-full-backup-${date}.sql.enc`;

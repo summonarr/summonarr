@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail } from "@/lib/audit";
+import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 
 type RouteParams = { params: Promise<{ id: string }> };
@@ -58,7 +58,7 @@ export const DELETE = withAdmin(async (
   if (body.all) {
     await revokeAllUserSessions(id);
 
-    await logAuditOrFail({
+    void logAudit({
       userId:    session.user.id,
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
@@ -88,7 +88,7 @@ export const DELETE = withAdmin(async (
 
     await revokeSessionById(body.sessionId);
 
-    await logAuditOrFail({
+    void logAudit({
       userId:    session.user.id,
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",

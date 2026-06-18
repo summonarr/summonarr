@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [users, autoDisableRow] = await Promise.all([
@@ -55,7 +55,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       create: { key: "downloadAutoDisableNew", value: newValue },
       update: { value: newValue },
     });
-    await logAuditOrFail({
+    void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email ?? null,
       action: "SETTINGS_CHANGE",
