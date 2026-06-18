@@ -235,6 +235,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         where: { id, status: "APPROVED" },
         data: { status: "PENDING", pendingNotifyAt: null },
       }).catch((rbErr) => console.error("[requests] rollback to PENDING failed:", rbErr));
+      // Correct the optimistic APPROVED SSE emitted before the push — without this,
+      // clients show the request stuck APPROVED when it's actually back to PENDING.
+      emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
     }
 
     // Only notify if ARR push actually succeeded — otherwise the user gets a

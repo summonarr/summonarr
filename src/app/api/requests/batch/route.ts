@@ -64,6 +64,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     select: { id: true },
   });
   const pendingBeforeIds = new Set(pendingBefore.map((r) => r.id));
+  // Hoisted to function scope so the SSE emit below can report the TRUE status of
+  // rows whose ARR push failed (rolled back to PENDING), not the batch target.
+  const failedIds = new Set<string>();
 
   await prisma.mediaRequest.updateMany({
     where: { id: { in: typedIds }, status: "PENDING" },
@@ -81,7 +84,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       where: { id: { in: [...pendingBeforeIds] }, status: "APPROVED" },
     });
 
-    const failedIds = new Set<string>();
+    // failedIds is declared at function scope above (reused by the SSE emit).
     await Promise.allSettled(
       approved.map(async (r) => {
         try {
@@ -136,7 +139,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   for (const id of typedIds) {
     const userId = ownerMap.get(id);
     if (!userId) continue;
-    emitSSE({ type: "request:updated", requestId: id, status: typedStatus, userId });
+    // A row whose ARR push failed was rolled back to PENDING — emit its TRUE
+    // status, not the batch target, so clients don't show it stuck APPROVED.
+    const effectiveStatus = typedStatus === "APPROVED" && failedIds.has(id) ? "PENDING" : typedStatus;
+    emitSSE({ type: "request:updated", requestId: id, status: effectiveStatus, userId });
   }
 
   // Permanent declines get their own audit action so they're trivially queryable;
