@@ -3,7 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
-import { logAudit, logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
 
 export const PATCH = withAdmin(async (
@@ -180,12 +180,9 @@ export const PATCH = withAdmin(async (
 
   invalidateUserSession(id);
 
-  try {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+  // Role change already committed; a failed audit write must not 500 it (a retry
+  // would re-apply and double-audit). logAudit swallows write failures by design.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_ROLE_CHANGE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, after: { role: body.role } }, ...auditContext(req, session) });
   return NextResponse.json({ id, role: body.role });
 });
 
@@ -229,11 +226,8 @@ export const DELETE = withAdmin(async (
 
   invalidateUserSession(id);
 
-  try {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, cascadeDeleted: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+  // User already deleted; a failed audit write must not 500 it (a retry 404s and
+  // loses the trail). logAudit swallows write failures by design.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, cascadeDeleted: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
   return NextResponse.json({ ok: true });
 });

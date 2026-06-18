@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -58,7 +58,8 @@ export const DELETE = withAdmin(async (
 
   await prisma.playHistory.delete({ where: { id } });
 
-  await logAuditOrFail({
+  // Row already deleted; a failed audit write must not 500 a successful delete.
+  void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
     action: "PLAY_HISTORY_DELETE",
