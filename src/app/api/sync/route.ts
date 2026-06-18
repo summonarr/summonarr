@@ -120,32 +120,29 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     r.mediaType === "MOVIE" ? availableMovieSet.has(vkey(r.tmdbId, r.is4k)) : availableTvSet.has(vkey(r.tmdbId, r.is4k)),
   );
   if (nowAvailableApproved.length > 0) {
-    const nowAvailableIds = nowAvailableApproved.map((r) => r.id);
-    const preNotifiedRows = await prisma.mediaRequest.findMany({
-      where: { id: { in: nowAvailableIds } },
-      select: { id: true, notifiedAvailable: true },
-    });
-    const wasUnnotifiedIds = new Set(
-      preNotifiedRows.filter((r) => !r.notifiedAvailable).map((r) => r.id),
-    );
-    const wasNotifiedIds = preNotifiedRows.filter((r) => r.notifiedAvailable).map((r) => r.id);
-
-    // CAS on notifiedAvailable: only the first writer fires notifications, preventing duplicates
-    const casUpdated = await prisma.mediaRequest.updateMany({
-      where: { id: { in: nowAvailableIds }, notifiedAvailable: false },
-      data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null, notifiedAvailable: true },
-    });
-    if (casUpdated.count > 0) {
-      for (const req of nowAvailableApproved) {
-        if (wasUnnotifiedIds.has(req.id)) {
-          arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
-        }
-      }
+    // Atomic claim (UPDATE ... RETURNING) closes the snapshot→CAS TOCTOU: only the
+    // rows this statement actually flipped (notifiedAvailable false→true) come
+    // back, so a row a concurrent sync/webhook claimed between a read and the
+    // update is never double-notified. Mirrors the per-source plex/jellyfin paths.
+    const winners = await claimAvailableNotificationWinners(nowAvailableApproved, { markAvailable: true });
+    const winnerIds = new Set(winners.map((w) => w.id));
+    for (const req of winners) {
+      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
     }
-    if (wasNotifiedIds.length > 0) {
-      // Another path already claimed notifiedAvailable; still mark AVAILABLE without re-notifying
+    if (winnerIds.size > 0) {
+      // The helper sets status/availableAt/notifiedAvailable but not pendingNotifyAt.
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: wasNotifiedIds }, notifiedAvailable: true },
+        where: { id: { in: [...winnerIds] } },
+        data: { pendingNotifyAt: null },
+      });
+    }
+    // Rows we didn't win were already notifiedAvailable elsewhere; still flip them
+    // AVAILABLE without re-notifying — but only when not already AVAILABLE, so a
+    // stable row's availableAt isn't rewritten on every tick.
+    const catchupIds = nowAvailableApproved.filter((r) => !winnerIds.has(r.id)).map((r) => r.id);
+    if (catchupIds.length > 0) {
+      await prisma.mediaRequest.updateMany({
+        where: { id: { in: catchupIds }, notifiedAvailable: true, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
     }
@@ -688,32 +685,19 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     }
 
     if (toNotify.length > 0) {
-      // Single CAS updateMany flips notifiedAvailable=false→true for every candidate at once.
-      // To know which rows we actually claimed (vs. ones a concurrent path flipped between our
-      // initial snapshot and now), re-read the candidates' notifiedAvailable IMMEDIATELY before
-      // the updateMany; only those still showing false at that moment are ones we flipped.
-      const candidateIds = toNotify.map((r) => r.id);
-      const preState = await prisma.mediaRequest.findMany({
-        where: { id: { in: candidateIds } },
-        select: { id: true, notifiedAvailable: true },
-      });
-      const stillUnnotifiedIds = new Set(
-        preState.filter((r) => !r.notifiedAvailable).map((r) => r.id),
-      );
-      const updated = await prisma.mediaRequest.updateMany({
-        where: { id: { in: candidateIds }, status: "AVAILABLE", notifiedAvailable: false },
-        data: { notifiedAvailable: true },
-      });
-      if (updated.count > 0) {
-        const notifyBatch = toNotify.filter((r) => stillUnnotifiedIds.has(r.id));
-        if (notifyBatch.length > 0) {
-          // Backstop wipe: the original AVAILABLE transition (per-source mark pass,
-          // webhooks) should have wiped already, but a regression there is silent
-          // until threshold notifications fire on stale votes — wipe again here.
-          void clearDeletionVotesForTmdbs(notifyBatch);
-          notifyUsersRequestsAvailable(notifyBatch).catch(() => {});
-          notifyUsersRequestsAvailablePush(notifyBatch).catch(() => {});
-        }
+      // Atomic claim (UPDATE ... RETURNING) closes the snapshot→updateMany TOCTOU:
+      // only rows this statement flipped (status AVAILABLE, notifiedAvailable
+      // false→true) come back, so a row a concurrent path claimed between a read
+      // and the update is never re-notified. requireStatusAvailable preserves the
+      // original "only notify rows already marked AVAILABLE" guard.
+      const winners = await claimAvailableNotificationWinners(toNotify, { requireStatusAvailable: true });
+      if (winners.length > 0) {
+        // Backstop wipe: the original AVAILABLE transition (per-source mark pass,
+        // webhooks) should have wiped already, but a regression there is silent
+        // until threshold notifications fire on stale votes — wipe again here.
+        void clearDeletionVotesForTmdbs(winners);
+        notifyUsersRequestsAvailable(winners).catch(() => {});
+        notifyUsersRequestsAvailablePush(winners).catch(() => {});
       }
     }
   }
