@@ -754,7 +754,7 @@ export async function getMovieCredits(id: number): Promise<CastMember[]> {
   if (cached) return cached;
 
   const r = await tmdbFetch<{ cast: { id: number; name: string; character: string; profile_path: string | null; order: number }[] }>(`/movie/${id}/credits`);
-  const result = r.cast.slice(0, 12).map((c) => ({
+  const result = (r.cast ?? []).slice(0, 12).map((c) => ({
     id: c.id, name: c.name, character: c.character, profilePath: c.profile_path,
   }));
 
@@ -768,7 +768,7 @@ export async function getTVCredits(id: number): Promise<CastMember[]> {
   if (cached) return cached;
 
   const r = await tmdbFetch<{ cast: { id: number; name: string; character: string; profile_path: string | null; order: number }[] }>(`/tv/${id}/credits`);
-  const result = r.cast.slice(0, 12).map((c) => ({
+  const result = (r.cast ?? []).slice(0, 12).map((c) => ({
     id: c.id, name: c.name, character: c.character, profilePath: c.profile_path,
   }));
 
@@ -1030,8 +1030,27 @@ export async function getPopularTVPage(page: number): Promise<PagedResult> {
   return result;
 }
 
+// Allowlist TMDB sort_by values — an arbitrary sortBy would otherwise reach TMDB
+// (400 → propagated 500) AND be baked into the discoverKey() cache key, letting
+// any authenticated user manufacture junk TmdbCache entries. Union of the movie +
+// TV sort fields TMDB accepts.
+const ALLOWED_DISCOVER_SORT = new Set([
+  "popularity.desc", "popularity.asc",
+  "vote_average.desc", "vote_average.asc",
+  "primary_release_date.desc", "primary_release_date.asc",
+  "first_air_date.desc", "first_air_date.asc",
+  "revenue.desc", "revenue.asc",
+  "original_title.desc", "original_title.asc",
+  "vote_count.desc", "vote_count.asc",
+]);
+function allowedDiscoverSort(sortBy: string | undefined): string {
+  return sortBy && ALLOWED_DISCOVER_SORT.has(sortBy) ? sortBy : "popularity.desc";
+}
+
 export async function discoverMoviesPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
   const p = Math.max(1, page);
+  // Sanitize sortBy up front so a junk value reaches neither TMDB nor the cache key.
+  filters = { ...filters, sortBy: allowedDiscoverSort(filters.sortBy) };
   const key = `${discoverKey("movie", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1049,7 +1068,7 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
 
   const params: Record<string, string> = {
     include_adult: "false",
-    sort_by: filters.sortBy ?? "popularity.desc",
+    sort_by: filters.sortBy ?? "popularity.desc", // already allowlisted at entry
     page: String(p),
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
@@ -1072,6 +1091,8 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
 
 export async function discoverTVPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
   const p = Math.max(1, page);
+  // Sanitize sortBy up front so a junk value reaches neither TMDB nor the cache key.
+  filters = { ...filters, sortBy: allowedDiscoverSort(filters.sortBy) };
   const key = `${discoverKey("tv", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1089,7 +1110,7 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
 
   const params: Record<string, string> = {
     include_adult: "false",
-    sort_by: filters.sortBy ?? "popularity.desc",
+    sort_by: filters.sortBy ?? "popularity.desc", // already allowlisted at entry
     page: String(p),
   };
   if (filters.genreId)         params["with_genres"] = filters.genreId;
