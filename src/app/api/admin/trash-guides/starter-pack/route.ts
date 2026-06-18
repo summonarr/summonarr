@@ -34,8 +34,13 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
     async () => {
       try {
         const items = await resolveStarterPack();
-        const specIds = items.filter((i) => i.spec).map((i) => i.spec!.id);
-        const missing = items.filter((i) => !i.spec).map((i) => i.item.label);
+        // Only the curated STARTER_PACK entries (recommended:true). resolveStarterPack
+        // also returns every non-curated profile/naming/size spec (for the GET
+        // picker); filtering on `i.spec` alone would push the ENTIRE TRaSH catalog
+        // to Radarr/Sonarr and overwrite the operator's existing custom profiles.
+        const curated = items.filter((i) => i.item.recommended);
+        const specIds = curated.filter((i) => i.spec).map((i) => i.spec!.id);
+        const missing = curated.filter((i) => !i.spec).map((i) => i.item.label);
 
         const startTime = Date.now();
         const results = specIds.length > 0 ? await applySpecs(specIds) : [];
