@@ -59,7 +59,11 @@ export const GET = withAuth(async (request, _ctx, session) => {
       if (i < futureTV.length) raw.push(futureTV[i]);
     }
   } catch (err) {
+    // Surface a real fetch failure as 502 instead of returning 200 with an empty
+    // list — the latter is indistinguishable from "no upcoming releases" and hides
+    // the outage. A legitimately-empty result (no error) still falls through to 200.
     console.error("[upcoming] Failed:", err);
+    return NextResponse.json({ error: "Failed to load upcoming releases" }, { status: 502 });
   }
 
   const show4k = await getShow4kVisibility(session);

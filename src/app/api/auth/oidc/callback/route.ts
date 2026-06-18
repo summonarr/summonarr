@@ -77,10 +77,19 @@ export async function GET(req: NextRequest) {
   }
 
   const device = buildDeviceMeta(req.headers);
-  const result = await signInAndMintSession({
-    user: { ...dbUser, ...device },
-    providerId: "oidc",
-  });
+  let result: Awaited<ReturnType<typeof signInAndMintSession>>;
+  try {
+    result = await signInAndMintSession({
+      user: { ...dbUser, ...device },
+      providerId: "oidc",
+    });
+  } catch (err) {
+    // Don't let a transient DB failure during mint throw out of the handler and
+    // strand the OIDC state cookie — redirect to login with an error like the
+    // other failure paths in this route.
+    console.error("[oidc/callback] OIDC session mint failed:", err instanceof Error ? err.message : err);
+    return loginErrorRedirect(req, "oidc_session_error");
+  }
 
   const base = process.env.AUTH_URL ?? new URL("/", req.url).toString();
   // returnTo was already validated at /start (must start with "/", not "//")

@@ -188,7 +188,11 @@ async function ghRawFile(repo: string, branch: string, path: string): Promise<st
   const url = `https://raw.githubusercontent.com/${repo}/${branch}/${path}`;
   const res = await safeFetchTrusted(url, {
     allowedHosts: ["raw.githubusercontent.com"],
-    headers: { "User-Agent": USER_AGENT },
+    // Send the GitHub token here too (ghAuthHeaders), not only on the api.github.com
+    // tree call — a full refresh pulls hundreds of files from raw.githubusercontent.com,
+    // so the configured token should authenticate the high-volume path (private
+    // repos + higher rate limits), not just the single tree request.
+    headers: await ghAuthHeaders(),
     timeoutMs: RAW_FETCH_TIMEOUT_MS,
     maxResponseBytes: RAW_FETCH_MAX_BYTES,
   });
@@ -869,8 +873,14 @@ export async function applyCustomFormats(
   try {
     const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/customformat");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
-  } catch {
-
+  } catch (err) {
+    // Can't read existing CFs → can't tell new from existing, so a blind POST in
+    // the loop below would create duplicates. Fail the whole batch instead of
+    // guessing (also satisfies GR7: surface the error).
+    console.warn("[trash] failed to prefetch remote customformat list:", err instanceof Error ? err.message : err);
+    return Promise.all(
+      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, is4k)),
+    );
   }
 
   const results: ApplyResult[] = [];
@@ -1304,8 +1314,13 @@ export async function applyQualityProfiles(
   try {
     const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/qualityprofile");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
-  } catch {
-
+  } catch (err) {
+    // Can't read existing quality profiles → a blind POST below would duplicate
+    // them. Fail the whole batch instead of guessing (also satisfies GR7).
+    console.warn("[trash] failed to prefetch remote qualityprofile list:", err instanceof Error ? err.message : err);
+    return Promise.all(
+      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, is4k)),
+    );
   }
 
   const results: ApplyResult[] = [];

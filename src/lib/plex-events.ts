@@ -367,9 +367,12 @@ class PlexEventStreamManager {
 
     await Promise.all(
       stale.map(async (session) => {
-        markPlexSessionFinalized(session.id, nowMs);
         try {
           await recordCompletedSession(applyFinalTick(session, now), { stoppedAt: now });
+          // Ledger AFTER the PlayHistory write commits (GR27): a failed record must
+          // not ledger-lock the sessionKey for an hour with no history row — leave
+          // it un-finalized so the next poll re-creates the row and retries.
+          markPlexSessionFinalized(session.id, nowMs);
         } catch (err) {
           console.warn(`[plex-events] bootstrap finalize failed for ${session.id}:`, err);
         }
@@ -618,8 +621,6 @@ class PlexEventStreamManager {
         }
       }
 
-      markPlexSessionFinalized(id);
-
       const now = new Date();
       const finalized = applyFinalTick(existing, now, {
         ...(viewOffset != null && Number.isFinite(viewOffset) && viewOffset >= 0
@@ -628,6 +629,13 @@ class PlexEventStreamManager {
       });
 
       await recordCompletedSession(finalized, { stoppedAt: now });
+
+      // Ledger AFTER the PlayHistory write commits (GR27): if recordCompletedSession
+      // throws, the outer catch logs and we leave the session un-finalized so the
+      // poller retries — rather than ledger-locking the sessionKey for an hour with
+      // no history row. Still set before the deleteMany below so the re-create race
+      // with the concurrent poller stays closed on the success path.
+      markPlexSessionFinalized(id);
 
       // SSE is the authoritative stop signal. recordCompletedSession's CAS on
       // lastSeenAt may have left the ActiveSession row in place if the poller

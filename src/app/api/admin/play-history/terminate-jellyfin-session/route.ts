@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
@@ -69,7 +69,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   const result = await terminateJellyfinSession(serverUrl, apiKey, match.sessionId, reason);
 
-  await logAuditOrFail({
+  // Session already terminated on Jellyfin; a failed audit write must not 500 it.
+  void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
     action: "JELLYFIN_SESSION_TERMINATE",

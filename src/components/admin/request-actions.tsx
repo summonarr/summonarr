@@ -139,6 +139,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
       router.refresh();
     } catch {
       setOptimisticStatus(null);
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }

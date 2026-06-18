@@ -80,22 +80,29 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
     ]);
     if (!urlRow?.value || !keyRow?.value) return map;
 
-    const { safeFetchAdminConfigured } = await import("@/lib/safe-fetch");
+    const { arrFetch } = await import("@/lib/arr");
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    const res = await safeFetchAdminConfigured(`${urlRow.value.replace(/\/$/, "")}/api/v3/${endpoint}`, {
-      headers: { "X-Api-Key": keyRow.value, "Content-Type": "application/json" },
-      timeoutMs: 10_000,
-    });
-    if (!res.ok) return map;
-
+    const cfg = { url: urlRow.value.replace(/\/$/, ""), apiKey: keyRow.value };
     type ArrItem = { tmdbId?: number; path?: string };
-    const items = (await res.json()) as ArrItem[];
+    // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB body
+    // cap. The default 10 MB silently truncated large libraries (guardrail 5 /
+    // commit c7902db), leaving every arrVerdict past the cut null with no log.
+    // arrFetch throws ArrResponseError on non-2xx, handled by the catch below.
+    const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
     for (const item of items) {
       if (!item.tmdbId || !item.path) continue;
-      map.set(item.path.replace(/\\/g, "/").replace(/\/$/, ""), item.tmdbId);
+      // Key by the folder BASENAME, not the absolute path — Plex and Radarr/Sonarr
+      // usually have different bind-mount roots (/plexmedia vs /data), so absolute
+      // paths never match. Basenames ("Movie (2020)") line up across mounts.
+      const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
+      if (folderName) map.set(folderName, item.tmdbId);
     }
     await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
-  } catch {}
+  } catch (err) {
+    // Don't swallow silently — a missing arr map makes every bad-match verdict
+    // null, which previously looked like "no problems found".
+    console.warn("[bad-matches] ARR path map fetch failed:", err instanceof Error ? err.message : err);
+  }
   return map;
 }
 
@@ -208,7 +215,14 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
 
   return filtered.map((m) => {
     const arrMap = m.plex.mediaType === "MOVIE" ? movieArr : tvArr;
-    const folder = folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath);
+    // Match the arr map key (buildArrPathMap keys by the arr path basename): for
+    // TV that's the SERIES folder — m.relativePath is already reduced to it by
+    // toMatchKey — while for movies it's the movie's own folder (the file's
+    // parent). Using folderOf for TV yields the SEASON folder and never matches
+    // Sonarr, so split by mediaType (same selector as movieArr/tvArr above).
+    const folder = m.plex.mediaType === "TV"
+      ? m.relativePath
+      : (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
     const arrTmdbId = arrMap.get(folder) ?? null;
 
     let arrVerdict: "plex" | "jellyfin" | null = null;

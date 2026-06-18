@@ -577,8 +577,8 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
 
   useEffect(() => {
     fetch(`/api/admin/users/${u.id}/sessions`)
-      .then((r) => r.json())
-      .then((data: AdminAuthSession[]) => setSessions(data))
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: AdminAuthSession[]) => setSessions(Array.isArray(data) ? data : []))
       .catch(() => setSessions([]))
       .finally(() => setLoading(false));
   }, [u.id]);

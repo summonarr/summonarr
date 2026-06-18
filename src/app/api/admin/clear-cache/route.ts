@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 // Cache "sources" map to TmdbCache key prefixes. TMDB details (movie:/tv:) is where the bulk of
 // metadata lives — including the country/language/keyword/watch-provider fields — and previously had
@@ -38,20 +38,16 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     where: { OR: prefixes.map((p) => ({ key: { startsWith: p } })) },
   });
 
-  try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      // Reuse the existing cache-clear audit action; the cleared source is carried in details.
-      action: "RATINGS_CACHE_CLEAR",
-      target: "tmdbCache",
-      details: { source: sourceParam, cleared: count },
-      ...auditContext(req, session),
-    });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+  // Cache already cleared; a failed audit write must not 500 a successful clear.
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    // Reuse the existing cache-clear audit action; the cleared source is carried in details.
+    action: "RATINGS_CACHE_CLEAR",
+    target: "tmdbCache",
+    details: { source: sourceParam, cleared: count },
+    ...auditContext(req, session),
+  });
 
   return NextResponse.json({ source: sourceParam, cleared: count });
 });

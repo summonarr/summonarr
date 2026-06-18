@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 
 // Admin terminate-playback endpoint. POSTs to Plex's
@@ -78,7 +78,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     reason,
   );
 
-  await logAuditOrFail({
+  // Session already terminated on Plex; a failed audit write must not 500 it.
+  void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
     action: "PLEX_SESSION_TERMINATE",

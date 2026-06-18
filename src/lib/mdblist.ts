@@ -93,7 +93,9 @@ export async function fetchAndCacheMdblistForTmdb(
 
     if (!res.ok) {
       console.warn(`[mdblist] API returned ${sanitizeForLog(res.status)} for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
+      // A transient 5xx must NOT be negative-cached — that would suppress a valid
+      // item's ratings for the full 24h TTL. Only a 404 (handled above) is a real
+      // "not found" worth caching. Matches the batch path's reasoning.
       return { found: false, keyConfigured: true };
     }
 
@@ -249,6 +251,10 @@ export async function fetchMdblistBatch(
         const pageItem = raw.id != null
           ? (page.find((p) => p.id === raw.id) ?? page[i])
           : page[i];
+        // MDBList can return MORE items than requested (or unmatched ids), so
+        // page.find()/page[i] can be undefined — guard before any property access
+        // or the whole 200-item batch throws and silently yields zero ratings.
+        if (!pageItem) continue;
         const tmdbId = raw.id ?? pageItem.id;
         if (!tmdbId) continue;
 

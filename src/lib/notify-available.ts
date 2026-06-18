@@ -24,10 +24,15 @@ type MediaType = "MOVIE" | "TV";
  */
 export async function claimAvailableNotificationWinners<T extends { id: string }>(
   candidates: readonly T[],
-  opts: { markAvailable?: boolean } = {},
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
 ): Promise<T[]> {
   if (candidates.length === 0) return [];
   const ids = candidates.map((r) => r.id);
+  // Non-markAvailable callers (the notify-fallback path) only flip notifiedAvailable
+  // for rows ALREADY AVAILABLE — they don't set status themselves — so they pass
+  // requireStatusAvailable to keep that guard. markAvailable callers set status in
+  // the same statement and don't need it.
+  const statusGuard = opts.requireStatusAvailable ? Prisma.sql`AND "status" = 'AVAILABLE'` : Prisma.empty;
   const updated = opts.markAvailable
     ? await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
         UPDATE "MediaRequest"
@@ -43,6 +48,7 @@ export async function claimAvailableNotificationWinners<T extends { id: string }
         SET "notifiedAvailable" = true
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
+          ${statusGuard}
         RETURNING id
       `);
   if (updated.length === 0) return [];

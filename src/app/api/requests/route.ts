@@ -226,17 +226,23 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // HD request: a Plex/Jellyfin library hit OR the HD *arr-available cache counts
   // as already-here. 4K request: only the 4K instance's available cache counts —
   // a Plex HD copy must not block requesting 4K.
-  const [plexItem, arrAvailable] = await Promise.all([
+  const [plexItem, jellyfinItem, arrAvailable] = await Promise.all([
     is4k
       ? Promise.resolve(null)
       : prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
+    is4k
+      ? Promise.resolve(null)
+      : prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
     isAutoApprove
       ? mediaType === "MOVIE"
         ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
         : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
       : Promise.resolve(false),
   ]);
-  const alreadyAvailable = !!plexItem || arrAvailable;
+  // Check BOTH libraries — a Jellyfin-only install has no PlexLibraryItem rows, so
+  // a Plex-only check let users re-request titles already in their Jellyfin library
+  // (skip on 4K, same as Plex: an HD copy must not block a 4K request).
+  const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
 
   const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 

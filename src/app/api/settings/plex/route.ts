@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexUser } from "@/lib/plex";
-import { logAuditOrFail } from "@/lib/audit";
+import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
@@ -37,7 +37,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   await prisma.plexTokenCache.deleteMany({});
   console.warn("[settings] plexAdminToken changed — cleared PlexTokenCache");
 
-  await logAuditOrFail({
+  void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
     action: "SETTINGS_CHANGE",
@@ -59,7 +59,7 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   await prisma.plexTokenCache.deleteMany({});
   console.warn("[settings] plexAdminToken removed — cleared PlexTokenCache");
 
-  await logAuditOrFail({
+  void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
     action: "SETTINGS_CHANGE",

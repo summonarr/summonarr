@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { checkBodySize } from "@/lib/body-size";
 import {
   processBackupImport,
@@ -100,9 +100,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
   if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
     // Belt-and-suspenders for transfer-encoding: chunked uploads where the
-    // Content-Length-based check above can't trigger. Release the slot we just
-    // claimed on chunk 0 so an oversized first chunk doesn't strand the uploader.
-    if (chunkIndex === 0) await clearSession(uploadId);
+    // Content-Length-based check above can't trigger. An oversized chunk corrupts
+    // the upload, so release the slot for ANY index (not just chunk 0) — otherwise
+    // an oversized non-zero chunk strands the global slot until its TTL.
+    await clearSession(uploadId);
     return NextResponse.json(
       { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
       { status: 413 },
@@ -161,29 +162,26 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: result.error, complete: true }, { status: result.status });
   }
 
-  try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "BACKUP_IMPORT",
-      target: "backup:full-db",
-      details: {
-        format: "sql",
-        encrypted: true,
-        mode: "admin-chunked",
-        after: {
-          totalStatements: result.summary.total,
-          executed: result.summary.executed,
-          skipped: result.summary.skipped,
-          errors: result.summary.errors,
-        },
+  // The DB restore already executed; a failed audit write must not 500 a
+  // successful import (GR26). logAudit swallows write failures internally.
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "BACKUP_IMPORT",
+    target: "backup:full-db",
+    details: {
+      format: "sql",
+      encrypted: true,
+      mode: "admin-chunked",
+      after: {
+        totalStatements: result.summary.total,
+        executed: result.summary.executed,
+        skipped: result.summary.skipped,
+        errors: result.summary.errors,
       },
-      ...auditContext(req, session),
-    });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+    },
+    ...auditContext(req, session),
+  });
 
   return NextResponse.json({
     ok: true,

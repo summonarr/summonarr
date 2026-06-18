@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import {
   buildQcFlowSetCookie,
   hashQuickConnectSecret,
@@ -59,7 +60,10 @@ export async function POST(req: NextRequest) {
     const cookieValue = await signQcFlowCookie({
       secretHash: hashQuickConnectSecret(result.secret),
     });
-    const response = NextResponse.json(result);
+    // Native clients can't carry the HttpOnly flow cookie, so hand them the same
+    // signed flowState in the body to send back at sign-in (mirrors Plex /start).
+    const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
+    const response = NextResponse.json(isNative ? { ...result, flowState: cookieValue } : result);
     response.headers.append(
       "Set-Cookie",
       buildQcFlowSetCookie(cookieValue, isSecureCookieContext()),
@@ -92,10 +96,14 @@ export async function GET(req: NextRequest) {
   }
 
   const countKey = secret.slice(0, 32);
-  const existing = pollCounts.get(countKey);
+  const existingRaw = pollCounts.get(countKey);
   const now = Date.now();
-  if (existing && existing.expiresAt < now) pollCounts.delete(countKey);
-  const attempts = (existing && existing.expiresAt >= now ? existing.count : 0) + 1;
+  // Treat an expired entry as absent so a fresh TTL window starts. Otherwise the
+  // new entry inherits the stale (already-past) expiresAt, the count resets to 1
+  // on every poll, and MAX_POLLS is never enforced after the first TTL expiry.
+  const existing = existingRaw && existingRaw.expiresAt >= now ? existingRaw : undefined;
+  if (existingRaw && !existing) pollCounts.delete(countKey);
+  const attempts = (existing ? existing.count : 0) + 1;
   if (attempts > MAX_POLLS) {
     pollCounts.delete(countKey);
     return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });

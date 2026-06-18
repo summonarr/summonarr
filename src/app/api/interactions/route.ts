@@ -630,6 +630,7 @@ async function handleComponent(interaction: any): Promise<void> {
           confirmEmbed.color = 0x57f287;
         } else if (mayAutoApprove) {
           const request = await prisma.mediaRequest.create({ data: { ...baseData, status: "APPROVED" } });
+          let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
               await addMovieToRadarr(selected.id);
@@ -640,9 +641,17 @@ async function handleComponent(interaction: any): Promise<void> {
           } catch (err) {
             console.error("[interactions] arr push failed:", err);
             await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
+            arrFailed = true;
           }
-          note = "Your request was auto-approved and is being downloaded. You'll get a ping when it's ready!";
-          confirmEmbed.color = 0x57f287;
+          if (arrFailed) {
+            // The push failed and the request rolled back to PENDING — don't tell
+            // the user it's "being downloaded"; surface that an admin will review it.
+            note = "Your request was received, but couldn't be queued automatically — an admin will review it shortly.";
+            confirmEmbed.color = 0xfee75c;
+          } else {
+            note = "Your request was auto-approved and is being downloaded. You'll get a ping when it's ready!";
+            confirmEmbed.color = 0x57f287;
+          }
 
           scheduleDelayed(90_000, async () => {
             try {

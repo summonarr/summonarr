@@ -96,8 +96,15 @@ export async function register() {
       );
     }
 
-    const { prewarmPublicKeyCache } = await import("@/app/api/interactions/route");
-    await prewarmPublicKeyCache();
+    try {
+      const { prewarmPublicKeyCache } = await import("@/app/api/interactions/route");
+      await prewarmPublicKeyCache();
+    } catch (err) {
+      // Don't let a DB blip at boot crash startup — the Discord public-key cache
+      // re-warms lazily on the first interaction (the library prewarm below is
+      // already fire-and-forget for the same reason).
+      console.error("[startup] Discord public-key prewarm failed:", err instanceof Error ? err.message : err);
+    }
 
     import("@/lib/tmdb-prewarm")
       .then(({ prewarmLibraryCache }) => prewarmLibraryCache())

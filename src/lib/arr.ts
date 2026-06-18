@@ -64,7 +64,10 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
           headers: auth.headers,
           timeoutMs: 10_000,
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          console.warn(`[arr] tvdb-to-tmdb TMDB lookup returned ${res.status} for tvdbId ${tvdbId}`);
+          return;
+        }
         const data = await res.json() as { tv_results?: { id: number }[] };
         const tmdbId = data.tv_results?.[0]?.id ?? null;
         await setCache(
@@ -73,8 +76,10 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
           tmdbId !== null ? TVDB_TO_TMDB_TTL_RESOLVED : TVDB_TO_TMDB_TTL_UNRESOLVED,
         );
         if (tmdbId !== null) result.set(tvdbId, tmdbId);
-      } catch {
-
+      } catch (err) {
+        // Don't swallow: a TMDB 429/401/outage here silently drops every
+        // tvdbId-only series from wanted/available/arrPending with no evidence.
+        console.warn(`[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId ${tvdbId}:`, err instanceof Error ? err.message : err);
       }
     }));
   }
@@ -489,12 +494,18 @@ async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
   const cached = queueCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.tmdbIds;
   try {
-    const queue = await arrFetch<{ records: { movie?: { tmdbId: number } }[] }>(
-      cfg, "/api/v3/queue?pageSize=200&includeMovie=true"
-    );
+    // The queue endpoint is paged — pageSize=200 silently dropped downloads past
+    // the 200th on busy instances, giving false "not downloading" badges. Page
+    // through totalRecords with a 40-page (10k-item) runaway backstop.
     const tmdbIds = new Set<number>();
-    for (const r of queue.records) {
-      if (r.movie?.tmdbId) tmdbIds.add(r.movie.tmdbId);
+    for (let page = 1; page <= 40; page++) {
+      const queue = await arrFetch<{ records: { movie?: { tmdbId: number } }[]; totalRecords: number }>(
+        cfg, `/api/v3/queue?page=${page}&pageSize=250&includeMovie=true`
+      );
+      for (const r of queue.records) {
+        if (r.movie?.tmdbId) tmdbIds.add(r.movie.tmdbId);
+      }
+      if (queue.records.length === 0 || page * 250 >= queue.totalRecords) break;
     }
     queueCache.set(cacheKey, { tmdbIds, tvdbIds: new Set(), expiresAt: now + QUEUE_STATE_TTL_MS });
     return tmdbIds;
@@ -514,12 +525,17 @@ async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
   const cached = queueCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.tvdbIds;
   try {
-    const queue = await arrFetch<{ records: { series?: { tvdbId: number } }[] }>(
-      cfg, "/api/v3/queue?pageSize=200&includeSeries=true"
-    );
+    // Paged endpoint — see getRadarrQueueSet. pageSize=200 dropped downloads past
+    // the 200th; page through totalRecords with a runaway backstop.
     const tvdbIds = new Set<number>();
-    for (const r of queue.records) {
-      if (r.series?.tvdbId) tvdbIds.add(r.series.tvdbId);
+    for (let page = 1; page <= 40; page++) {
+      const queue = await arrFetch<{ records: { series?: { tvdbId: number } }[]; totalRecords: number }>(
+        cfg, `/api/v3/queue?page=${page}&pageSize=250&includeSeries=true`
+      );
+      for (const r of queue.records) {
+        if (r.series?.tvdbId) tvdbIds.add(r.series.tvdbId);
+      }
+      if (queue.records.length === 0 || page * 250 >= queue.totalRecords) break;
     }
     queueCache.set(cacheKey, { tmdbIds: new Set(), tvdbIds, expiresAt: now + QUEUE_STATE_TTL_MS });
     return tvdbIds;

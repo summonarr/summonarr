@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
 
 // One-shot backfill for PlayHistory rows written before ActiveSession.playtimeMs landed.
@@ -147,19 +147,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     threshold,
   );
 
-  try {
-    await logAuditOrFail({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email,
-      action: "PLAY_HISTORY_BACKFILL",
-      target: "PlayHistory",
-      details: { updated, threshold, watchedFlippedToFalse },
-      ...auditContext(req, session),
-    });
-  } catch (err) {
-    console.error("[audit] Critical audit log failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
-  }
+  // Backfill already executed; a failed audit write must not 500 it (GR26).
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email,
+    action: "PLAY_HISTORY_BACKFILL",
+    target: "PlayHistory",
+    details: { updated, threshold, watchedFlippedToFalse },
+    ...auditContext(req, session),
+  });
 
   // Activity stats are cached up to 30 minutes — drop them so the new numbers show immediately.
   clearActivityCache();

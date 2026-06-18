@@ -95,8 +95,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
           orderBy: { createdAt: "asc" },
         });
         if (oldest) {
-          // Ignore failure in case another request already deleted it
-          await tx.pushSubscription.delete({ where: { id: oldest.id } }).catch(() => {});
+          // deleteMany (not delete().catch()): a concurrent delete of the same
+          // row makes delete() throw P2025, and catching it inside a top-level
+          // $transaction still aborts the tx (no SAVEPOINT) → the upsert below is
+          // silently rolled back and the subscription is dropped (guardrail 23).
+          // deleteMany returns count:0 on a missing row instead of throwing.
+          await tx.pushSubscription.deleteMany({ where: { id: oldest.id } });
         }
       }
     }

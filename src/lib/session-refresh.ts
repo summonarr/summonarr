@@ -105,7 +105,13 @@ export async function verifyAndRefreshSession(
     ? Math.floor(dbUser.passwordChangedAt.getTime() / 1000)
     : 0;
   const cutoff = Math.max(revokedSec, passwordSec);
-  if (cutoff > 0 && typeof claims.iat === "number" && claims.iat < cutoff) {
+  // `<=` (not `<`): the cutoffs are floored to whole seconds, and a revoked
+  // session's JWT is typically signed in the same second its AuthSession row was
+  // created — strict `<` would let that token's iat == cutoff slip past the
+  // cross-replica backstop. `<=` closes the same-second gap; the only false catch
+  // is a brand-new sign-in in the same second as an unrelated revoke, which is
+  // vanishingly rare and simply re-authenticates.
+  if (cutoff > 0 && typeof claims.iat === "number" && claims.iat <= cutoff) {
     return null;
   }
 

@@ -7,7 +7,7 @@ import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
 import { notifyUserDownloadPending, notifyUserAwaitingRelease } from "@/lib/discord-notify";
 import { isMovieDownloadingInRadarr, isSeriesDownloadingInSonarr, getMovieReleaseInfo, getSeriesFirstAired } from "@/lib/arr";
 import { emitSSE } from "@/lib/sse-emitter";
-import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -65,9 +65,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     if (adminNote !== undefined) {
       await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
       // Audit the note change so silent edits via search/retry leave a trail.
-      // The status-transition branches already audit via logAuditOrFail.
+      // The status-transition branches already audit via logAudit.
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
-        void logAuditOrFail({
+        void logAudit({
           userId: session.user.id,
           userName: session.user.name ?? session.user.email ?? "unknown",
           action: "SETTINGS_CHANGE",
@@ -104,7 +104,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     if (adminNote !== undefined) {
       await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
-        void logAuditOrFail({
+        void logAudit({
           userId: session.user.id,
           userName: session.user.name ?? session.user.email ?? "unknown",
           action: "SETTINGS_CHANGE",
@@ -208,9 +208,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   const requestedByName = existing.user?.name ?? existing.user?.email ?? existing.requestedBy;
   if (status === "APPROVED" && existing.status !== "APPROVED") {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
   } else if (status === "DECLINED" && existing.status !== "DECLINED") {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DECLINE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, adminNote: updated.adminNote, before: { status: existing.status }, after: { status } }, ...auditContext(req, session) });
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
@@ -235,6 +235,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         where: { id, status: "APPROVED" },
         data: { status: "PENDING", pendingNotifyAt: null },
       }).catch((rbErr) => console.error("[requests] rollback to PENDING failed:", rbErr));
+      // Correct the optimistic APPROVED SSE emitted before the push — without this,
+      // clients show the request stuck APPROVED when it's actually back to PENDING.
+      emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
     }
 
     // Only notify if ARR push actually succeeded — otherwise the user gets a
@@ -345,7 +348,7 @@ export const DELETE = withAuth(async (
   // Only an admin-initiated delete is an audit-worthy moderation action; a user
   // cancelling their own pending request is routine and stays out of the log.
   if (isAdmin) {
-    await logAuditOrFail({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_DELETE", target: `request:${id}`, details: { title: existing.title, mediaType: existing.mediaType, year: existing.releaseYear, requestedBy: existing.user?.name ?? existing.user?.email ?? existing.requestedBy, before: { status: existing.status } }, ...auditContext(req, session) });
   }
   return NextResponse.json({ ok: true });
 });

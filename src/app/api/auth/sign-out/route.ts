@@ -26,10 +26,17 @@ export async function POST(req: NextRequest) {
       // the in-process ledger AND bumps the user's sessionsRevokedAt cutoff, so a
       // separately-captured copy of this JWT is rejected immediately instead of
       // surviving the dbCheckedAt fast-path window (up to 60s) after logout.
-      await revokeSessionById(claims.sessionId);
+      // Best-effort server-side revoke: revokeSessionById no longer swallows its
+      // error, but a DB failure here must NOT block the local sign-out (cookie
+      // clearing) below. Catch, log, and continue clearing cookies.
+      try {
+        await revokeSessionById(claims.sessionId);
+      } catch (err) {
+        console.error("[auth] sign-out revoke failed (clearing cookie anyway):", err);
+      }
       void logAudit({
         userId: claims.id,
-        userName: "unknown",
+        userName: claims.name ?? claims.email ?? "unknown",
         action: "AUTH_LOGOUT",
         target: "auth:logout",
         provider: claims.provider ?? null,

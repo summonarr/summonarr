@@ -225,6 +225,10 @@ export function ActivityRecentPlays({
       setPlays((prev) => [...prev, ...items]);
       setPage(nextPage);
       setHasMore(items.length >= 20);
+    } catch (err) {
+      // Without this, a network failure rejected loadMore's promise as an
+      // unhandled rejection (it's wired straight to onClick with no await).
+      console.error("[activity-recent-plays] load more failed:", err);
     } finally {
       setLoading(false);
     }

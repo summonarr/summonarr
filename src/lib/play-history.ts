@@ -1617,7 +1617,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prisma.$queryRawUnsafe<{ watched: bigint; total: bigint }[]>(
       `${arcCte}
        SELECT COUNT(*) FILTER (WHERE arc_dur > 0 AND (arc_play::float / arc_dur) >= $${completionIdx})::bigint AS watched,
-              COUNT(*)::bigint AS total
+              COUNT(*) FILTER (WHERE arc_dur > 0)::bigint AS total
        FROM arcs`,
       ...arcRateParams,
     ),
