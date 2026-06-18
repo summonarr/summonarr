@@ -340,15 +340,16 @@ export async function notifyUsersRequestsAvailablePush(
 
     const deduped = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const sub = userSubs[0];
-      if (!sub) return [];
+      if (!userSubs.length) return [];
       const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
       const payload = {
         title: "Now Available",
         body: `Your ${mediaLabel} ${r.title} is ready to watch`,
         url: "/requests",
       };
-      return [sendPush(keys, sub, payload)];
+      // Send to ALL of the user's devices — matches the approved/declined push
+      // siblings; previously only userSubs[0] got the "now available" push.
+      return userSubs.map((s) => sendPush(keys, s, payload));
     });
     await Promise.allSettled(deduped);
   } catch (err) {
