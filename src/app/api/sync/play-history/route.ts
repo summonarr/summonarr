@@ -248,12 +248,15 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
             // re-create so subsequent polls don't resurrect it. SSE feed normally
             // catches this faster; this is the fallback when SSE is down or the
             // client never sent a state="stopped" notification.
-            markPlexSessionFinalized(sessionId, nowMs);
             try {
               await recordCompletedSession(
                 applyFinalTick(existing, now),
                 { skipSSE: true, stoppedAt: now },
               );
+              // Ledger AFTER the write (GR27): a failed record must not ledger-lock
+              // the sessionKey for an hour with no history row — let the next poll
+              // re-observe the stall and retry the finalize.
+              markPlexSessionFinalized(sessionId, nowMs);
             } catch (err) {
               console.warn(`[play-history] stall-finalize failed for ${sessionId}:`, err);
             }
@@ -603,7 +606,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           year: s.year != null ? String(s.year) : null,
           seasonNumber: s.seasonNumber ?? null,
           episodeNumber: s.episodeNumber ?? null,
-          episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ")[1] ?? null) : null,
+          episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
           sourceItemId: s.itemId,
           posterPath: jfPosterPath,
           progressPercent,
