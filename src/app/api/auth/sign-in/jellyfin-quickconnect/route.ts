@@ -40,7 +40,11 @@ export async function POST(req: NextRequest) {
   // Verify the QC secret was issued by THIS server to THIS browser. Without
   // this, an attacker who phishes a secret can redeem it from their own
   // browser and end up with a Summonarr session as the approving user.
-  const cookieToken = readQcFlowCookie(req.headers.get("cookie"));
+  // Native clients have no cookie jar — fall back to the flowState the QC
+  // initiation route returns in the body for them (CORS-sound: a cross-origin
+  // page can't read that body). Web keeps using the HttpOnly cookie.
+  const cookieToken = readQcFlowCookie(req.headers.get("cookie"))
+    ?? (typeof body.flowState === "string" ? body.flowState : null);
   if (!cookieToken) {
     return NextResponse.json({ error: "QuickConnect flow expired" }, { status: 400 });
   }
