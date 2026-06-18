@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       }
       void logAudit({
         userId: claims.id,
-        userName: "unknown",
+        userName: claims.name ?? claims.email ?? "unknown",
         action: "AUTH_LOGOUT",
         target: "auth:logout",
         provider: claims.provider ?? null,

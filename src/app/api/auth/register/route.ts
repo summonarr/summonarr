@@ -44,6 +44,12 @@ export async function POST(req: NextRequest) {
   if (!email || !password) {
     return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
   }
+  if (typeof password !== "string") {
+    // Guard before the .length checks + hashPassword below — a non-string password
+    // (e.g. a JSON number) is truthy, so it slips past `!password` and then crashes
+    // hashPassword with a TypeError. Mirrors the email typeof check.
+    return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+  }
 
   if (typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
     return NextResponse.json({ error: "Invalid email address" }, { status: 400 });

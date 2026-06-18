@@ -50,6 +50,11 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     );
   }
 
+  if (currentPassword !== undefined && typeof currentPassword !== "string") {
+    // A non-string currentPassword would reach bcrypt and throw an opaque
+    // TypeError; reject it explicitly (mirrors the newPassword guard above).
+    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+  }
   const currentOk = await verifyPassword(currentPassword ?? "", user.passwordHash);
   if (!currentOk) {
     return NextResponse.json({ error: "Invalid password" }, { status: 400 });
