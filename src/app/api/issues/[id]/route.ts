@@ -110,7 +110,10 @@ export const PATCH = withIssueAdmin(async (
       );
     }
   } else if (Object.keys(updateData).length > 0) {
-    await prisma.issue.update({ where: { id }, data: updateData });
+    // updateMany (not update) so a concurrent delete returns count:0 instead of
+    // throwing an unhandled P2025.
+    const r = await prisma.issue.updateMany({ where: { id }, data: updateData });
+    if (r.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
   const updated = await prisma.issue.findUnique({ where: { id } });
