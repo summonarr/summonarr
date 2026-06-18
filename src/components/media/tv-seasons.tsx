@@ -55,16 +55,19 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   });
 
   const toggleSeason = useCallback(
-    async (seasonNumber: number) => {
+    async (seasonNumber: number, forceReload = false) => {
       const current = state[seasonNumber];
       if (!current) return;
 
-      if (current.expanded) {
+      // forceReload (the Retry button) skips the collapse + already-loaded
+      // short-circuits and re-runs the fetch below — otherwise Retry, fired from
+      // inside the expanded error panel, just collapsed the panel.
+      if (current.expanded && !forceReload) {
         setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: false } }));
         return;
       }
 
-      if (current.loadState === "ready") {
+      if (current.loadState === "ready" && !forceReload) {
         setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: true } }));
         return;
       }
@@ -280,7 +283,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       Failed to load episodes.{" "}
                       <button
                         type="button"
-                        onClick={() => toggleSeason(season.seasonNumber)}
+                        onClick={() => toggleSeason(season.seasonNumber, true)}
                         className="underline transition-colors"
                         style={{
                           background: "transparent",

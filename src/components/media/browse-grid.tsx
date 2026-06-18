@@ -62,7 +62,7 @@ export function BrowseGrid({
   const hideAvailable = searchParams.get("hideAvailable") === "1";
   const page          = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
 
-  const fetchResults = useCallback(async () => {
+  const fetchResults = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
@@ -79,14 +79,19 @@ export function BrowseGrid({
       if (watchProvider) params.set("watchProvider", watchProvider);
       if (hideAvailable) params.set("hideAvailable", "1");
 
-      const res = await fetch(`/api/browse?${params.toString()}`);
+      const res = await fetch(`/api/browse?${params.toString()}`, { signal });
       if (!res.ok) return;
       const data = await res.json() as BrowseResult;
       setItems(data.items);
       setTotalPages(data.totalPages);
       setCurrentPage(data.page);
+    } catch (err) {
+      // A superseded fetch (filters changed mid-flight) is aborted — ignore it so
+      // the newer request's results aren't clobbered by this stale one. Leave the
+      // prior results in place on any other error.
+      if ((err as Error)?.name === "AbortError") return;
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
   }, [mediaType, page, genreId, keywordId, minRating, ratingFilter, minVoteCount, fromYear, toYear, sortBy, watchProvider, hideAvailable]);
 
@@ -96,7 +101,9 @@ export function BrowseGrid({
       setIsInitial(false);
       return;
     }
-    fetchResults();
+    const controller = new AbortController();
+    fetchResults(controller.signal);
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchResults]);
 

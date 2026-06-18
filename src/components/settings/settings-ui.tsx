@@ -3532,15 +3532,28 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
 
   async function toggle() {
     const next = !disabled;
+    const prev = disabled;
     setDisabled(next);
     setStatus("saving");
-    const res = await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ disableLocalLogin: next ? "true" : "false" }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ disableLocalLogin: next ? "true" : "false" }),
+      });
+      const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
+      if (!data.ok) {
+        // Roll back the optimistic toggle so the switch doesn't show a state the
+        // server rejected (or a network error never persisted).
+        setDisabled(prev);
+        setStatus("error");
+      } else {
+        setStatus("ok");
+      }
+    } catch {
+      setDisabled(prev);
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
