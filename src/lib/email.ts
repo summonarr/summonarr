@@ -96,6 +96,12 @@ async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
   if (!cfg.smtpHost) throw new Error("SMTP host not configured");
   const resolved = await resolveSafeSmtpHost(cfg.smtpHost);
   const port = parseInt(cfg.smtpPort ?? "587", 10);
+  if (isNaN(port) || port <= 0 || port > 65535) {
+    // A non-numeric/out-of-range Setting value would otherwise make `secure` and
+    // `requireTLS` both false and then crash net.connect with an opaque
+    // "Port should be >= 0 and < 65536" deep in a fire-and-forget notifier.
+    throw new Error(`Invalid SMTP port: ${cfg.smtpPort}`);
+  }
   const isLocalhost = /^localhost$/i.test(cfg.smtpHost);
   return {
     // Hand TLS the original hostname for SNI + certificate-name validation, while the TCP layer
@@ -416,7 +422,9 @@ export async function notifyAdminsNewIssue(data: {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    const to = await getAdminEmails();
+    // ISSUE_ADMINs must get the new-issue email too — the push counterpart
+    // already targets them. getAdminEmails() is ADMIN-only.
+    const to = await getIssueAdminEmails();
     if (!to.length) return;
 
     const mediaLabel = mediaLabelOf(data.mediaType);
