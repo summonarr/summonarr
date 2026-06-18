@@ -406,14 +406,17 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   );
   const finalized = await Promise.all(
     stale.map((session) => {
-      // Gate re-create against a racey Plex /status/sessions reappearance,
-      // same as the stall path above.
-      markPlexSessionFinalized(session.id, nowMs);
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
       // activity:history-updated after the full sync run completes, so we
       // don't trigger N refetches per cron tick.
       return recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
-        .then(() => true)
+        .then(() => {
+          // Ledger AFTER the write commits (GR27): gate re-create against a racey
+          // Plex reappearance only once the PlayHistory row exists, so a failed
+          // write doesn't ledger-lock the sessionKey with no row for an hour.
+          markPlexSessionFinalized(session.id, nowMs);
+          return true;
+        })
         .catch(() => false);
     }),
   );
