@@ -215,9 +215,14 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
 
   return filtered.map((m) => {
     const arrMap = m.plex.mediaType === "MOVIE" ? movieArr : tvArr;
-    // Basename match (see buildArrPathMap): compare folder names, not absolute
-    // paths, so differing Plex/arr mount roots still line up.
-    const folder = (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
+    // Match the arr map key (buildArrPathMap keys by the arr path basename): for
+    // TV that's the SERIES folder — m.relativePath is already reduced to it by
+    // toMatchKey — while for movies it's the movie's own folder (the file's
+    // parent). Using folderOf for TV yields the SEASON folder and never matches
+    // Sonarr, so split by mediaType (same selector as movieArr/tvArr above).
+    const folder = m.plex.mediaType === "TV"
+      ? m.relativePath
+      : (folderOf(m.plex.filePath) || folderOf(m.jellyfin.filePath)).split("/").pop() ?? "";
     const arrTmdbId = arrMap.get(folder) ?? null;
 
     let arrVerdict: "plex" | "jellyfin" | null = null;
