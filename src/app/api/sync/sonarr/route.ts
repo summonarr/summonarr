@@ -18,7 +18,10 @@ export async function POST(req: NextRequest) {
       ]);
       if (result === null) {
         console.warn("[sync/sonarr] skipping cache update — ARR fetch failed");
-        return NextResponse.json({ skipped: true, reason: "arr-unavailable" });
+        // 502 (not 200) so withCronRunRecording marks this run failed — the cache
+        // was NOT refreshed and pending badges may be stale. Unconfigured Sonarr
+        // returns empty sets, so null only fires on a real fetch failure.
+        return NextResponse.json({ skipped: true, reason: "arr-unavailable" }, { status: 502 });
       }
       const wantedHd    = Array.from(result.wanted).map((tmdbId) => ({ tmdbId, is4k: false }));
       const availableHd = Array.from(result.available).map((tmdbId) => ({ tmdbId, is4k: false }));

@@ -45,7 +45,11 @@ export async function POST(request: NextRequest) {
     prisma.setting.findUnique({ where: { key: "omdbApiKey" } }),
   ]);
   if (!mdblistKey?.value && !omdbKey?.value) {
-    return NextResponse.json({ skipped: true, reason: "no ratings API key configured" });
+    // Record the skip so the cron dashboard's last-run timestamp still updates
+    // when no ratings key is configured (the sync legitimately did nothing).
+    return withCronRunRecording("ratings-sync", async () =>
+      NextResponse.json({ skipped: true, reason: "no ratings API key configured" }),
+    );
   }
 
   return withCronRunRecording("ratings-sync", () => withAdvisoryLock(
