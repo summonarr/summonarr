@@ -340,6 +340,24 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **The force-upgrade CTA URL is hardcoded in the client** (iOS `AppInfo.appStoreURL`), NEVER taken from a server response. The server may send a message string, never a link the client opens.
     - **Floors are for breaking changes; feature-gate for graceful degradation.** `MIN_API_VERSION`, the client's `requiredServerApiVersion`, and `MIN_CLIENT` are HARD floors — the accepted version *range* is `[floor, ∞)`, not an exact pin. Raise a floor ONLY when a peer genuinely cannot function. To keep supporting an older peer that merely *lacks* a newer feature, leave the floor and gate that feature on the reported `apiVersion` (the iOS client reads `X-Summonarr-Api` → `SessionStore.serverSupports(N)`). Bumping a floor per feature collapses the range into a hard cutoff — the opposite of "support a prior version for a while."
 
+26. **NEVER `logAuditOrFail` after a mutation that has already committed.** Use `logAudit` (the swallowing variant) post-commit.
+
+    Why:
+    - `logAuditOrFail` ([src/lib/audit.ts](src/lib/audit.ts)) re-throws on a failed audit write — it exists for use *inside* a `$transaction`, where a failed audit should roll the whole thing back.
+    - Called *after* a `prisma.x.delete`/`update`/raw mutation has already committed (no enclosing tx), a transient audit-write failure returns **500 on a successful destructive operation**. The retry then 404s (row already gone) with no audit trail, or re-applies and double-audits (role-change).
+    - This was the failure mode in six routes (user delete + role-change, play-history delete, DB restore, Plex + Jellyfin terminate, cache clear) — all switched to `void logAudit(...)`.
+
+    Rule: `logAuditOrFail` is legitimate **only** as the last op inside a `$transaction` (so its throw rolls back the mutation it audits). Anywhere the mutation is already durable, use `logAudit` — its contract is "a failed audit write must never break the triggering request."
+
+27. **In-memory ledgers / "force-revalidate" marks go AFTER the DB write they guard, not before.**
+
+    Why:
+    - Several finalize/revocation paths keep an in-process set (`recentlyFinalizedPlexSessions`, `markSessionForceRevoked`) alongside a DB write (`recordCompletedSession`, AuthSession delete). The in-memory mark is the single-replica fast path; the DB row is the source of truth.
+    - Marking *before* the write means a failed/rolled-back write leaves the ledger asserting a state the DB doesn't reflect: a session ledger-locked with no `PlayHistory` row (the now-playing card never returns for ~1h), or a "revoked" mark on a row that's still live (resurrects on restart).
+    - `revokeAllUserSessions` already does it right (mark after the tx); `revokeSessionById` was fixed to match.
+
+    Rule: write the DB row first; only on success update the in-memory ledger. If the write throws, let it propagate so the caller learns the operation failed instead of trusting a phantom mark.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
