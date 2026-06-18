@@ -119,6 +119,17 @@ export async function POST(req: NextRequest) {
   }
 
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
+  // Post-read cap for Transfer-Encoding: chunked uploads, where checkBodySize's
+  // Content-Length check above can't fire (mirrors db-import-chunk). Release the
+  // slot claimed on chunk 0 so an oversized first chunk doesn't strand the
+  // uploader for the session TTL.
+  if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
+    if (chunkIndex === 0) await clearSession(uploadId);
+    return NextResponse.json(
+      { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
+      { status: 413 },
+    );
+  }
   const append = await appendChunk(uploadId, chunkIndex, chunkBytes);
   if (!append.ok) {
     const e = append.error;
