@@ -1,0 +1,95 @@
+import { NextResponse } from "next/server";
+import { withAuth } from "@/lib/api-auth";
+import { invalidateUserSession } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
+
+// Thrown inside the deactivation transaction to roll it back when the caller is
+// the last active admin (guardrail 23: propagate out of the tx, don't swallow).
+class LastAdminError extends Error {}
+
+// DELETE /api/profile — the signed-in user deletes their OWN account.
+//
+// Required by App Store Review Guideline 5.1.1(v). We satisfy it with
+// ANONYMIZE + DISABLE rather than a hard row delete: the user's personal data is
+// scrubbed (name / email / password / image / Discord / notification email +
+// the Plex/Jellyfin provider-subject keys + their OAuth Account rows), every
+// session is revoked, and the row is marked `deactivatedAt` so it can never sign
+// in again — but their requests / votes / issues stay attached to the now
+// de-identified "Deleted user" row so the instance keeps its history. A bare
+// "disable" that retained personal data would NOT satisfy 5.1.1(v); the PII scrub
+// is what makes this a deletion.
+export const DELETE = withAuth(async (req, _ctx, session) => {
+  const id = session.user.id;
+
+  const target = await prisma.user.findUnique({
+    where: { id },
+    select: { role: true, name: true, email: true, deactivatedAt: true },
+  });
+  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (target.deactivatedAt) return NextResponse.json({ ok: true }); // idempotent
+
+  const now = new Date();
+  // RFC-2606 reserved `.invalid` TLD — never routable, and `id` keeps it unique.
+  const anon = {
+    name: "Deleted user",
+    email: `deleted-${id}@deleted.invalid`,
+    emailVerified: null,
+    image: null,
+    passwordHash: null,
+    discordId: null,
+    notificationEmail: null,
+    plexClientId: null,
+    plexUserId: null,
+    jellyfinUserId: null,
+    deactivatedAt: now,
+    sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
+  };
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (target.role === "ADMIN") {
+        // Never let the LAST active admin self-delete and lock the instance out of
+        // administration. Advisory lock 42 + an atomic count of non-deactivated
+        // admins mirrors the admin-delete CAS. A 0-row result throws to roll the
+        // whole anonymization back.
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+        const rows = await tx.$executeRaw`
+          UPDATE "User" SET "deactivatedAt" = ${now}
+          WHERE id = ${id} AND "deactivatedAt" IS NULL
+          AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
+        `;
+        if (rows === 0) throw new LastAdminError();
+      }
+      // Remove provider tokens/subject (OAuth) + every device session, then
+      // anonymize the row in place (keeps requests/votes/issues linked).
+      await tx.account.deleteMany({ where: { userId: id } });
+      await tx.authSession.deleteMany({ where: { userId: id } });
+      await tx.session.deleteMany({ where: { userId: id } });
+      await tx.user.update({ where: { id }, data: anon });
+    });
+  } catch (err) {
+    if (err instanceof LastAdminError) {
+      return NextResponse.json(
+        { error: "You are the last admin. Promote another user to admin before deleting your account." },
+        { status: 400 },
+      );
+    }
+    throw err;
+  }
+
+  invalidateUserSession(id);
+
+  // Account already anonymized; a failed audit write must not 500 a successful
+  // destructive op (guardrail 26 — logAudit swallows write failures).
+  void logAudit({
+    userId: id,
+    userName: target.name ?? target.email ?? "unknown",
+    action: "USER_DELETE",
+    target: `user:${id}`,
+    details: { kind: "self-delete-anonymize", before: { role: target.role } },
+    ...auditContext(req, session),
+  });
+
+  return NextResponse.json({ ok: true });
+});
