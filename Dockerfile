@@ -94,9 +94,19 @@ FROM node:26.3.0-alpine3.23@sha256:144769ec3f32e8ee36b3cfde91e82bee25d9367b20f31
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).
+# The base image is pinned by digest, so the `apk upgrade` layer never
+# invalidates on its own — without a literal change to this RUN, BuildKit's gha
+# cache (docker-publish.yml: cache-from/to type=gha) replays the layer frozen at
+# whatever Alpine packages were current when it was first cached, so OS-package
+# CVE fixes never reach a rebuilt image (this is why published images stayed on
+# libssl3 3.5.6-r0 after 3.5.7-r0 shipped). The explicit floored `apk add` both
+# (a) changes this RUN string to force the layer to rebuild and pull current
+# patches and (b) fails the build loudly if Alpine can't satisfy the patched
+# version. Bump the floor when the next libssl3/libcrypto3 CVE lands.
 # Remove npm and npx — the entrypoint uses node directly; no npm needed at runtime.
 # This eliminates the entire class of npm-bundled CVEs (picomatch, brace-expansion, etc).
 RUN apk upgrade --no-cache && \
+    apk add --no-cache 'libssl3>=3.5.7-r0' 'libcrypto3>=3.5.7-r0' && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production

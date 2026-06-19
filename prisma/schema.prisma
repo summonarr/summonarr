@@ -23,6 +23,11 @@ model User {
   // gives admins a one-shot "log this user out everywhere" primitive that is
   // honored on every replica's next refresh.
   sessionsRevokedAt DateTime?
+  // Set when the user self-deletes their account (App Store Guideline 5.1.1(v)).
+  // The row is ANONYMIZED in place — PII scrubbed, provider-subject keys + OAuth
+  // rows cleared — so their requests/votes/issues survive de-identified, but the
+  // account can never sign in again. Excluded from the "last active admin" count.
+  deactivatedAt DateTime?
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -607,6 +612,7 @@ enum AuditAction {
   CACHE_WARM
   RATINGS_CACHE_CLEAR
   ISSUE_DELETE
+  CONTENT_REPORT
   PLAY_HISTORY_BACKFILL
   PLAY_HISTORY_DELETE
   AUDIT_LOG_EXPORT

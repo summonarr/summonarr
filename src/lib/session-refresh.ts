@@ -89,6 +89,7 @@ export async function verifyAndRefreshSession(
         mediaServer: true,
         sessionsRevokedAt: true,
         passwordChangedAt: true,
+        deactivatedAt: true,
         email: true,
         notificationEmail: true,
       },
@@ -97,6 +98,11 @@ export async function verifyAndRefreshSession(
 
   if (!authSessionRow) return null;
   if (!dbUser) return null;
+
+  // A self-deleted (anonymized + disabled) account can never re-authenticate,
+  // even within a still-valid JWT exp window — absolute, not an iat cutoff.
+  // Set by self-account-deletion (src/app/api/profile/route.ts).
+  if (dbUser.deactivatedAt) return null;
 
   const revokedSec = dbUser.sessionsRevokedAt
     ? Math.floor(dbUser.sessionsRevokedAt.getTime() / 1000)

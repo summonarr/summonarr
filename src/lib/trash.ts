@@ -869,7 +869,7 @@ export async function applyCustomFormats(
   });
   if (specs.length === 0) return [];
 
-  let remoteByName = new Map<string, number>();
+  let remoteByName: Map<string, number>;
   try {
     const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/customformat");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
@@ -1310,7 +1310,7 @@ export async function applyQualityProfiles(
   });
   if (specs.length === 0) return [];
 
-  let remoteByName = new Map<string, number>();
+  let remoteByName: Map<string, number>;
   try {
     const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/qualityprofile");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
