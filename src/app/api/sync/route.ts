@@ -94,7 +94,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   let marked = 0;
   let reverted = 0;
   let repushed = 0;
-  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string }> = [];
+  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string; tmdbId: number }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -127,7 +127,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
     const winners = await claimAvailableNotificationWinners(nowAvailableApproved, { markAvailable: true });
     const winnerIds = new Set(winners.map((w) => w.id));
     for (const req of winners) {
-      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType });
+      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId });
     }
     if (winnerIds.size > 0) {
       // The helper sets status/availableAt/notifiedAvailable but not pendingNotifyAt.

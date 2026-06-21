@@ -24,8 +24,16 @@ export const POST = withAuth(async (_req, _ctx, session) => {
     return NextResponse.json({ error: "No push subscription found for your account — try unsubscribing and re-subscribing" }, { status: 404 });
   }
 
+  // This route tests Web Push (VAPID) only. Native (iOS/APNs) rows carry a
+  // deviceToken with null p256dh/auth and are delivered via the relay, not here.
+  type WebSub = (typeof subs)[number] & { p256dh: string; auth: string };
+  const webSubs = subs.filter((s): s is WebSub => s.p256dh !== null && s.auth !== null);
+  if (!webSubs.length) {
+    return NextResponse.json({ error: "No web push subscription to test — this account only has native app push registered." }, { status: 404 });
+  }
+
   const results = await Promise.all(
-    subs.map(async (sub) => {
+    webSubs.map(async (sub) => {
       try {
         await sendPushNotification(
           {

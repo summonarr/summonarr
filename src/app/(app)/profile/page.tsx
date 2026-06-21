@@ -7,6 +7,7 @@ import { NotificationPrefs } from "@/components/profile/notification-prefs";
 import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
+import { DeleteAccount } from "@/components/profile/delete-account";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
@@ -129,6 +130,13 @@ export default async function ProfilePage() {
                 isCurrent: s.sessionId === currentSessionId,
               }))}
             />
+          </ProfileCard>
+
+          <ProfileCard
+            title="Delete Account"
+            description="Permanently delete your account and personal data."
+          >
+            <DeleteAccount />
           </ProfileCard>
         </div>
 

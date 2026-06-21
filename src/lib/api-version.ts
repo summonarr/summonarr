@@ -11,7 +11,8 @@
 
 // Current contract version the server speaks. Advertised via X-Summonarr-Api
 // and GET /api/config/compat. Bump on a breaking contract change.
-export const API_VERSION = 1;
+// v2: APNs push registration (POST/DELETE /api/push/apns) + iOS relay push.
+export const API_VERSION = 2;
 
 // Oldest contract version the server still answers. Bump only when you drop
 // backward-compatible support for an old client contract.

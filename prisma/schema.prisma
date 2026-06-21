@@ -116,13 +116,16 @@ model User {
 }
 
 model PushSubscription {
-  id        String   @id @default(cuid(2))
-  userId    String
-  endpoint  String   @unique
-  p256dh    String
-  auth      String
-  label     String?
-  createdAt DateTime @default(now())
+  id          String   @id @default(cuid(2))
+  userId      String
+  endpoint    String   @unique
+  platform    String   @default("web") // "web" (VAPID Web Push) | "ios" (APNs)
+  p256dh      String? // web only (VAPID)
+  auth        String? // web only (VAPID)
+  deviceToken String? // ios only — APNs device token, encrypted at the route (guardrail 7a)
+  publicKey   String? // ios only — device P-256 public key (X9.63 base64) for E2E push; public, NOT encrypted
+  label       String?
+  createdAt   DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

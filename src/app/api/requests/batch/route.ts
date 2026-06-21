@@ -125,7 +125,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // were left untouched by updateMany and must not get a duplicate decline ping.
     const declined = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
-      select: { requestedBy: true, title: true, mediaType: true },
+      select: { requestedBy: true, title: true, mediaType: true, tmdbId: true },
     });
     notifyUsersRequestsDeclined(declined, typedAdminNote).catch(() => {});
     notifyUsersRequestsDeclinedPush(declined).catch(() => {});
