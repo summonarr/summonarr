@@ -139,7 +139,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
 
   if (isAdmin) {
     void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
-    void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text }).catch(() => {});
+    void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
     void prisma.user
       .findUnique({
         where: { id: issue.reportedBy },
@@ -153,11 +153,11 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
       })
       .catch(() => {});
     void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
     void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   } else {
     void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
     void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   }
 

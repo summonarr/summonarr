@@ -2,8 +2,28 @@ import { generateVapidKeys, sendPushNotification } from "@/lib/web-push";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { isFeatureEnabled } from "@/lib/features";
+import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { encryptForDevice } from "@/lib/push-e2e";
 
-async function getVapidKeysRaw(): Promise<{ publicKey: string; privateKey: string; contact: string } | null> {
+type VapidKeys = { publicKey: string; privateKey: string; contact: string };
+
+// Shape every notify* helper passes to sendPush. `title`/`body` are the rich web
+// text; `category` selects the GENERIC iOS alert (see APNS_ALERTS) so no titles
+// or usernames ever reach the central relay.
+type PushPayload = { title: string; body: string; url: string; category: ApnsCategory; deepLink?: string };
+
+// Row shape sendPush consumes — structurally satisfied by prisma.pushSubscription
+// findMany results (web rows have p256dh/auth; ios rows have deviceToken).
+type PushRow = {
+  endpoint: string;
+  platform: string;
+  p256dh: string | null;
+  auth: string | null;
+  deviceToken: string | null;
+  publicKey: string | null;
+};
+
+async function getVapidKeysRaw(): Promise<VapidKeys | null> {
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["vapidPublicKey", "vapidPrivateKey", "smtpFrom", "smtpUser"] } },
   });
@@ -11,12 +31,6 @@ async function getVapidKeysRaw(): Promise<{ publicKey: string; privateKey: strin
   if (!cfg.vapidPublicKey || !cfg.vapidPrivateKey) return null;
   const contact = `mailto:${cfg.smtpFrom || cfg.smtpUser || "admin@localhost"}`;
   return { publicKey: cfg.vapidPublicKey, privateKey: cfg.vapidPrivateKey, contact };
-}
-
-// Send-path variant — returns null when the push integration feature flag is disabled so all notification helpers short-circuit through their existing `if (!keys) return` guards. Key bootstrapping (getOrCreateVapidPublicKey) uses getVapidKeysRaw directly so keys can still be inspected/generated even when sends are disabled.
-async function getVapidKeys(): Promise<{ publicKey: string; privateKey: string; contact: string } | null> {
-  if (!(await isFeatureEnabled("feature.integration.push"))) return null;
-  return getVapidKeysRaw();
 }
 
 export async function getOrCreateVapidPublicKey(): Promise<string> {
@@ -53,6 +67,113 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
   return keys?.publicKey ?? generated.publicKey;
 }
 
+// ── iOS (APNs via the central relay) ─────────────────────────────────────────
+
+type ApnsCategory =
+  | "new_request"
+  | "approved"
+  | "declined"
+  | "available"
+  | "issue_reply"
+  | "new_issue"
+  | "grab_complete"
+  | "manual_interaction"
+  | "deletion_votes";
+
+// Generic, content-free alerts sent to iOS through the relay. They deliberately
+// omit media titles and usernames — the relay is operated centrally and must
+// never see them; the app loads the real details on tap from the user's own
+// server. Web Push keeps its rich text (it goes to the user's browser vendor,
+// not our relay) — only the iOS branch swaps in these generics.
+const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
+  new_request: { title: "New request", body: "A new request needs review" },
+  approved: { title: "Request approved", body: "Open Summonarr to see details" },
+  declined: { title: "Request declined", body: "Open Summonarr to see details" },
+  available: { title: "Now available", body: "Something you requested is ready to watch" },
+  issue_reply: { title: "New reply", body: "There's new activity on an issue" },
+  new_issue: { title: "New issue", body: "A new issue was reported" },
+  grab_complete: { title: "Download complete", body: "A download has finished" },
+  manual_interaction: { title: "Manual import needed", body: "A download needs your attention" },
+  deletion_votes: { title: "Deletion votes", body: "A title reached the deletion-vote threshold" },
+};
+
+// Default relay operated by the app publisher. Overridable per-server via the
+// `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay). TODO: set this
+// to the real production relay host before the iOS push feature ships.
+const DEFAULT_APNS_RELAY_URL = "https://push.summonarr.app/push";
+
+async function getApnsRelayUrl(): Promise<string> {
+  const row = await prisma.setting.findUnique({ where: { key: "apnsRelayUrl" } });
+  return row?.value?.trim() || DEFAULT_APNS_RELAY_URL;
+}
+
+async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
+  if (!subscription.deviceToken) return false;
+  const alert = APNS_ALERTS[payload.category];
+  const apnsPayload: Record<string, unknown> = {
+    aps: { alert: { title: alert.title, body: alert.body }, sound: "default" },
+    url: payload.url,
+  };
+
+  // If the device registered an E2E public key, encrypt the REAL title/body and
+  // mark the payload mutable so the on-device Notification Service Extension
+  // rewrites the banner. The relay only ever sees ciphertext + the generic
+  // placeholder above (shown if decryption is unavailable). Falls back to the
+  // placeholder on any encrypt failure.
+  if (subscription.publicKey) {
+    try {
+      const blob = encryptForDevice(
+        subscription.publicKey,
+        // `u` (the item deep link) rides INSIDE the encrypted blob — it can carry
+        // a tmdbId, which must never reach the relay in cleartext.
+        JSON.stringify({ t: payload.title, b: payload.body, ...(payload.deepLink ? { u: payload.deepLink } : {}) }),
+      );
+      (apnsPayload.aps as Record<string, unknown>)["mutable-content"] = 1;
+      apnsPayload.e2e = blob;
+    } catch (err) {
+      console.error("[push] e2e encrypt failed:", err instanceof Error ? err.message : err);
+    }
+  }
+
+  try {
+    const token = decryptToken(subscription.deviceToken, "PushSubscription.deviceToken");
+    const relayUrl = await getApnsRelayUrl();
+    const res = await safeFetchAdminConfigured(relayUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // collapseId groups same-category alerts so a batch (e.g. several requests
+      // flipping available at once) shows as one notification on the device.
+      body: JSON.stringify({ deviceToken: token, payload: apnsPayload, collapseId: payload.category }),
+      timeoutMs: 10_000,
+    });
+    if (!res.ok) {
+      // 5xx / timeouts are transient — keep the token, no prune.
+      console.error(`[push] APNs relay HTTP ${res.status}`);
+      return false;
+    }
+    const data = (await res.json().catch(() => null)) as { ok?: boolean; reason?: string } | null;
+    if (data?.reason === "unregistered") {
+      await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
+      return false;
+    }
+    return data?.ok === true;
+  } catch (err) {
+    console.error("[push] APNs relay send failed:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+// ── shared send path ─────────────────────────────────────────────────────────
+
+// Returns the VAPID keys (possibly null) when push is enabled, or null when the
+// integration flag is off so all notify helpers short-circuit. Keys may be null
+// even when enabled — iOS push goes through the relay and needs no VAPID setup,
+// so we must NOT abort the whole send just because web keys aren't configured.
+async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
+  if (!(await isFeatureEnabled("feature.integration.push"))) return null;
+  return { keys: await getVapidKeysRaw() };
+}
+
 async function getAdminSubscriptions() {
   return prisma.pushSubscription.findMany({
     where: { user: { role: "ADMIN" } },
@@ -78,10 +199,16 @@ async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restri
 }
 
 async function sendPush(
-  keys: { publicKey: string; privateKey: string; contact: string },
-  subscription: { endpoint: string; p256dh: string; auth: string },
-  payload: object
+  keys: VapidKeys | null,
+  subscription: PushRow,
+  payload: PushPayload,
 ): Promise<boolean> {
+  if (subscription.platform === "ios") {
+    return sendApns(subscription, payload);
+  }
+
+  // web (VAPID) — needs both the configured keys and the subscription's crypto material
+  if (!keys || !subscription.p256dh || !subscription.auth) return false;
   try {
     await sendPushNotification(
       {
@@ -91,12 +218,11 @@ async function sendPush(
           auth: decryptToken(subscription.auth, "PushSubscription.auth"),
         },
       },
-      JSON.stringify(payload),
+      JSON.stringify({ title: payload.title, body: payload.body, url: payload.url }),
       { contact: keys.contact, vapidPublicKey: keys.publicKey, vapidPrivateKey: keys.privateKey },
     );
     return true;
   } catch (err: unknown) {
-
     const status = (err as { statusCode?: number }).statusCode;
     // 410 Gone / 404 Not Found means the subscription was revoked by the browser — remove it to stop retrying
     if (status === 410 || status === 404) {
@@ -108,26 +234,36 @@ async function sendPush(
   }
 }
 
+// Builds the encrypted-only media deep link (/media/<type>/<tmdbId>). Undefined
+// when no tmdbId is available, leaving that notification tab-level.
+function mediaDeepLink(mediaType: string, tmdbId: number | null | undefined): string | undefined {
+  if (tmdbId == null) return undefined;
+  return `/media/${mediaType === "MOVIE" ? "movie" : "tv"}/${tmdbId}`;
+}
+
 export async function notifyAdminsNewRequestPush(data: {
   title: string;
   mediaType: string;
   requestedBy: string;
+  tmdbId?: number;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
     const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload = {
+    const payload: PushPayload = {
       title: `New ${mediaLabel} Request`,
       body: `${data.title} — requested by ${data.requestedBy}`,
       url: "/admin",
+      category: "new_request",
+      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
     };
 
-    await Promise.allSettled(subs.map((s: { endpoint: string; p256dh: string; auth: string }) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify admins (request):", err);
   }
@@ -137,23 +273,25 @@ export async function notifyUserIssueMessagePush(data: {
   userId: string;
   title: string;
   body: string;
+  issueId?: string;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { notifyOnIssue: true } },
     });
     if (!subs.length) return;
 
-    const payload = {
+    const payload: PushPayload = {
       title: `Admin replied on: ${data.title}`,
       body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
-      url: "/issues",
+      url: data.issueId ? `/issues/${data.issueId}` : "/issues",
+      category: "issue_reply",
     };
 
-    await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify user (issue message):", err);
   }
@@ -166,10 +304,11 @@ export async function notifyAdminsIssueMessagePush(data: {
   excludeUserId?: string;
   fromAdmin?: boolean;
   restrictToUserId?: string;
+  issueId?: string;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await getIssueAdminSubscriptions({
       excludeUserId: data.excludeUserId,
@@ -177,13 +316,14 @@ export async function notifyAdminsIssueMessagePush(data: {
     });
     if (!subs.length) return;
 
-    const payload = {
+    const payload: PushPayload = {
       title: data.fromAdmin ? `Admin reply on issue: ${data.title}` : `User reply on issue: ${data.title}`,
       body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
-      url: "/admin/issues",
+      url: data.issueId ? `/issues/${data.issueId}` : "/admin/issues",
+      category: "issue_reply",
     };
 
-    await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify admins (issue message):", err);
   }
@@ -218,8 +358,8 @@ export async function notifyAdminGrabCompletedPush(data: {
   issueId: string;
 }): Promise<AdminGrabPushOutcome> {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return "skipped-no-keys";
+    const ctx = await pushContext();
+    if (!ctx) return "skipped-no-keys";
 
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
     if (!subs.length) return "skipped-no-subs";
@@ -231,13 +371,14 @@ export async function notifyAdminGrabCompletedPush(data: {
       scopeLabel = ` Season ${data.seasonNumber}`;
     }
 
-    const payload = {
+    const payload: PushPayload = {
       title: "Download complete",
       body: `${data.title}${scopeLabel} has finished downloading`,
-      url: "/admin/issues",
+      url: `/issues/${data.issueId}`,
+      category: "grab_complete",
     };
 
-    const results = await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
+    const results = await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
     const anyDelivered = results.some((r) => r.status === "fulfilled" && r.value === true);
     return anyDelivered ? "delivered" : "failed";
   } catch (err) {
@@ -250,10 +391,11 @@ export async function notifyUserRequestApprovedPush(data: {
   userId: string;
   title: string;
   mediaType: string;
+  tmdbId?: number;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const user = await prisma.user.findUnique({
       where: { id: data.userId },
@@ -265,13 +407,15 @@ export async function notifyUserRequestApprovedPush(data: {
     if (!subs.length) return;
 
     const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload = {
+    const payload: PushPayload = {
       title: "Request Approved",
       body: `Your ${mediaLabel} request for ${data.title} has been approved`,
       url: "/requests",
+      category: "approved",
+      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
     };
 
-    await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify user (approved):", err);
   }
@@ -281,10 +425,11 @@ export async function notifyUserRequestDeclinedPush(data: {
   userId: string;
   title: string;
   mediaType: string;
+  tmdbId?: number;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const user = await prisma.user.findUnique({
       where: { id: data.userId },
@@ -296,25 +441,27 @@ export async function notifyUserRequestDeclinedPush(data: {
     if (!subs.length) return;
 
     const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload = {
+    const payload: PushPayload = {
       title: "Request Declined",
       body: `Your ${mediaLabel} request for ${data.title} was not approved`,
       url: "/requests",
+      category: "declined",
+      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
     };
 
-    await Promise.allSettled(subs.map((s) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify user (declined):", err);
   }
 }
 
 export async function notifyUsersRequestsAvailablePush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
 ) {
   if (requests.length === 0) return;
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
@@ -342,14 +489,16 @@ export async function notifyUsersRequestsAvailablePush(
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
       if (!userSubs.length) return [];
       const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-      const payload = {
+      const payload: PushPayload = {
         title: "Now Available",
         body: `Your ${mediaLabel} ${r.title} is ready to watch`,
         url: "/requests",
+        category: "available",
+        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
       };
       // Send to ALL of the user's devices — matches the approved/declined push
       // siblings; previously only userSubs[0] got the "now available" push.
-      return userSubs.map((s) => sendPush(keys, s, payload));
+      return userSubs.map((s) => sendPush(ctx.keys, s, payload));
     });
     await Promise.allSettled(deduped);
   } catch (err) {
@@ -358,12 +507,12 @@ export async function notifyUsersRequestsAvailablePush(
 }
 
 export async function notifyUsersRequestsApprovedPush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
 ) {
   if (requests.length === 0) return;
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
@@ -391,12 +540,14 @@ export async function notifyUsersRequestsApprovedPush(
       eligible.flatMap((r) => {
         const userSubs = subsByUser.get(r.requestedBy) ?? [];
         const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-        const payload = {
+        const payload: PushPayload = {
           title: "Request Approved",
           body: `Your ${mediaLabel} request for ${r.title} has been approved`,
           url: "/requests",
+          category: "approved",
+          deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
         };
-        return userSubs.map((s) => sendPush(keys, s, payload));
+        return userSubs.map((s) => sendPush(ctx.keys, s, payload));
       })
     );
   } catch (err) {
@@ -405,12 +556,12 @@ export async function notifyUsersRequestsApprovedPush(
 }
 
 export async function notifyUsersRequestsDeclinedPush(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number }>
 ) {
   if (requests.length === 0) return;
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
@@ -438,12 +589,14 @@ export async function notifyUsersRequestsDeclinedPush(
       eligible.flatMap((r) => {
         const userSubs = subsByUser.get(r.requestedBy) ?? [];
         const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-        const payload = {
+        const payload: PushPayload = {
           title: "Request Declined",
           body: `Your ${mediaLabel} request for ${r.title} was not approved`,
           url: "/requests",
+          category: "declined",
+          deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
         };
-        return userSubs.map((s) => sendPush(keys, s, payload));
+        return userSubs.map((s) => sendPush(ctx.keys, s, payload));
       })
     );
   } catch (err) {
@@ -455,22 +608,24 @@ export async function notifyAdminsNewIssuePush(data: {
   title: string;
   issueType: string;
   reportedBy: string;
+  issueId?: string;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await getIssueAdminSubscriptions();
     if (!subs.length) return;
 
     const issueLabel = data.issueType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-    const payload = {
+    const payload: PushPayload = {
       title: "New Issue Report",
       body: `${data.title} — ${issueLabel} reported by ${data.reportedBy}`,
-      url: "/admin/issues",
+      url: data.issueId ? `/issues/${data.issueId}` : "/admin/issues",
+      category: "new_issue",
     };
 
-    await Promise.allSettled(subs.map((s: { endpoint: string; p256dh: string; auth: string }) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify admins (issue):", err);
   }
@@ -485,22 +640,23 @@ export async function notifyAdminsManualInteractionRequiredPush(data: {
   detail?: string;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
     const title = data.title.length > 100 ? data.title.slice(0, 97) + "…" : data.title;
-    const payload = {
+    const payload: PushPayload = {
       title: `${data.service}: manual import needed`,
       body: data.detail
         ? `${title} — stuck in ${data.detail}, needs manual intervention`
         : `${title} needs manual intervention in ${data.service}`,
       url: "/admin",
+      category: "manual_interaction",
     };
 
-    await Promise.allSettled(subs.map((s: { endpoint: string; p256dh: string; auth: string }) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify admins (manual interaction):", err);
   }
@@ -510,22 +666,25 @@ export async function notifyAdminsDeletionVoteThresholdPush(data: {
   title: string;
   mediaType: string;
   voteCount: number;
+  tmdbId?: number;
 }) {
   try {
-    const keys = await getVapidKeys();
-    if (!keys) return;
+    const ctx = await pushContext();
+    if (!ctx) return;
 
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
     const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload = {
+    const payload: PushPayload = {
       title: "Deletion Vote Threshold Reached",
       body: `${data.title} (${label}) has ${data.voteCount} deletion votes`,
       url: "/votes",
+      category: "deletion_votes",
+      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
     };
 
-    await Promise.allSettled(subs.map((s: { endpoint: string; p256dh: string; auth: string }) => sendPush(keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify admins (deletion vote):", err);
   }

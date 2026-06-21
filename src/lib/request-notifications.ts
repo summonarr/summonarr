@@ -50,7 +50,7 @@ export async function notifyAvailablePerServer(
   // actually flipped, not the full pre-CAS overlap set.
   const winners = await claimAvailableNotificationWinners(toNotify);
   if (winners.length > 0) {
-    const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType }));
+    const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
 
@@ -133,7 +133,7 @@ export function notifyRequestStatusChange(
 
   if (status === "APPROVED") {
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
@@ -144,7 +144,7 @@ export function notifyRequestStatusChange(
 
   if (status === "AVAILABLE") {
     notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
@@ -155,7 +155,7 @@ export function notifyRequestStatusChange(
 
   if (status === "DECLINED") {
     notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
