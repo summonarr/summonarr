@@ -98,9 +98,8 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
 };
 
 // Default relay operated by the app publisher. Overridable per-server via the
-// `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay). TODO: set this
-// to the real production relay host before the iOS push feature ships.
-const DEFAULT_APNS_RELAY_URL = "https://push.summonarr.app/push";
+// `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
+const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 
 async function getApnsRelayUrl(): Promise<string> {
   const row = await prisma.setting.findUnique({ where: { key: "apnsRelayUrl" } });
