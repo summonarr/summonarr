@@ -37,7 +37,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
   if (record.expiresAt < new Date()) {
-    await prisma.discordMergeCode.delete({ where: { userId: session.user.id } });
+    // deleteMany (not delete) — on a concurrent double-submit of an expired code
+    // the second delete would throw P2025 → 500; deleteMany no-ops. Matches the
+    // race-safe pattern used by the rate-limit path above.
+    await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
       { error: "Code has expired — please request a new one." },
       { status: 400 }

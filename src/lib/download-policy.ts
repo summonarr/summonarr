@@ -132,13 +132,30 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
     }
   }
 
-  // Remove users no longer on the Jellyfin server. Guard against empty list
-  // to avoid nuking everyone if the API call silently returns nothing.
-  if (users.length > 0) {
+  // Remove users no longer on the Jellyfin server. PlayHistory and
+  // ActiveSession cascade-delete with the MediaServerUser row, so a prune
+  // driven by a degraded fetch permanently destroys watch history. The live
+  // poller is the only writer of Jellyfin history (no backfill cron exists),
+  // so the loss is unrecoverable. getJellyfinAllUsers only throws on a non-2xx
+  // status — a 200 returning a truncated/subset list (reduced API-key
+  // elevation, transient upstream quirk) slips through as a short array. Only
+  // prune when the fetch looks complete: non-empty AND not a suspicious
+  // shrink versus the rows we already had. A genuine departure of more than a
+  // handful at once is rare enough to skip for one run and let the next
+  // (hopefully complete) fetch reconcile.
+  const priorCount = existingRows.length;
+  const PRUNE_MAX_SHRINK = 2; // tolerate small genuine departures per run
+  const safeToPrune =
+    users.length > 0 && (priorCount === 0 || users.length >= priorCount - PRUNE_MAX_SHRINK);
+  if (safeToPrune) {
     const currentIds = users.map((u) => u.id);
     await prisma.mediaServerUser.deleteMany({
       where: { source: "jellyfin", sourceUserId: { notIn: currentIds } },
     });
+  } else if (users.length > 0) {
+    console.warn(
+      `[download-policy] Skipping Jellyfin user prune: fetched ${users.length} users but DB had ${priorCount} — refusing to cascade-delete history on a possibly-degraded response`,
+    );
   }
 
   return result;
