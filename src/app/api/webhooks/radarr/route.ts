@@ -117,10 +117,28 @@ export async function POST(req: NextRequest) {
     // Don't log the payload-supplied title (CodeQL js/log-injection — it's a
     // remote source). The title still reaches admins via the push below.
     console.warn("[webhook/radarr] manual interaction required — resolve it in Radarr's queue");
-    after(() =>
-      notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
-        .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err)),
-    );
+    // Per-item one-shot gate (same idempotent pattern as the deletion-vote
+    // threshold in /api/votes): Radarr re-emits ManualInteractionRequired for the
+    // same parked release on every queue tick (changing queue id / progress), and
+    // the replay digest hashes the full payload so each one passes — push exactly
+    // once per stuck item. Key on the STABLE tmdbId + service, never the volatile
+    // queue id/progress. ISO value lets the marker be pruned later.
+    const stableTmdbId = payload.movie?.tmdbId;
+    let shouldNotify = true;
+    if (Number.isInteger(stableTmdbId) && (stableTmdbId as number) > 0) {
+      const manualKey = `manualInteractionNotified:radarr:${stableTmdbId}`;
+      const claim = await prisma.setting.createMany({
+        data: [{ key: manualKey, value: new Date().toISOString() }],
+        skipDuplicates: true,
+      });
+      shouldNotify = claim.count === 1;
+    }
+    if (shouldNotify) {
+      after(() =>
+        notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
+          .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err)),
+      );
+    }
     syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });
   }

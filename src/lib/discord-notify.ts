@@ -366,7 +366,7 @@ export async function notifyUserIssueResolved(userId: string, title: string, med
     title: `✅ Issue Resolved — ${escMd(title)}`,
     description: `The issue you reported with **${label}** has been resolved.${resolutionPart}`,
     timestamp: new Date().toISOString(),
-  });
+  }, "notifyOnIssue");
 }
 
 export async function notifyUsersRequestsApproved(
@@ -379,7 +379,7 @@ export async function notifyUsersRequestsApproved(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null } },
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
@@ -418,7 +418,7 @@ export async function notifyUsersRequestsAvailable(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null } },
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnAvailable: true },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
@@ -458,7 +458,7 @@ export async function notifyUsersRequestsDeclined(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null } },
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));

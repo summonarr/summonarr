@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, isMovieDownloadingInRadarr, isSeriesDownloadingInSonarr, getMovieReleaseInfo, getSeriesFirstAired } from "@/lib/arr";
-import { notifyUserDownloadPending, notifyUserAwaitingRelease, assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord, notifyUserRequestApproved, notifyUserRequestDeclined } from "@/lib/discord-notify";
+import { notifyUserDownloadPending, notifyUserAwaitingRelease, assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
+import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { Prisma } from "@/generated/prisma";
 import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -553,7 +554,9 @@ async function handleComponent(interaction: any): Promise<void> {
       }
 
       const existing = await prisma.mediaRequest.findFirst({
-        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id },
+        // is4k-scoped: Discord requests are HD-only (is4k: false), so a web-created
+        // 4K request for the same title must not block this user's HD request.
+        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
       });
       if (existing) {
         confirmEmbed.color = 0xfee75c;
@@ -706,15 +709,42 @@ async function handleComponent(interaction: any): Promise<void> {
             select: { status: true },
           });
           if (alreadyGreenlit) {
-            await prisma.mediaRequest.create({ data: { ...baseData, status: alreadyGreenlit.status } });
+            // Mirror availableAt when the greenlit status is AVAILABLE, matching the
+            // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
+            // availableAt and looks freshly approved.
+            await prisma.mediaRequest.create({
+              data: {
+                ...baseData,
+                status: alreadyGreenlit.status,
+                ...(alreadyGreenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+              },
+            });
             note = "Added — this title is already approved, so you'll be notified when it's ready.";
             confirmEmbed.color = 0x57f287;
           } else {
             const pendingRequest = await prisma.mediaRequest.create({ data: baseData });
             const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
-            void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null });
-            void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, tmdbId: selected.id });
-            void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
+            // Only the earliest PENDING request for a title alerts admins — a later duplicate
+            // (different user requesting the same still-pending title) is nothing new to review.
+            const earlierPending = await prisma.mediaRequest.findFirst({
+              where: {
+                tmdbId: selected.id,
+                mediaType,
+                is4k: false,
+                status: "PENDING",
+                id: { not: pendingRequest.id },
+                OR: [
+                  { createdAt: { lt: pendingRequest.createdAt } },
+                  { createdAt: pendingRequest.createdAt, id: { lt: pendingRequest.id } },
+                ],
+              },
+              select: { id: true },
+            });
+            if (!earlierPending) {
+              void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null, excludeUserId: dbUser.id });
+              void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, tmdbId: selected.id, excludeUserId: dbUser.id });
+              void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
+            }
             note = "An admin will review your request.";
             confirmEmbed.color = 0x57f287;
           }
@@ -811,7 +841,11 @@ async function handleComponent(interaction: any): Promise<void> {
           details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed },
           provider: "discord",
         });
-        void notifyUserRequestApproved(request.requestedBy, request.title, request.mediaType);
+        // Fan out push + email + Discord so a web/iOS requester without Discord linked
+        // is still notified. Skip self-notify when the admin approved their own request.
+        if (request.requestedBy !== adminUser.id) {
+          notifyRequestStatusChange("APPROVED", request);
+        }
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
           title: arrFailed ? `⚠️ Approved (arr failed) — ${request.title}` : `✅ Approved — ${request.title}`,
@@ -845,7 +879,10 @@ async function handleComponent(interaction: any): Promise<void> {
           details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord" },
           provider: "discord",
         });
-        void notifyUserRequestDeclined(request.requestedBy, request.title, request.mediaType);
+        // Fan out push + email + Discord. Skip self-notify when the admin declined their own request.
+        if (request.requestedBy !== adminUser.id) {
+          notifyRequestStatusChange("DECLINED", request);
+        }
         const embed: Record<string, unknown> = {
           color: 0xED4245,
           title: `❌ Declined — ${request.title}`,

@@ -142,8 +142,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const reportedBy = session.user.name ?? session.user.email ?? session.user.id;
   after(async () => {
     await Promise.allSettled([
-      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id }),
-      notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy, issueId: issue.id }),
+      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id, excludeUserId: session.user.id }),
+      notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy, issueId: issue.id, excludeUserId: session.user.id }),
     ]);
   });
   return NextResponse.json(issue, { status: 201 });

@@ -157,9 +157,12 @@ function safeHeader(str: string): string {
   return str.replace(/[\r\n]+/g, " ");
 }
 
-async function getAdminEmails(): Promise<string[]> {
+async function getAdminEmails(excludeUserId?: string): Promise<string[]> {
   const admins = await prisma.user.findMany({
-    where: { role: "ADMIN" },
+    where: {
+      role: "ADMIN",
+      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
+    },
     select: { email: true, notificationEmail: true },
   });
   return admins
@@ -375,12 +378,13 @@ export async function notifyAdminsNewRequest(data: {
   posterPath?: string | null;
   tmdbId?: number;
   releaseYear?: string | null;
+  excludeUserId?: string;
 }) {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    const to = await getAdminEmails();
+    const to = await getAdminEmails(data.excludeUserId);
     if (!to.length) return;
 
     const mediaLabel = mediaLabelOf(data.mediaType);
@@ -417,6 +421,7 @@ export async function notifyAdminsNewIssue(data: {
   note: string | null;
   posterPath?: string | null;
   issueId?: string;
+  excludeUserId?: string;
 }) {
   try {
     const cfg = await getEmailConfig();
@@ -424,7 +429,7 @@ export async function notifyAdminsNewIssue(data: {
 
     // ISSUE_ADMINs must get the new-issue email too — the push counterpart
     // already targets them. getAdminEmails() is ADMIN-only.
-    const to = await getIssueAdminEmails();
+    const to = await getIssueAdminEmails({ excludeUserId: data.excludeUserId });
     if (!to.length) return;
 
     const mediaLabel = mediaLabelOf(data.mediaType);

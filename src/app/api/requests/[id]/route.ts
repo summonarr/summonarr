@@ -207,6 +207,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   emitSSE({ type: "request:updated", requestId: id, status: updated.status, userId: existing.requestedBy });
 
   const requestedByName = existing.user?.name ?? existing.user?.email ?? existing.requestedBy;
+  // An admin acting on their OWN request shouldn't get a self-notification ("your
+  // request was approved/declined/available") — they just performed the action.
+  const selfAction = existing.requestedBy === session.user.id;
   if (status === "APPROVED" && existing.status !== "APPROVED") {
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "REQUEST_APPROVE", target: `request:${id}`, details: { title: updated.title, mediaType: updated.mediaType, year: updated.releaseYear, requestedBy: requestedByName, before: { status: existing.status }, after: { status }, ...(qualityProfileId !== undefined ? { qualityProfileId, qualityProfileName: qualityProfileName ?? null } : {}) }, ...auditContext(req, session) });
   } else if (status === "DECLINED" && existing.status !== "DECLINED") {
@@ -242,7 +245,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
     // Only notify if ARR push actually succeeded — otherwise the user gets a
     // misleading "Approved!" ping for a request that's actually back to PENDING.
-    if (arrPushSucceeded) {
+    // Skip when the admin approved their own request (selfAction).
+    if (arrPushSucceeded && !selfAction) {
       notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
     }
 
@@ -308,11 +312,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     }
     if (casCount === 1) {
       void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
-      notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+      if (!selfAction) {
+        notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+      }
     }
   }
 
-  if (status === "DECLINED" && existing.status !== "DECLINED") {
+  if (status === "DECLINED" && existing.status !== "DECLINED" && !selfAction) {
     notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
   }
 

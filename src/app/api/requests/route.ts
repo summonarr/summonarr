@@ -218,7 +218,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
     if (existing.permanentlyDeclined) {
       return NextResponse.json({ error: "This request has been permanently denied" }, { status: 403 });
     }
-    return NextResponse.json({ error: "Already requested" }, { status: 409 });
+    // An ordinary (non-permanent) decline is not terminal — let the user
+    // re-request: delete the stale DECLINED row and fall through to a fresh
+    // create. APPROVED/AVAILABLE/PENDING still block with a 409.
+    if (existing.status === "DECLINED") {
+      // deleteMany (not delete) — on a concurrent double re-request the second
+      // delete would throw P2025 (500); deleteMany no-ops, and the create below
+      // then surfaces a clean 409 via its P2002 catch instead.
+      await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+    } else {
+      return NextResponse.json({ error: "Already requested" }, { status: 409 });
+    }
   }
 
   const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, is4k);
@@ -287,7 +297,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
         select: { status: true },
       });
       if (greenlit) {
-        createdRequest = await tx.mediaRequest.create({ data: { ...baseData, status: greenlit.status } });
+        createdRequest = await tx.mediaRequest.create({
+          data: {
+            ...baseData,
+            status: greenlit.status,
+            // Mirror an already-AVAILABLE title's availability timestamp so this
+            // row matches the original's shape (the sync's "now available" pass
+            // and availability sorts read availableAt).
+            ...(greenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+          },
+        });
         createdBranch = "mirror-approved";
         return;
       }
@@ -347,13 +366,36 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-  const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
-  after(async () => {
-    await Promise.allSettled([
-      notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear }),
-      notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy, tmdbId }),
-      notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
-    ]);
+
+  // Suppress duplicate admin alerts for a title that's still pending review: only
+  // the EARLIEST pending request for (tmdbId, mediaType, is4k) fires the admin
+  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
+  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
+  // and alerts; the rest find this row and skip.
+  const earlierPending = await prisma.mediaRequest.findFirst({
+    where: {
+      tmdbId,
+      mediaType,
+      is4k,
+      status: "PENDING",
+      id: { not: request.id },
+      OR: [
+        { createdAt: { lt: request.createdAt } },
+        { createdAt: request.createdAt, id: { lt: request.id } },
+      ],
+    },
+    select: { id: true },
   });
+
+  if (!earlierPending) {
+    const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
+    after(async () => {
+      await Promise.allSettled([
+        notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear, excludeUserId: session.user.id }),
+        notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy, tmdbId, excludeUserId: session.user.id }),
+        notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
+      ]);
+    });
+  }
   return NextResponse.json(request, { status: 201 });
 });

@@ -7,6 +7,7 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { notifyUsersRequestsAvailableEmail } from "@/lib/request-notifications";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -195,6 +196,7 @@ async function syncPlex(request: NextRequest) {
         void clearDeletionVotesForTmdbs(winners);
         notifyUsersRequestsAvailable(winners).catch(() => {});
         notifyUsersRequestsAvailablePush(winners).catch(() => {});
+        void notifyUsersRequestsAvailableEmail(winners, "sync/plex");
       }
     }
 

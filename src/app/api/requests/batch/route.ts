@@ -112,7 +112,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
 
     // Notify only the ones that actually made it into ARR — otherwise users get
     // a misleading "Approved!" ping for a request that's actually back to PENDING.
-    const notifyTargets = approved.filter((r) => !failedIds.has(r.id));
+    // Skip rows the acting admin owns — no self-notification for one's own request.
+    const notifyTargets = approved.filter((r) => !failedIds.has(r.id) && r.requestedBy !== session.user.id);
     if (notifyTargets.length > 0) {
       notifyUsersRequestsApproved(notifyTargets).catch(() => {});
       notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
@@ -127,8 +128,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
       select: { requestedBy: true, title: true, mediaType: true, tmdbId: true },
     });
-    notifyUsersRequestsDeclined(declined, typedAdminNote).catch(() => {});
-    notifyUsersRequestsDeclinedPush(declined).catch(() => {});
+    // Skip rows the acting admin owns — no self-notification for one's own request.
+    const declineTargets = declined.filter((r) => r.requestedBy !== session.user.id);
+    notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
+    notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
   }
 
   const batchRequests = await prisma.mediaRequest.findMany({

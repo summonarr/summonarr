@@ -198,7 +198,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       // lookup to HD rows too — otherwise a target who holds only a 4K request for a
       // title is wrongly classified "already-requested" and the HD create is skipped.
       where: { requestedBy: targetUserId, is4k: false, OR: orPairs },
-      select: { tmdbId: true, mediaType: true, permanentlyDeclined: true },
+      select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
     }),
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
@@ -220,6 +220,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Classify each item; collect the ones to actually create.
   const skipped: { tmdbId: number; mediaType: MediaType; result: ItemResult }[] = [];
   const toCreate: { tmdbId: number; mediaType: MediaType }[] = [];
+  // Ids of stale, non-permanent DECLINED rows to drop so a fresh request can be
+  // created (the @@unique constraint would otherwise make createMany skip them).
+  const staleDeclinedIds: string[] = [];
   for (const it of items) {
     const k = keyOf(it.tmdbId, it.mediaType);
     if (!canRequest(targetPerms, it.mediaType, false)) {
@@ -232,10 +235,27 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
     const ex = existingMap.get(k);
     if (ex) {
-      skipped.push({ ...it, result: ex.permanentlyDeclined ? "skipped-declined" : "already-requested" });
+      if (ex.permanentlyDeclined) {
+        skipped.push({ ...it, result: "skipped-declined" });
+        continue;
+      }
+      // An ordinary (non-permanent) decline is re-requestable: delete the stale
+      // row below and create fresh. APPROVED/AVAILABLE/PENDING stay blocked.
+      if (ex.status === "DECLINED") {
+        staleDeclinedIds.push(ex.id);
+        toCreate.push(it);
+        continue;
+      }
+      skipped.push({ ...it, result: "already-requested" });
       continue;
     }
     toCreate.push(it);
+  }
+
+  // Drop stale declined rows before the create transaction so their fresh
+  // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, is4k).
+  if (staleDeclinedIds.length > 0) {
+    await prisma.mediaRequest.deleteMany({ where: { id: { in: staleDeclinedIds } } });
   }
 
   if (toCreate.length === 0) {
