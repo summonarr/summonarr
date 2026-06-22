@@ -82,7 +82,7 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 
 ## Environment
 
-Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY`, `TMDB_READ_TOKEN`.
+Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (must be an explicit `true` or `false` in production — the server refuses to boot if unset, so local-only mode can't be entered silently by omission; its Host-header guard is spoofable — see [instrumentation.ts](src/instrumentation.ts) + guardrail 29), `TMDB_READ_TOKEN`.
 Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
 
 Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
@@ -368,6 +368,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The FK is now `onDelete: Restrict` on both `PlayHistory` and `ActiveSession` — any hard-delete of a `MediaServerUser` that still has history/sessions THROWS, surfacing the landmine instead of silently erasing data. Do not revert it to `Cascade`.
     - The Jellyfin prune in [download-policy.ts](src/lib/download-policy.ts) sets `active = false` (soft-delete) for departed users; the next sync re-activates a returning one. Do not reintroduce `deleteMany` on `MediaServerUser`.
     - Active-management surfaces (server-users admin list/page, the diagnose count) filter `active: true`; history/stats surfaces (the play-history user filter, the activity/stats aggregates) intentionally do NOT — a departed user's history stays visible and attributed.
+
+29. **Page/layout authorization is DB-checked (`authActive()` / `readActiveSummonarrSession()`), NEVER the proxy alone and NEVER JWT-only `auth()`.**
+
+    Why:
+    - `proxy.ts`'s matcher carries a `missing: [next-router-prefetch, purpose=prefetch]` clause, so the proxy (login redirect, DB session check, admin/role gating) does **not** run on prefetch requests. A forged `GET /page` with header `next-router-prefetch: 1` skips all of it. Next's own docs say the same — *"Always verify authentication and authorization inside each Server Function rather than relying on Proxy alone"* ([proxy.md](node_modules/next/dist/docs/01-app/03-api-reference/03-file-conventions/proxy.md)) — and prescribe a check close to the data ([data-security.md](node_modules/next/dist/docs/01-app/02-guides/data-security.md)).
+    - `auth()` ([src/lib/auth.ts](src/lib/auth.ts)) verifies only the JWT signature + expiry. It does NOT see a revoked `AuthSession`, a `sessionsRevokedAt`/`passwordChangedAt` cutoff, or a role demotion. On the prefetch path (proxy skipped) it would be the *only* check, so a demoted-but-unexpired admin token could read admin pages.
+
+    Rules:
+    - Every `(app)` page is login-gated by the DB-checked root [(app)/layout.tsx](src/app/(app)/layout.tsx) (`authActive()` → `redirect("/login")`). Keep that gate — it's the prefetch-safe backstop for the whole subtree. The redirect MUST stay before/outside the layout's `try/catch` or the `NEXT_REDIRECT` throw gets swallowed.
+    - A page/layout that makes a **role-based** redirect (`role !== "ADMIN"`, etc.) MUST read the session with `authActive()` (drop-in for `auth()`, identical `SummonarrSession` shape) or `readActiveSummonarrSession()` (the [admin layout](src/app/(app)/admin/layout.tsx) pattern) — never JWT-only `auth()`.
+    - `auth()` is fine for **personalization** reads (badge visibility, "my vote", "show admin shortcut") — a few seconds of staleness there is cosmetic, not an authz decision. Don't pay the DB round-trip on every discovery-page render for those.
+    - API routes are already DB-checked via `withAuth`/`withAdmin` (guardrail 6a). This rule is about server-component pages/layouts only.
 
 ## Working principles
 

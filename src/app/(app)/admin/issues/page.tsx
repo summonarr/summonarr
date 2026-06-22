@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
@@ -79,7 +79,7 @@ export default async function AdminIssuesPage({
   searchParams: Promise<{ filter?: string; selected?: string }>;
 }) {
   await requireFeature("feature.page.issues");
-  const session = await auth();
+  const session = await authActive();
   if (!session || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) redirect("/");
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;

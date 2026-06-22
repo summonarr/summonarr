@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect, notFound } from "next/navigation";
 import { getMediaPlayStats } from "@/lib/play-history";
 import { resolvePosterMap } from "@/lib/poster-cache";
@@ -22,7 +22,7 @@ export default async function MediaActivityPage({
 }: {
   params: Promise<{ tmdbId: string }>;
 }) {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const { tmdbId: tmdbIdStr } = await params;

@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { parseCronLastRun } from "@/lib/cron-auth";
@@ -115,7 +115,7 @@ export default async function SettingsPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session] = await Promise.all([searchParams, auth()]);
+  const [sp, session] = await Promise.all([searchParams, authActive()]);
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const rawTab = sp.tab as TabId | undefined;

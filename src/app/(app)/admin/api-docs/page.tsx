@@ -1,4 +1,4 @@
-import { auth, isTokenExpired } from "@/lib/auth";
+import { authActive, isTokenExpired } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { OpenApiViewer } from "@/components/admin/openapi-viewer";
 import { PageHeader } from "@/components/ui/design";
@@ -6,7 +6,7 @@ import { PageHeader } from "@/components/ui/design";
 export const dynamic = "force-dynamic";
 
 export default async function ApiDocsPage() {
-  const session = await auth();
+  const session = await authActive();
   if (
     !session ||
     isTokenExpired(session) ||

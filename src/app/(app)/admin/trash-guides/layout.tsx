@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
@@ -22,7 +22,7 @@ const LAYOUT_KEYS = [
 const TRUNCATION_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export default async function TrashGuidesLayout({ children }: { children: React.ReactNode }) {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const rows = await prisma.setting.findMany({

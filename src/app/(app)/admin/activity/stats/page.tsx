@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getPlayHistoryStats } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
@@ -12,7 +12,7 @@ export default async function StatsPage({
 }: {
   searchParams: Promise<{ days?: string; source?: string; mediaType?: string }>;
 }) {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam } =

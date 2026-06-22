@@ -49,16 +49,14 @@ export async function register() {
       }
     }
 
-    if (process.env.TRUST_PROXY !== "true") {
-      console.warn(
-        "[startup] TRUST_PROXY is not 'true' — running in LOCAL-ONLY mode. The proxy will refuse " +
-          "any request whose Host header is not localhost or an RFC1918 address, and per-IP rate " +
-          "limiting is disabled (single shared bucket). Set TRUST_PROXY=true when running behind " +
-          "a trusted reverse proxy (Nginx, Traefik, Caddy, etc.) that reliably sets X-Forwarded-For."
-      );
-    }
-
-    if (process.env.TRUST_PROXY === "true") {
+    // TRUST_PROXY is REQUIRED (see CLAUDE.md env list). It must be an EXPLICIT
+    // "true" or "false" in production — an unset value used to silently default
+    // to local-only mode, whose Host-header guard is spoofable (src/lib/local-only.ts).
+    // A deployment that forgot the flag and got exposed to the internet would
+    // then serve the public via a forged `Host: 127.0.0.1`. Force the operator to
+    // choose so the local-only fail-open footgun can't be hit by omission.
+    const trustProxyValue = process.env.TRUST_PROXY;
+    if (trustProxyValue === "true") {
       const authUrl = process.env.AUTH_URL ?? "";
       if (authUrl.startsWith("http://") && process.env.NODE_ENV === "production") {
         console.warn(
@@ -67,6 +65,30 @@ export async function register() {
           "IP-based rate limiting can be bypassed via header spoofing."
         );
       }
+    } else if (trustProxyValue === "false") {
+      // Deliberate local-only / LAN deployment. The proxy refuses any request whose
+      // Host header is not loopback/RFC1918, but Host is SPOOFABLE — footgun-prevention,
+      // not a hard boundary. An instance accidentally exposed to the internet can still
+      // be reached with a forged Host. Keep it off the public internet (bind loopback/LAN);
+      // use TRUST_PROXY=true behind a reverse proxy.
+      console.warn(
+        "[startup] TRUST_PROXY=false — LOCAL-ONLY mode. Per-IP rate limiting is disabled " +
+          "(single shared bucket) and the local-only guard trusts the (spoofable) Host header. " +
+          "Do NOT expose this instance directly to the public internet."
+      );
+    } else if (process.env.NODE_ENV === "production") {
+      console.error(
+        "[startup] TRUST_PROXY is required in production and was not set to 'true' or 'false'. " +
+          "Set TRUST_PROXY=true behind a trusted reverse proxy (Nginx/Traefik/Caddy that sets " +
+          "X-Forwarded-For), or TRUST_PROXY=false to explicitly run in local-only/LAN mode " +
+          "(and keep the instance off the public internet). Refusing to start."
+      );
+      process.exit(1);
+    } else {
+      console.warn(
+        "[startup] TRUST_PROXY is not set — LOCAL-ONLY mode (dev only). Set TRUST_PROXY=true " +
+          "behind a reverse proxy, or TRUST_PROXY=false to explicitly run local-only."
+      );
     }
 
     if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {

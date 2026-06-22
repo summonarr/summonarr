@@ -7,10 +7,10 @@ import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
-import { signSessionJwt } from "@/lib/session-jwt";
+import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
-import { readSummonarrSession } from "@/lib/session-server";
+import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 
@@ -301,13 +301,7 @@ export function isTokenExpired(session: SummonarrSession | null): boolean {
   return !!session.tokenExpiresAt && Math.floor(Date.now() / 1000) > session.tokenExpiresAt;
 }
 
-// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
-// exported — synchronous-looking API that returns SummonarrSession | null.
-// Routes that need 401/403 semantics should use requireAuth/withAuth from
-// @/lib/api-auth instead.
-export async function auth(): Promise<SummonarrSession | null> {
-  const claims = await readSummonarrSession();
-  if (!claims) return null;
+function claimsToSession(claims: SessionClaims): SummonarrSession {
   return {
     user: {
       id: claims.id,
@@ -321,6 +315,30 @@ export async function auth(): Promise<SummonarrSession | null> {
     sessionId: claims.sessionId,
     tokenExpiresAt: claims.expiresAt,
   };
+}
+
+// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
+// exported — synchronous-looking API that returns SummonarrSession | null.
+// JWT-only: verifies signature + expiry, NOT DB revocation/role-rotation. Fine
+// for personalization reads; for an AUTHORIZATION decision in a page/layout use
+// authActive() instead. Routes that need 401/403 semantics should use
+// requireAuth/withAuth from @/lib/api-auth.
+export async function auth(): Promise<SummonarrSession | null> {
+  const claims = await readSummonarrSession();
+  return claims ? claimsToSession(claims) : null;
+}
+
+// DB-checked counterpart of auth() for AUTHORIZATION decisions in server
+// components (page/layout role guards). Routes through readActiveSummonarrSession
+// → verifyAndRefreshSession, so a revoked AuthSession, sessionsRevokedAt/
+// passwordChangedAt cutoff, or role demotion is honored immediately — not just
+// the JWT signature + expiry. Required because proxy.ts's matcher skips prefetch
+// requests (next-router-prefetch / purpose=prefetch), so a page that makes a
+// role-based redirect cannot assume the proxy's DB check has run. Same
+// SummonarrSession shape as auth(), so it is a drop-in replacement at the guard.
+export async function authActive(): Promise<SummonarrSession | null> {
+  const claims = await readActiveSummonarrSession();
+  return claims ? claimsToSession(claims) : null;
 }
 
 export function invalidateUserSession(userId: string): void {

@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
@@ -89,7 +89,7 @@ export default async function UsersActivityPage({
 }: {
   searchParams: Promise<{ search?: string; sort?: string; dir?: string }>;
 }) {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const { search, sort: sortParam, dir: dirParam } = await searchParams;

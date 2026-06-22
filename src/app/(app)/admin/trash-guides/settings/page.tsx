@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { SyncSettingsCard } from "@/components/admin/trash-guides/sync-settings-card";
@@ -17,7 +17,7 @@ const SETTING_KEYS = [
 ] as const;
 
 export default async function TrashGuidesSettingsPage() {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const rows = await prisma.setting.findMany({

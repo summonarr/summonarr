@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import Link from "next/link";
@@ -33,7 +33,7 @@ function formatRelativeTime(date: Date): string {
 }
 
 export default async function RecentlyAddedPage() {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const [plexItems, jellyfinItems] = await Promise.all([
