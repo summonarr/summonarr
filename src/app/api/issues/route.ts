@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewIssue } from "@/lib/email";
 import { notifyAdminsNewIssuePush } from "@/lib/push";
+import { notifyAdminsNewIssueDiscord } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
@@ -144,6 +145,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     await Promise.allSettled([
       notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id, excludeUserId: session.user.id }),
       notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy, issueId: issue.id, excludeUserId: session.user.id }),
+      notifyAdminsNewIssueDiscord({ issueId: issue.id, title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
     ]);
   });
   return NextResponse.json(issue, { status: 201 });

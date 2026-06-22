@@ -20,6 +20,7 @@ const COLORS = {
   pending:   0xFEE75C,
   available: 0x57F287,
   declined:  0xED4245,
+  issue:     0xEB459E,
 } as const;
 
 interface Embed {
@@ -133,6 +134,67 @@ export async function notifyAdminsNewRequestDiscord(data: {
     }
   } catch (err) {
     console.error("[discord-notify] notifyAdminsNewRequestDiscord failed:", err);
+  }
+}
+
+const ISSUE_TYPE_LABELS: Record<string, string> = {
+  BAD_VIDEO: "Bad video",
+  WRONG_AUDIO: "Wrong audio",
+  MISSING_SUBTITLES: "Missing subtitles",
+  WRONG_MATCH: "Wrong match",
+  OTHER: "Other",
+};
+
+// Posts a new issue to the admin Discord channel (the same channel as new
+// requests). Channel-wide, not per-user, so it takes no excludeUserId — mirrors
+// notifyAdminsNewRequestDiscord. No approve/decline buttons: issues are triaged
+// in-app (claim / resolve / reply), not via embed actions.
+export async function notifyAdminsNewIssueDiscord(data: {
+  issueId: string;
+  title: string;
+  mediaType: string;
+  issueType: string;
+  reportedBy: string;
+  note: string | null;
+  posterPath: string | null;
+}): Promise<void> {
+  try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: ["discordBotToken", "discordAdminRequestChannelId"] } },
+    });
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (!cfg.discordBotToken || !cfg.discordAdminRequestChannelId) return;
+    if (!isValidSnowflake(cfg.discordAdminRequestChannelId)) return;
+
+    const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
+    const typeLabel = ISSUE_TYPE_LABELS[data.issueType] ?? data.issueType;
+    const embed: Record<string, unknown> = {
+      color: COLORS.issue,
+      title: `🛠️ New Issue — ${escMd(data.title)}`,
+      description: [
+        `**${label}** · ${escMd(typeLabel)} · reported by **${escMd(data.reportedBy)}**`,
+        data.note ? `\n> ${escMd(data.note)}` : "",
+      ].filter(Boolean).join(""),
+      timestamp: new Date().toISOString(),
+    };
+    if (data.posterPath) {
+      embed.thumbnail = { url: `${TMDB_POSTER_BASE}${data.posterPath}` };
+    }
+
+    const res = await safeFetchTrusted(`${DISCORD_API}/channels/${cfg.discordAdminRequestChannelId}/messages`, {
+      allowedHosts: DISCORD_HOSTS,
+      method: "POST",
+      headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
+      timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`[discord-notify] Failed to post admin issue (${res.status}): ${text}`);
+    }
+  } catch (err) {
+    console.error("[discord-notify] notifyAdminsNewIssueDiscord failed:", err);
   }
 }
 
