@@ -18,6 +18,7 @@ import {
   parsePermissions,
   effectivePermissions,
   hasPermission,
+  Permission,
   type PermissionValue,
 } from "@/lib/permissions";
 
@@ -195,9 +196,17 @@ export function withAuth<Ctx = unknown>(
 export const withAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
   withAuth(handler, { role: "ADMIN" });
 
-/** `withAuth` pinned to ISSUE_ADMIN (accepts ADMIN or ISSUE_ADMIN). */
+/**
+ * Issue-management gate. Authoritative on the MANAGE_ISSUES permission BIT, not
+ * the role label — the ADMIN superbit and the ISSUE_ADMIN preset both carry it,
+ * so normal ADMIN/ISSUE_ADMIN access is unchanged, but clearing MANAGE_ISSUES from
+ * a user now actually revokes issue/fix-match API access (and granting it to a
+ * plain USER grants it), keeping the bitmask the single source of truth. The proxy
+ * /api/admin/* role backstop still only fails-closed roles with NO admin access, so
+ * it can't wrongly deny a permission-bearing caller — this wrapper is the precise check.
+ */
 export const withIssueAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
-  withAuth(handler, { role: "ISSUE_ADMIN" });
+  withPermission(Permission.MANAGE_ISSUES)<Ctx>(handler);
 
 /**
  * `withAuth` plus a capability check against the user's permission bitmask

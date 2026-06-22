@@ -22,42 +22,46 @@ export async function POST(request: NextRequest) {
       if (movies.status === "rejected") console.error("[sync/upcoming] Movie fetch failed:", movies.reason);
       if (tv.status === "rejected") console.error("[sync/upcoming] TV fetch failed:", tv.reason);
 
-      const rows = [
-        ...movieItems.map((m) => ({
-          tmdbId: m.id,
-          mediaType: "MOVIE" as const,
-          title: m.title,
-          overview: m.overview,
-          posterPath: m.posterPath,
-          backdropPath: m.backdropPath,
-          releaseDate: m.releaseDate,
-          releaseYear: m.releaseYear ?? "",
-          voteAverage: m.voteAverage,
-          cachedAt: new Date(),
-        })),
-        ...tvItems.map((t) => ({
-          tmdbId: t.id,
-          mediaType: "TV" as const,
-          title: t.title,
-          overview: t.overview,
-          posterPath: t.posterPath,
-          backdropPath: t.backdropPath,
-          releaseDate: t.releaseDate,
-          releaseYear: t.releaseYear ?? "",
-          voteAverage: t.voteAverage,
-          cachedAt: new Date(),
-        })),
-      ];
+      const movieRows = movieItems.map((m) => ({
+        tmdbId: m.id,
+        mediaType: "MOVIE" as const,
+        title: m.title,
+        overview: m.overview,
+        posterPath: m.posterPath,
+        backdropPath: m.backdropPath,
+        releaseDate: m.releaseDate,
+        releaseYear: m.releaseYear ?? "",
+        voteAverage: m.voteAverage,
+        cachedAt: new Date(),
+      }));
+      const tvRows = tvItems.map((t) => ({
+        tmdbId: t.id,
+        mediaType: "TV" as const,
+        title: t.title,
+        overview: t.overview,
+        posterPath: t.posterPath,
+        backdropPath: t.backdropPath,
+        releaseDate: t.releaseDate,
+        releaseYear: t.releaseYear ?? "",
+        voteAverage: t.voteAverage,
+        cachedAt: new Date(),
+      }));
+      const rows = [...movieRows, ...tvRows];
 
-      if (rows.length > 0) {
-        // Concurrency is already serialized by the outer withAdvisoryLock(2007)
-        // (lock 1001,3 was coordinated with nothing else — removed). The tx still
-        // gives the delete + repopulate atomicity.
-        await prisma.$transaction(async (tx) => {
-          await tx.upcomingCacheItem.deleteMany();
-          await batchCreateMany(tx.upcomingCacheItem, rows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-      }
+      // Per-source replace: only delete+repopulate a media type whose fetch SUCCEEDED.
+      // A blanket deleteMany() would wipe the sibling type when only one source failed
+      // (e.g. movies OK, TV rejected → TV cache erased). Concurrency is already
+      // serialized by the outer withAdvisoryLock(2007); the tx still gives atomicity.
+      await prisma.$transaction(async (tx) => {
+        if (movies.status === "fulfilled") {
+          await tx.upcomingCacheItem.deleteMany({ where: { mediaType: "MOVIE" } });
+          if (movieRows.length > 0) await batchCreateMany(tx.upcomingCacheItem, movieRows);
+        }
+        if (tv.status === "fulfilled") {
+          await tx.upcomingCacheItem.deleteMany({ where: { mediaType: "TV" } });
+          if (tvRows.length > 0) await batchCreateMany(tx.upcomingCacheItem, tvRows);
+        }
+      }, { timeout: BATCH_TX_TIMEOUT });
 
       const durationMs = Date.now() - startTime;
       const errors = [movies, tv].filter((r) => r.status === "rejected").length;

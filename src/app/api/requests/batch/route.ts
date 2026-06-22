@@ -57,24 +57,30 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
 
   const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
 
-  const pendingBefore = await prisma.mediaRequest.findMany({
-    where: { id: { in: typedIds }, status: "PENDING" },
-    select: { id: true },
-  });
-  const pendingBeforeIds = new Set(pendingBefore.map((r) => r.id));
+  // Atomically CLAIM each row (PENDING -> typedStatus) one at a time: updateMany's
+  // count tells us which rows THIS call actually transitioned. A concurrent batch on
+  // the same ids finds them already non-PENDING (count 0) and skips them, so the ARR
+  // push, notifications, and audit below can't double-fire on the same request. The
+  // old bulk findMany(PENDING) + updateMany shared a pre-update snapshot that two
+  // concurrent calls could both act on.
+  const claimedIds: string[] = [];
+  for (const id of typedIds) {
+    const res = await prisma.mediaRequest.updateMany({
+      where: { id, status: "PENDING" },
+      data: {
+        status: typedStatus,
+        pendingNotifyAt,
+        ...(typedAdminNote !== undefined ? { adminNote: typedAdminNote } : {}),
+        ...(typedStatus === "DECLINED" ? { permanentlyDeclined: typedPermanent } : {}),
+      },
+    });
+    if (res.count === 1) claimedIds.push(id);
+  }
+  // The set of rows THIS call transitioned — drives every side effect below.
+  const pendingBeforeIds = new Set(claimedIds);
   // Hoisted to function scope so the SSE emit below can report the TRUE status of
   // rows whose ARR push failed (rolled back to PENDING), not the batch target.
   const failedIds = new Set<string>();
-
-  await prisma.mediaRequest.updateMany({
-    where: { id: { in: typedIds }, status: "PENDING" },
-    data: {
-      status: typedStatus,
-      pendingNotifyAt,
-      ...(typedAdminNote !== undefined ? { adminNote: typedAdminNote } : {}),
-      ...(typedStatus === "DECLINED" ? { permanentlyDeclined: typedPermanent } : {}),
-    },
-  });
 
   if (typedStatus === "APPROVED") {
     // Re-fetch from the pre-update PENDING set to avoid acting on requests that were already approved

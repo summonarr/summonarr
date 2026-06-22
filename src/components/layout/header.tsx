@@ -106,8 +106,10 @@ export function SearchBar({
       try {
         const url = `/api/search?q=${encodeURIComponent(query)}${filter !== "all" ? `&type=${filter}` : ""}`;
         const res = await fetch(url, { signal: controller.signal });
-        const data: TmdbMedia[] = await res.json();
-        setResults(data.slice(0, 8));
+        // /api/search can return { error } on 4xx/5xx — guard before .slice so a
+        // non-array body doesn't blow up the debounced handler.
+        const data: unknown = res.ok ? await res.json() : null;
+        setResults(Array.isArray(data) ? (data as TmdbMedia[]).slice(0, 8) : []);
         setOpen(true);
       } catch (err) {
         if ((err as Error).name !== "AbortError") setResults([]);

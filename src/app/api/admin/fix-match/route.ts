@@ -34,7 +34,8 @@ async function fixPlexMatch(
   mediaType: "MOVIE" | "TV",
   preselectedGuid?: string,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
-  // Plex rating keys are always integers; coerce to break taint from DB-read string
+  // Plex rating keys are always integers; coerce to break taint from a DB-read
+  // string before it's interpolated into any admin-token URL below.
   const safeKey = String(parseInt(ratingKey, 10) || 0);
   const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
 
@@ -71,7 +72,7 @@ async function fixPlexMatch(
   }
 
   if (!title) {
-    const metaRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}`, {
+    const metaRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}`, {
       headers,
       timeoutMs: 15_000,
     });
@@ -340,7 +341,8 @@ async function fixJellyfinMatch(
   mediaType: "MOVIE" | "TV",
   filePath: string | null,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
-  // Strip itemId to UUID-safe chars to break taint from DB-read string
+  // Strip itemId to UUID-safe chars to break taint from a DB-read string before
+  // it's interpolated into any admin-token URL below.
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
   const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
 
@@ -364,7 +366,7 @@ async function fixJellyfinMatch(
     headers,
     body: JSON.stringify({
       SearchInfo: { ProviderIds: { Tmdb: String(correctTmdbId) } },
-      ItemId: itemId,
+      ItemId: safeItemId,
       IncludeDisabledProviders: true,
     }),
     timeoutMs: 30_000,
@@ -395,7 +397,7 @@ async function fixJellyfinMatch(
     { method: "POST", headers, timeoutMs: 30_000 },
   ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
 
-  let resolvedItemId = itemId;
+  let resolvedItemId = safeItemId;
   let confirmed = false;
   for (let attempt = 0; attempt < 4; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
@@ -425,14 +427,16 @@ async function fixJellyfinMatch(
           });
           const found = byPath ?? byTmdb;
           if (found?.Id) {
+            // Sanitize the upstream-supplied Id before it lands in a URL and the DB.
+            const foundSafeId = found.Id.replace(/[^0-9a-f-]/gi, "");
             const pid = found.ProviderIds?.Tmdb ?? found.ProviderIds?.tmdb;
             const isConfirmed = pid === String(correctTmdbId);
             if (isConfirmed) {
-              resolvedItemId = found.Id;
+              resolvedItemId = foundSafeId;
               confirmed = true;
               break;
             }
-            if (byPath) resolvedItemId = found.Id;
+            if (byPath) resolvedItemId = foundSafeId;
           }
         }
       }
@@ -448,7 +452,7 @@ async function fixJellyfinMatch(
   if (!confirmed) {
     console.warn("[fix-match]", `${tag} could not confirm new item ID after all attempts — item ID unchanged in DB`);
   }
-  return { newItemId: confirmed ? resolvedItemId : itemId, baseUrl, apiKey };
+  return { newItemId: confirmed ? resolvedItemId : safeItemId, baseUrl, apiKey };
 }
 
 // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges

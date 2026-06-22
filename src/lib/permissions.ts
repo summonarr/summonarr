@@ -3,8 +3,9 @@
 // `permissions` (a BigInt bitmask on User) is the AUTHORITATIVE capability
 // check. The Prisma `Role` enum is now a coarse PRESET that seeds the bitmask
 // (see PRESETS) plus a label still used for admin-area gating in proxy.ts and
-// the withAdmin/withIssueAdmin wrappers. `hasPermission()` here is the source of
-// truth for everything finer-grained.
+// the withAdmin wrapper. `withIssueAdmin` is bitmask-backed — it gates on the
+// MANAGE_ISSUES bit so clearing that bit actually revokes issue access — and
+// `hasPermission()` here is the source of truth for everything finer-grained.
 //
 // Leaf module — ZERO non-builtin imports — so client components (the admin
 // permission editor), API routes, and the edge proxy can all import it. Mirrors

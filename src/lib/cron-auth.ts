@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSession } from "@/lib/session-server";
+import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { prisma } from "@/lib/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
@@ -57,6 +58,10 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   const claims = await readActiveSummonarrSession();
   if (claims?.role === "ADMIN") {
     if (!isSameOriginRequest(request)) return false;
+    // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
+    // admin cookie replayed from another device (with a forged trusted Origin) must
+    // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
+    if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
     return true;
   }
 

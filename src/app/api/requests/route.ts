@@ -274,10 +274,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
       }
 
       if (isAutoApprove) {
-        createdRequest = await tx.mediaRequest.upsert({
-          where: { tmdbId_mediaType_requestedBy_is4k: { tmdbId, mediaType, requestedBy: session.user.id, is4k } },
-          create: { ...baseData, status: "APPROVED" },
-          update: {},
+        // create (NOT upsert update:{}): a concurrent duplicate must hit the unique
+        // constraint and surface as P2002 -> 409 below, exactly like the pending and
+        // mirror-approved branches. The no-op upsert update let two concurrent
+        // auto-approvals BOTH "succeed" and both fire ARR side effects + a 201/SSE
+        // for the same row (guardrail 23).
+        createdRequest = await tx.mediaRequest.create({
+          data: { ...baseData, status: "APPROVED" },
         });
         createdBranch = "auto-approve";
         return;

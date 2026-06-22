@@ -120,6 +120,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }
 
+  // Issues presuppose the title is in the library — every type (bad video, wrong
+  // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
+  // Jellyfin library hit so the API can't be scripted into issue records for titles
+  // that aren't available (the UI only surfaces "report issue" on available media).
+  const mt = mediaType as "MOVIE" | "TV";
+  const [plexHit, jellyfinHit] = await Promise.all([
+    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+  ]);
+  if (!plexHit && !jellyfinHit) {
+    return NextResponse.json({ error: "This title isn't in the library — issues can only be filed for available media." }, { status: 422 });
+  }
+
   const issue = await prisma.issue.create({
     data: {
       reportedBy: session.user.id,

@@ -23,13 +23,12 @@ async function getAuthContext(request: NextRequest): Promise<{ userId: string; u
   return { userId: "system", userName: "cron", trigger: "cron" };
 }
 
+// No try/catch: a failed fetch must REJECT so the Promise.allSettled below counts
+// it (errorCount) and recordCronRun reports ok=false. Swallowing the error to 0
+// here made every run look green even when upstream fetches failed.
 async function warm<T>(fn: () => Promise<T[]>): Promise<number> {
-  try {
-    const result = await fn();
-    return result.length;
-  } catch {
-    return 0;
-  }
+  const result = await fn();
+  return result.length;
 }
 
 export async function POST(request: NextRequest) {
