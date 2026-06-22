@@ -78,7 +78,8 @@ type ApnsCategory =
   | "new_issue"
   | "grab_complete"
   | "manual_interaction"
-  | "deletion_votes";
+  | "deletion_votes"
+  | "test";
 
 // Generic, content-free alerts sent to iOS through the relay. They deliberately
 // omit media titles and usernames — the relay is operated centrally and must
@@ -95,6 +96,7 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
   grab_complete: { title: "Download complete", body: "A download has finished" },
   manual_interaction: { title: "Manual import needed", body: "A download needs your attention" },
   deletion_votes: { title: "Deletion votes", body: "A title reached the deletion-vote threshold" },
+  test: { title: "Summonarr", body: "Test notification — push is working!" },
 };
 
 // Default relay operated by the app publisher. Overridable per-server via the
@@ -160,6 +162,33 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
     console.error("[push] APNs relay send failed:", err instanceof Error ? err.message : err);
     return false;
   }
+}
+
+// Sends a test push to a user's registered iOS (APNs) devices through the real
+// relay + E2E path — the same code the notify* helpers use. It's a manual
+// diagnostic (triggered from /api/push/test), so it deliberately bypasses the
+// `feature.integration.push` flag and per-event preferences, and touches only
+// iOS rows (web rows are tested separately via VAPID). Returns a per-device
+// result so the caller can report which devices delivered.
+export async function sendApnsTestToUser(
+  userId: string,
+): Promise<Array<{ endpoint: string; label: string | null; ok: boolean }>> {
+  const subs = await prisma.pushSubscription.findMany({
+    where: { userId, platform: "ios" },
+  });
+  const payload: PushPayload = {
+    title: "Summonarr",
+    body: "Test notification — push is working! 🎉",
+    url: "/",
+    category: "test",
+  };
+  return Promise.all(
+    subs.map(async (s) => ({
+      endpoint: s.endpoint.slice(0, 28) + "…",
+      label: s.label ?? null,
+      ok: await sendApns(s, payload),
+    })),
+  );
 }
 
 // ── shared send path ─────────────────────────────────────────────────────────
