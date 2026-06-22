@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -13,12 +14,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped(req, 1048576);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const rawItems = (body as { items?: unknown })?.items;
   if (!Array.isArray(rawItems)) {

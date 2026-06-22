@@ -13,10 +13,7 @@ import {
   type VerifyAndRefreshResult,
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
-import {
-  extractUaFingerprint,
-  serializeFingerprint,
-} from "@/lib/ua-fingerprint";
+import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import {
   parsePermissions,
   effectivePermissions,
@@ -110,19 +107,6 @@ export async function requireAuth(
 function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
   if (required === "ADMIN") return actual === "ADMIN";
   return actual === "ADMIN" || actual === "ISSUE_ADMIN";
-}
-
-// Compares the current request's UA against the stored fingerprint on the
-// claims. "machine:"-prefixed fingerprints (issued by /api/auth/machine-session)
-// are bound to CRON_SECRET, not a browser UA, so skip them. Returns false on
-// mismatch (caller should 401), true on match or no-fingerprint-on-claims.
-function matchesStoredFingerprint(
-  storedFp: string | undefined,
-  currentUa: string | null,
-): boolean {
-  if (!storedFp || storedFp.startsWith("machine:")) return true;
-  const currentFp = serializeFingerprint(extractUaFingerprint(currentUa ?? ""));
-  return currentFp === storedFp;
 }
 
 type AuthedHandler<Ctx> = (

@@ -82,7 +82,7 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 
 ## Environment
 
-Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (must be an explicit `true` or `false` in production — the server refuses to boot if unset, so local-only mode can't be entered silently by omission; its Host-header guard is spoofable — see [instrumentation.ts](src/instrumentation.ts) + guardrail 29), `TMDB_READ_TOKEN`.
+Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (production refuses to boot only when `AUTH_URL` is a *public* host and this isn't `true` — an internet-facing instance must sit behind a trusted reverse proxy; a LAN/loopback `AUTH_URL` boots in local-only mode with the spoofable Host guard. NEVER unconditionally exit on a blank value — the default docker deployment ships it blank. See [instrumentation.ts](src/instrumentation.ts)), `TMDB_READ_TOKEN`.
 Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
 
 Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
@@ -380,6 +380,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - A page/layout that makes a **role-based** redirect (`role !== "ADMIN"`, etc.) MUST read the session with `authActive()` (drop-in for `auth()`, identical `SummonarrSession` shape) or `readActiveSummonarrSession()` (the [admin layout](src/app/(app)/admin/layout.tsx) pattern) — never JWT-only `auth()`.
     - `auth()` is fine for **personalization** reads (badge visibility, "my vote", "show admin shortcut") — a few seconds of staleness there is cosmetic, not an authz decision. Don't pay the DB round-trip on every discovery-page render for those.
     - API routes are already DB-checked via `withAuth`/`withAdmin` (guardrail 6a). This rule is about server-component pages/layouts only.
+    - `authActive()` and the public `/api/auth/me` ALSO re-check the UA fingerprint (`matchesStoredFingerprint`, [ua-fingerprint.ts](src/lib/ua-fingerprint.ts)) for cookie sessions — the prefetch-skip means the page-render path and that public route are otherwise the only authenticated surfaces with no fingerprint enforcement. Bearer/native sessions skip it (app-secure storage, not an ambient cookie).
+
+30. **Cap every JSON request body — `readJsonCapped(req, maxBytes)` (or `readJsonCappedOr` for tolerant routes), never a bare `await req.json()`.**
+
+    Why:
+    - [next.config.ts](next.config.ts) sets `proxyClientMaxBodySize: "50mb"` — a backstop, NOT a per-route limit. A bare `await req.json()` will parse up to 50 MB, so an oversized body (anonymous on first-run `register`, or any authenticated user on request/issue/vote routes) forces a large JSON parse = memory/CPU DoS.
+    - The helpers in [body-size.ts](src/lib/body-size.ts) combine `checkBodySize` (Content-Length fast-reject) + `assertBodyBytesUnderCap` (post-read byte check; catches `Transfer-Encoding: chunked`) + `JSON.parse`. `readJsonCapped` 400s on malformed JSON; `readJsonCappedOr(req, max, fallback)` tolerates an empty/malformed body for routes where no body is a valid request.
+
+    Rules:
+    - New JSON route → `const parsed = await readJsonCapped<T>(req, CAP); if (parsed instanceof NextResponse) return parsed; const body = parsed;`. Caps: ~16 KB single object, 32–64 KB text-bearing, ~1 MB bulk/batch arrays.
+    - Don't reintroduce a bare `await req.json()`. Upload/binary bodies (thumbnails, backup restore) are the only legitimate bypass.
+    - Admin/settings/sync routes (ADMIN/CRON-auth + the 50 MB backstop) are lower-priority but should adopt the helper when next touched — they still read uncapped today.
 
 ## Working principles
 

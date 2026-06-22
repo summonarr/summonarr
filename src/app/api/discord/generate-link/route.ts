@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { readJsonCappedOr } from "@/lib/body-size";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
@@ -12,12 +13,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   let discordId: string | null = null;
-  try {
-    const body = await req.json().catch(() => ({})) as { discordId?: unknown };
-    if (typeof body.discordId === "string" && DISCORD_SNOWFLAKE.test(body.discordId)) {
-      discordId = body.discordId;
-    }
-  } catch { }
+  const body = await readJsonCappedOr<{ discordId?: unknown }>(req, 16 * 1024, {});
+  if (body instanceof NextResponse) return body;
+  if (typeof body.discordId === "string" && DISCORD_SNOWFLAKE.test(body.discordId)) {
+    discordId = body.discordId;
+  }
 
   // 128-bit entropy (32 hex chars) — bumped from 80-bit to resist offline guessing
   const token = randomBytes(16).toString("hex").toUpperCase();

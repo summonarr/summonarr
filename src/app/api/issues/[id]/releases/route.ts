@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import {
   getReleasesForMovie,
@@ -54,12 +55,9 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  let body: { guid?: string; indexerId?: number };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ guid?: string; indexerId?: number }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { guid, indexerId } = body;
   if (!guid || typeof guid !== "string") {

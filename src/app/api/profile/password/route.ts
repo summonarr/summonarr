@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
@@ -13,12 +14,9 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  let body: { currentPassword?: string; newPassword?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ currentPassword?: string; newPassword?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { currentPassword, newPassword } = body;
 

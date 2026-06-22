@@ -17,6 +17,7 @@ import {
 } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
+import { readJsonCapped } from "@/lib/body-size";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -106,12 +107,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: { items?: unknown; onBehalfOfUserId?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const rawBody = await readJsonCapped<{ items?: unknown; onBehalfOfUserId?: unknown }>(req, 1048576);
+  if (rawBody instanceof NextResponse) return rawBody;
+  const body = rawBody;
 
   if (!Array.isArray(body.items) || body.items.length === 0) {
     return NextResponse.json({ error: "items must be a non-empty array" }, { status: 400 });

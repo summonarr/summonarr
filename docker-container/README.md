@@ -123,7 +123,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
-| `TRUST_PROXY`          | exactly `"true"` or unset                  | `true` when behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else disables per-IP rate limiting and the app refuses to boot in production. |
+| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`; a LAN/loopback `AUTH_URL` boots in local-only mode. |
 
 ### Strongly recommended in production
 

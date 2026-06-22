@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { notifyUserIssueMessage, notifyAdminsIssueMessage } from "@/lib/discord-notify";
 import { notifyUserIssueMessagePush, notifyAdminsIssueMessagePush } from "@/lib/push";
@@ -49,12 +50,9 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let body: { body?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ body?: string }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   // Validate the type BEFORE calling a string method: req.json() is untyped at
   // runtime, so a non-string body (number/object/null) would throw on .trim() and

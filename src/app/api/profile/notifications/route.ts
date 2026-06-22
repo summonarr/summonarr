@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 
@@ -24,18 +25,15 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 });
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
-  let body: {
+  const parsed = await readJsonCapped<{
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
     emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
     pushOnApproved?: boolean;   pushOnAvailable?: boolean;   pushOnDeclined?: boolean;
     notifyOnIssue?: boolean;
     notificationEmail?: string | null;
-  };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const data: Record<string, boolean | string | null> = {};
   if (typeof body.notifyOnApproved === "boolean") data.notifyOnApproved = body.notifyOnApproved;

@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewIssue } from "@/lib/email";
@@ -54,7 +55,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: {
+  const parsed = await readJsonCapped<{
     mediaType?: string;
     tmdbId?: number;
     tvdbId?: number;
@@ -63,13 +64,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     seasonNumber?: number;
     episodeNumber?: number;
     note?: string;
-  };
-
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { mediaType, tmdbId, tvdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
 

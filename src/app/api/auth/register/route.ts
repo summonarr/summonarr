@@ -6,6 +6,7 @@ import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
 import { defaultPermissionsForRole } from "@/lib/permissions";
+import { readJsonCapped } from "@/lib/body-size";
 
 // In-process mutex: DB advisory lock is the real guard, but this catches obvious double-submits quickly
 let registrationInFlight = false;
@@ -32,12 +33,9 @@ export async function POST(req: NextRequest) {
   if (!checkRateLimit(`register:${getClientIp(req.headers)}`, limit, 15 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
-  let body: { name?: string; email?: string; password?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ name?: string; email?: string; password?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { name, email, password } = body;
 

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
 
@@ -23,12 +24,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  let body: { contentType?: string; contentId?: string; context?: string; reason?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ contentType?: string; contentId?: string; context?: string; reason?: string }>(req, 32768);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { contentType, contentId } = body;
   if (!contentType || !CONTENT_TYPES.includes(contentType as ContentType)) {

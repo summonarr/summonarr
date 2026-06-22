@@ -9,6 +9,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { readJsonCapped } from "@/lib/body-size";
 
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -18,12 +19,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
   }
 
-  let body: { ids?: unknown; status?: unknown; adminNote?: unknown; permanent?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ ids?: unknown; status?: unknown; adminNote?: unknown; permanent?: unknown }>(req, 1048576);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { ids, status, adminNote, permanent } = body;
 

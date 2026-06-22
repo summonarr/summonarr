@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
@@ -6,7 +7,7 @@ import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJell
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
+import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
@@ -338,7 +339,16 @@ export async function auth(): Promise<SummonarrSession | null> {
 // SummonarrSession shape as auth(), so it is a drop-in replacement at the guard.
 export async function authActive(): Promise<SummonarrSession | null> {
   const claims = await readActiveSummonarrSession();
-  return claims ? claimsToSession(claims) : null;
+  if (!claims) return null;
+  // UA-fingerprint replay check — parity with the proxy and the withAuth/withAdmin
+  // wrappers ([api-auth.ts]). The proxy's matcher skips prefetch requests, so the
+  // page-render path must re-enforce the cookie→device binding here too: otherwise a
+  // stolen cookie replayed with a prefetch-looking header could render protected
+  // pages. Page renders are cookie/SSR only (no bearer); machine:/no-fingerprint
+  // sessions are skipped inside the helper.
+  const ua = (await headers()).get("user-agent");
+  if (!matchesStoredFingerprint(claims.uaFingerprint, ua)) return null;
+  return claimsToSession(claims);
 }
 
 export function invalidateUserSession(userId: string): void {

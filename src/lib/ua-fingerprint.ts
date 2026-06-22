@@ -52,6 +52,21 @@ export function serializeFingerprint(fp: UaFingerprint): string {
   return `${fp.browser}:${fp.os}:${fp.device}`;
 }
 
+// Compares the current request's UA against the stored fingerprint on a session's
+// claims. "machine:"-prefixed fingerprints (issued by /api/auth/machine-session)
+// are bound to CRON_SECRET, not a browser UA, so they're skipped. Returns false on
+// mismatch (caller should deny), true on match or no-fingerprint-on-claims. Bearer
+// sessions are NOT handled here — the caller decides to skip for bearer (the JWT
+// lives in app-secure storage, not an ambiently-replayed cookie).
+export function matchesStoredFingerprint(
+  storedFp: string | undefined,
+  currentUa: string | null,
+): boolean {
+  if (!storedFp || storedFp.startsWith("machine:")) return true;
+  const currentFp = serializeFingerprint(extractUaFingerprint(currentUa ?? ""));
+  return currentFp === storedFp;
+}
+
 export function fingerprintToLabel(fp: UaFingerprint): string {
   const browserLabel: Record<string, string> = {
     chrome: "Chrome",

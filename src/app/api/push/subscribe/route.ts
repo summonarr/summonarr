@@ -5,6 +5,7 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { resolveToSafeUrl } from "@/lib/ssrf";
 import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
+import { readJsonCapped } from "@/lib/body-size";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
@@ -13,12 +14,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: { endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string }>(req, 32768);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { endpoint, keys, label } = body;
   if (!endpoint || !keys?.p256dh || !keys?.auth) {
@@ -116,12 +114,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
-  let body: { endpoint?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ endpoint?: string }>(req, 32768);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (!body.endpoint) {
     return NextResponse.json({ error: "endpoint is required" }, { status: 400 });

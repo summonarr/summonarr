@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { verifyPassword } from "@/lib/password-hash";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { revokeSessionById } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -43,12 +44,9 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  let body: { sessionId?: string; confirmPassword?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ sessionId?: string; confirmPassword?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { sessionId, confirmPassword } = body;
   if (!sessionId || typeof sessionId !== "string") {

@@ -4,6 +4,7 @@ import {
   serializeSessionCookie,
 } from "@/lib/session-cookie";
 import { parseBearerToken } from "@/lib/mobile-auth";
+import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { verifyAndRefreshSession } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
 
@@ -61,6 +62,14 @@ export async function GET(req: NextRequest) {
   }
   const result = await verifyAndRefreshSession(token);
   if (!result) {
+    return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
+  }
+  // UA-fingerprint replay check for cookie sessions. /api/auth/me is a public path
+  // (isPublicPath in proxy.ts), so the proxy never runs the fingerprint check here —
+  // enforce the cookie→device binding ourselves, matching the withAuth wrappers.
+  // Bearer (native) sessions skip it: the JWT lives in app-secure storage, not an
+  // ambiently-replayed cookie.
+  if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
   const res = applyPrivacyHeaders(NextResponse.json({ session: serialize(result.claims) }));

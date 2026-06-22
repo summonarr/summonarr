@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
@@ -120,19 +121,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Capability + per-media-type quota are evaluated below, once mediaType is
   // known (see canRequest / resolveUserQuota after body validation).
 
-  let body: {
+  const parsed = await readJsonCapped<{
     tmdbId?: number;
     mediaType?: string;
     note?: string;
     _token?: string;
     is4k?: boolean;
-  };
-
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { tmdbId, mediaType, note, _token } = body;
   const is4k = body.is4k === true;

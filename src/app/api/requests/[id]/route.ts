@@ -13,6 +13,7 @@ import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { readJsonCapped } from "@/lib/body-size";
 
 const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -28,12 +29,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   const { id } = await params;
 
-  let body: { status?: string; retry?: boolean; search?: boolean; adminNote?: string; permanent?: boolean; qualityProfileId?: number; qualityProfileName?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ status?: string; retry?: boolean; search?: boolean; adminNote?: string; permanent?: boolean; qualityProfileId?: number; qualityProfileName?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { status, retry, search, adminNote, permanent, qualityProfileId, qualityProfileName } = body;
 

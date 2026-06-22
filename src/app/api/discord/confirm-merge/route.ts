@@ -5,6 +5,7 @@ import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { timingSafeEqual } from "crypto";
+import { readJsonCapped } from "@/lib/body-size";
 
 // Bot DM template lives in src/app/api/discord/initiate-merge/route.ts
 // (the 12-char code copy is updated there).
@@ -18,13 +19,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  let code: string;
-  try {
-    const body = await req.json();
-    code = String(body.code ?? "").trim().toUpperCase();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ code?: unknown }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const code = String(parsed.code ?? "").trim().toUpperCase();
 
   const record = await prisma.discordMergeCode.findUnique({
     where: { userId: session.user.id },
