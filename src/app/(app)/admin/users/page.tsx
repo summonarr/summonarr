@@ -49,6 +49,7 @@ export default async function UsersPage() {
       select: { id: true },
     }),
     prisma.mediaServerUser.findMany({
+      where: { active: true }, // hide soft-deleted (departed) server users
       select: {
         id: true,
         source: true,

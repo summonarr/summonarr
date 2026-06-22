@@ -358,6 +358,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     Rule: write the DB row first; only on success update the in-memory ledger. If the write throws, let it propagate so the caller learns the operation failed instead of trusting a phantom mark.
 
+28. **NEVER hard-delete a `MediaServerUser`. Soft-delete (`active = false`) instead.**
+
+    Why:
+    - `PlayHistory` and `ActiveSession` FK `MediaServerUser`. The FK used to be `onDelete: Cascade`, so deleting a server-user *permanently and unrecoverably* destroyed their entire watch history — and the live poller is the only Jellyfin-history writer (guardrail 19), so it cannot be rebuilt. Play history is server/usage data that must outlive a user's removal; it is not part of the user's account.
+    - A degraded Jellyfin `/Users` fetch (a `200` with a truncated list) once made the hourly download-policy prune delete every absent user and cascade-erase their history.
+
+    Rules:
+    - The FK is now `onDelete: Restrict` on both `PlayHistory` and `ActiveSession` — any hard-delete of a `MediaServerUser` that still has history/sessions THROWS, surfacing the landmine instead of silently erasing data. Do not revert it to `Cascade`.
+    - The Jellyfin prune in [download-policy.ts](src/lib/download-policy.ts) sets `active = false` (soft-delete) for departed users; the next sync re-activates a returning one. Do not reintroduce `deleteMany` on `MediaServerUser`.
+    - Active-management surfaces (server-users admin list/page, the diagnose count) filter `active: true`; history/stats surfaces (the play-history user filter, the activity/stats aggregates) intentionally do NOT — a departed user's history stays visible and attributed.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

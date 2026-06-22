@@ -6,6 +6,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [users, autoDisableRow] = await Promise.all([
     prisma.mediaServerUser.findMany({
+      where: { active: true }, // hide soft-deleted (departed) server users from active management
       select: {
         id: true,
         source: true,

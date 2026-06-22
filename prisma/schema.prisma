@@ -645,6 +645,11 @@ model MediaServerUser {
   user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   downloadsEnabled Boolean? // null = not yet synced; true = allowed; false = enforced-disabled
   isServerAdmin    Boolean  @default(false) // cached from server — admins are never touched by bulk enforcement
+  // false = removed from the media server (soft-deleted). NEVER hard-delete a
+  // MediaServerUser: PlayHistory + ActiveSession FK it (now onDelete: Restrict)
+  // and play history must survive a user's removal. The Jellyfin prune sets this
+  // false instead of deleting; the next sync re-activates a returning user.
+  active           Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -671,7 +676,7 @@ model PlayHistory {
 
   // User
   mediaServerUserId String
-  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Cascade)
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Restrict)
 
   // Media identification
   tmdbId        Int?
@@ -765,7 +770,7 @@ model ActiveSession {
 
   // User
   mediaServerUserId String
-  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Cascade)
+  mediaServerUser   MediaServerUser @relation(fields: [mediaServerUserId], references: [id], onDelete: Restrict)
   serverUsername    String          @db.VarChar(256)
 
   // Media

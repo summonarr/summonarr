@@ -87,7 +87,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   const skipped = breakdown.filter((u) => u.wouldBeSkipped);
   const processed = breakdown.filter((u) => !u.wouldBeSkipped);
 
-  const dbCount = await prisma.mediaServerUser.count({ where: { source: "jellyfin" } });
+  const dbCount = await prisma.mediaServerUser.count({ where: { source: "jellyfin", active: true } });
 
   return NextResponse.json({
     httpStatus,
