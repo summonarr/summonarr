@@ -697,13 +697,27 @@ async function handleComponent(interaction: any): Promise<void> {
             }
           }, { name: "interactions:90s-download-check" });
         } else {
-          const pendingRequest = await prisma.mediaRequest.create({ data: baseData });
-          const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
-          void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null });
-          void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, tmdbId: selected.id });
-          void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
-          note = "An admin will review your request.";
-          confirmEmbed.color = 0x57f287;
+          // If another request for this title is already APPROVED or AVAILABLE, the
+          // content is already greenlit — mirror that status so this user is tracked
+          // for the "now available" notification, and skip the admin "new request"
+          // alert (nothing to review). Discord requests are HD-only (is4k: false).
+          const alreadyGreenlit = await prisma.mediaRequest.findFirst({
+            where: { tmdbId: selected.id, mediaType, is4k: false, status: { in: ["APPROVED", "AVAILABLE"] } },
+            select: { status: true },
+          });
+          if (alreadyGreenlit) {
+            await prisma.mediaRequest.create({ data: { ...baseData, status: alreadyGreenlit.status } });
+            note = "Added — this title is already approved, so you'll be notified when it's ready.";
+            confirmEmbed.color = 0x57f287;
+          } else {
+            const pendingRequest = await prisma.mediaRequest.create({ data: baseData });
+            const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
+            void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null });
+            void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, tmdbId: selected.id });
+            void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
+            note = "An admin will review your request.";
+            confirmEmbed.color = 0x57f287;
+          }
         }
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {

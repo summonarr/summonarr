@@ -247,7 +247,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
-  let createdBranch: "auto-approve" | "pending" | null = null;
+  let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -273,6 +273,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
           update: {},
         });
         createdBranch = "auto-approve";
+        return;
+      }
+
+      // If another request for this exact title (+ 4K tier) is already APPROVED or
+      // AVAILABLE, the content is already greenlit / being fulfilled — there is
+      // nothing for an admin to review. Mirror that status so this requester is
+      // tracked and still receives the "now available" notification (the sync
+      // notifies every APPROVED row's requester), while skipping the admin
+      // "new request" alert.
+      const greenlit = await tx.mediaRequest.findFirst({
+        where: { tmdbId, mediaType, is4k, status: { in: ["APPROVED", "AVAILABLE"] } },
+        select: { status: true },
+      });
+      if (greenlit) {
+        createdRequest = await tx.mediaRequest.create({ data: { ...baseData, status: greenlit.status } });
+        createdBranch = "mirror-approved";
         return;
       }
 
@@ -318,6 +334,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
       await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
     }
 
+    return NextResponse.json(request, { status: 201 });
+  }
+
+  if (createdBranch === "mirror-approved") {
+    // Content is already greenlit by an earlier request — no arr push (already
+    // done) and no admin "new request" alert (nothing to review). The requester
+    // is still tracked, so the sync's "now available" pass notifies them just
+    // like the original requester.
+    emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
     return NextResponse.json(request, { status: 201 });
   }
 
