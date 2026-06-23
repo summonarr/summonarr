@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { sseEmitter, SSE_MAX_LISTENERS, type SSEEvent } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -48,7 +49,10 @@ export async function GET() {
 
   const userId = session.user.id;
   const isSystemAdmin = session.user.role === "ADMIN";
-  const isIssueAdmin = session.user.role === "ISSUE_ADMIN";
+  // Bitmask-authoritative (not role) so a demoted ISSUE_ADMIN with MANAGE_ISSUES
+  // cleared stops receiving issue:* / issuemessage:* events. ADMIN still passes via
+  // isSystemAdmin above, so this only governs the issue-event bypass.
+  const isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   if (!incrementConnection(userId)) {
     return new Response("Too many SSE connections", { status: 429 });

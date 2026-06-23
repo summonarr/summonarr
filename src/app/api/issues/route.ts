@@ -11,15 +11,18 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const where =
-    (session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN") ? {} : { reportedBy: session.user.id };
+  // Issue visibility is bitmask-authoritative: a demoted ISSUE_ADMIN (role kept but
+  // MANAGE_ISSUES cleared) is scoped to their own issues. ADMIN passes via the superbit.
+  const canManageIssues = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  const where = canManageIssues ? {} : { reportedBy: session.user.id };
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = canManageIssues;
 
   const limitParam = req.nextUrl.searchParams.get("limit");
   const limit = Math.min(100, Math.max(1, parseInt(limitParam ?? "50", 10) || 50));

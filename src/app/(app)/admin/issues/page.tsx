@@ -1,4 +1,5 @@
 import { authActive } from "@/lib/auth";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { redirect } from "next/navigation";
@@ -80,7 +81,7 @@ export default async function AdminIssuesPage({
 }) {
   await requireFeature("feature.page.issues");
   const session = await authActive();
-  if (!session || (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")) redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;
   const filter: FilterValue = VALID_FILTERS.includes(rawFilter as FilterValue)

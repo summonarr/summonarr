@@ -1,6 +1,7 @@
 "use client";
 
 import { Play } from "@/components/icons";
+import { safeExternalHref } from "@/lib/safe-url";
 
 interface TrailerButtonProps {
   trailerKey?: string | null;
@@ -10,7 +11,7 @@ interface TrailerButtonProps {
 export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
   const href = trailerKey
     ? `https://www.youtube.com/watch?v=${trailerKey}`
-    : trailerUrl;
+    : safeExternalHref(trailerUrl);
   if (!href) return null;
   return (
     <a

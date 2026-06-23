@@ -11,6 +11,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeText } from "@/lib/sanitize";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -19,11 +20,11 @@ export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
+  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   const messages = await prisma.issueMessage.findMany({
     where: { issueId: id },
@@ -46,7 +47,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
+  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -69,7 +70,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   }
   const text = sanitizeText(rawText);
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   const message = await prisma.issueMessage.create({
     data: {

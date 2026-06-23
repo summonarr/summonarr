@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, createHash } from "crypto";
 
 // Version prefix lets us detect whether a stored value is encrypted or plaintext (legacy passthrough)
 const ENC_PREFIX = "enc:v1:";
@@ -35,6 +35,16 @@ function resolveKey(): Buffer {
 // if the env var is missing or malformed. Safe to call repeatedly (cached).
 export function assertTokenEncryptionKey(): void {
   resolveKey();
+}
+
+// Non-reversible fingerprint of the encryption key — lets callers tell "same key or
+// not" across instances (e.g. backup restore) WITHOUT revealing the key. Salted
+// SHA-256, truncated. Returns null when no valid key is configured (caller treats
+// as unknown). Does NOT use resolveKey() so it never throws on a misconfigured key.
+export function tokenEncryptionKeyFingerprint(): string | null {
+  const hex = process.env.TOKEN_ENCRYPTION_KEY;
+  if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) return null;
+  return createHash("sha256").update("summonarr-tek-fp:" + hex.toLowerCase()).digest("hex").slice(0, 16);
 }
 
 // Per-label warning bookkeeping for legacy plaintext values still on disk.

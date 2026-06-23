@@ -321,6 +321,17 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
                 if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
               }
             }
+            // Capture rows that existed BEFORE this insert so the side effects below
+            // (SSE + ARR push) fire ONLY for rows THIS request created. Two concurrent
+            // bulk requests with overlapping items would otherwise both re-query the
+            // same skipDuplicates rows and both push/notify. With Serializable + retry,
+            // a duplicate's retry re-snapshots, sees the other's committed rows in
+            // `before`, and emits nothing. (Bulk analog of the requests/route fix.)
+            const before = await tx.mediaRequest.findMany({
+              where: { requestedBy: targetUserId, is4k: false, OR: pairs },
+              select: { id: true },
+            });
+            const beforeIds = new Set(before.map((r) => r.id));
             await tx.mediaRequest.createMany({
               data: prepared.map((p) => ({
                 tmdbId: p.tmdbId,
@@ -334,10 +345,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
               })),
               skipDuplicates: true,
             });
-            return tx.mediaRequest.findMany({
+            const after = await tx.mediaRequest.findMany({
               where: { requestedBy: targetUserId, is4k: false, OR: pairs },
               select: { id: true, tmdbId: true, mediaType: true, status: true },
             });
+            return after.filter((r) => !beforeIds.has(r.id));
           },
           { isolationLevel: "Serializable" },
         ),

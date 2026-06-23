@@ -2,6 +2,7 @@ import Image from "next/image";
 import Link from "next/link";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
+import { safeExternalHref } from "@/lib/safe-url";
 
 const PROVIDER_LOGO_BASE = "https://image.tmdb.org/t/p/w92";
 
@@ -21,7 +22,9 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
   const providers = media.watchProviders ?? [];
   // keywordList carries id+name (media.keywords is the names-only back-compat array).
   const keywords = media.keywordList ?? [];
-  const homepage = media.homepage ?? null;
+  // Validate before render — TMDB homepage is third-party data; a javascript: URL
+  // in an href would execute on click. safeExternalHref returns only http(s) URLs.
+  const homepage = safeExternalHref(media.homepage) ?? null;
   const hasProviders = providers.length > 0;
   const hasKeywords = keywords.length > 0;
 
