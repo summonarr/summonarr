@@ -33,7 +33,8 @@ Then open <http://localhost:3001>. The first user to register is auto-promoted t
 - Per-device session tracking, Web Push notifications, optional SMTP email
 - AES-256-GCM encryption at rest for provider secrets and push/OAuth tokens
 - Encrypted, password-protected database backups (export/import via the admin UI)
-- Webhook support for Plex, Jellyfin, Sonarr, and Radarr
+- Radarr and Sonarr webhooks for instant request fulfillment (Plex activity via a real-time SSE stream, Jellyfin via a 5-second poller — no Plex/Jellyfin webhook needed)
+- Optional Discord (bot), SMTP/Resend email, and ratings providers (OMDb, MDBList, Trakt) — all configured in-app
 - Admin debug endpoint (`/api/admin/debug/arr-state`) for inspecting the Radarr/Sonarr pipeline end-to-end
 
 ## Architecture at a glance
@@ -75,7 +76,7 @@ docker compose up -d
 docker compose logs -f summonarr
 ```
 
-The Dockerfile is a four-stage build (deps → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
+The Dockerfile is a five-stage build (deps → prisma-gen → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
 
 The set of required env vars is the same as the GHCR deploy — see [`docker-container/README.md`](./docker-container/README.md#environment-variables) for the full reference.
 
@@ -91,8 +92,14 @@ npm install
 cp .env.example .env
 # Set DATABASE_URL directly when running Postgres yourself, e.g.:
 #   DATABASE_URL=postgresql://summonarr:password@localhost:5432/summonarr
-# Then fill in NEXTAUTH_SECRET (≥32 chars), AUTH_URL, CRON_SECRET (≥32 chars),
-# TMDB_READ_TOKEN, TRUST_PROXY.
+# Then fill in the boot-required secrets:
+#   NEXTAUTH_SECRET       (≥ 32 chars)
+#   CRON_SECRET           (≥ 32 chars)
+#   TOKEN_ENCRYPTION_KEY  (exactly 64 hex chars — `openssl rand -hex 32`; the app
+#                          exits at boot without it)
+#   AUTH_URL, TMDB_READ_TOKEN, TRUST_PROXY
+# Optional sign-in: OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET (see
+# docker-container/README.md → Connecting external services → OIDC / SSO).
 
 npx prisma db push    # apply schema (no migrations folder)
 npx prisma generate   # regenerate client (outputs to src/generated/prisma)
