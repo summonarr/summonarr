@@ -4,19 +4,16 @@ import { prisma } from "@/lib/prisma";
 import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
+import { readJsonCapped } from "@/lib/body-size";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
-  let discordId: string;
-  try {
-    const body = await req.json();
-    discordId = String(body.discordId ?? "").trim();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ discordId?: unknown }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const discordId = String(parsed.discordId ?? "").trim();
 
   if (!SNOWFLAKE_RE.test(discordId)) {
     return NextResponse.json(

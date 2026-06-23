@@ -57,3 +57,50 @@ export function assertBodyBytesUnderCap(
   }
   return null;
 }
+
+// One-shot capped JSON read. Combines the Content-Length fast-reject, the
+// post-read byte assertion (catches chunked-encoding bypasses), and JSON.parse,
+// so a route replaces `const body = await req.json()` with one size-bounded call.
+// Returns the parsed value on success, or a NextResponse the caller returns
+// verbatim: 413 when over the cap, 400 on malformed JSON. Discriminate on
+// `instanceof NextResponse`. Use on every non-upload JSON route — the global
+// proxyClientMaxBodySize (50 MB) is only a backstop; pick a cap that comfortably
+// fits the largest legitimate payload (single objects ~64 KB, bulk arrays more).
+export async function readJsonCapped<T = unknown>(
+  req: NextRequest,
+  maxBytes: number,
+): Promise<T | NextResponse> {
+  const headerCheck = checkBodySize(req, maxBytes);
+  if (headerCheck) return headerCheck;
+  const raw = new Uint8Array(await req.arrayBuffer());
+  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
+  if (sizeCheck) return sizeCheck;
+  try {
+    return JSON.parse(new TextDecoder().decode(raw)) as T;
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+}
+
+// Tolerant variant of readJsonCapped for routes where a missing/empty/malformed
+// body is a VALID request (all fields optional). Still enforces the size cap
+// (returns a 413 NextResponse when over), but on an empty or unparseable body it
+// returns `fallback` instead of a 400 — preserving the "no body = defaults"
+// contract those routes document. Discriminate the 413 on `instanceof NextResponse`.
+export async function readJsonCappedOr<T>(
+  req: NextRequest,
+  maxBytes: number,
+  fallback: T,
+): Promise<T | NextResponse> {
+  const headerCheck = checkBodySize(req, maxBytes);
+  if (headerCheck) return headerCheck;
+  const raw = new Uint8Array(await req.arrayBuffer());
+  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
+  if (sizeCheck) return sizeCheck;
+  if (raw.byteLength === 0) return fallback;
+  try {
+    return JSON.parse(new TextDecoder().decode(raw)) as T;
+  } catch {
+    return fallback;
+  }
+}

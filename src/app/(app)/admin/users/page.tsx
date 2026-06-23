@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { UserTable } from "@/components/admin/user-table";
@@ -11,7 +11,7 @@ import { isArrConfigured } from "@/lib/arr";
 export const dynamic = "force-dynamic";
 
 export default async function UsersPage() {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const [users, localAuthRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
@@ -49,6 +49,7 @@ export default async function UsersPage() {
       select: { id: true },
     }),
     prisma.mediaServerUser.findMany({
+      where: { active: true }, // hide soft-deleted (departed) server users
       select: {
         id: true,
         source: true,

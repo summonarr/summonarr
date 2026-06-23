@@ -8,7 +8,8 @@ import { NavigationProgress } from "@/components/layout/navigation-progress";
 import { MaintenancePage } from "@/components/layout/maintenance-page";
 import { MaintenanceBanner } from "@/components/layout/maintenance-banner";
 import { prisma } from "@/lib/prisma";
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
+import { redirect } from "next/navigation";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 
@@ -21,6 +22,17 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
+  // DB-checked login gate. The proxy enforces auth on normal navigations, but its
+  // matcher (src/proxy.ts) deliberately skips prefetch requests (next-router-prefetch
+  // / purpose=prefetch), and the (app) pages carry no own login guard — so without
+  // this a forged prefetch could render them unauthenticated. Next's own guidance is
+  // to verify auth close to the data rather than rely on the proxy alone (proxy.md /
+  // data-security.md). authActive() is DB-checked, so a revoked session or role
+  // demotion is honored here too, not just the JWT signature + expiry.
+  const session = await authActive();
+  if (!session) redirect("/login");
+  const isAdmin = session.user.role === "ADMIN";
+
   let motdBody  = "";
   let motdTitle = "";
   let siteTitle = "";
@@ -28,12 +40,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let userDiscordId: string | null = null;
   let maintenanceEnabled = false;
   let maintenanceMessage = "";
-  let isAdmin = false;
   let featureFlags: FeatureFlags | undefined;
   try {
-    const [rows, session, flags] = await Promise.all([
+    const [rows, flags] = await Promise.all([
       prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage", ...DONATION_SETTING_KEYS] } } }),
-      auth(),
       getFeatureFlags(),
     ]);
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
@@ -43,11 +53,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     discordInviteUrl    = cfg.discordInviteUrl    ?? "";
     maintenanceEnabled  = cfg.maintenanceEnabled === "true";
     maintenanceMessage  = cfg.maintenanceMessage  ?? "";
-    isAdmin             = session?.user?.role === "ADMIN";
     // Auto-hide the Donate nav link when no donation methods are configured —
     // nothing to link to, regardless of the feature toggle.
     featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
-    if (discordInviteUrl && session?.user?.id) {
+    if (discordInviteUrl && session.user.id) {
       const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } });
       userDiscordId = user?.discordId ?? null;
     }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexUser } from "@/lib/plex";
@@ -6,12 +7,9 @@ import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  let body: { authToken?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ authToken?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (!body.authToken || typeof body.authToken !== "string") {
     return NextResponse.json({ error: "authToken is required" }, { status: 400 });

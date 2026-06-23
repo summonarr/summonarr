@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
@@ -7,6 +8,7 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { notifyUsersRequestsAvailableEmail } from "@/lib/request-notifications";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -20,7 +22,8 @@ export async function POST(request: NextRequest) {
 }
 
 async function syncJellyfin(request: NextRequest) {
-  const rawBody = await request.json().catch(() => ({})) as Record<string, unknown>;
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
   const [urlRow, keyRow, librariesRow] = await Promise.all([
@@ -157,6 +160,7 @@ async function syncJellyfin(request: NextRequest) {
         void clearDeletionVotesForTmdbs(winners);
         notifyUsersRequestsAvailable(winners).catch(() => {});
         notifyUsersRequestsAvailablePush(winners).catch(() => {});
+        void notifyUsersRequestsAvailableEmail(winners, "sync/jellyfin");
       }
     }
 

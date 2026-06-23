@@ -125,10 +125,34 @@ export async function POST(req: NextRequest) {
     // Don't log the payload-supplied series title (CodeQL js/log-injection — it's
     // a remote source). The title still reaches admins via the push below.
     console.warn("[webhook/sonarr] manual interaction required — resolve it in Sonarr's queue");
-    after(() =>
-      notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
-        .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),
-    );
+    // Per-item one-shot gate (same idempotent pattern as the deletion-vote
+    // threshold in /api/votes): Sonarr re-emits ManualInteractionRequired for the
+    // same parked release on every queue tick (changing queue id / progress), and
+    // the replay digest hashes the full payload so each one passes — push exactly
+    // once per stuck series. Key on the STABLE series id (tvdbId, falling back to
+    // tmdbId) + service, never the volatile queue id/progress. ISO value lets the
+    // marker be pruned later.
+    const stableSeriesId =
+      Number.isInteger(payload.series?.tvdbId) && (payload.series!.tvdbId as number) > 0
+        ? payload.series!.tvdbId
+        : Number.isInteger(payload.series?.tmdbId) && (payload.series!.tmdbId as number) > 0
+        ? payload.series!.tmdbId
+        : null;
+    let shouldNotify = true;
+    if (stableSeriesId !== null) {
+      const manualKey = `manualInteractionNotified:sonarr:${stableSeriesId}`;
+      const claim = await prisma.setting.createMany({
+        data: [{ key: manualKey, value: new Date().toISOString() }],
+        skipDuplicates: true,
+      });
+      shouldNotify = claim.count === 1;
+    }
+    if (shouldNotify) {
+      after(() =>
+        notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
+          .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),
+      );
+    }
     syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });
   }

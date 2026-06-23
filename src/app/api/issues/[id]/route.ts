@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import {
   searchMovieInRadarr,
@@ -22,12 +23,9 @@ export const PATCH = withIssueAdmin(async (
 ) => {
   const { id } = await params;
 
-  let body: { status?: string; resolution?: string; refetch?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: boolean }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { status, resolution, refetch } = body;
 

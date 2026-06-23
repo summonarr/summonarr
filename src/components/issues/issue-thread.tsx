@@ -34,9 +34,14 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
     const ctrl = new AbortController();
     setLoadState("loading");
     fetch(`/api/issues/${issueId}/messages`, { signal: ctrl.signal })
-      .then((r) => r.json())
+      .then((r) => {
+        // A 403/404 returns { error }; without this guard setMessages({error})
+        // makes messages.map throw in render (uncaught by .catch).
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data: IssueMessageData[]) => {
-        setMessages(data);
+        setMessages(Array.isArray(data) ? data : []);
         setLoadState("ready");
       })
       .catch((err) => {

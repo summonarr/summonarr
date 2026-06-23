@@ -1,4 +1,6 @@
 // Runs once at server startup in the Node.js runtime only — safe to use Node APIs and import server-only modules here
+import { isLocalHost } from "@/lib/local-only";
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     // Fail-closed crypto check FIRST — before any other init. The token-crypto module
@@ -49,15 +51,15 @@ export async function register() {
       }
     }
 
-    if (process.env.TRUST_PROXY !== "true") {
-      console.warn(
-        "[startup] TRUST_PROXY is not 'true' — running in LOCAL-ONLY mode. The proxy will refuse " +
-          "any request whose Host header is not localhost or an RFC1918 address, and per-IP rate " +
-          "limiting is disabled (single shared bucket). Set TRUST_PROXY=true when running behind " +
-          "a trusted reverse proxy (Nginx, Traefik, Caddy, etc.) that reliably sets X-Forwarded-For."
-      );
-    }
-
+    // TRUST_PROXY governs whether X-Forwarded-* is trusted (per-IP rate limiting) and
+    // whether the local-only Host guard (src/lib/local-only.ts) is active. That Host
+    // guard is SPOOFABLE — footgun-prevention for a LAN deployment, NOT a boundary for
+    // an internet-facing one. So: trust the proxy when told; otherwise run local-only,
+    // but REFUSE to boot when AUTH_URL is a PUBLIC host (an internet-facing deployment
+    // that forgot to put a trusted proxy in front — the one case the Host guard cannot
+    // protect). A LAN/loopback AUTH_URL (or unset/false TRUST_PROXY) stays supported and
+    // boots with a loud warning — this is the default docker deployment, so DON'T exit on
+    // a blank value (that would brick it).
     if (process.env.TRUST_PROXY === "true") {
       const authUrl = process.env.AUTH_URL ?? "";
       if (authUrl.startsWith("http://") && process.env.NODE_ENV === "production") {
@@ -67,6 +69,40 @@ export async function register() {
           "IP-based rate limiting can be bypassed via header spoofing."
         );
       }
+    } else {
+      const authHost = (() => {
+        try { return new URL(process.env.AUTH_URL ?? "").hostname.toLowerCase(); } catch { return ""; }
+      })();
+      // Treat as LAN unless AUTH_URL is a dotted FQDN with a routable-looking TLD:
+      // loopback/RFC1918 IPs, "localhost", bare single-label hostnames, and private
+      // mDNS/internal suffixes are all local. Err toward "local" so a misjudged host
+      // never bricks a legitimate LAN deployment — false negatives just keep today's
+      // behaviour; only a clearly-public AUTH_URL without a trusted proxy is refused.
+      // A bracketed IPv6 literal (URL.hostname keeps the brackets) is also treated as
+      // a host: isLocalHost() handles loopback/link-local/ULA, so only a PUBLIC IPv6
+      // literal slips past the dotted-FQDN test and is correctly flagged here.
+      const PRIVATE_SUFFIXES = [".local", ".lan", ".internal", ".home", ".home.arpa", ".localhost"];
+      const authIsPublic =
+        !!authHost &&
+        authHost !== "localhost" &&
+        (authHost.includes(".") || authHost.startsWith("[")) &&
+        !isLocalHost(authHost) &&
+        !PRIVATE_SUFFIXES.some((s) => authHost.endsWith(s));
+      if (process.env.NODE_ENV === "production" && authIsPublic) {
+        console.error(
+          "[startup] AUTH_URL is a public host but TRUST_PROXY is not 'true'. An internet-facing " +
+            "deployment MUST run behind a trusted reverse proxy with TRUST_PROXY=true — the local-only " +
+            "Host-header guard is spoofable and cannot protect a public instance. Set TRUST_PROXY=true " +
+            "(and have the proxy strip client-supplied X-Forwarded-* headers). Refusing to start."
+        );
+        process.exit(1);
+      }
+      console.warn(
+        "[startup] TRUST_PROXY is not 'true' — LOCAL-ONLY mode (LAN/loopback). Per-IP rate limiting is " +
+          "disabled (single shared bucket) and the local-only guard trusts the (spoofable) Host header, " +
+          "which is NOT a security boundary. Set TRUST_PROXY=true behind a trusted reverse proxy for any " +
+          "internet-facing deployment; keep local-only instances off the public internet."
+      );
     }
 
     if (!process.env.CRON_SECRET || process.env.CRON_SECRET.trim().length < 32) {

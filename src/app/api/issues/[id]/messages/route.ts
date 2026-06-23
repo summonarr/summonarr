@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { notifyUserIssueMessage, notifyAdminsIssueMessage } from "@/lib/discord-notify";
 import { notifyUserIssueMessagePush, notifyAdminsIssueMessagePush } from "@/lib/push";
@@ -10,6 +11,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeText } from "@/lib/sanitize";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -18,11 +20,11 @@ export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
+  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   const messages = await prisma.issueMessage.findMany({
     where: { issueId: id },
@@ -45,16 +47,13 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN" && issue.reportedBy !== session.user.id) {
+  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  let body: { body?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ body?: string }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   // Validate the type BEFORE calling a string method: req.json() is untyped at
   // runtime, so a non-string body (number/object/null) would throw on .trim() and
@@ -71,7 +70,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   }
   const text = sanitizeText(rawText);
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   const message = await prisma.issueMessage.create({
     data: {

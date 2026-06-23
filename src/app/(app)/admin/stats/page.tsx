@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { getArrDiskSpace } from "@/lib/arr-stats";
@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 export default async function StatsPage() {
   await requireFeature("feature.admin.stats");
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const [

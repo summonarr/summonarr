@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -127,12 +128,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: { tmdbId?: number; mediaType?: string; reason?: string; _token?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; reason?: string; _token?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { tmdbId, mediaType, reason, _token } = body;
 

@@ -56,30 +56,48 @@ export async function notifyAvailablePerServer(
 
     // Email channel — H3 in audit. Until this fix, AVAILABLE notifications on
     // webhook/sync paths only fanned out Discord + push; `emailOnAvailable` was
-    // a dead preference for those paths. Batch-fetch user prefs in a single
-    // query, send per-winner where the pref is true and a deliverable address
-    // resolves (synthetic *.local emails return null and skip cleanly).
-    const userPrefs = await prisma.user.findMany({
-      where: { id: { in: [...new Set(winners.map((w) => w.requestedBy))] } },
-      select: { id: true, email: true, notificationEmail: true, emailOnAvailable: true },
-    }).catch((err) => {
-      console.error(`[${logScope}] email-pref fetch failed:`, err instanceof Error ? err.message : err);
-      return [];
-    });
-    const prefByUserId = new Map(userPrefs.map((u) => [u.id, u]));
-    for (const w of winners) {
-      const u = prefByUserId.get(w.requestedBy);
-      if (!u || !u.emailOnAvailable) continue;
-      const to = resolveUserNotificationEmail(u);
-      if (!to) continue;
-      notifyUserRequestAvailableEmail({
-        toEmail: to,
-        title: w.title,
-        mediaType: w.mediaType,
-        posterPath: w.posterPath ?? null,
-        tmdbId: w.tmdbId ?? undefined,
-      }).catch((err) => console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err));
-    }
+    // a dead preference for those paths.
+    await notifyUsersRequestsAvailableEmail(winners, logScope);
+  }
+}
+
+// Email-on-available fan-out for the sync/webhook AVAILABLE paths. Batch-fetch
+// user prefs in a single query, send per-winner where `emailOnAvailable` is true
+// and a deliverable address resolves (synthetic *.local emails return null and
+// skip cleanly). The `enableUserEmails` global gate + per-event throttle live
+// inside notifyUserRequestAvailableEmail. Exported so the sync routes can fan out
+// the email channel for their winner rows.
+export async function notifyUsersRequestsAvailableEmail(
+  winners: Array<{
+    requestedBy: string;
+    title: string;
+    mediaType: string;
+    tmdbId?: number | null;
+    posterPath?: string | null;
+  }>,
+  logScope = "notify",
+): Promise<void> {
+  if (winners.length === 0) return;
+  const userPrefs = await prisma.user.findMany({
+    where: { id: { in: [...new Set(winners.map((w) => w.requestedBy))] } },
+    select: { id: true, email: true, notificationEmail: true, emailOnAvailable: true },
+  }).catch((err) => {
+    console.error(`[${logScope}] email-pref fetch failed:`, err instanceof Error ? err.message : err);
+    return [];
+  });
+  const prefByUserId = new Map(userPrefs.map((u) => [u.id, u]));
+  for (const w of winners) {
+    const u = prefByUserId.get(w.requestedBy);
+    if (!u || !u.emailOnAvailable) continue;
+    const to = resolveUserNotificationEmail(u);
+    if (!to) continue;
+    notifyUserRequestAvailableEmail({
+      toEmail: to,
+      title: w.title,
+      mediaType: w.mediaType,
+      posterPath: w.posterPath ?? null,
+      tmdbId: w.tmdbId ?? undefined,
+    }).catch((err) => console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err));
   }
 }
 

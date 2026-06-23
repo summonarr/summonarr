@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
@@ -11,12 +12,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many bulk operations — try again later" }, { status: 429 });
   }
 
-  let body: { source?: string; downloadsEnabled?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ source?: string; downloadsEnabled?: boolean }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { source } = body;
 

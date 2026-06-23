@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { invalidateSessionDurationsCache } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -242,12 +243,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: Record<string, string>;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<Record<string, string>>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const now = Date.now();
   for (const key of Object.keys(body)) {

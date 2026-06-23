@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { type RequestStatus, type MediaType, Prisma } from "@/generated/prisma";
 import { posterUrl, getMovieDetails, getTVDetails } from "@/lib/tmdb";
@@ -30,7 +30,7 @@ export default async function AdminPage({
 }: {
   searchParams: Promise<{ page?: string; status?: string; sort?: string; type?: string }>;
 }) {
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam } = await searchParams;

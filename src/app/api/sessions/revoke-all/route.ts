@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { markUserForceRevalidate } from "@/lib/session-revocation";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { readJsonCappedOr } from "@/lib/body-size";
 
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
@@ -29,12 +30,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  let body: { confirmPassword?: string; includeCurrent?: boolean } = {};
-  try {
-    body = (await req.json()) ?? {};
-  } catch {
-    body = {};
-  }
+  const parsed = await readJsonCappedOr<{ confirmPassword?: string; includeCurrent?: boolean }>(req, 16 * 1024, {});
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
   const confirmPassword = typeof body.confirmPassword === "string" ? body.confirmPassword : undefined;
   const includeCurrent = body.includeCurrent === true;
 

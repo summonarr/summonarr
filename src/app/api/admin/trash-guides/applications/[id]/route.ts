@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -9,12 +10,9 @@ export const PATCH = withAdmin(async (
   session,
 ) => {
   const { id } = await ctx.params;
-  let body: { enabled?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ enabled?: unknown }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
   if (typeof body.enabled !== "boolean") {
     return NextResponse.json({ error: "enabled must be boolean" }, { status: 400 });
   }

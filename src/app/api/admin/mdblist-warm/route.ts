@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
@@ -8,11 +9,9 @@ const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  let force = false;
-  try {
-    const body = await req.json() as { force?: boolean };
-    force = body.force === true;
-  } catch { }
+  const body = await readJsonCappedOr<{ force?: boolean }>(req, 8192, {});
+  if (body instanceof NextResponse) return body;
+  const force = body.force === true;
 
   const now = Date.now();
 

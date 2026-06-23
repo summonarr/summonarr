@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
@@ -120,19 +121,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Capability + per-media-type quota are evaluated below, once mediaType is
   // known (see canRequest / resolveUserQuota after body validation).
 
-  let body: {
+  const parsed = await readJsonCapped<{
     tmdbId?: number;
     mediaType?: string;
     note?: string;
     _token?: string;
     is4k?: boolean;
-  };
-
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { tmdbId, mediaType, note, _token } = body;
   const is4k = body.is4k === true;
@@ -218,7 +215,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
     if (existing.permanentlyDeclined) {
       return NextResponse.json({ error: "This request has been permanently denied" }, { status: 403 });
     }
-    return NextResponse.json({ error: "Already requested" }, { status: 409 });
+    // An ordinary (non-permanent) decline is not terminal — let the user
+    // re-request: delete the stale DECLINED row and fall through to a fresh
+    // create. APPROVED/AVAILABLE/PENDING still block with a 409.
+    if (existing.status === "DECLINED") {
+      // deleteMany (not delete) — on a concurrent double re-request the second
+      // delete would throw P2025 (500); deleteMany no-ops, and the create below
+      // then surfaces a clean 409 via its P2002 catch instead.
+      await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+    } else {
+      return NextResponse.json({ error: "Already requested" }, { status: 409 });
+    }
   }
 
   const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, is4k);
@@ -247,7 +254,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
-  let createdBranch: "auto-approve" | "pending" | null = null;
+  let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -267,12 +274,40 @@ export const POST = withAuth(async (req, _ctx, session) => {
       }
 
       if (isAutoApprove) {
-        createdRequest = await tx.mediaRequest.upsert({
-          where: { tmdbId_mediaType_requestedBy_is4k: { tmdbId, mediaType, requestedBy: session.user.id, is4k } },
-          create: { ...baseData, status: "APPROVED" },
-          update: {},
+        // create (NOT upsert update:{}): a concurrent duplicate must hit the unique
+        // constraint and surface as P2002 -> 409 below, exactly like the pending and
+        // mirror-approved branches. The no-op upsert update let two concurrent
+        // auto-approvals BOTH "succeed" and both fire ARR side effects + a 201/SSE
+        // for the same row (guardrail 23).
+        createdRequest = await tx.mediaRequest.create({
+          data: { ...baseData, status: "APPROVED" },
         });
         createdBranch = "auto-approve";
+        return;
+      }
+
+      // If another request for this exact title (+ 4K tier) is already APPROVED or
+      // AVAILABLE, the content is already greenlit / being fulfilled — there is
+      // nothing for an admin to review. Mirror that status so this requester is
+      // tracked and still receives the "now available" notification (the sync
+      // notifies every APPROVED row's requester), while skipping the admin
+      // "new request" alert.
+      const greenlit = await tx.mediaRequest.findFirst({
+        where: { tmdbId, mediaType, is4k, status: { in: ["APPROVED", "AVAILABLE"] } },
+        select: { status: true },
+      });
+      if (greenlit) {
+        createdRequest = await tx.mediaRequest.create({
+          data: {
+            ...baseData,
+            status: greenlit.status,
+            // Mirror an already-AVAILABLE title's availability timestamp so this
+            // row matches the original's shape (the sync's "now available" pass
+            // and availability sorts read availableAt).
+            ...(greenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+          },
+        });
+        createdBranch = "mirror-approved";
         return;
       }
 
@@ -321,14 +356,46 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json(request, { status: 201 });
   }
 
+  if (createdBranch === "mirror-approved") {
+    // Content is already greenlit by an earlier request — no arr push (already
+    // done) and no admin "new request" alert (nothing to review). The requester
+    // is still tracked, so the sync's "now available" pass notifies them just
+    // like the original requester.
+    emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
+    return NextResponse.json(request, { status: 201 });
+  }
+
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
-  const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
-  after(async () => {
-    await Promise.allSettled([
-      notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear }),
-      notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy, tmdbId }),
-      notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
-    ]);
+
+  // Suppress duplicate admin alerts for a title that's still pending review: only
+  // the EARLIEST pending request for (tmdbId, mediaType, is4k) fires the admin
+  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
+  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
+  // and alerts; the rest find this row and skip.
+  const earlierPending = await prisma.mediaRequest.findFirst({
+    where: {
+      tmdbId,
+      mediaType,
+      is4k,
+      status: "PENDING",
+      id: { not: request.id },
+      OR: [
+        { createdAt: { lt: request.createdAt } },
+        { createdAt: request.createdAt, id: { lt: request.id } },
+      ],
+    },
+    select: { id: true },
   });
+
+  if (!earlierPending) {
+    const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
+    after(async () => {
+      await Promise.allSettled([
+        notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear, excludeUserId: session.user.id }),
+        notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy, tmdbId, excludeUserId: session.user.id }),
+        notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
+      ]);
+    });
+  }
   return NextResponse.json(request, { status: 201 });
 });

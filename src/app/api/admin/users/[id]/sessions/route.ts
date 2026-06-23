@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -48,12 +49,9 @@ export const DELETE = withAdmin(async (
   });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  let body: { sessionId?: string; all?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ sessionId?: string; all?: boolean }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (body.all) {
     await revokeAllUserSessions(id);

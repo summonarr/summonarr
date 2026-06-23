@@ -202,9 +202,12 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
   return { keys: await getVapidKeysRaw() };
 }
 
-async function getAdminSubscriptions() {
+async function getAdminSubscriptions(excludeUserId?: string) {
   return prisma.pushSubscription.findMany({
-    where: { user: { role: "ADMIN" } },
+    where: {
+      ...(excludeUserId ? { userId: { not: excludeUserId } } : {}),
+      user: { role: "ADMIN" },
+    },
   });
 }
 
@@ -274,12 +277,13 @@ export async function notifyAdminsNewRequestPush(data: {
   mediaType: string;
   requestedBy: string;
   tmdbId?: number;
+  excludeUserId?: string;
 }) {
   try {
     const ctx = await pushContext();
     if (!ctx) return;
 
-    const subs = await getAdminSubscriptions();
+    const subs = await getAdminSubscriptions(data.excludeUserId);
     if (!subs.length) return;
 
     const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
@@ -637,12 +641,13 @@ export async function notifyAdminsNewIssuePush(data: {
   issueType: string;
   reportedBy: string;
   issueId?: string;
+  excludeUserId?: string;
 }) {
   try {
     const ctx = await pushContext();
     if (!ctx) return;
 
-    const subs = await getIssueAdminSubscriptions();
+    const subs = await getIssueAdminSubscriptions({ excludeUserId: data.excludeUserId });
     if (!subs.length) return;
 
     const issueLabel = data.issueType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());

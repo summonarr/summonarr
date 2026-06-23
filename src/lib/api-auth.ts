@@ -13,14 +13,12 @@ import {
   type VerifyAndRefreshResult,
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
-import {
-  extractUaFingerprint,
-  serializeFingerprint,
-} from "@/lib/ua-fingerprint";
+import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import {
   parsePermissions,
   effectivePermissions,
   hasPermission,
+  Permission,
   type PermissionValue,
 } from "@/lib/permissions";
 
@@ -112,19 +110,6 @@ function hasRole(actual: string | undefined, required: RequireAuthRole): boolean
   return actual === "ADMIN" || actual === "ISSUE_ADMIN";
 }
 
-// Compares the current request's UA against the stored fingerprint on the
-// claims. "machine:"-prefixed fingerprints (issued by /api/auth/machine-session)
-// are bound to CRON_SECRET, not a browser UA, so skip them. Returns false on
-// mismatch (caller should 401), true on match or no-fingerprint-on-claims.
-function matchesStoredFingerprint(
-  storedFp: string | undefined,
-  currentUa: string | null,
-): boolean {
-  if (!storedFp || storedFp.startsWith("machine:")) return true;
-  const currentFp = serializeFingerprint(extractUaFingerprint(currentUa ?? ""));
-  return currentFp === storedFp;
-}
-
 type AuthedHandler<Ctx> = (
   req: NextRequest,
   ctx: Ctx,
@@ -211,9 +196,17 @@ export function withAuth<Ctx = unknown>(
 export const withAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
   withAuth(handler, { role: "ADMIN" });
 
-/** `withAuth` pinned to ISSUE_ADMIN (accepts ADMIN or ISSUE_ADMIN). */
+/**
+ * Issue-management gate. Authoritative on the MANAGE_ISSUES permission BIT, not
+ * the role label — the ADMIN superbit and the ISSUE_ADMIN preset both carry it,
+ * so normal ADMIN/ISSUE_ADMIN access is unchanged, but clearing MANAGE_ISSUES from
+ * a user now actually revokes issue/fix-match API access (and granting it to a
+ * plain USER grants it), keeping the bitmask the single source of truth. The proxy
+ * /api/admin/* role backstop still only fails-closed roles with NO admin access, so
+ * it can't wrongly deny a permission-bearing caller — this wrapper is the precise check.
+ */
 export const withIssueAdmin = <Ctx = unknown>(handler: AuthedHandler<Ctx>) =>
-  withAuth(handler, { role: "ISSUE_ADMIN" });
+  withPermission(Permission.MANAGE_ISSUES)<Ctx>(handler);
 
 /**
  * `withAuth` plus a capability check against the user's permission bitmask

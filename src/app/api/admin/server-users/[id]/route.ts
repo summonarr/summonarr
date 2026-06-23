@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
@@ -10,12 +11,9 @@ export const PATCH = withAdmin(async (
 ) => {
   const { id } = await params;
 
-  let body: { downloadsEnabled?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ downloadsEnabled?: boolean }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (typeof body.downloadsEnabled !== "boolean") {
     return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });

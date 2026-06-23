@@ -13,7 +13,12 @@ import path from "node:path";
 import os from "node:os";
 import { MAX_CIPHERTEXT_BYTES } from "@/lib/backup-import";
 
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min — long enough for a slow upload, short enough that a stale temp file can't linger forever
+// IDLE window: bumped to now+TTL on every chunk (appendChunkUnsafe), so this is the
+// allowed gap BETWEEN chunks, not the total upload time. Kept tight so an attacker
+// can't pin the single global restore slot by opening a session and walking away
+// (the slot frees ~10 min after the last chunk instead of 30); still ample for a slow
+// chunk upload. The chunk-0 rate limit bounds how often a new session can be opened.
+const SESSION_TTL_MS = 10 * 60 * 1000;
 const TEMP_PREFIX = path.join(os.tmpdir(), "summonarr-upload-");
 
 type Session = {

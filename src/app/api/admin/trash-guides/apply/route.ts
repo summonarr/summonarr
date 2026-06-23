@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
@@ -13,12 +14,9 @@ function busyResponse() {
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  let body: { specIds?: unknown; variant?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ specIds?: unknown; variant?: unknown }>(req, 32768);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (!Array.isArray(body.specIds) || body.specIds.some((v) => typeof v !== "string")) {
     return NextResponse.json({ error: "specIds must be string[]" }, { status: 400 });

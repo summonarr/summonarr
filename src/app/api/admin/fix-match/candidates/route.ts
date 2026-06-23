@@ -201,6 +201,9 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   if (!item?.plexRatingKey) {
     return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
   }
+  // Coerce to break taint from the DB-read string before interpolating into the
+  // Plex admin-token URL below (rating keys are always integers).
+  const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
 
   const [urlRow, tokenRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
@@ -377,7 +380,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
 
   const plexSearch = async (params: Record<string, string>): Promise<RawResult[]> => {
     const res = await safeFetchAdminConfigured(
-      `${serverUrl}/library/metadata/${item.plexRatingKey}/matches?` + new URLSearchParams(params),
+      `${serverUrl}/library/metadata/${safeRatingKey}/matches?` + new URLSearchParams(params),
       { headers: plexHeaders, timeoutMs: 30_000 },
     ).catch(() => null);
     if (!res?.ok) return [];

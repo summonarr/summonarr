@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -28,13 +29,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // The dry-run path ignores the body.
   let confirmAffected: number | null = null;
   if (execute) {
-    try {
-      const body = await req.json().catch(() => ({}));
-      if (typeof body?.confirmAffectedRows === "number") {
-        confirmAffected = body.confirmAffectedRows;
-      }
-    } catch {
-      // body absent or invalid → handled by the count-match check below
+    const body = await readJsonCappedOr<{ confirmAffectedRows?: number }>(req, 8192, {});
+    if (body instanceof NextResponse) return body;
+    if (typeof body?.confirmAffectedRows === "number") {
+      confirmAffected = body.confirmAffectedRows;
     }
   }
 

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
+import { readJsonCapped } from "@/lib/body-size";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
@@ -15,12 +16,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: { deviceToken?: string; label?: string; publicKey?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ deviceToken?: string; label?: string; publicKey?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim() : "";
   if (!DEVICE_TOKEN_RE.test(deviceToken)) {
@@ -98,12 +96,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
-  let body: { deviceToken?: string };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ deviceToken?: string }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim() : "";
   if (!deviceToken) {

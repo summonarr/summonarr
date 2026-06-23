@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { AuditLogView } from "@/components/admin/audit-log-table";
@@ -32,7 +32,7 @@ export default async function AuditLogPage({
   searchParams: Promise<{ action?: string; group?: string; dateFrom?: string; dateTo?: string; user?: string; target?: string; hideCron?: string }>;
 }) {
   await requireFeature("feature.admin.auditLog");
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   const { action: actionParam, group: groupParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;

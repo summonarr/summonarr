@@ -1,23 +1,28 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { notifyAdminsNewIssue } from "@/lib/email";
 import { notifyAdminsNewIssuePush } from "@/lib/push";
+import { notifyAdminsNewIssueDiscord } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
+import { hasPermission, Permission } from "@/lib/permissions";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const where =
-    (session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN") ? {} : { reportedBy: session.user.id };
+  // Issue visibility is bitmask-authoritative: a demoted ISSUE_ADMIN (role kept but
+  // MANAGE_ISSUES cleared) is scoped to their own issues. ADMIN passes via the superbit.
+  const canManageIssues = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  const where = canManageIssues ? {} : { reportedBy: session.user.id };
 
-  const isAdmin = session.user.role === "ADMIN" || session.user.role === "ISSUE_ADMIN";
+  const isAdmin = canManageIssues;
 
   const limitParam = req.nextUrl.searchParams.get("limit");
   const limit = Math.min(100, Math.max(1, parseInt(limitParam ?? "50", 10) || 50));
@@ -53,7 +58,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: {
+  const parsed = await readJsonCapped<{
     mediaType?: string;
     tmdbId?: number;
     tvdbId?: number;
@@ -62,13 +67,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
     seasonNumber?: number;
     episodeNumber?: number;
     note?: string;
-  };
-
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  }>(req, 65536);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { mediaType, tmdbId, tvdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
 
@@ -122,6 +123,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }
 
+  // Issues presuppose the title is in the library — every type (bad video, wrong
+  // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
+  // Jellyfin library hit so the API can't be scripted into issue records for titles
+  // that aren't available (the UI only surfaces "report issue" on available media).
+  const mt = mediaType as "MOVIE" | "TV";
+  const [plexHit, jellyfinHit] = await Promise.all([
+    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+  ]);
+  if (!plexHit && !jellyfinHit) {
+    return NextResponse.json({ error: "This title isn't in the library — issues can only be filed for available media." }, { status: 422 });
+  }
+
   const issue = await prisma.issue.create({
     data: {
       reportedBy: session.user.id,
@@ -142,8 +156,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const reportedBy = session.user.name ?? session.user.email ?? session.user.id;
   after(async () => {
     await Promise.allSettled([
-      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id }),
-      notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy, issueId: issue.id }),
+      notifyAdminsNewIssue({ title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id, excludeUserId: session.user.id }),
+      notifyAdminsNewIssuePush({ title: verified.title, issueType, reportedBy, issueId: issue.id, excludeUserId: session.user.id }),
+      notifyAdminsNewIssueDiscord({ issueId: issue.id, title: verified.title, mediaType, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
     ]);
   });
   return NextResponse.json(issue, { status: 201 });

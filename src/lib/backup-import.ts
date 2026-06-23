@@ -15,6 +15,7 @@ import {
   ENCRYPTED_MAGIC,
 } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
+import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 
 // Verbose INSERT-per-row encoding inflates row data 3–5×; 500 MB plaintext
 // covers a fully-loaded Summonarr instance with audit log + play history.
@@ -384,8 +385,10 @@ export async function processBackupImport(
   let abortReason: { error: string; status: number } | null = null;
   const validatedStatements: string[] = [];
   let receivedFingerprint: string | null = null;
+  let receivedTekFingerprint: string | null = null;
 
   const FINGERPRINT_RE = /^Schema-Fingerprint:\s*([0-9a-f]{8,64})$/i;
+  const TEK_FINGERPRINT_RE = /^Token-Encryption-Key-Fingerprint:\s*([0-9a-f]{8,64})$/i;
 
   function collectStatement(stmt: string): void {
     if (aborted) return;
@@ -415,6 +418,8 @@ export async function processBackupImport(
   function collectComment(comment: string): void {
     const m = FINGERPRINT_RE.exec(comment);
     if (m) receivedFingerprint = m[1].toLowerCase();
+    const tm = TEK_FINGERPRINT_RE.exec(comment);
+    if (tm) receivedTekFingerprint = tm[1].toLowerCase();
   }
 
   const ptReader = plaintextStream.getReader();
@@ -497,7 +502,7 @@ export async function processBackupImport(
   }
 
   const expectedFingerprint = computeSchemaFingerprint();
-  let fingerprintWarning: string | null = null;
+  const warnings: string[] = [];
   if (receivedFingerprint && receivedFingerprint !== expectedFingerprint) {
     return {
       ok: false,
@@ -507,8 +512,19 @@ export async function processBackupImport(
     };
   }
   if (!receivedFingerprint) {
-    fingerprintWarning =
-      `This backup has no schema fingerprint (it was created by an older version). Proceeding, but if the schema has drifted the restore will roll back partway through.`;
+    warnings.push(
+      `This backup has no schema fingerprint (it was created by an older version). Proceeding, but if the schema has drifted the restore will roll back partway through.`,
+    );
+  }
+  // Encrypted secrets (API keys, OAuth tokens, SMTP password) are AES-encrypted with
+  // TOKEN_ENCRYPTION_KEY. Restoring onto a server with a DIFFERENT key leaves them as
+  // undecryptable ciphertext. Warn (don't refuse — the rest of the data restores fine
+  // and the operator can re-enter the secrets afterward).
+  const currentTekFingerprint = tokenEncryptionKeyFingerprint();
+  if (receivedTekFingerprint && currentTekFingerprint && receivedTekFingerprint !== currentTekFingerprint) {
+    warnings.push(
+      `This backup's encrypted secrets (API keys, tokens, SMTP password) were encrypted with a different TOKEN_ENCRYPTION_KEY than this server uses — they will restore but won't be decryptable. Re-enter them in Settings after the restore.`,
+    );
   }
 
   const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
@@ -579,6 +595,12 @@ export async function processBackupImport(
     return { ok: false, status: rejection.status, error: rejection.error };
   }
 
+  if (conflictSkippedTotal > 0) {
+    warnings.push(
+      `${conflictSkippedTotal} duplicate row(s) in the backup were skipped on restore (the dump contained internal duplicates, e.g. from an older export). The restore is otherwise complete.`,
+    );
+  }
+
   return {
     ok: true,
     status: 200,
@@ -590,6 +612,6 @@ export async function processBackupImport(
       conflictSkippedByTable,
       conflictSkippedTotal,
     },
-    warning: fingerprintWarning,
+    warning: warnings.length ? warnings.join(" ") : null,
   };
 }

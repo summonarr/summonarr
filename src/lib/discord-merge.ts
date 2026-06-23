@@ -24,17 +24,20 @@ export async function mergeDiscordIntoWebAccount(
 
       const webRequests = await tx.mediaRequest.findMany({
         where: { requestedBy: webUserId },
-        select: { tmdbId: true, mediaType: true },
+        select: { tmdbId: true, mediaType: true, is4k: true },
       });
-      const webKeys = new Set(webRequests.map((r) => `${r.tmdbId}:${r.mediaType}`));
+      // Key on is4k too — the MediaRequest unique is (tmdbId, mediaType, requestedBy,
+      // is4k), so an HD and a 4K request for the same title are DISTINCT rows. Keying
+      // only on tmdbId:mediaType treated them as duplicates and deleted the 4K variant.
+      const webKeys = new Set(webRequests.map((r) => `${r.tmdbId}:${r.mediaType}:${r.is4k}`));
 
       const discordRequests = await tx.mediaRequest.findMany({
         where: { requestedBy: existing.id },
-        select: { id: true, tmdbId: true, mediaType: true },
+        select: { id: true, tmdbId: true, mediaType: true, is4k: true },
       });
 
       const conflictIds = discordRequests
-        .filter((r) => webKeys.has(`${r.tmdbId}:${r.mediaType}`))
+        .filter((r) => webKeys.has(`${r.tmdbId}:${r.mediaType}:${r.is4k}`))
         .map((r) => r.id);
       if (conflictIds.length > 0) {
         await tx.mediaRequest.deleteMany({ where: { id: { in: conflictIds } } });

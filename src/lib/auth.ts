@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
@@ -6,11 +7,11 @@ import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJell
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
-import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel } from "@/lib/ua-fingerprint";
-import { signSessionJwt } from "@/lib/session-jwt";
+import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
+import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
-import { readSummonarrSession } from "@/lib/session-server";
+import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 
@@ -260,7 +261,18 @@ const DEFAULT_SESSION_SECONDS        = 3_600;
 const DEFAULT_MOBILE_SESSION_SECONDS = 604_800;
 const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
 
-// Hard ceiling regardless of admin-configured session durations — prevents unbounded JWT lifetimes
+// Native-app (bearer) sessions get a long FIXED lifetime so the iOS app stays signed
+// in by default. The token lives in the iOS Keychain (hardware-backed, not an ambient
+// cookie) and bearer clients have no sliding refresh (guardrail 6b), so a long fixed
+// TTL is the mechanism. NOT a security hole: DB revocation — sign-out-everywhere, a
+// password change, the sessionsRevokedAt/passwordChangedAt cutoffs — still invalidates
+// it instantly on the next request, independent of this lifetime. Granted ONLY to
+// rememberMe + a mobile device class (so web "remember me" is unaffected).
+const NATIVE_APP_SESSION_SECONDS = 365 * 24 * 60 * 60; // 1 year
+
+// Hard ceiling for ADMIN-CONFIGURABLE durations (the sessionDefault/Mobile/Max settings)
+// — prevents an admin from configuring an unbounded JWT lifetime. NATIVE_APP_SESSION_SECONDS
+// above is a deliberate code-level constant and is intentionally not bound by this.
 const MAX_ALLOWED_SESSION_SECONDS = 90 * 24 * 60 * 60;
 
 type SessionDurations = { desktopDuration: number; mobileDuration: number; maxDuration: number };
@@ -301,13 +313,7 @@ export function isTokenExpired(session: SummonarrSession | null): boolean {
   return !!session.tokenExpiresAt && Math.floor(Date.now() / 1000) > session.tokenExpiresAt;
 }
 
-// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
-// exported — synchronous-looking API that returns SummonarrSession | null.
-// Routes that need 401/403 semantics should use requireAuth/withAuth from
-// @/lib/api-auth instead.
-export async function auth(): Promise<SummonarrSession | null> {
-  const claims = await readSummonarrSession();
-  if (!claims) return null;
+function claimsToSession(claims: SessionClaims): SummonarrSession {
   return {
     user: {
       id: claims.id,
@@ -321,6 +327,39 @@ export async function auth(): Promise<SummonarrSession | null> {
     sessionId: claims.sessionId,
     tokenExpiresAt: claims.expiresAt,
   };
+}
+
+// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
+// exported — synchronous-looking API that returns SummonarrSession | null.
+// JWT-only: verifies signature + expiry, NOT DB revocation/role-rotation. Fine
+// for personalization reads; for an AUTHORIZATION decision in a page/layout use
+// authActive() instead. Routes that need 401/403 semantics should use
+// requireAuth/withAuth from @/lib/api-auth.
+export async function auth(): Promise<SummonarrSession | null> {
+  const claims = await readSummonarrSession();
+  return claims ? claimsToSession(claims) : null;
+}
+
+// DB-checked counterpart of auth() for AUTHORIZATION decisions in server
+// components (page/layout role guards). Routes through readActiveSummonarrSession
+// → verifyAndRefreshSession, so a revoked AuthSession, sessionsRevokedAt/
+// passwordChangedAt cutoff, or role demotion is honored immediately — not just
+// the JWT signature + expiry. Required because proxy.ts's matcher skips prefetch
+// requests (next-router-prefetch / purpose=prefetch), so a page that makes a
+// role-based redirect cannot assume the proxy's DB check has run. Same
+// SummonarrSession shape as auth(), so it is a drop-in replacement at the guard.
+export async function authActive(): Promise<SummonarrSession | null> {
+  const claims = await readActiveSummonarrSession();
+  if (!claims) return null;
+  // UA-fingerprint replay check — parity with the proxy and the withAuth/withAdmin
+  // wrappers ([api-auth.ts]). The proxy's matcher skips prefetch requests, so the
+  // page-render path must re-enforce the cookie→device binding here too: otherwise a
+  // stolen cookie replayed with a prefetch-looking header could render protected
+  // pages. Page renders are cookie/SSR only (no bearer); machine:/no-fingerprint
+  // sessions are skipped inside the helper.
+  const ua = (await headers()).get("user-agent");
+  if (!matchesStoredFingerprint(claims.uaFingerprint, ua)) return null;
+  return claimsToSession(claims);
 }
 
 export function invalidateUserSession(userId: string): void {
@@ -437,7 +476,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
   let ttl: number;
-  if (rememberMe) {
+  if (rememberMe && isMobile) {
+    // Native app (iOS Keychain bearer) — long-lived by default. See NATIVE_APP_SESSION_SECONDS.
+    ttl = NATIVE_APP_SESSION_SECONDS;
+  } else if (rememberMe) {
+    // Web "remember me" — admin-configurable maxDuration (30d default, capped at 90d).
     ttl = maxDuration;
   } else if (isMobile) {
     ttl = mobileDuration;

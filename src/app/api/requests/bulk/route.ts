@@ -17,6 +17,7 @@ import {
 } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
+import { readJsonCapped } from "@/lib/body-size";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -106,12 +107,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  let body: { items?: unknown; onBehalfOfUserId?: unknown };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const rawBody = await readJsonCapped<{ items?: unknown; onBehalfOfUserId?: unknown }>(req, 1048576);
+  if (rawBody instanceof NextResponse) return rawBody;
+  const body = rawBody;
 
   if (!Array.isArray(body.items) || body.items.length === 0) {
     return NextResponse.json({ error: "items must be a non-empty array" }, { status: 400 });
@@ -198,7 +196,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       // lookup to HD rows too — otherwise a target who holds only a 4K request for a
       // title is wrongly classified "already-requested" and the HD create is skipped.
       where: { requestedBy: targetUserId, is4k: false, OR: orPairs },
-      select: { tmdbId: true, mediaType: true, permanentlyDeclined: true },
+      select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
     }),
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
@@ -220,6 +218,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Classify each item; collect the ones to actually create.
   const skipped: { tmdbId: number; mediaType: MediaType; result: ItemResult }[] = [];
   const toCreate: { tmdbId: number; mediaType: MediaType }[] = [];
+  // Ids of stale, non-permanent DECLINED rows to drop so a fresh request can be
+  // created (the @@unique constraint would otherwise make createMany skip them).
+  const staleDeclinedIds: string[] = [];
   for (const it of items) {
     const k = keyOf(it.tmdbId, it.mediaType);
     if (!canRequest(targetPerms, it.mediaType, false)) {
@@ -232,10 +233,27 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
     const ex = existingMap.get(k);
     if (ex) {
-      skipped.push({ ...it, result: ex.permanentlyDeclined ? "skipped-declined" : "already-requested" });
+      if (ex.permanentlyDeclined) {
+        skipped.push({ ...it, result: "skipped-declined" });
+        continue;
+      }
+      // An ordinary (non-permanent) decline is re-requestable: delete the stale
+      // row below and create fresh. APPROVED/AVAILABLE/PENDING stay blocked.
+      if (ex.status === "DECLINED") {
+        staleDeclinedIds.push(ex.id);
+        toCreate.push(it);
+        continue;
+      }
+      skipped.push({ ...it, result: "already-requested" });
       continue;
     }
     toCreate.push(it);
+  }
+
+  // Drop stale declined rows before the create transaction so their fresh
+  // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, is4k).
+  if (staleDeclinedIds.length > 0) {
+    await prisma.mediaRequest.deleteMany({ where: { id: { in: staleDeclinedIds } } });
   }
 
   if (toCreate.length === 0) {
@@ -303,6 +321,17 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
                 if (used + n > rq.limit) throw new QuotaExceeded(mt, rq.limit, rq.windowLabel, used);
               }
             }
+            // Capture rows that existed BEFORE this insert so the side effects below
+            // (SSE + ARR push) fire ONLY for rows THIS request created. Two concurrent
+            // bulk requests with overlapping items would otherwise both re-query the
+            // same skipDuplicates rows and both push/notify. With Serializable + retry,
+            // a duplicate's retry re-snapshots, sees the other's committed rows in
+            // `before`, and emits nothing. (Bulk analog of the requests/route fix.)
+            const before = await tx.mediaRequest.findMany({
+              where: { requestedBy: targetUserId, is4k: false, OR: pairs },
+              select: { id: true },
+            });
+            const beforeIds = new Set(before.map((r) => r.id));
             await tx.mediaRequest.createMany({
               data: prepared.map((p) => ({
                 tmdbId: p.tmdbId,
@@ -316,10 +345,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
               })),
               skipDuplicates: true,
             });
-            return tx.mediaRequest.findMany({
+            const after = await tx.mediaRequest.findMany({
               where: { requestedBy: targetUserId, is4k: false, OR: pairs },
               select: { id: true, tmdbId: true, mediaType: true, status: true },
             });
+            return after.filter((r) => !beforeIds.has(r.id));
           },
           { isolationLevel: "Serializable" },
         ),

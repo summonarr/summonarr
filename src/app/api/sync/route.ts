@@ -21,6 +21,7 @@ import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecordi
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { notifyUsersRequestsAvailableEmail } from "@/lib/request-notifications";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -193,6 +194,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
 
   notifyUsersRequestsAvailable(arrNotify).catch(() => {});
   notifyUsersRequestsAvailablePush(arrNotify).catch(() => {});
+  void notifyUsersRequestsAvailableEmail(arrNotify, "sync");
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -597,6 +599,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           void clearDeletionVotesForTmdbs(winners);
           notifyUsersRequestsAvailable(winners).catch(() => {});
           notifyUsersRequestsAvailablePush(winners).catch(() => {});
+          void notifyUsersRequestsAvailableEmail(winners, "sync");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -698,6 +701,7 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
         void clearDeletionVotesForTmdbs(winners);
         notifyUsersRequestsAvailable(winners).catch(() => {});
         notifyUsersRequestsAvailablePush(winners).catch(() => {});
+        void notifyUsersRequestsAvailableEmail(winners, "sync");
       }
     }
   }

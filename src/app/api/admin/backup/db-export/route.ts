@@ -4,6 +4,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
+import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,13 @@ function buildSqlStream(
         // live server's fingerprint. Mismatch refuses the restore before any
         // mutation. Format must stay parseable by the importer's regex.
         write(`-- Schema-Fingerprint: ${fingerprint}\n`);
+        const tekFingerprint = tokenEncryptionKeyFingerprint();
+        if (tekFingerprint) {
+          // Lets the importer warn when restoring onto a server with a DIFFERENT
+          // TOKEN_ENCRYPTION_KEY — the encrypted secrets would otherwise restore as
+          // undecryptable ciphertext with no signal. Non-secret domain-separated hash.
+          write(`-- Token-Encryption-Key-Fingerprint: ${tekFingerprint}\n`);
+        }
         write(`-- Exported at: ${new Date().toISOString()}\n`);
         write(`-- Exported by: admin (${exportedBy})\n\n`);
 

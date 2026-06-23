@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.6 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.7 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -156,6 +156,27 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.7
+
+**Added**
+
+- New issues are now posted to the Discord admin channel, matching new requests.
+
+**Changed**
+
+- The iOS app now stays signed in for up to **1 year** by default — its bearer token gets a long fixed lifetime (sign-out-everywhere and password changes still revoke it instantly on the next request). Web "remember me" sessions are unchanged.
+- A second request for an already-approved or available title no longer alerts admins — the requester is still tracked and receives the "now available" notification.
+- Issues can now only be filed for titles that are in your Plex or Jellyfin library.
+- `TRUST_PROXY` must be set explicitly in production: an internet-facing deployment (a public `AUTH_URL`) refuses to boot unless `TRUST_PROXY=true`. LAN/loopback deployments are unaffected.
+- Backup restore now warns when a backup was created with a different `TOKEN_ENCRYPTION_KEY` (its encrypted secrets would need re-entering) or when duplicate rows were skipped.
+
+**Fixed**
+
+- Resolved 10 notification bugs — duplicate or missing approve/decline/"now available" pings, self-notifications, and Discord notifications that ignored per-user preferences.
+- Departed media-server users are now soft-deleted, so their watch history is never destroyed.
+- Discord account merge no longer deletes a valid 4K request when an HD request exists for the same title (and vice-versa).
+- Security & robustness hardening: closed a prefetch-header authorization bypass on pages; page and issue access is now database- and permission-checked rather than relying on the request proxy alone; added per-route request-body size limits, UA-fingerprint replay checks, and `http(s)`-only validation of external metadata links; and fixed several request-side races that could double-fire Radarr/Sonarr pushes or notifications.
 
 ### v0.13.6
 
@@ -641,7 +662,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.6 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.7 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

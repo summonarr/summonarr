@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { Lock, Download, Upload } from "@/components/icons";
 import { BackupUI } from "@/components/admin/backup-ui";
@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 
 export default async function BackupPage() {
   await requireFeature("feature.admin.backup");
-  const session = await auth();
+  const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
 
   return (

@@ -45,7 +45,7 @@ Before reporting, check whether the issue is already mitigated. We'd rather hear
 
 - `NEXTAUTH_SECRET` — minimum 32 characters
 - `AUTH_URL` — fixes the public origin so NextAuth can't be tricked by a forged `Host` header
-- `TRUST_PROXY=true` — required so per-IP rate limiting works behind a reverse proxy
+- `TRUST_PROXY=true` — required for **internet-facing** deployments: when `AUTH_URL` is a public host, production refuses to boot without it (the local-only Host guard is spoofable and can't protect a public instance). LAN/loopback deployments run in local-only mode without it.
 - `CRON_SECRET` — minimum 32 characters; protects `/api/sync*` and `/api/cron*`
 - `TOKEN_ENCRYPTION_KEY` — exactly 64 hex characters (`openssl rand -hex 32`)
 
