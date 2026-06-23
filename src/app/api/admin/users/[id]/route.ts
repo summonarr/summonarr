@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -20,7 +21,7 @@ export const PATCH = withAdmin(async (
   type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
   const notifKeys: NotifKey[] = ["notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined", "emailOnApproved", "emailOnAvailable", "emailOnDeclined", "pushOnApproved", "pushOnAvailable", "pushOnDeclined", "notifyOnIssue"];
 
-  let body: {
+  type UpdateBody = {
     role?: string;
     permissions?: string;
     movieQuotaLimit?: number | null;
@@ -29,11 +30,9 @@ export const PATCH = withAdmin(async (
     tvQuotaDays?: number | null;
     mediaServer?: string | null;
   } & Partial<Record<NotifKey, boolean>>;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsedBody = await readJsonCapped<UpdateBody>(req, 32768);
+  if (parsedBody instanceof NextResponse) return parsedBody;
+  const body = parsedBody;
 
   if ("mediaServer" in body) {
     const ms = body.mediaServer;

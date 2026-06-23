@@ -10,7 +10,9 @@ export function safeExternalHref(url: string | null | undefined): string | undef
     const { protocol } = new URL(trimmed);
     if (protocol === "http:" || protocol === "https:") return trimmed;
   } catch {
-    // Not an absolute URL — reject; we only render absolute external links here.
+    // Not an absolute URL — reject. Protocol-relative (//host) and relative paths
+    // throw here (no base) and are intentionally rejected; we only render absolute
+    // http(s) external links.
   }
   return undefined;
 }

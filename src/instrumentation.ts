@@ -78,11 +78,14 @@ export async function register() {
       // mDNS/internal suffixes are all local. Err toward "local" so a misjudged host
       // never bricks a legitimate LAN deployment — false negatives just keep today's
       // behaviour; only a clearly-public AUTH_URL without a trusted proxy is refused.
+      // A bracketed IPv6 literal (URL.hostname keeps the brackets) is also treated as
+      // a host: isLocalHost() handles loopback/link-local/ULA, so only a PUBLIC IPv6
+      // literal slips past the dotted-FQDN test and is correctly flagged here.
       const PRIVATE_SUFFIXES = [".local", ".lan", ".internal", ".home", ".home.arpa", ".localhost"];
       const authIsPublic =
         !!authHost &&
         authHost !== "localhost" &&
-        authHost.includes(".") &&
+        (authHost.includes(".") || authHost.startsWith("[")) &&
         !isLocalHost(authHost) &&
         !PRIVATE_SUFFIXES.some((s) => authHost.endsWith(s));
       if (process.env.NODE_ENV === "production" && authIsPublic) {

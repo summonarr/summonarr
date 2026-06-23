@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
@@ -57,13 +58,10 @@ export async function POST(req: NextRequest) {
   }
 
   let expiresIn = DEFAULT_EXPIRES_IN;
-  try {
-    const body = await req.json().catch(() => ({}));
-    if (typeof body?.expiresIn === "number") {
-      expiresIn = Math.min(Math.max(body.expiresIn, 60), MAX_EXPIRES_IN);
-    }
-  } catch {
-    // ignore — body is optional
+  const body = await readJsonCappedOr<{ expiresIn?: number }>(req, 8192, {});
+  if (body instanceof NextResponse) return body;
+  if (typeof body?.expiresIn === "number") {
+    expiresIn = Math.min(Math.max(body.expiresIn, 60), MAX_EXPIRES_IN);
   }
 
   const user = await prisma.user.findFirst({

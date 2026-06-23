@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { refreshCatalog, describeSchemaError, type RefreshResult } from "@/lib/trash";
@@ -18,11 +19,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const contentLength = req.headers.get("content-length");
   let body: { service?: unknown } = {};
   if (contentLength && contentLength !== "0") {
-    try {
-      body = (await req.json()) as { service?: unknown };
-    } catch {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-    }
+    const parsed = await readJsonCapped<{ service?: unknown }>(req, 8192);
+    if (parsed instanceof NextResponse) return parsed;
+    body = parsed;
   }
   if (body.service !== undefined && body.service !== "radarr" && body.service !== "sonarr") {
     return NextResponse.json(

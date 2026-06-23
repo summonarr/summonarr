@@ -105,7 +105,8 @@ export async function notifyAdminsNewRequestDiscord(data: {
       title: `📥 New Request — ${escMd(data.title)}`,
       description: [
         `**${label}** · requested by **${escMd(data.requestedBy)}**`,
-        data.note ? `\n> ${escMd(data.note)}` : "",
+        // Prefix every line so a multi-line note stays inside the blockquote.
+        data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
       ].filter(Boolean).join(""),
       timestamp: new Date().toISOString(),
     };
@@ -174,7 +175,8 @@ export async function notifyAdminsNewIssueDiscord(data: {
       title: `🛠️ New Issue — ${escMd(data.title)}`,
       description: [
         `**${label}** · ${escMd(typeLabel)} · reported by **${escMd(data.reportedBy)}**`,
-        data.note ? `\n> ${escMd(data.note)}` : "",
+        // Prefix every line so a multi-line note stays inside the blockquote.
+        data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
       ].filter(Boolean).join(""),
       timestamp: new Date().toISOString(),
     };

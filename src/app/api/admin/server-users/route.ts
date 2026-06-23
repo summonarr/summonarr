@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -30,12 +31,9 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
-  let body: { autoDisableNew?: boolean };
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ autoDisableNew?: boolean }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (body.autoDisableNew !== undefined) {
     if (typeof body.autoDisableNew !== "boolean") {

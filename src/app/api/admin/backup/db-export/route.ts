@@ -51,7 +51,7 @@ function buildSqlStream(
         if (tekFingerprint) {
           // Lets the importer warn when restoring onto a server with a DIFFERENT
           // TOKEN_ENCRYPTION_KEY — the encrypted secrets would otherwise restore as
-          // undecryptable ciphertext with no signal. Non-secret salted hash.
+          // undecryptable ciphertext with no signal. Non-secret domain-separated hash.
           write(`-- Token-Encryption-Key-Fingerprint: ${tekFingerprint}\n`);
         }
         write(`-- Exported at: ${new Date().toISOString()}\n`);

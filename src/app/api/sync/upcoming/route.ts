@@ -52,6 +52,11 @@ export async function POST(request: NextRequest) {
       // A blanket deleteMany() would wipe the sibling type when only one source failed
       // (e.g. movies OK, TV rejected → TV cache erased). Concurrency is already
       // serialized by the outer withAdvisoryLock(2007); the tx still gives atomicity.
+      // NOTE: a fulfilled-but-empty fetch (0 rows) intentionally clears that media
+      // type's cache — for the upcoming list an empty TMDB result is a valid "nothing
+      // upcoming" state, and the cache re-warms on the next run. This deliberately
+      // differs from the library-sync "skip delete on 0" anti-wipe guard (guardrails
+      // 13/28), where 0 rows usually means a degraded fetch, not an empty library.
       await prisma.$transaction(async (tx) => {
         if (movies.status === "fulfilled") {
           await tx.upcomingCacheItem.deleteMany({ where: { mediaType: "MOVIE" } });

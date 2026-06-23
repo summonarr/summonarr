@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -17,12 +18,9 @@ import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 // sessionKey → Session.id via a snapshot of /status/sessions because storing
 // the GUID on ActiveSession would be a single-purpose column.
 export const POST = withAdmin(async (req, _ctx, session) => {
-  let body: { sessionKey?: unknown; reason?: unknown };
-  try {
-    body = (await req.json()) as { sessionKey?: unknown; reason?: unknown };
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<{ sessionKey?: unknown; reason?: unknown }>(req, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
   const reason = typeof body.reason === "string" && body.reason.trim().length > 0

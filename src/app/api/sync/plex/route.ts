@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
@@ -18,7 +19,8 @@ export async function POST(request: NextRequest) {
 }
 
 async function syncPlex(request: NextRequest) {
-  const rawBody = await request.json().catch(() => ({})) as Record<string, unknown>;
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
   const [serverUrlRow, tokenRow, librariesRow] = await Promise.all([

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readJsonCappedOr } from "@/lib/body-size";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
@@ -21,7 +22,8 @@ export async function POST(request: NextRequest) {
 }
 
 async function syncJellyfin(request: NextRequest) {
-  const rawBody = await request.json().catch(() => ({})) as Record<string, unknown>;
+  const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
+  if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
   const [urlRow, keyRow, librariesRow] = await Promise.all([

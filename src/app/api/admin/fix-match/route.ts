@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { readJsonCapped } from "@/lib/body-size";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
@@ -468,12 +469,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     );
   }
 
-  let body: FixMatchBody;
-  try {
-    body = await request.json() as FixMatchBody;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<FixMatchBody>(request, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
 
