@@ -165,6 +165,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 **Changed**
 
+- The iOS app now stays signed in for up to **1 year** by default — its bearer token gets a long fixed lifetime (sign-out-everywhere and password changes still revoke it instantly on the next request). Web "remember me" sessions are unchanged.
 - A second request for an already-approved or available title no longer alerts admins — the requester is still tracked and receives the "now available" notification.
 - Issues can now only be filed for titles that are in your Plex or Jellyfin library.
 - `TRUST_PROXY` must be set explicitly in production: an internet-facing deployment (a public `AUTH_URL`) refuses to boot unless `TRUST_PROXY=true`. LAN/loopback deployments are unaffected.

@@ -261,7 +261,18 @@ const DEFAULT_SESSION_SECONDS        = 3_600;
 const DEFAULT_MOBILE_SESSION_SECONDS = 604_800;
 const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
 
-// Hard ceiling regardless of admin-configured session durations — prevents unbounded JWT lifetimes
+// Native-app (bearer) sessions get a long FIXED lifetime so the iOS app stays signed
+// in by default. The token lives in the iOS Keychain (hardware-backed, not an ambient
+// cookie) and bearer clients have no sliding refresh (guardrail 6b), so a long fixed
+// TTL is the mechanism. NOT a security hole: DB revocation — sign-out-everywhere, a
+// password change, the sessionsRevokedAt/passwordChangedAt cutoffs — still invalidates
+// it instantly on the next request, independent of this lifetime. Granted ONLY to
+// rememberMe + a mobile device class (so web "remember me" is unaffected).
+const NATIVE_APP_SESSION_SECONDS = 365 * 24 * 60 * 60; // 1 year
+
+// Hard ceiling for ADMIN-CONFIGURABLE durations (the sessionDefault/Mobile/Max settings)
+// — prevents an admin from configuring an unbounded JWT lifetime. NATIVE_APP_SESSION_SECONDS
+// above is a deliberate code-level constant and is intentionally not bound by this.
 const MAX_ALLOWED_SESSION_SECONDS = 90 * 24 * 60 * 60;
 
 type SessionDurations = { desktopDuration: number; mobileDuration: number; maxDuration: number };
@@ -465,7 +476,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
   let ttl: number;
-  if (rememberMe) {
+  if (rememberMe && isMobile) {
+    // Native app (iOS Keychain bearer) — long-lived by default. See NATIVE_APP_SESSION_SECONDS.
+    ttl = NATIVE_APP_SESSION_SECONDS;
+  } else if (rememberMe) {
+    // Web "remember me" — admin-configurable maxDuration (30d default, capped at 90d).
     ttl = maxDuration;
   } else if (isMobile) {
     ttl = mobileDuration;
