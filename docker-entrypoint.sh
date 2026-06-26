@@ -205,43 +205,43 @@ _cron_loop() {
     sleep 60
     NOW=$(date +%s)
     if [ "$NOW" -ge "$SYNC_NEXT" ]; then
-      _cron_sync "${SYNC_URL:-http://localhost:3000/api/sync}" "sync"
+      _cron_sync "${SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync}" "sync"
       SYNC_NEXT=$((NOW + ${SYNC_INTERVAL:-3600}))
     fi
     if [ "$NOW" -ge "$UPCOMING_NEXT" ]; then
-      _cron_sync "${UPCOMING_SYNC_URL:-http://localhost:3000/api/sync/upcoming}" "upcoming"
+      _cron_sync "${UPCOMING_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/upcoming}" "upcoming"
       UPCOMING_NEXT=$((NOW + ${UPCOMING_SYNC_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$RATINGS_NEXT" ]; then
-      _cron_sync "${RATINGS_SYNC_URL:-http://localhost:3000/api/sync/ratings}" "ratings"
+      _cron_sync "${RATINGS_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/ratings}" "ratings"
       RATINGS_NEXT=$((NOW + ${RATINGS_SYNC_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
-      _cron_sync "${PURGE_SESSIONS_URL:-http://localhost:3000/api/cron/purge-auth-sessions}" "purge-sessions"
+      _cron_sync "${PURGE_SESSIONS_URL:-http://localhost:3000${BASE_PATH}/api/cron/purge-auth-sessions}" "purge-sessions"
       PURGE_SESSIONS_NEXT=$((NOW + ${PURGE_SESSIONS_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
-      _cron_sync "${LIST_CACHE_SYNC_URL:-http://localhost:3000/api/cron/warm-list-cache}" "warm-list-cache"
+      _cron_sync "${LIST_CACHE_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-list-cache}" "warm-list-cache"
       LIST_CACHE_NEXT=$((NOW + ${LIST_CACHE_SYNC_INTERVAL:-21600}))
     fi
     if [ "$NOW" -ge "$WARM_ACTIVITY_NEXT" ]; then
-      _cron_sync "${WARM_ACTIVITY_URL:-http://localhost:3000/api/cron/warm-activity}" "warm-activity" quiet
+      _cron_sync "${WARM_ACTIVITY_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-activity}" "warm-activity" quiet
       WARM_ACTIVITY_NEXT=$((NOW + ${WARM_ACTIVITY_INTERVAL:-1800}))
     fi
     if [ "$NOW" -ge "$WARM_MDBLIST_NEXT" ]; then
-      _cron_sync "${WARM_MDBLIST_URL:-http://localhost:3000/api/cron/warm-mdblist}" "warm-mdblist"
+      _cron_sync "${WARM_MDBLIST_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-mdblist}" "warm-mdblist"
       WARM_MDBLIST_NEXT=$((NOW + ${WARM_MDBLIST_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
-      _cron_sync "${WARM_OMDB_URL:-http://localhost:3000/api/cron/warm-omdb}" "warm-omdb"
+      _cron_sync "${WARM_OMDB_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-omdb}" "warm-omdb"
       WARM_OMDB_NEXT=$((NOW + ${WARM_OMDB_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
-      _cron_sync "${SCRUB_AUDIT_PII_URL:-http://localhost:3000/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet
+      _cron_sync "${SCRUB_AUDIT_PII_URL:-http://localhost:3000${BASE_PATH}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet
       SCRUB_AUDIT_PII_NEXT=$((NOW + ${SCRUB_AUDIT_PII_INTERVAL:-86400}))
     fi
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
-      _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000/api/cron/trash-sync}" "trash-sync"
+      _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/trash-sync}" "trash-sync"
       TRASH_SYNC_NEXT=$((NOW + ${TRASH_SYNC_INTERVAL:-86400}))
     fi
   done
@@ -265,9 +265,9 @@ _play_history_loop() {
   INTERVAL=${PLAY_HISTORY_SYNC_INTERVAL:-5}
   echo "Play history polling started (every ${INTERVAL}s)"
 
-  PORT_VALUE="${PORT:-3000}" node --input-type=module <<'JSEOF'
+  PORT_VALUE="${PORT:-3000}" BASE_PATH_VALUE="${BASE_PATH}" node --input-type=module <<'JSEOF'
 const port = process.env.PORT_VALUE;
-const url = `http://127.0.0.1:${port}/api/health`;
+const url = `http://127.0.0.1:${port}${process.env.BASE_PATH_VALUE || ""}/api/health`;
 const start = Date.now();
 const MAX_MS = 60_000;
 while (Date.now() - start < MAX_MS) {
@@ -282,7 +282,7 @@ process.exit(0);
 JSEOF
 
   while true; do
-    _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000/api/sync/play-history}" "play-history" "1"
+    _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/play-history}" "play-history" "1"
     sleep "$INTERVAL"
   done
 }

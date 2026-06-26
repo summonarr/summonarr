@@ -66,6 +66,12 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       await tx.account.deleteMany({ where: { userId: id } });
       await tx.authSession.deleteMany({ where: { userId: id } });
       await tx.session.deleteMany({ where: { userId: id } });
+      // Orphaned device + Discord-link rows would otherwise outlive the anonymized
+      // row and keep delivering pushes (to a possibly handed-down device) or leave
+      // dangling unique link/merge rows. Remove them in the same transaction.
+      await tx.pushSubscription.deleteMany({ where: { userId: id } });
+      await tx.discordLinkToken.deleteMany({ where: { userId: id } });
+      await tx.discordMergeCode.deleteMany({ where: { userId: id } });
       await tx.user.update({ where: { id }, data: anon });
     });
   } catch (err) {

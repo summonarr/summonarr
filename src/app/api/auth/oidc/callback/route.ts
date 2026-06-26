@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
+import { findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
   exchangeOidcCode,
@@ -65,6 +65,9 @@ export async function GET(req: NextRequest) {
 
   if (dbUser === PROVIDER_REBIND_REQUIRED) {
     return loginErrorRedirect(req, "oidc_rebind_required");
+  }
+  if (dbUser === PROVIDER_SETUP_REQUIRED) {
+    return loginErrorRedirect(req, "oidc_setup_required");
   }
 
   // Keep notificationEmail in lock-step with the OIDC provider's email claim

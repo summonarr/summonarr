@@ -35,7 +35,10 @@ export default async function ProfilePage() {
     prisma.setting.findUnique({ where: { key: "discordInviteUrl" } }),
     prisma.pushSubscription.findMany({
       where: { userId: session.user.id },
-      select: { id: true, endpoint: true, label: true, createdAt: true },
+      // Deliberately NOT selecting `endpoint`: for iOS rows it is `apns:<raw token>`,
+      // and serializing it to the client leaks the device token. Device management
+      // keys off `id` instead.
+      select: { id: true, label: true, createdAt: true },
       orderBy: { createdAt: "asc" },
     }),
     prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } }),

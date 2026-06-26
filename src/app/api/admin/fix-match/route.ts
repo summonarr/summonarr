@@ -502,16 +502,21 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
       const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, canonicalGuid);
 
-      await prisma.$transaction([
-        prisma.plexLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
-        prisma.plexLibraryItem.upsert({
+      await prisma.$transaction(async (tx) => {
+        // Take the same advisory locks the sync orchestrator uses (2001 library, 2002
+        // episode cache) so a concurrent sync can't clobber or interleave this manual
+        // remap. Acquire 2001 before 2002 (one consistent global order → no deadlock).
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
+        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.plexLibraryItem.upsert({
           where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
           create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
           update: { plexRatingKey: item.plexRatingKey },
-        }),
+        });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
-        prisma.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } }),
-      ]);
+        await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
+      }, { timeout: BATCH_TX_TIMEOUT });
       void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
 
       if (mediaType === "TV") {
@@ -519,6 +524,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
           .then(async (episodes) => {
             if (episodes.length === 0) return;
             await prisma.$transaction(async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId: correctTmdbId } });
               await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
             }, { timeout: BATCH_TX_TIMEOUT });
@@ -544,16 +550,20 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       const jellyfinResult = await fixJellyfinMatch(item.jellyfinItemId, correctTmdbId, mediaType, item.filePath);
       const resolvedItemId = jellyfinResult.newItemId;
 
-      await prisma.$transaction([
-        prisma.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
-        prisma.jellyfinLibraryItem.upsert({
+      await prisma.$transaction(async (tx) => {
+        // Same locks as the sync orchestrator (2001 library, 2002 episode), 2001 before
+        // 2002, so a concurrent sync can't clobber/interleave this manual remap.
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
+        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.jellyfinLibraryItem.upsert({
           where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
           create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, jellyfinItemId: resolvedItemId },
           update: { jellyfinItemId: resolvedItemId },
-        }),
+        });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
-        prisma.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } }),
-      ]);
+        await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
+      }, { timeout: BATCH_TX_TIMEOUT });
       void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
 
       if (mediaType === "TV") {
@@ -561,6 +571,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
           .then(async (episodes) => {
             if (episodes.length === 0) return;
             await prisma.$transaction(async (tx) => {
+              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: correctTmdbId } });
               await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
             }, { timeout: BATCH_TX_TIMEOUT });

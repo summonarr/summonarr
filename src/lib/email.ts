@@ -435,7 +435,7 @@ export async function notifyAdminsNewIssue(data: {
     const mediaLabel = mediaLabelOf(data.mediaType);
     const issueLabel = data.issueType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
     const subject = `New Issue Report: ${data.title}`;
-    const ctaPath = data.issueId ? `/admin/issues/${data.issueId}` : "/admin/issues";
+    const ctaPath = data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues";
     const html = richEmailHtml({
       preheader: `${data.reportedBy} reported a ${issueLabel.toLowerCase()} issue on ${data.title}`,
       accent: "amber",
@@ -493,7 +493,7 @@ export async function notifyAdminsIssueMessageEmail(data: {
       ],
       bodyHtml: noteBlockHtml(data.body, "Message"),
       ctaLabel: "View Issue",
-      ctaHref: buildSiteUrl(cfg.siteUrl, `/admin/issues/${data.issueId}`),
+      ctaHref: buildSiteUrl(cfg.siteUrl, `/admin/issues?selected=${data.issueId}`),
       siteUrl: cfg.siteUrl,
     });
     await sendMany(cfg, to, subject, html);

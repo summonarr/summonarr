@@ -45,7 +45,11 @@ const SLASH_COMMANDS = [
         type: 3,
         required: true,
         min_length: 1,
-        max_length: 20,
+        // 32 to fit the 32-hex link token (generate-link: randomBytes(16).toString("hex")).
+        // At 20, Discord rejected every token client- and server-side before it ever
+        // reached the handler, so the /link flow was unusable. Re-run "Register commands"
+        // after changing this so Discord picks up the new option schema.
+        max_length: 32,
       },
     ],
   },

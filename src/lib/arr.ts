@@ -611,9 +611,9 @@ export async function isMovieDownloadingInRadarr(tmdbId: number, variant: ArrVar
   } catch { return false; }
 }
 
-export async function countRadarrQueue(): Promise<number | null> {
+export async function countRadarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
   try {
-    const cfg = await getCfg("radarr");
+    const cfg = await getCfg("radarr", variant);
     if (!cfg) return null;
     const queueSet = await getRadarrQueueSet(cfg);
     return queueSet.size;
@@ -634,9 +634,9 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
   } catch { return false; }
 }
 
-export async function countSonarrQueue(): Promise<number | null> {
+export async function countSonarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
   try {
-    const cfg = await getCfg("sonarr");
+    const cfg = await getCfg("sonarr", variant);
     if (!cfg) return null;
     const queueSet = await getSonarrQueueSet(cfg);
     return queueSet.size;

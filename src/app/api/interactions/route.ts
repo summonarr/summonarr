@@ -16,7 +16,7 @@ import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { canAutoApprove, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
+import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 
 export const dynamic = "force-dynamic";
@@ -569,6 +569,16 @@ async function handleComponent(interaction: any): Promise<void> {
       // both the quota bypass and the auto-approve decision below.
       const effPerms = effectivePermissions(dbUser.role, dbUser.permissions);
 
+      // Enforce request permission (parity with the web route, which 403s on this).
+      // Without it, a user whose admin set a permission mask omitting the REQUEST
+      // bits could still create a request through Discord.
+      if (!canRequest(effPerms, mediaType, false)) {
+        confirmEmbed.color = 0xed4245;
+        confirmEmbed.description = `(${selected.releaseYear}) — You don't have permission to request this.`;
+        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+        return;
+      }
+
       const [quotaLimitRow, quotaPeriodRow] = await Promise.all([
         prisma.setting.findUnique({ where: { key: "quotaLimit" } }),
         prisma.setting.findUnique({ where: { key: "quotaPeriod" } }),
@@ -940,6 +950,26 @@ export async function POST(req: NextRequest) {
   // type=1 is Discord's PING to verify the endpoint is reachable; respond with PONG immediately
   if (interaction.type === 1) {
     return NextResponse.json({ type: 1 });
+  }
+
+  // Replay guard (defense-in-depth beyond the 5s timestamp window above): a captured,
+  // validly-signed interaction can otherwise be re-POSTed within that window. Discord
+  // interaction ids are unique snowflakes — record each once and reject duplicates.
+  // Best-effort: a storage hiccup must NOT drop a legitimate interaction, so only an
+  // actual unique-violation (P2002) counts as a replay. PING (handled above) is exempt.
+  const interactionId = typeof interaction.id === "string" ? interaction.id : null;
+  if (interactionId) {
+    try {
+      await prisma.discordSearchCache.create({
+        data: { queryKey: `nonce:${interactionId}`, data: "", expiresAt: new Date(Date.now() + 30 * 1000) },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+        console.warn(`[interactions] Replayed interaction rejected: ${sanitizeForLog(interactionId)}`);
+        return new NextResponse("Duplicate interaction", { status: 401 });
+      }
+      console.error(`[interactions] Replay-guard write failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    }
   }
 
   if (interaction.type === 2) {

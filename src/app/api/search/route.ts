@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { searchMulti } from "@/lib/tmdb";
-import { prisma } from "@/lib/prisma";
+import { attachAllAvailability } from "@/lib/attach-all";
+import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -24,31 +25,14 @@ export const GET = withAuth(async (req, _ctx, session) => {
       ? allResults.filter((r) => r.mediaType === type)
       : allResults;
 
-    const where = {
-      OR: results.map((r) => ({
-        tmdbId: r.id,
-        mediaType: r.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
-      })),
-    };
+    // Attach the SAME availability/request/Arr state the browse + discover surfaces
+    // do, so clients that render search results as request-able cards (the iOS app)
+    // don't show a "Request" CTA for a title that's already requested/available.
+    // skipRatings avoids an OMDB/MDBList fan-out on every (debounced) keystroke.
+    const show4k = await getShow4kVisibility(session);
+    const enriched = await attachAllAvailability(results, session.user.id, { skipRatings: true, show4k });
 
-    const [plexRows, jfRows] = await Promise.all([
-      prisma.plexLibraryItem.findMany({ where, select: { tmdbId: true, mediaType: true } }),
-      prisma.jellyfinLibraryItem.findMany({ where, select: { tmdbId: true, mediaType: true } }),
-    ]);
-
-    const plexSet = new Set(plexRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
-    const jfSet   = new Set(jfRows.map((r)   => `${r.tmdbId}:${r.mediaType}`));
-
-    return NextResponse.json(
-      results.map((r) => {
-        const key = `${r.id}:${r.mediaType === "movie" ? "MOVIE" : "TV"}`;
-        return {
-          ...r,
-          plexAvailable:     plexSet.has(key),
-          jellyfinAvailable: jfSet.has(key),
-        };
-      })
-    );
+    return NextResponse.json(enriched);
   } catch (err) {
     console.error("TMDB search error:", err);
     return NextResponse.json({ error: "Search failed" }, { status: 500 });

@@ -41,6 +41,13 @@ export function hashAuditEmail(email: string): string {
 export const PROVIDER_REBIND_REQUIRED = Symbol("provider-rebind-required");
 export type ProviderRebindRequired = typeof PROVIDER_REBIND_REQUIRED;
 
+// Returned when an OIDC sign-in would mint the very FIRST user before setup has
+// run (no admin exists and OAuth bootstrap isn't enabled). Creating a plain USER
+// there trips the "registration closed" guard in /api/auth/register and bricks
+// first-admin bootstrap — refuse instead. See runFirstAdminPromotion.
+export const PROVIDER_SETUP_REQUIRED = Symbol("provider-setup-required");
+export type ProviderSetupRequired = typeof PROVIDER_SETUP_REQUIRED;
+
 export type AuthorizedDbUser = { id: string; email: string; name: string | null; role: string };
 
 export async function findOrCreatePlexUser({
@@ -190,7 +197,7 @@ export interface OidcUserClaims {
 // callers must pass raw tokens.
 export async function findOrCreateOidcUser(
   claims: OidcUserClaims,
-): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   if (!claims.emailVerified) {
     throw new Error("OIDC account email is not verified");
   }
@@ -235,24 +242,52 @@ export async function findOrCreateOidcUser(
     return PROVIDER_REBIND_REQUIRED;
   }
 
-  const created = await prisma.user.create({
-    data: {
-      email: normalizedEmail,
-      name: sanitizeOptional(claims.name ?? claims.preferredUsername),
-      image: claims.picture,
-      role: "USER",
-      permissions: defaultPermissionsForRole("USER"),
-      notificationEmail: normalizedEmail,
-      accounts: {
-        create: {
-          type: "oidc",
-          provider: "oidc",
-          providerAccountId: claims.sub,
-          ...accountTokens,
-        },
+  // Refuse to MINT THE FIRST USER via OIDC before setup has run. With OAuth
+  // bootstrap disabled (the default), runFirstAdminPromotion won't promote this
+  // sign-in, so a plain USER row would close /api/auth/register's "registration"
+  // guard and permanently brick first-admin setup. Mirrors the promotion
+  // preconditions: only block when bootstrap is off AND setup isn't complete AND
+  // no admin exists yet. After that, normal OIDC onboarding proceeds.
+  if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN !== "true") {
+    const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
+    if (!setupRow) {
+      const existingAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
+      if (!existingAdmin) {
+        console.warn(`[auth/oidc] Refused pre-setup OIDC sign-in for ${normalizedEmail}: complete initial setup (create the first admin) first.`);
+        return PROVIDER_SETUP_REQUIRED;
+      }
+    }
+  }
+
+  // Create the user and its OAuth account in ONE transaction. The account must be
+  // a TOP-LEVEL account.create (NOT a nested `accounts: { create }` under
+  // user.create) so the prisma.ts encryption extension's account.create hook fires
+  // and encrypts access_token/refresh_token/id_token at rest. A nested relation
+  // write bypasses that hook and persists the tokens in plaintext. Guardrail 7a:
+  // never call encryptToken here — the extension owns it; it applies to the tx
+  // client, and the single $transaction keeps the original write's atomicity.
+  const created = await prisma.$transaction(async (tx) => {
+    const u = await tx.user.create({
+      data: {
+        email: normalizedEmail,
+        name: sanitizeOptional(claims.name ?? claims.preferredUsername),
+        image: claims.picture,
+        role: "USER",
+        permissions: defaultPermissionsForRole("USER"),
+        notificationEmail: normalizedEmail,
       },
-    },
-    select: { id: true, email: true, name: true, role: true },
+      select: { id: true, email: true, name: true, role: true },
+    });
+    await tx.account.create({
+      data: {
+        userId: u.id,
+        type: "oidc",
+        provider: "oidc",
+        providerAccountId: claims.sub,
+        ...accountTokens,
+      },
+    });
+    return u;
   });
   return created;
 }

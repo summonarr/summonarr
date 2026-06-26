@@ -63,7 +63,13 @@ COPY . .
 # Pull the prisma client generated on $BUILDPLATFORM into the target-arch tree.
 COPY --from=prisma-gen /app/src/generated/prisma ./src/generated/prisma
 
-# Build Next.js (standalone output)
+# Build Next.js (standalone output). BASE_PATH is BUILD-TIME per Next's docs — it is
+# inlined into the client bundle, so a runtime env can't change it. It MUST be a build
+# ARG. Build with `--build-arg BASE_PATH=/request` to serve under a sub-path; the
+# runner stage re-declares it so the entrypoint + HEALTHCHECK prefix matches.
+ARG BASE_PATH=""
+ENV BASE_PATH=$BASE_PATH
+ENV NEXT_PUBLIC_BASE_PATH=$BASE_PATH
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
@@ -111,6 +117,11 @@ RUN apk upgrade --no-cache && \
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+# Re-declare the build arg in the runner (ARG is per-stage) so the entrypoint cron loop
+# and the HEALTHCHECK below can prefix their internal loopback URLs with the same
+# sub-path the bundle was built with.
+ARG BASE_PATH=""
+ENV BASE_PATH=$BASE_PATH
 # Cap the V8 heap so GC runs more aggressively instead of accumulating garbage.
 # RSS will still exceed this (code, stack, native libs add ~50-80 MB on top).
 ENV NODE_OPTIONS=--max-old-space-size=1024
@@ -163,6 +174,6 @@ ENV HOSTNAME=0.0.0.0
 # Container health probe — hits the in-app /api/health endpoint. Wide start-period
 # covers cold-start (Next standalone boot + Prisma migrate deploy on first run).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+(process.env.BASE_PATH||'')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 
 ENTRYPOINT ["./docker-entrypoint.sh"]

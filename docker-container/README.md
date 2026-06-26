@@ -177,9 +177,17 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 
 ## Sub-path deployment (`BASE_PATH`)
 
+> **`BASE_PATH` is a BUILD-TIME setting.** Next.js inlines it into the client bundle, so it **cannot** be changed by a runtime env var — setting `BASE_PATH=` in `.env` on the prebuilt image has no effect. The published image is built **without** a sub-path, so serving under one requires building your own image.
+
 Running Summonarr at `https://example.com/request` instead of a dedicated hostname:
 
-1. Set `BASE_PATH=/request` in your `.env`.
+1. Build an image with the prefix baked in, and point your compose service at it:
+
+   ```bash
+   docker build --build-arg BASE_PATH=/request -t summonarr:subpath .
+   ```
+
+   Then set `image: summonarr:subpath` (or a `build:` block passing the same `--build-arg`) for the `summonarr` service.
 2. Set `AUTH_URL=https://example.com/request`.
 3. Configure the proxy to forward requests under `/request/` **without stripping the prefix** — Summonarr's router expects to see the full path. Example for Nginx:
 
@@ -195,7 +203,9 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
    }
    ```
 
-4. `docker compose up -d --force-recreate summonarr` so the new `BASE_PATH` is picked up.
+4. `docker compose up -d --force-recreate summonarr`.
+
+The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically. **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
 
 ## Internal cron schedule
 

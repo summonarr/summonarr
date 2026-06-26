@@ -26,9 +26,34 @@ export interface OmdbRatings {
   metacritic: string | null;
 }
 
-async function getApiKey(): Promise<string | null> {
-  const row = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
-  return row?.value || null;
+// The OMDB API key lives in a single Setting row that changes only when an admin
+// edits it. A blocking ratings batch resolves up to 200 misses and each miss
+// calls getApiKey twice (once here, once in fetchAndCacheOmdbForTmdb) — without
+// memoization that is ~400 identical setting.findUnique reads against the small
+// Prisma pool per request. Cache the resolved value for a short window, and
+// coalesce concurrent cold reads into one query, so a key change still
+// propagates within seconds. Pass { fresh: true } to bypass the cache (admin
+// connection test, where stale-by-up-to-TTL would be confusing).
+const API_KEY_TTL_MS = 30_000;
+let apiKeyCache: { value: string | null; at: number } | null = null;
+let apiKeyInflight: Promise<string | null> | null = null;
+
+async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null> {
+  if (!opts.fresh && apiKeyCache && Date.now() - apiKeyCache.at < API_KEY_TTL_MS) {
+    return apiKeyCache.value;
+  }
+  if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
+  const p = (async () => {
+    const row = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
+    const value = row?.value || null;
+    apiKeyCache = { value, at: Date.now() };
+    return value;
+  })();
+  if (!opts.fresh) {
+    apiKeyInflight = p;
+    p.finally(() => { apiKeyInflight = null; }).catch(() => {});
+  }
+  return p;
 }
 
 export async function getOmdbRatings(imdbId: string, releaseDate?: string | null): Promise<OmdbRatings | null> {
@@ -49,8 +74,10 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
-      console.warn(`[omdb] OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
-      return null;
+      // Transient upstream failure (5xx/429/etc.) — throw so the caller does NOT
+      // write a 24h NOT_FOUND sentinel for it. Genuine "no OMDB entry" is only the
+      // Response!=="True" branch below.
+      throw new Error(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
     }
 
     const data = await res.json() as {
@@ -85,12 +112,14 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
-    return null;
+    // Transient (network/timeout/SSRF) — propagate so fetchAndCacheOmdbForTmdb's
+    // catch returns without negative-caching a title that may exist.
+    throw err;
   }
 }
 
 export async function testOmdbConnection(): Promise<string> {
-  const apiKey = await getApiKey();
+  const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No OMDB API key configured");
 
   const url = new URL(OMDB_BASE);

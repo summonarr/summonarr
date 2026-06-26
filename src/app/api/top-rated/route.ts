@@ -156,38 +156,68 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const showMovies = mediaType !== "tv";
     const showTV = mediaType !== "movies";
 
+    // applyFilters (minImdb / hideAvailable) and the rating sort read fields that
+    // only exist AFTER attachAllAvailability. When any filter or a non-default sort
+    // is active, enrich + filter + sort the WHOLE pool before paginating, so pages
+    // aren't short and the totals aren't the unfiltered pool size. Otherwise keep
+    // the cheap path that enriches only the visible slice — the default view is
+    // already rating-ordered by source, so per-slice work is correct and far
+    // cheaper than enriching hundreds of pooled titles per request.
+    const filtersActive = hideAvailable || !!minImdb || !!minVotes || !!fromYear || !!toYear || sortBy !== "imdb";
     const offset = (page - 1) * PER_PAGE;
-    let moviePage = allMovies.slice(offset, offset + PER_PAGE);
-    let tvPage = allTV.slice(offset, offset + PER_PAGE);
 
-    [moviePage, tvPage] = await Promise.all([
-      backfillMetadata(moviePage),
-      backfillMetadata(tvPage),
-    ]);
+    let movies: TmdbMedia[];
+    let tv: TmdbMedia[];
+    let totalMovies: number;
+    let totalTv: number;
 
-    let [movies, tv] = await Promise.all([
-      showMovies && moviePage.length > 0
-        ? attachAllAvailability(moviePage, session.user.id, { show4k })
-        : Promise.resolve([] as TmdbMedia[]),
-      showTV && tvPage.length > 0
-        ? attachAllAvailability(tvPage, session.user.id, { show4k })
-        : Promise.resolve([] as TmdbMedia[]),
-    ]);
-
-    movies = sortByRating(applyFilters(movies, filterOpts), sortBy);
-    tv = sortByRating(applyFilters(tv, filterOpts), sortBy);
+    if (filtersActive) {
+      const [enrichedMovies, enrichedTV] = await Promise.all([
+        showMovies && allMovies.length > 0
+          ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session.user.id, { show4k }))
+          : Promise.resolve([] as TmdbMedia[]),
+        showTV && allTV.length > 0
+          ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session.user.id, { show4k }))
+          : Promise.resolve([] as TmdbMedia[]),
+      ]);
+      const filteredMovies = sortByRating(applyFilters(enrichedMovies, filterOpts), sortBy);
+      const filteredTV = sortByRating(applyFilters(enrichedTV, filterOpts), sortBy);
+      totalMovies = filteredMovies.length;
+      totalTv = filteredTV.length;
+      movies = filteredMovies.slice(offset, offset + PER_PAGE);
+      tv = filteredTV.slice(offset, offset + PER_PAGE);
+    } else {
+      let moviePage = allMovies.slice(offset, offset + PER_PAGE);
+      let tvPage = allTV.slice(offset, offset + PER_PAGE);
+      [moviePage, tvPage] = await Promise.all([
+        backfillMetadata(moviePage),
+        backfillMetadata(tvPage),
+      ]);
+      [movies, tv] = await Promise.all([
+        showMovies && moviePage.length > 0
+          ? attachAllAvailability(moviePage, session.user.id, { show4k })
+          : Promise.resolve([] as TmdbMedia[]),
+        showTV && tvPage.length > 0
+          ? attachAllAvailability(tvPage, session.user.id, { show4k })
+          : Promise.resolve([] as TmdbMedia[]),
+      ]);
+      movies = sortByRating(movies, sortBy);
+      tv = sortByRating(tv, sortBy);
+      totalMovies = allMovies.length;
+      totalTv = allTV.length;
+    }
 
     const totalPages = Math.max(
       1,
-      Math.ceil(allMovies.length / PER_PAGE),
-      Math.ceil(allTV.length / PER_PAGE),
+      Math.ceil(totalMovies / PER_PAGE),
+      Math.ceil(totalTv / PER_PAGE),
     );
 
     return NextResponse.json({
       movies,
       tv,
-      totalMovies: allMovies.length,
-      totalTv: allTV.length,
+      totalMovies,
+      totalTv,
       totalPages,
       page,
       sortBy,

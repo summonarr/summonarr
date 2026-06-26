@@ -105,9 +105,14 @@ function buildSqlStream(
                       }
                       safeIdents.push(`"${r.attname.replace(/"/g, '""')}"`);
                     }
+                    // No primary key (e.g. VerificationToken, DiscordMergeCode) →
+                    // OFFSET pagination needs a stable total order or it can skip or
+                    // duplicate rows across pages. ctid is a unique system column,
+                    // stable within this REPEATABLE READ snapshot, and needs no
+                    // schema knowledge.
                     orderClause = safeIdents.length > 0
                       ? "ORDER BY " + safeIdents.join(", ")
-                      : "";
+                      : "ORDER BY ctid";
                   }
                   rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
                     `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
