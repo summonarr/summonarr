@@ -2,6 +2,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { safeFetchTrusted } from "./safe-fetch";
+import { settleLimit } from "./concurrency";
 
 // In-process request coalescing: concurrent callers for the same detail page share one upstream fetch
 // rather than hammering TMDB and writing the same cache row N times.
@@ -437,17 +438,24 @@ const PAGES = 5;
 const BROWSE_PAGES = 20;
 const UPCOMING_PAGES = 10;
 
+// Each cold-cache list helper fans out many paged TMDB fetches, and the Discover
+// home page fires seven of them at once — ~105 concurrent requests on a cold
+// cache without a bound. Cap the per-list page fan-out, and wrap each helper in
+// coalesce() so simultaneous callers share one fan-out instead of multiplying it.
+const LIST_PAGE_CONCURRENCY = 5;
+
 export async function getTrending(): Promise<TmdbMedia[]> {
   const key = "trending:week";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const pages = await Promise.allSettled(
-    Array.from({ length: PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
-        "/trending/all/week", { page: String(i + 1) }, 86400
-      )
-    )
+  const pages = await settleLimit(
+    Array.from({ length: PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
+      "/trending/all/week", { page: String(page) }, 86400
+    ),
   );
   const seen = new Set<number>();
   const result = pages
@@ -460,17 +468,19 @@ export async function getTrending(): Promise<TmdbMedia[]> {
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
+  });
 }
 
 export async function getPopularMovies(): Promise<TmdbMedia[]> {
   const key = "movies:popular";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const pages = await Promise.allSettled(
-    Array.from({ length: BROWSE_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawMovie>>("/movie/popular", { page: String(i + 1) })
-    )
+  const pages = await settleLimit(
+    Array.from({ length: BROWSE_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/popular", { page: String(page) }),
   );
   const seen = new Set<number>();
   const result = pages
@@ -482,17 +492,19 @@ export async function getPopularMovies(): Promise<TmdbMedia[]> {
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
+  });
 }
 
 export async function getPopularTV(): Promise<TmdbMedia[]> {
   const key = "tv:popular";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const pages = await Promise.allSettled(
-    Array.from({ length: BROWSE_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawTV>>("/tv/popular", { page: String(i + 1) })
-    )
+  const pages = await settleLimit(
+    Array.from({ length: BROWSE_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/popular", { page: String(page) }),
   );
   const seen = new Set<number>();
   const result = pages
@@ -504,6 +516,7 @@ export async function getPopularTV(): Promise<TmdbMedia[]> {
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
+  });
 }
 
 export async function searchMulti(query: string): Promise<TmdbMedia[]> {
@@ -524,10 +537,11 @@ export async function searchMulti(query: string): Promise<TmdbMedia[]> {
 }
 
 export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
-  const pages = await Promise.allSettled(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawMovie>>("/movie/upcoming", { page: String(i + 1) }, 86400)
-    )
+  return coalesce("movies:upcoming", async () => {
+  const pages = await settleLimit(
+    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/upcoming", { page: String(page) }, 86400),
   );
   const seen = new Set<number>();
   return pages
@@ -535,13 +549,15 @@ export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
     .filter((r) => r.id != null && r.id > 0)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeMovie);
+  });
 }
 
 export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
-  const pages = await Promise.allSettled(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawTV>>("/tv/on_the_air", { page: String(i + 1) }, 86400)
-    )
+  return coalesce("tv:on_the_air", async () => {
+  const pages = await settleLimit(
+    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/on_the_air", { page: String(page) }, 86400),
   );
   const seen = new Set<number>();
   return pages
@@ -549,26 +565,28 @@ export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
     .filter((r) => r.id != null && r.id > 0)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
+  });
 }
 
 export async function getUpcomingTV(): Promise<TmdbMedia[]> {
+  return coalesce("tv:upcoming", async () => {
   // /tv/on_the_air returns shows whose original first_air_date is often years past
   // (long-running shows currently airing new episodes). For "Upcoming" we want
   // shows premiering today or later, so we use /discover/tv with first_air_date.gte.
   const today = new Date().toISOString().slice(0, 10);
-  const pages = await Promise.allSettled(
-    Array.from({ length: UPCOMING_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawTV>>(
-        "/discover/tv",
-        {
-          include_adult: "false",
-          sort_by: "popularity.desc",
-          "first_air_date.gte": today,
-          page: String(i + 1),
-        },
-        86400,
-      )
-    )
+  const pages = await settleLimit(
+    Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawTV>>(
+      "/discover/tv",
+      {
+        include_adult: "false",
+        sort_by: "popularity.desc",
+        "first_air_date.gte": today,
+        page: String(page),
+      },
+      86400,
+    ),
   );
   const seen = new Set<number>();
   return pages
@@ -577,6 +595,7 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
     .filter((r) => r.first_air_date && r.first_air_date >= today)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
+  });
 }
 
 // Detail cache rows written before keywords were split into `keywords` (names) +
@@ -886,13 +905,14 @@ const TOP_MIN_VOTES_TV = 100;
 
 export async function getTopRatedMovies(): Promise<TmdbMedia[]> {
   const key = "movies:top_rated";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const pages = await Promise.allSettled(
-    Array.from({ length: TOP_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawMovie>>("/movie/top_rated", { page: String(i + 1) })
-    )
+  const pages = await settleLimit(
+    Array.from({ length: TOP_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/top_rated", { page: String(page) }),
   );
   const seen = new Set<number>();
   const result = pages
@@ -905,17 +925,19 @@ export async function getTopRatedMovies(): Promise<TmdbMedia[]> {
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
+  });
 }
 
 export async function getTopRatedTV(): Promise<TmdbMedia[]> {
   const key = "tv:top_rated";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
-  const pages = await Promise.allSettled(
-    Array.from({ length: TOP_PAGES }, (_, i) =>
-      tmdbFetch<PagedResponse<RawTV>>("/tv/top_rated", { page: String(i + 1) })
-    )
+  const pages = await settleLimit(
+    Array.from({ length: TOP_PAGES }, (_, i) => i + 1),
+    LIST_PAGE_CONCURRENCY,
+    (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/top_rated", { page: String(page) }),
   );
   const seen = new Set<number>();
   const result = pages
@@ -928,6 +950,7 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
+  });
 }
 
 export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {

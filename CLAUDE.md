@@ -394,6 +394,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Don't reintroduce a bare `await req.json()`. Upload/binary bodies (thumbnails, backup restore) are the only legitimate bypass.
     - Admin/settings/sync routes (ADMIN/CRON-auth + the 50 MB backstop) are lower-priority but should adopt the helper when next touched — they still read uncapped today.
 
+31. **Bound large async fan-outs with `mapLimit` / `settleLimit` from [src/lib/concurrency.ts](src/lib/concurrency.ts) — never a bare `Promise.all(items.map(...))` over a user/library-sized list.**
+
+    Why:
+    - A bare `Promise.all` issues every task at once. Over a request-batch- or library-sized list this saturates the small Prisma connection pool and bursts hundreds of requests at upstream APIs (TMDB ~50 req/s; OMDB free tier 1k/day). Two live cases motivated the helper: the blocking ratings batch fanned out up to 200 OMDB chains ([omdb-availability.ts](src/lib/omdb-availability.ts)), and the cold Discover page fired ~105 concurrent TMDB list fetches ([tmdb.ts](src/lib/tmdb.ts)).
+    - `mapLimit` is a bounded `Promise.all` (rejects if a task rejects — use when tasks self-catch). `settleLimit` is a bounded `Promise.allSettled` (never rejects) — a drop-in for the paged TMDB `Promise.allSettled(Array.from(...))` pattern.
+
+    Rules:
+    - Fixed-size fan-outs (2–3 elements, e.g. movie+tv split, similar+recommendations) stay as plain `Promise.all` — the cap is only for lists whose length scales with input/library size.
+    - Pair the cap with `coalesce(key, fn)` ([tmdb.ts](src/lib/tmdb.ts)) on shared cache-key computations (the TMDB list helpers) so simultaneous callers share one fan-out instead of multiplying it. The list helpers wrap their whole body in `coalesce` and bound the page fetch with `settleLimit`; match that shape for any new list helper.
+    - Don't add a third copy of the OMDB API key read — `getApiKey()` in [omdb.ts](src/lib/omdb.ts) is memoized + in-flight-coalesced (30s TTL) precisely so a 200-item batch doesn't issue ~400 identical `setting.findUnique` reads. Pass `{ fresh: true }` only for the admin connection test.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

@@ -70,18 +70,23 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
     if (needsLoop) {
       totalPages = Math.max(1, Math.ceil(firstPaged.totalPages / TMDB_PAGES_PER_VIRTUAL));
-      const tmdbEndPage = tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1;
-      let tmdbPage = tmdbStartPage;
+      const tmdbEndPage = Math.min(firstPaged.totalPages, tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1);
 
-      while (items.length < PAGE_SIZE && tmdbPage <= Math.min(firstPaged.totalPages, tmdbEndPage)) {
-        const paged = tmdbPage === tmdbStartPage ? firstPaged : await fetchPage(tmdbPage);
-        let batch = await attachAllAvailability(paged.items, session.user.id, { show4k });
-        if (ratingFilter) batch = applyExternalRatingFilter(batch, ratingFilter);
-        if (hideAvailable) batch = batch.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
-        items = items.concat(batch);
-        tmdbPage++;
-      }
-      items = items.slice(0, PAGE_SIZE);
+      // Fetch the whole virtual-page window up front (in parallel) and enrich once,
+      // instead of a sequential fetch+enrich per page. fetchPage has no catch here,
+      // so guard each extra page — one transient failure degrades to fewer items
+      // rather than 500ing the whole request.
+      const restPages: number[] = [];
+      for (let p = tmdbStartPage + 1; p <= tmdbEndPage; p++) restPages.push(p);
+      const rest = await Promise.all(
+        restPages.map((p) => fetchPage(p).catch(() => ({ items: [] as TmdbMedia[], totalPages: firstPaged.totalPages }))),
+      );
+      const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
+
+      let enriched = await attachAllAvailability(rawItems, session.user.id, { show4k });
+      if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
+      if (hideAvailable) enriched = enriched.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+      items = enriched.slice(0, PAGE_SIZE);
     } else {
       totalPages = firstPaged.totalPages;
       items = await attachAllAvailability(firstPaged.items, session.user.id, { show4k });
