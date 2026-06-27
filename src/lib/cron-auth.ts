@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readActiveSummonarrSession } from "@/lib/session-server";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
@@ -52,10 +53,15 @@ function isSameOriginRequest(request: NextRequest): boolean {
 
 // Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET.
 // These routes are in proxy.ts's isPublicPath(), so the proxy does NOT DB-validate the session here;
-// readActiveSummonarrSession() does it instead (revocation/cutoff/role-demotion honored immediately),
-// rather than auth() which would trust a revoked admin's JWT until its exp (up to the 7d admin ceiling).
+// readActiveSummonarrSessionFromRequest() does it instead (bearer-first then cookie, revocation/cutoff/
+// role-demotion honored immediately), rather than auth() which would trust a revoked admin's JWT until
+// its exp (up to the 7d admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound
+// CRON_SECRET guessing without affecting the valid-session or valid-secret happy paths.
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
-  const claims = await readActiveSummonarrSession();
+  // Request-aware read: resolves a bearer JWT (native admin) FIRST, then the
+  // cookie, so a native admin holding only a bearer token can use the session
+  // path. readActiveSummonarrSession() read the cookie only.
+  const claims = await readActiveSummonarrSessionFromRequest(request);
   if (claims?.role === "ADMIN") {
     if (!isSameOriginRequest(request)) return false;
     // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
@@ -68,7 +74,16 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const authHeader = request.headers.get("authorization") ?? "";
-    if (authHeader.startsWith("Bearer ") && safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
+    if (authHeader.startsWith("Bearer ")) {
+      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
+      // Throttle failed CRON_SECRET guessing per source IP. A presented-but-wrong
+      // Bearer is a guess; bound it to 20 failures / 60s. When the bucket is
+      // exhausted, deny (return false) so brute-forcing the secret is bounded.
+      // The happy path above already returned, so this never touches a valid call.
+      if (!checkRateLimit(`cron-auth-fail:${getClientIp(request.headers)}`, 20, 60_000)) {
+        return false;
+      }
+    }
   }
 
   return false;

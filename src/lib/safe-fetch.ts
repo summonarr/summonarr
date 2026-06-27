@@ -149,12 +149,14 @@ async function doFetch(
         `URL blocked by SSRF policy (trusted host resolves to unsafe address): ${rawUrl}`,
       );
     }
-    // Rebuild targetUrl from the URL we just validated. Same hostname as
-    // rawUrl (we deliberately don't switch to the resolved IP — TLS SNI and
-    // virtual-hosted endpoints both need the hostname), but the data-flow now
-    // passes through `parsedUrl` whose hostname has been checked against
-    // `allowedHosts` — that breaks CodeQL's request-forgery taint flow
-    // (CodeQL js/request-forgery, alert #4).
+    // Rebuild targetUrl from the URL we just validated. We keep the same
+    // hostname as rawUrl (we deliberately don't switch to the resolved IP — TLS
+    // SNI and virtual-hosted endpoints both need the hostname), but the outbound
+    // request now derives from `parsedUrl`, whose hostname was checked against
+    // the required `allowedHosts` allowlist above. Routing the fetch through the
+    // already-validated value (rather than the raw, attacker-influenced input)
+    // is what makes this request-forgery-safe: there is no untrusted-host path
+    // from caller input to the network call.
     targetUrl = parsedUrl.toString();
   } else {
     // mode === "admin"
@@ -323,9 +325,11 @@ export interface TrustedFetchOptions extends SafeFetchOptions {
   allowedHosts: readonly string[];
 }
 
-// safeFetchTrusted skips DNS-based SSRF validation but enforces a hardcoded hostname
-// allowlist — use for fixed third-party APIs (TMDB, plex.tv, discord.com, …). Pass the
-// expected host(s) so a future code change can't accidentally fan out to user-controlled URLs.
+// safeFetchTrusted enforces a hardcoded hostname allowlist AND still runs DNS-based SSRF
+// validation (resolve + per-address public-IP check, allowPrivate=false, so DNS-rebind to
+// a private address is blocked) — use for fixed third-party APIs (TMDB, plex.tv, discord.com,
+// …). Pass the expected host(s) so a future code change can't accidentally fan out to
+// user-controlled URLs.
 export function safeFetchTrusted(
   url: string,
   opts: TrustedFetchOptions,

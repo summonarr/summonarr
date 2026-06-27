@@ -21,6 +21,12 @@ import {
   parseNativeClient,
   isClientBelowMinimum,
 } from "@/lib/api-version";
+import {
+  effectivePermissions,
+  hasPermission,
+  parsePermissions,
+  Permission,
+} from "@/lib/permissions";
 
 const trustProxy = process.env.TRUST_PROXY === "true";
 
@@ -235,15 +241,38 @@ export async function proxy(request: NextRequest) {
     }
 
     // Defense-in-depth backstop for the admin API surface. Per-route
-    // withAdmin/withIssueAdmin guards are the source of truth for the exact
-    // ADMIN-vs-ISSUE_ADMIN decision; this only fails closed if such a guard
-    // is ever missing, and only for roles with NO admin access at all.
+    // withAdmin/withIssueAdmin/withPermission guards are the source of truth for
+    // the exact decision; this only fails closed if such a guard is ever missing,
+    // and only for principals with NO admin-surface access at all.
+    //
+    // The backstop must honor management permission bits, not just the legacy
+    // ADMIN/ISSUE_ADMIN roles. A principal whose role is plain USER may still
+    // hold a granular management bit — e.g. MANAGE_ISSUES (the modern equivalent
+    // of legacy ISSUE_ADMIN), which the per-route withIssueAdmin guard honors for
+    // routes like /api/admin/fix-match/*. A role-only backstop would 403 those
+    // legitimately-permissioned callers before their route ever ran, wrongly
+    // denying access the per-route guard would have granted. So after the role
+    // check, we also let through any principal holding a management bit; the
+    // per-route guard still makes the precise ADMIN-vs-permission allow/deny
+    // call. We deny here only when the principal has no admin-surface access of
+    // any kind, where a missing per-route guard would otherwise fail open.
     if (
       pathname.startsWith("/api/admin/") &&
       role !== "ADMIN" &&
       role !== "ISSUE_ADMIN"
     ) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      const perms = effectivePermissions(
+        role ?? "USER",
+        parsePermissions(refreshResult.claims.permissions),
+      );
+      const hasAdminSurface = hasPermission(
+        perms,
+        [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS, Permission.MANAGE_ISSUES],
+        "or",
+      );
+      if (!hasAdminSurface) {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      }
     }
 
     const lowerPath = pathname.toLowerCase();

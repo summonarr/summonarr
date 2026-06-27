@@ -4,6 +4,7 @@ import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Native-client mirror of src/app/(app)/upcoming/page.tsx. Serves the cached
 // upcoming feed (refreshed by the /api/sync/upcoming cron), falling back to
@@ -33,6 +34,10 @@ async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!checkRateLimit(`upcoming:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
   const raw: TmdbMedia[] = [];
 

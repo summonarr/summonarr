@@ -22,6 +22,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
+  // Global per-user cap: the per-target bucket alone lets one account DM
+  // hundreds of distinct snowflakes (each unique target gets its own bucket).
+  // This caps total merge-init DMs across ALL targets for one user.
+  if (!checkRateLimit(`discord-merge-init-global:${session.user.id}`, 10, 60 * 60_000)) {
+    return NextResponse.json(
+      { error: "Too many merge attempts — try again later." },
+      { status: 429 }
+    );
+  }
+
   // Rate-limit per (user, target discord id): a single attacker iterating
   // through victim discord IDs can't share the bucket with their own attempts
   if (!checkRateLimit(`discord-merge-init:${session.user.id}:${discordId}`, 3, 15 * 60 * 1000)) {

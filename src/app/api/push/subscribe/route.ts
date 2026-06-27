@@ -131,7 +131,14 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "id or endpoint is required" }, { status: 400 });
   }
 
-  const canonicalEndpoint = (await resolveToSafeUrl(body.endpoint)) ?? body.endpoint;
+  // Reject rather than fall back to the raw endpoint: the stored row is keyed by
+  // the canonicalized endpoint, so a raw value bypasses canonicalization and
+  // either no-ops or matches an unintended row. An unresolvable endpoint is a
+  // bad request.
+  const canonicalEndpoint = await resolveToSafeUrl(body.endpoint);
+  if (!canonicalEndpoint) {
+    return NextResponse.json({ error: "Invalid endpoint" }, { status: 400 });
+  }
 
   await prisma.pushSubscription.deleteMany({
     where: { endpoint: canonicalEndpoint, userId: session.user.id },

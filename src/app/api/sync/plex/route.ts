@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { auth } from "@/lib/auth";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
@@ -214,11 +214,14 @@ async function syncPlex(request: NextRequest) {
     }
   }
 
-  const session = await auth();
-  if (session?.user) {
+  // DB-checked attribution (bearer-first then cookie) so a stale/revoked admin
+  // JWT can't mis-attribute the audit row. Access control stays isCronAuthorized
+  // (in POST above); this only attributes the admin-triggered run.
+  const attributionClaims = await readActiveSummonarrSessionFromRequest(request);
+  if (attributionClaims) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.id,
+      userId: attributionClaims.id,
+      userName: attributionClaims.name ?? attributionClaims.id,
       action: "LIBRARY_SYNC",
       target: "sync:plex",
       details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length },

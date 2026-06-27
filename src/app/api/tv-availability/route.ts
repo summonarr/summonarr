@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export interface TVSeasonInfo {
   seasonNumber: number;
@@ -13,6 +14,10 @@ export interface TVAvailabilityResponse {
 }
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  if (!checkRateLimit(`tv-availability:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const raw = req.nextUrl.searchParams.get("tmdbId");
   if (!raw) return NextResponse.json({ error: "tmdbId is required" }, { status: 400 });
   const tmdbId = parseInt(raw, 10);

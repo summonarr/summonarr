@@ -132,6 +132,76 @@ export async function register() {
       );
     }
 
+    // AUTH_TRUSTED_ORIGIN is a comma-separated allowlist of extra browser origins
+    // (proxy.ts / cron-auth.ts). Those readers silently drop unparseable entries,
+    // so a typo'd origin fails open as "not trusted" with no signal — warn here so
+    // a misconfigured CSRF allowlist surfaces at boot instead of as mystery 403s.
+    if (process.env.AUTH_TRUSTED_ORIGIN) {
+      for (const raw of process.env.AUTH_TRUSTED_ORIGIN.split(",")) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        try {
+          // Mirror the readers: they key off URL.origin. A bare host or a path-only
+          // value parses to a different origin (or throws) and won't match.
+          new URL(trimmed);
+        } catch {
+          console.warn(
+            `[startup] AUTH_TRUSTED_ORIGIN entry "${trimmed}" is not a valid absolute URL and will be ignored. ` +
+              "Use full origins, e.g. https://app.example.com."
+          );
+        }
+      }
+    }
+
+    // TRUSTED_PROXY_HOPS is clamped to 5 in rate-limit.ts (MAX_TRUSTED_HOPS). A
+    // value above 3 is unusual and means the client-IP derivation trusts that many
+    // X-Forwarded-For entries — too generous a value lets a client spoof its IP.
+    // Warn only; the clamp in rate-limit.ts is the hard backstop (do NOT edit it).
+    {
+      const hopsRaw = process.env.TRUSTED_PROXY_HOPS;
+      if (hopsRaw) {
+        const hops = parseInt(hopsRaw, 10);
+        if (Number.isFinite(hops) && hops > 3) {
+          console.warn(
+            `[startup] TRUSTED_PROXY_HOPS=${hops} is unusually high (>3). Each hop is an X-Forwarded-For entry ` +
+              "trusted for client-IP derivation; an over-generous value lets clients spoof their IP. " +
+              "It is clamped to 5 at runtime — set it to the actual number of trusted proxies in front of the app."
+          );
+        }
+      }
+    }
+
+    // OIDC is all-or-nothing: a partial config (issuer set, but client id/secret
+    // missing) silently disables the provider. Warn loudly rather than exit — this
+    // matches the file's non-fatal posture for optional integrations (TMDB above),
+    // and OIDC is optional, so a broken config must not brick boot for everyone.
+    if (process.env.OIDC_ISSUER) {
+      const oidcMissing = (["OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"] as const).filter(
+        (k) => !process.env[k],
+      );
+      if (oidcMissing.length > 0) {
+        console.warn(
+          `[startup] OIDC_ISSUER is set but ${oidcMissing.join(" and ")} ${oidcMissing.length === 1 ? "is" : "are"} missing. ` +
+            "OIDC sign-in will not work until all of OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET are set."
+        );
+      }
+    }
+
+    // SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN grants ADMIN to the first OIDC/OAuth
+    // sign-in when no admin exists yet — a bootstrap convenience for fresh
+    // installs. While it is on, ANY successful OIDC/OAuth sign-in into an
+    // admin-less instance is promoted to ADMIN, so leaving it enabled after the
+    // real admin exists is a privilege-escalation footgun (the next OAuth user to
+    // sign in during a transient admin-less window could be handed full control).
+    // It's easy to forget once set, so warn loudly at boot — like the other
+    // dangerous flags — to keep its state visible in the logs.
+    if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") {
+      console.warn(
+        "[startup] SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN=true — the FIRST OIDC/OAuth sign-in (when no admin " +
+          "exists) will be promoted to ADMIN. Unset this after the initial admin account is created."
+      );
+    }
+
     try {
       const { prewarmPublicKeyCache } = await import("@/app/api/interactions/route");
       await prewarmPublicKeyCache();
@@ -146,9 +216,11 @@ export async function register() {
       .then(({ prewarmLibraryCache }) => prewarmLibraryCache())
       .catch((err) => console.error("[prewarm] Library cache pre-warm error:", err));
 
-    // Item 4 / C-1 self-heal: backfill User.plexUserId from plex.tv so
-    // existing Plex users aren't locked out by the new (provider, sub) binding.
-    // Fire-and-forget — must never block boot.
+    // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
+    // so existing Plex users (created before sign-in switched from email-based to
+    // immutable-id-based (provider, plexUserId) matching) aren't locked out on
+    // their next sign-in. See src/lib/plex-user-backfill.ts for the full
+    // rationale. Fire-and-forget — must never block boot.
     import("@/lib/plex-user-backfill")
       .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
       .catch((err) => console.error("[plex-backfill] startup error:", err));

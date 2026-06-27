@@ -776,9 +776,14 @@ export async function getPlexMachineId(serverUrl: string, adminToken: string): P
 }
 
 export async function getPlexFriendEmails(adminToken: string, serverUrl?: string): Promise<Set<string>> {
-  // Defense-in-depth: caller (auth.ts) already gates on serverUrl, but if it ever
-  // slipped through we would silently fall back to "anyone the admin friended on
-  // any server", which is the C-2 vulnerability. Refuse loudly instead.
+  // Defense-in-depth: this set decides who is allowed to sign in via Plex, so it
+  // MUST be scoped to friends of *this* server (matched by machineIdentifier
+  // below). The caller (auth.ts) already gates on serverUrl, but if a future
+  // refactor ever let a missing serverUrl through, the function would otherwise
+  // fall back to enumerating every account the admin has friended on ANY Plex
+  // server — granting sign-in to people who share no library with this instance,
+  // an account-takeover / unauthorized-access hole. Refuse loudly instead of
+  // returning an over-broad allowlist.
   if (!serverUrl) {
     console.warn("[plex] getPlexFriendEmails called without serverUrl; refusing to enumerate friends.");
     return new Set<string>();

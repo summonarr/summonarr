@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import {
   getRadarrWantedTmdbIds,
@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
 
   return withCronRunRecording("sync:full", () => withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
-    (signal: AbortSignal) => runSyncOrchestrator(signal),
+    (signal: AbortSignal) => runSyncOrchestrator(request, signal),
     () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
   ));
 }
@@ -76,7 +76,7 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
   return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
 };
 
-async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> {
+async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): Promise<NextResponse> {
   // signal is wired through so callers (e.g. arrFetch) can opt in later; currently unobserved.
   void signal;
   const startTime = Date.now();
@@ -737,11 +737,14 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   // wrapper writes the Setting row on every run (including throws + non-2xx). The audit
   // row below stays scoped to admin-triggered runs to avoid hourly flooding of the
   // audit table.
-  const session = await auth();
-  if (session?.user) {
+  // DB-checked attribution (bearer-first then cookie) so a stale/revoked admin
+  // JWT can't mis-attribute the audit row. The access-control gate stays
+  // isCronAuthorized (above); this only attributes the admin-triggered run.
+  const attributionClaims = await readActiveSummonarrSessionFromRequest(request);
+  if (attributionClaims) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.id,
+      userId: attributionClaims.id,
+      userName: attributionClaims.name ?? attributionClaims.id,
       action: "LIBRARY_SYNC",
       target: "sync:full",
       details: { marked, reverted, repushed, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted, durationMs },

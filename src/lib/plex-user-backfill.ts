@@ -2,13 +2,19 @@ import { prisma } from "./prisma";
 import { getPlexAccounts } from "./plex";
 import { normalizeEmail } from "./email-normalize";
 
-// Boot-time self-heal for the C-1 / Item 4 SSO migration.
+// Boot-time self-heal for the Plex SSO identity-binding migration.
 //
-// After the audit, Plex sign-in is bound to (provider, plexUserId) instead of
-// email — so existing Plex users (whose User row was created with a real email
-// and no plexUserId) would be REFUSED on first sign-in until their plexUserId
-// is backfilled. This helper runs once per boot, queries plex.tv for the
-// admin's account list, and matches by email so the next sign-in succeeds.
+// Plex sign-in now matches an account on its immutable plex.tv user id
+// (provider, plexUserId) rather than on email address. Binding to email was
+// unsafe: a Plex email is user-changeable and not guaranteed unique across the
+// accounts an admin can see, so matching on it could let one Plex account claim
+// another user's local record. The trade-off is that User rows created before
+// the migration carry a real email but a null plexUserId, and would now be
+// REFUSED on their first post-migration sign-in (no plexUserId to match) until
+// the column is populated. This helper runs once per boot, queries plex.tv for
+// the admin's account list, and backfills plexUserId by matching email — a safe
+// one-time bridge using the admin's authoritative account list — so the next
+// sign-in succeeds via the new id-based binding.
 //
 // Candidate filter: only "Plex-only" users — no passwordHash, no jellyfinUserId,
 // no OIDC Account row, AND no @jellyfin.local synthetic email (legacy Jellyfin

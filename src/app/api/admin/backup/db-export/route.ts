@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
 import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -169,6 +170,18 @@ function buildSqlStream(
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export const GET = withAdmin(async (req, _ctx, session) => {
+  // Per-admin rate limit on a full encrypted database export. This endpoint
+  // streams the ENTIRE database (every BACKUP_TABLES row) and can run for up to
+  // ~20 minutes, so it is both expensive to serve and the single highest-value
+  // exfiltration target in the app — one successful pull hands an attacker every
+  // user, session, encrypted secret, and play-history record. Capping it to 5
+  // exports per hour per admin means a stolen/compromised admin cookie cannot
+  // repeatedly pull dumps (e.g. to gather many encrypted blobs for offline
+  // password cracking, or to drain the box of data) while still comfortably
+  // covering an operator's legitimate manual-backup cadence.
+  if (!checkRateLimit(`admin-db-export:${session.user.id}`, 5, 60 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many backup exports — try again later." }, { status: 429 });
+  }
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(

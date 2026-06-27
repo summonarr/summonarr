@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { sanitizeText } from "@/lib/sanitize";
 
 // POST /api/report — a signed-in user flags user-generated content (an issue
 // message, a vote reason) for the instance admin to review. The report lands in
@@ -38,8 +39,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!contentId || typeof contentId !== "string" || contentId.length > 200) {
     return NextResponse.json({ error: "contentId is required" }, { status: 400 });
   }
-  const context = typeof body.context === "string" ? body.context.slice(0, 200) : undefined;
-  const reason = typeof body.reason === "string" ? body.reason.slice(0, MAX_REASON) : undefined;
+  const context = typeof body.context === "string" ? sanitizeText(body.context).slice(0, 200) : undefined;
+  const reason = typeof body.reason === "string" ? sanitizeText(body.reason).slice(0, MAX_REASON) : undefined;
 
   // The audit write IS the operation here (there is no prior mutation), so
   // logAuditOrFail is correct — a failed write must surface as an error, not a

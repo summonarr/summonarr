@@ -4,8 +4,12 @@ import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
 // Hosts that Plex's metadata agents return for candidate thumbnails. The external-URL
-// branch below routes through safeFetchTrusted with this allowlist so an admin can't
-// turn fix-match into an open image proxy (CodeQL js/request-forgery, alert #4).
+// branch below routes through safeFetchTrusted with this fixed allowlist so the
+// `path` query param — which an admin (or a forged request riding an admin session)
+// fully controls — cannot turn this route into an open image/request proxy that
+// fetches arbitrary URLs on the server's behalf (server-side request forgery: probing
+// internal services, exfiltrating data via redirects, or proxying attacker content).
+// The allowlist is the trust boundary: only these known agent CDNs are reachable.
 // Add entries here if Plex starts returning thumbs from a new agent CDN.
 const PLEX_AGENT_THUMB_HOSTS = [
   "image.tmdb.org",
@@ -21,6 +25,18 @@ export async function GET(request: NextRequest) {
   // DB-checked auth — see /api/events for why inline JWT-only auth() is
   // insufficient on the prefetch-header path. role:"ISSUE_ADMIN" admits ADMIN
   // too. requireAuth returns 401 (no/expired/revoked session) or 403 (wrong role).
+  //
+  // Note: this route intentionally does NOT thread a sliding-refresh Set-Cookie
+  // back to the client. requireAuth (api-auth.ts) deliberately discards any
+  // refreshed JWT — it returns only the validated session, not the `refreshed`
+  // token (see its JSDoc) — so re-issuing the slid cookie here would mean either
+  // re-implementing the verify/fingerprint/role boilerplate inline (guardrail 6a
+  // forbids that) or widening the shared api-auth return signature (out of scope;
+  // other direct callers depend on its current shape). The practical impact is
+  // nil: this is a binary image proxy whose response carries no Set-Cookie, and
+  // the very next normal withAuth-wrapped API request re-runs the sliding refresh.
+  // So the session's sliding window is never lost — only this one image fetch
+  // declines to advance it.
   const gate = await requireAuth({ role: "ISSUE_ADMIN" });
   if (gate instanceof NextResponse) return gate;
 
@@ -94,7 +110,9 @@ export async function GET(request: NextRequest) {
   return new NextResponse(body, {
     headers: {
       "Content-Type": contentType,
-      "Cache-Control": "public, max-age=3600",
+      // private (not public): this is an authenticated image proxy, so a shared
+      // proxy/CDN must not cache the thumbnail across users/sessions.
+      "Cache-Control": "private, max-age=3600",
     },
   });
 }

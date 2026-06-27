@@ -12,6 +12,7 @@ import {
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Native-client mirror of the curated Discover home — src/app/(app)/page.tsx.
 // Returns the same trending heroes + 6 rails the web renders. Keep the rail
@@ -54,6 +55,10 @@ function settled<T>(r: PromiseSettledResult<T[]>): T[] {
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!checkRateLimit(`home:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
 
   try {

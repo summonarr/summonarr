@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getFeatureFlags } from "@/lib/features";
+import { safeExternalHref } from "@/lib/safe-url";
 
 // User-readable slice of admin config for native clients. The web reads these
 // from server components (donate links, MOTD) or the admin-only /api/settings
@@ -38,13 +39,18 @@ export const GET = withAuth(async () => {
       title: cfg.motdTitle ?? null,
       body: cfg.motdBody ?? null,
     },
+    // Donation values are admin-stored but rendered as <a href> by native
+    // clients. Sanitize each through safeExternalHref so a javascript:/data:/
+    // vbscript: scheme can never reach a client link. Non-URL handles (e.g.
+    // "@alice") parse as non-http and collapse to null here — that's acceptable
+    // for the native surface, which only renders the http(s) link form.
     donate: {
-      paypal: cfg.donationPaypal ?? null,
-      venmo: cfg.donationVenmo ?? null,
-      zelle: cfg.donationZelle ?? null,
-      amazon: cfg.donationAmazon ?? null,
-      patreon: cfg.donationPatreon ?? null,
-      buyMeACoffee: cfg.donationBuyMeACoffee ?? null,
+      paypal: safeExternalHref(cfg.donationPaypal) ?? null,
+      venmo: safeExternalHref(cfg.donationVenmo) ?? null,
+      zelle: safeExternalHref(cfg.donationZelle) ?? null,
+      amazon: safeExternalHref(cfg.donationAmazon) ?? null,
+      patreon: safeExternalHref(cfg.donationPatreon) ?? null,
+      buyMeACoffee: safeExternalHref(cfg.donationBuyMeACoffee) ?? null,
     },
     features,
   });

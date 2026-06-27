@@ -11,6 +11,7 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isSeriesDownloadedInSonarr } from "@/lib/arr";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -122,8 +123,11 @@ export async function POST(req: NextRequest) {
       scope = ` (${eps.length} episodes)`;
     }
     const title = `${seriesTitle}${scope}`;
-    // Don't log the payload-supplied series title (CodeQL js/log-injection — it's
-    // a remote source). The title still reaches admins via the push below.
+    // Don't interpolate the payload-supplied series title into the log line. It's a
+    // remote-controlled string, and logging it verbatim is a log-injection vector:
+    // an attacker could embed newlines/control characters to forge or corrupt log
+    // entries. The title still reaches admins through the structured push below,
+    // which doesn't share the log's plain-text framing.
     console.warn("[webhook/sonarr] manual interaction required — resolve it in Sonarr's queue");
     // Per-item one-shot gate (same idempotent pattern as the deletion-vote
     // threshold in /api/votes): Sonarr re-emits ManualInteractionRequired for the
@@ -166,6 +170,29 @@ export async function POST(req: NextRequest) {
 
   const safeVdbId = Number.isInteger(tvdbId) && tvdbId > 0 ? tvdbId : null;
   const safeMdbId = typeof tmdbId === "number" && Number.isInteger(tmdbId) && tmdbId > 0 ? tmdbId : null;
+
+  // Never trust the payload's ids on their own. The webhook secret authenticates
+  // the request but does NOT prove the named series was actually downloaded: anyone
+  // who learns the secret (or replays a captured request) could POST a forged
+  // Download event for arbitrary tvdbId/tmdbId and flip an APPROVED request straight
+  // to AVAILABLE for a series Sonarr never grabbed. Verify against Sonarr's own
+  // authoritative API before changing any status. Tri-state result: `false` =
+  // Sonarr is reachable and confirms NO episode file exists, so we SKIP the flip
+  // (the forgery case we reject); `true` = confirmed downloaded, proceed; `null` =
+  // indeterminate (the HD/4K variant isn't configured, or Sonarr is unreachable) so
+  // we proceed optimistically and let the periodic library sync reconcile
+  // availability independently. Proceeding on null is safe against forgery because
+  // an attacker cannot force a null result without breaking the operator's own
+  // Sonarr connectivity.
+  const seriesDownloaded = await isSeriesDownloadedInSonarr(
+    { tvdbId: safeVdbId, tmdbId: safeMdbId },
+    is4k ? "4k" : "hd",
+  );
+  if (seriesDownloaded === false) {
+    console.warn(`[webhook/sonarr] Download event for tvdbId=${safeVdbId ?? "?"} tmdbId=${safeMdbId ?? "?"} not confirmed downloaded in Sonarr; skipping status flip.`);
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
+  }
 
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
 

@@ -16,6 +16,10 @@ const PAGE_SIZE = 40;
 const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  if (!checkRateLimit(`votes-list:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const sp = req.nextUrl.searchParams;
   const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const mine = sp.get("mine") === "1";

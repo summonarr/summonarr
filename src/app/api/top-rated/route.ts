@@ -6,6 +6,7 @@ import { getMdblistTopRated } from "@/lib/mdblist";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { prisma } from "@/lib/prisma";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Native-client mirror of src/app/(app)/top/page.tsx — deduplicated top-rated
 // titles across TMDB + Trakt + MDBList, sorted by a chosen rating source. Keep
@@ -121,6 +122,10 @@ function applyFilters(
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!checkRateLimit(`top-rated:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const sp = request.nextUrl.searchParams;
   const hideAvailable = sp.get("hideAvailable") === "1";
   const mediaType = sp.get("mediaType") || undefined; // "movies" | "tv" | undefined

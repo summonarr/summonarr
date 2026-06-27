@@ -31,10 +31,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const existing = await prisma.pushSubscription.findUnique({ where: { endpoint } });
   if (existing && existing.userId !== session.user.id) {
-    // APNs tokens are per-device, not per-account. If the device was handed to a
-    // different user (and the old owner's sign-out delete didn't run), reassign
-    // rather than 409 — drop the stale row so the upsert below re-creates it.
-    await prisma.pushSubscription.deleteMany({ where: { endpoint } });
+    // APNs tokens are per-device, but the prior row's ownership is proof the
+    // device was registered by another account. Silently reassigning it (no
+    // ownership proof from the caller) would let any user hijack another
+    // account's device token. Require the prior owner to DELETE first — a
+    // legitimate device handoff goes through sign-out (mirrors /api/push/subscribe).
+    return NextResponse.json({ error: "Device already registered to another account" }, { status: 409 });
   }
   const alreadyOwns = existing?.userId === session.user.id;
 

@@ -177,22 +177,16 @@ async function buildArrPathMap(
 
   const map = new Map<string, number>();
   try {
-    const [urlRow, keyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: mediaType === "MOVIE" ? "radarrUrl" : "sonarrUrl" } }),
-      prisma.setting.findUnique({ where: { key: mediaType === "MOVIE" ? "radarrApiKey" : "sonarrApiKey" } }),
-    ]);
-    if (!urlRow?.value || !keyRow?.value) return map;
+    // Route through arrFetch so this full-library list call inherits the 30s
+    // timeout + 50 MB cap (guardrail 5 — large libraries silently truncated at
+    // the old 10 MB safe-fetch default) + X-Api-Key injection + ArrResponseError.
+    const { arrFetch, getArrCfg } = await import("@/lib/arr");
+    const cfg = await getArrCfg(mediaType === "MOVIE" ? "radarr" : "sonarr");
+    if (!cfg) return map;
 
-    const { safeFetchAdminConfigured } = await import("@/lib/safe-fetch");
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    const res = await safeFetchAdminConfigured(`${urlRow.value.replace(/\/$/, "")}/api/v3/${endpoint}`, {
-      headers: { "X-Api-Key": keyRow.value, "Content-Type": "application/json" },
-      timeoutMs: 10_000,
-    });
-    if (!res.ok) return map;
-
     type ArrItem = { tmdbId?: number; path?: string };
-    const items = await res.json() as ArrItem[];
+    const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
     for (const item of items) {
       if (!item.tmdbId || !item.path) continue;
       const normPath = item.path.replace(/\\/g, "/").replace(/\/$/, "");

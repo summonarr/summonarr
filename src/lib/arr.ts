@@ -499,6 +499,76 @@ export async function isSeriesWantedInSonarr(tmdbId: number): Promise<boolean> {
   }
 }
 
+// Authoritative "is this movie actually downloaded" check, used by the Radarr
+// webhook to confirm against Radarr's live library before acting on a webhook
+// payload. The webhook is authenticated only by a shared secret (no per-payload
+// signature — the upstream services don't sign), so a caller who learns that
+// secret could POST a forged Download event carrying an arbitrary tmdbId and
+// flip an APPROVED request to AVAILABLE for a title Radarr never downloaded.
+// Re-querying Radarr for the movie's hasFile flag closes that gap: we trust the
+// upstream library's own state rather than the (spoofable) webhook body.
+// Returns:
+//   true  — Radarr has the movie WITH a file
+//   false — Radarr is reachable and reports the movie absent / without a file
+//   null  — could not verify (variant not configured, or the call errored).
+//           The caller proceeds on null: an attacker can't induce it without
+//           also breaking the operator's Radarr connectivity, and the periodic
+//           sync reconciles availability independently.
+export async function isMovieDownloadedInRadarr(
+  tmdbId: number,
+  variant: ArrVariant = "hd",
+): Promise<boolean | null> {
+  const cfg = await getArrCfg("radarr", variant);
+  if (!cfg) return null;
+  try {
+    const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
+      cfg, `/api/v3/movie?tmdbId=${tmdbId}`,
+    );
+    return movies.some((m) => m.tmdbId === tmdbId && m.hasFile);
+  } catch (err) {
+    console.warn("[arr] isMovieDownloadedInRadarr failed:", arrErrorMessage(err));
+    return null;
+  }
+}
+
+// Authoritative "does this series have a downloaded file" check for the Sonarr
+// webhook — the series-side counterpart to isMovieDownloadedInRadarr, with the
+// same purpose: confirm against Sonarr's live library so a forged Download event
+// (the secret-only webhook auth means anyone holding the secret can submit an
+// arbitrary payload) can't mark a series AVAILABLE that Sonarr never grabbed.
+// Same tri-state contract as isMovieDownloadedInRadarr (true / false / null when
+// unverifiable). Resolves the series by tvdbId (Sonarr's primary key); falls
+// back to a tmdb→tvdb lookup when only tmdbId is present. A Download event means
+// an episode imported, so a single episode file (episodeFileCount > 0) is
+// sufficient confirmation.
+export async function isSeriesDownloadedInSonarr(
+  ids: { tvdbId?: number | null; tmdbId?: number | null },
+  variant: ArrVariant = "hd",
+): Promise<boolean | null> {
+  const cfg = await getArrCfg("sonarr", variant);
+  if (!cfg) return null;
+  try {
+    let tvdbId =
+      Number.isInteger(ids.tvdbId) && (ids.tvdbId as number) > 0 ? (ids.tvdbId as number) : null;
+    if (tvdbId === null && Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0) {
+      const lookup = await arrFetch<{ tvdbId: number }[]>(
+        cfg, `/api/v3/series/lookup?term=tmdb:${ids.tmdbId}`,
+      );
+      tvdbId = lookup.length ? lookup[0].tvdbId : null;
+    }
+    if (tvdbId === null) return null;
+    const library = await arrFetch<{ tvdbId: number; statistics?: { episodeFileCount: number } }[]>(
+      cfg, "/api/v3/series",
+    );
+    const match = library.find((s) => s.tvdbId === tvdbId);
+    if (!match) return false;
+    return (match.statistics?.episodeFileCount ?? 0) > 0;
+  } catch (err) {
+    console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));
+    return null;
+  }
+}
+
 export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error("Radarr is not configured");

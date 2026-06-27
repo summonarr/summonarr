@@ -187,10 +187,15 @@ export async function resolveMediaServerUser(params: {
       }
     }
 
-    // Defense-in-depth (H-3): if a row already exists with a recorded serverMachineId, refuse a
-    // mismatched incoming machineId. This guards against an attacker who knows the webhook secret
-    // but is sending events from a different server, attempting to impersonate a (source, userId)
-    // we have already pinned to a specific server.
+    // Defense-in-depth server-binding check: once a (source, sourceUserId) row has
+    // been pinned to a specific server (serverMachineId recorded), refuse any later
+    // upsert that arrives carrying a DIFFERENT machineId. Without this, a caller who
+    // has obtained the webhook secret could submit events stamped with their own
+    // server's machineId for a (source, sourceUserId) that already belongs to the
+    // operator's server, hijacking that identity and attributing play history (or a
+    // user linkage) to a server they control. Pinning the first-seen machineId and
+    // rejecting mismatches keeps each media-server user bound to the one server that
+    // originally established it.
     if (serverMachineId) {
       const existing = await tx.mediaServerUser.findUnique({
         where: { source_sourceUserId: { source, sourceUserId } },

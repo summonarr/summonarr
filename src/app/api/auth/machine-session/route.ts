@@ -14,8 +14,14 @@ function safeCompare(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-// C-4: cap to 15 minutes. Machine sessions are short-lived by intent;
-// a leaked token shouldn't grant 24 hours of admin access.
+// Hard cap on a machine session's lifetime: 15 minutes (900s). A machine session
+// impersonates an admin, so its token is effectively an admin credential. These
+// sessions are minted on demand for short automated tasks, so there is no reason
+// to grant a long-lived token — and a tight cap bounds the blast radius if one
+// leaks (from logs, a CI artifact, process memory, etc.): a stolen token expires
+// in at most 15 minutes instead of granting hours of admin access. A caller may
+// request a shorter lifetime, but never a longer one — anything above this is
+// clamped down to MAX_EXPIRES_IN below.
 const MAX_EXPIRES_IN = 900;
 const DEFAULT_EXPIRES_IN = 900;
 
@@ -58,20 +64,41 @@ export async function POST(req: NextRequest) {
   }
 
   let expiresIn = DEFAULT_EXPIRES_IN;
-  const body = await readJsonCappedOr<{ expiresIn?: number }>(req, 8192, {});
+  const body = await readJsonCappedOr<{ expiresIn?: number; userId?: string }>(req, 8192, {});
   if (body instanceof NextResponse) return body;
   if (typeof body?.expiresIn === "number") {
     expiresIn = Math.min(Math.max(body.expiresIn, 60), MAX_EXPIRES_IN);
   }
 
-  const user = await prisma.user.findFirst({
-    where: { role: "ADMIN" },
-    select: { id: true, name: true, email: true, role: true, mediaServer: true },
-    orderBy: { createdAt: "asc" },
-  });
+  // Optional explicit target admin. When omitted, default to the oldest admin
+  // (backward compatible). When provided, the named user MUST exist AND be an
+  // ADMIN — the machine session always impersonates an admin, never an
+  // arbitrary or lower-privileged account.
+  const requestedUserId =
+    typeof body?.userId === "string" && body.userId.length > 0 ? body.userId : null;
+
+  const user = requestedUserId
+    ? await prisma.user.findUnique({
+        where: { id: requestedUserId },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true },
+      })
+    : await prisma.user.findFirst({
+        where: { role: "ADMIN" },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true },
+        orderBy: { createdAt: "asc" },
+      });
 
   if (!user) {
-    return NextResponse.json({ error: "No admin user found" }, { status: 404 });
+    return NextResponse.json(
+      { error: requestedUserId ? "User not found" : "No admin user found" },
+      { status: 404 },
+    );
+  }
+  if (requestedUserId && user.role !== "ADMIN") {
+    return NextResponse.json(
+      { error: "Requested user is not an admin" },
+      { status: 403 },
+    );
   }
 
   const sessionId = randomUUID();
@@ -128,7 +155,12 @@ export async function POST(req: NextRequest) {
     details: { kind: "machine-session", assumedAdmin: user.id, expiresIn, expiresAt },
   });
 
-  // C-4: do NOT return the token in the JSON body. Cookie-only delivery.
+  // Deliver the session token ONLY as an HttpOnly Set-Cookie, never in the JSON
+  // response body. Returning the raw admin-impersonating JWT in the body would
+  // expose it to anything that can read the response (client-side JS, logging
+  // proxies, browser history/devtools, CI logs that capture stdout), defeating the
+  // HttpOnly protection that keeps the cookie out of script reach. The body carries
+  // only the non-sensitive expiry so the caller knows when to re-mint.
   const response = NextResponse.json({ ok: true, expiresAt });
   response.headers.set(
     "Set-Cookie",

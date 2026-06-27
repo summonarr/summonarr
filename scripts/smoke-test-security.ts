@@ -2,9 +2,16 @@
 // Run with: npx tsx scripts/smoke-test-security.ts
 //
 // Verifies the runtime behaviour of:
-//   - src/lib/ssrf.ts        (H-2 ULA blocks)
-//   - src/lib/safe-fetch.ts  (timeout, redirect, size cap)
-//   - src/lib/webhook-replay.ts (replay rejection)
+//   - src/lib/ssrf.ts        (resolveToSafeUrl rejects IPv6 unique-local
+//                             addresses (fc00::/7) along with loopback,
+//                             link-local, RFC1918, IMDS, and the RFC 6052
+//                             NAT64 range, while still allowing public hosts)
+//   - src/lib/safe-fetch.ts  (request timeout fires promptly, redirects and
+//                             response size caps are enforced, and non-
+//                             allowlisted hosts are blocked)
+//   - src/lib/webhook-replay.ts (a previously-seen webhook body is rejected
+//                             as a replay while distinct bodies/sources/
+//                             secrets are still accepted)
 //
 // This is intentionally a small standalone runner — there is no test
 // framework in this project. Exits non-zero on the first failure.
@@ -30,7 +37,7 @@ async function expect(label: string, fn: () => boolean | Promise<boolean>): Prom
 }
 
 async function main() {
-  console.log("\n[smoke] H-2: SSRF helper blocks ULA + link-local + loopback");
+  console.log("\n[smoke] SSRF helper blocks ULA, link-local, loopback, and other private ranges");
   await expect("blocks fc00::/7 ULA literal",      async () => (await resolveToSafeUrl("http://[fd00::1]/")) === null);
   await expect("blocks fd12::/16 ULA literal",     async () => (await resolveToSafeUrl("http://[fd12:3456::1]/")) === null);
   await expect("blocks fc00::/8 ULA literal",      async () => (await resolveToSafeUrl("http://[fc00::1]/")) === null);
@@ -75,7 +82,7 @@ async function main() {
     }
   });
 
-  console.log("\n[smoke] M-1: webhook-replay cache rejects duplicates");
+  console.log("\n[smoke] webhook-replay cache rejects duplicate webhook bodies");
   __resetWebhookReplayCacheForTests();
   await expect("first call accepted",                  async () => (await checkAndRecordWebhook("plex", "secret", "body-1")) === true);
   await expect("identical replay rejected",            async () => (await checkAndRecordWebhook("plex", "secret", "body-1")) === false);

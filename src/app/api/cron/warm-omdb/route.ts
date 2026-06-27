@@ -1,17 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 
 async function getAuthContext(request: NextRequest): Promise<{ userId: string; userName: string; trigger: "admin" | "cron" } | null> {
   if (!(await isCronAuthorized(request))) return null;
 
-  const session = await auth();
-  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) {
-    return { userId: session.user.id, userName: session.user.name ?? "admin", trigger: "admin" };
+  // DB-checked attribution: bearer-first then cookie, with revocation/cutoff/role
+  // honored — so a stale or revoked admin JWT can't mis-attribute the audit row.
+  // verifyAndRefreshSession (inside the helper) already rejects expired tokens.
+  const claims = await readActiveSummonarrSessionFromRequest(request);
+  if (claims?.role === "ADMIN") {
+    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
   }
   return { userId: "system", userName: "cron", trigger: "cron" };
 }

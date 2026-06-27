@@ -6,6 +6,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { prisma } from "@/lib/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Native-client mirror of src/app/(app)/popular/page.tsx — most-played media on
 // the connected Plex/Jellyfin servers. Keep the resolve + enrich logic in sync
@@ -19,6 +20,10 @@ type EnrichedMedia = TmdbMedia & {
 };
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!checkRateLimit(`popular:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const sp = request.nextUrl.searchParams;
   const mediaTypeFilter = sp.get("mediaType") || undefined; // "movies" | "tv" | undefined
   const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);

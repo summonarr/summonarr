@@ -5,13 +5,10 @@ import {
   OIDC_STATE_COOKIE,
   signOidcStateCookie,
 } from "@/lib/oidc";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
-function getRedirectUri(req: NextRequest): string {
-  const base = process.env.AUTH_URL;
-  if (base) {
-    return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
-  }
-  return new URL("/api/auth/oidc/callback", req.url).toString();
+function getRedirectUri(base: string): string {
+  return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
 }
 
 function isSecureCookieContext(): boolean {
@@ -34,11 +31,20 @@ function safeCallbackUrl(raw: string | null): string | undefined {
 }
 
 export async function GET(req: NextRequest) {
+  if (!checkRateLimit(`oidc-start:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
+  }
+
   if (!isOidcConfigured()) {
     return NextResponse.json({ error: "OIDC sign-in is not configured" }, { status: 503 });
   }
 
-  const redirectUri = getRedirectUri(req);
+  const authUrl = process.env.AUTH_URL;
+  if (!authUrl) {
+    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+  }
+
+  const redirectUri = getRedirectUri(authUrl);
   const returnTo = safeCallbackUrl(req.nextUrl.searchParams.get("callbackUrl"));
   let auth;
   try {

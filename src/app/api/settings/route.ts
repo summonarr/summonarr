@@ -57,6 +57,7 @@ const SETTINGS_SCHEMA = [
   ["jellyfinPathStripPrefix",       false],
   ["jellyfinMoviePathStripPrefix",  false],
   ["jellyfinTvPathStripPrefix",     false],
+  ["jellyfinRestrictSignIn",        false],
   ["donationPaypal",                false],
   ["donationVenmo",                 false],
   ["donationZelle",                 false],
@@ -119,6 +120,7 @@ const SETTINGS_SCHEMA = [
   ["playHistoryRetentionDays",       false],
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
+  ["apnsRelayUrl",                    false],
   ["trashGuidesEnabled",              false],
   ["trashSyncCustomFormats",          false],
   ["trashSyncCustomFormatGroups",     false],
@@ -189,6 +191,13 @@ const URL_KEYS = new Set<string>([
   "plexServerUrl",
   "jellyfinUrl",
   "discordInviteUrl",
+  "apnsRelayUrl",
+]);
+
+// URL_KEYS that must use https:// only (no plaintext http). The APNs relay
+// carries push payloads / device tokens, so the transport must be encrypted.
+const HTTPS_ONLY_URL_KEYS = new Set<string>([
+  "apnsRelayUrl",
 ]);
 
 function stripUrlUserinfo(value: string): string {
@@ -295,7 +304,14 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (URL_KEYS.has(key)) {
       try {
         const parsed = new URL(value);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        if (HTTPS_ONLY_URL_KEYS.has(key)) {
+          if (parsed.protocol !== "https:") {
+            return NextResponse.json(
+              { error: `Setting "${key}" must be an https:// URL` },
+              { status: 400 },
+            );
+          }
+        } else if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
           return NextResponse.json(
             { error: `Setting "${key}" must be an http(s) URL` },
             { status: 400 },
@@ -363,6 +379,56 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           { status: 400 },
         );
       }
+    }
+
+    // Rate-limit caps must be a positive integer. "0" (or any non-integer)
+    // silently disables throttling in checkRateLimit, which treats a limit of
+    // 0 as "always allowed" — an admin must never be able to turn off a limiter
+    // by typo.
+    if (key.startsWith("rateLimit")) {
+      const n = parseInt(value, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 10_000) {
+        return NextResponse.json(
+          { error: `"${key}" must be an integer between 1 and 10000` },
+          { status: 400 },
+        );
+      }
+    }
+  }
+
+  // Never enable the machine-session API while its IP allowlist is empty. The
+  // machine-session route enforces the allowlist ONLY when it is non-empty (an empty
+  // allowlist is treated as "no IP restriction"), so turning the feature on with an
+  // empty allowlist means ANY caller in possession of CRON_SECRET could mint a fully
+  // privileged admin session cookie from ANY source IP — a privilege-escalation hole.
+  // Guard against that misconfiguration at write time: require the allowlist to be
+  // already persisted non-empty, OR to be set non-empty in this same PATCH, before
+  // flipping enableMachineSession on.
+  if (body.enableMachineSession === "true") {
+    const incomingAllowlist =
+      typeof body.machineSessionAllowedIps === "string"
+        ? body.machineSessionAllowedIps
+        : undefined;
+    let allowlistNonEmpty: boolean;
+    if (incomingAllowlist !== undefined) {
+      // Being set in this PATCH — empty string clears it.
+      allowlistNonEmpty = parseIpAllowlist(incomingAllowlist).length > 0;
+    } else {
+      const allowRow = await prisma.setting.findUnique({
+        where: { key: "machineSessionAllowedIps" },
+      });
+      allowlistNonEmpty = parseIpAllowlist(allowRow?.value).length > 0;
+    }
+    if (!allowlistNonEmpty) {
+      return NextResponse.json(
+        {
+          error:
+            "Cannot enable the machine-session API without a non-empty IP allowlist. " +
+            "Set machineSessionAllowedIps first (or in the same request) so any holder " +
+            "of CRON_SECRET cannot mint an admin session from any IP.",
+        },
+        { status: 400 },
+      );
     }
   }
 

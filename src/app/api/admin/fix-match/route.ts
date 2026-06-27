@@ -582,10 +582,12 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Log the real detail server-side only — the message can carry the
+    // configured Plex/Jellyfin server URL, internal paths, or upstream
+    // response bodies. Return a generic error to the client.
     const serverLabel = server === "plex" ? "plex" : "jellyfin";
     const errClass = err instanceof Error ? err.constructor.name : "Error";
-    console.error("[fix-match]", `${serverLabel} error (${errClass})`);
-    return NextResponse.json({ error: msg }, { status: 502 });
+    console.error("[fix-match]", `${serverLabel} error (${errClass})`, err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: "Fix-match operation failed" }, { status: 502 });
   }
 });
