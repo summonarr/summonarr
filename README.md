@@ -157,6 +157,7 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 - All `/api/sync*` and `/api/cron*` endpoints gate on `CRON_SECRET` (or an admin session).
 - The container runs as non-root (`nextjs:nodejs`, UID 1001), with `npm`/`npx` removed from the runtime image.
 - Security headers (HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `Permissions-Policy`) are applied to every response; `/api/*` responses set `Cache-Control: private, no-store` + `Vary: Cookie`.
+- For internet-facing deployments, follow the operational hardening checklist — proxy log redaction for webhook tokens, blocking `/api/setup/*` until first-run completes, `CRON_SECRET` / machine-session handling, APNs relay trust, and file-mounted secrets — in [`docker-container/README.md`](./docker-container/README.md#security-hardening-operational).
 
 ## Privacy
 

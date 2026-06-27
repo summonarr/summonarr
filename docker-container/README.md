@@ -13,12 +13,13 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 5. [Sub-path deployment (`BASE_PATH`)](#sub-path-deployment-base_path)
 6. [Internal cron schedule](#internal-cron-schedule)
 7. [Webhooks](#webhooks)
-8. [Connecting external services](#connecting-external-services)
-9. [Backups & restore](#backups--restore)
-10. [Health, observability, troubleshooting](#health-observability-troubleshooting)
-11. [Recovery — admin locked out](#recovery--admin-locked-out)
-12. [Upgrading](#upgrading)
-13. [Common commands](#common-commands)
+8. [Security hardening (operational)](#security-hardening-operational)
+9. [Connecting external services](#connecting-external-services)
+10. [Backups & restore](#backups--restore)
+11. [Health, observability, troubleshooting](#health-observability-troubleshooting)
+12. [Recovery — admin locked out](#recovery--admin-locked-out)
+13. [Upgrading](#upgrading)
+14. [Common commands](#common-commands)
 
 > **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
 
@@ -268,7 +269,63 @@ Endpoints:
 | Sonarr  | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
 | Radarr  | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
 
-In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. No HMAC payload signing — none of the upstream services sign their bodies.
+In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available* — and that flip is now verified against Radarr/Sonarr's own API before it applies, so a forged event can't mark a title available. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
+
+## Security hardening (operational)
+
+Code-level defenses (CSRF origin checks, SSRF pinning, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
+
+### Keep webhook tokens out of proxy logs
+
+Radarr/Sonarr webhook UIs have no header field, so the secret rides in the query string (`?token=…`). That value can land in reverse-proxy access logs, WAF logs, and `Referer` headers. The compare is timing-safe and the secret is per-instance, but **treat any logged token as compromised**.
+
+- Don't log the webhook requests (or strip their query string). Nginx:
+
+  ```nginx
+  location ~ ^/api/webhooks/ {
+      access_log off;                       # these requests carry ?token=
+      proxy_pass http://summonarr:3000;
+  }
+  ```
+
+  If you need the logs, define an `http`-scope `log_format` that uses `$uri` (which excludes the query string) instead of `$request`, and reference it here. Caddy: filter the `request>uri` field or disable access logging on `/api/webhooks/*`. Traefik: don't capture the full request URL in `accessLog.fields`.
+- Use a long random per-instance secret and **rotate** it (regenerate in Admin → Settings → Media) if a URL was ever logged or shared.
+
+### Block `/api/setup/*` until first-run completes
+
+The setup/import routes are **intentionally public while the instance has zero users** — that is what lets you restore a backup *before* the first login. On an internet-exposed fresh instance, a weak or leaked `BACKUP_DB_PASSWORD` could let an attacker replace the database before you register.
+
+- **Register the admin immediately after first boot** — the setup surface closes the moment the first admin exists.
+- Until then, block the routes at the proxy. Nginx:
+
+  ```nginx
+  location ^~ /api/setup/ { return 403; }   # remove once you've registered the admin
+  ```
+- Use a strong `BACKUP_DB_PASSWORD` (≥ 20 chars).
+
+### Treat `CRON_SECRET` like a root password
+
+`CRON_SECRET` authenticates `/api/sync*` and `/api/cron*`. If you also enable **machine sessions** (`enableMachineSession=true`, Admin → Settings), possession of `CRON_SECRET` can mint a 15-minute **admin** cookie — so the secret is effectively an admin credential.
+
+- Keep `enableMachineSession=false` unless you need API automation that holds an admin cookie.
+- If you enable it, **always** set `machineSessionAllowedIps` to the automation host(s) — an empty allowlist accepts any caller IP. (The app now rejects enabling machine sessions with an empty allowlist, but set it deliberately.)
+- Prefer the file mount `/run/secrets/cron_secret` so the secret never appears in `docker inspect`.
+- **Rotate `CRON_SECRET` immediately if it leaks** (compose files, CI logs, backups).
+
+### APNs relay trust (iOS push)
+
+iOS notifications are delivered through an APNs relay (default `summonapns.gadgetusaf.com`). Notification **content** is end-to-end encrypted once a device registers its public key, but the relay always receives the device's **APNs token** in clear.
+
+- For privacy-sensitive deployments, **self-host the relay** and point `apnsRelayUrl` (Admin → Settings) at it. It must be **HTTPS** (the setting now validates this).
+- Or leave iOS push disabled if you don't use the iOS app.
+
+### Move secrets to file mounts
+
+`docker-compose.yml` passes secrets via the `.env` file, which is visible to `docker inspect <container>` and `docker compose config`. To reduce exposure:
+
+- Restrict the env file: `chmod 600 .env`, and keep it out of version control.
+- Mount high-value secrets as files where supported — the entrypoint already reads `CRON_SECRET` from `/run/secrets/cron_secret` (Docker/Swarm secret); prefer that over the env var, and extend the same pattern to other secrets your orchestrator supports.
+- Avoid running `docker inspect` / `docker compose config` in shared or CI logs where the output is retained.
 
 ## Connecting external services
 
