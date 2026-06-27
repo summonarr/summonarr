@@ -17,13 +17,13 @@
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {
-    "@base-ui/react": "^1.5.0",
+    "@base-ui/react": "^1.6.0",
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "jose": "^6.2.3",
     "next": "16.2.9",
     "openid-client": "^6.8.4",
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "prisma": "^7.8.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.1",
-    "@types/node": "^25",
+    "@types/node": "^26.0.0",
     "@types/pg": "^8.11.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
