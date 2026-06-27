@@ -82,18 +82,22 @@ export default async function TVPage({
 
   if (needsLoop) {
     totalPages = Math.max(1, Math.ceil(firstPaged.totalPages / TMDB_PAGES_PER_VIRTUAL));
-    const tmdbEndPage = tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1;
-    let tmdbPage = tmdbStartPage;
+    const tmdbEndPage = Math.min(firstPaged.totalPages, tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1);
 
-    while (items.length < 20 && tmdbPage <= Math.min(firstPaged.totalPages, tmdbEndPage)) {
-      const paged = tmdbPage === tmdbStartPage ? firstPaged : await fetchPage(tmdbPage);
-      let batch = await attachAllAvailability(paged.items, session?.user.id, { show4k });
-      if (ratingFilter) batch = applyExternalRatingFilter(batch, ratingFilter);
-      if (hideAvailable) batch = batch.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
-      items = items.concat(batch);
-      tmdbPage++;
-    }
-    items = items.slice(0, 20);
+    // Fetch the whole virtual-page window up front (in parallel) and enrich once.
+    // The old loop ran a sequential fetch+enrich per page; when filtering discards
+    // most results (e.g. hideAvailable on a fully-owned library) that was up to 5
+    // serial round-trips of TMDB-fetch + attachAllAvailability. fetchPage already
+    // catches per-page, so a failed page yields no items rather than rejecting.
+    const restPages: number[] = [];
+    for (let p = tmdbStartPage + 1; p <= tmdbEndPage; p++) restPages.push(p);
+    const rest = await Promise.all(restPages.map(fetchPage));
+    const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
+
+    let enriched = await attachAllAvailability(rawItems, session?.user.id, { show4k });
+    if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
+    if (hideAvailable) enriched = enriched.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    items = enriched.slice(0, 20);
   } else {
     totalPages = firstPaged.totalPages;
     items = await attachAllAvailability(firstPaged.items, session?.user.id, { show4k });

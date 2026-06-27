@@ -380,14 +380,16 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [[plexUrlRow, plexTokenRow], [jfUrlRow, jfKeyRow]] = await Promise.all([
+  const [[plexUrlRow, plexTokenRow, plexLibrariesRow], [jfUrlRow, jfKeyRow, jfLibrariesRow]] = await Promise.all([
     Promise.all([
       prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
       prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+      prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
     ]),
     Promise.all([
       prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
       prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+      prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
     ]),
   ]);
 
@@ -407,10 +409,16 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       try {
         const serverUrl = plexUrlRow.value.replace(/\/$/, "");
         const token = plexTokenRow.value;
+        // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
+        // this the scheduled full sync ingested EVERY section, marking media in an
+        // excluded library as owned → availability false positives on every cron tick.
+        const selectedPlexKeys = plexLibrariesRow?.value
+          ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+          : undefined;
         const sections = await getPlexLibrarySections(serverUrl, token);
         [plexMovieIds, plexTvIds] = await Promise.all([
-          getPlexTmdbIds(serverUrl, token, "MOVIE", false, undefined, sections),
-          getPlexTmdbIds(serverUrl, token, "TV", false, undefined, sections),
+          getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
+          getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
         ]);
         const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
         const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
@@ -429,17 +437,19 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
         }).catch((err) => console.error("[sync] failed to stamp lastPlexSyncSucceededAt:", err));
         try {
-          const episodes = await getPlexTVEpisodes(serverUrl, token, undefined, sections);
-          if (episodes.length > 0) {
-            const episodeRows = episodes.map((e) => ({ source: "plex" as const, ...e }));
-            await prisma.$transaction(async (tx) => {
-              // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
-              // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
-              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-              await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-              await batchCreateMany(tx.tVEpisodeCache, episodeRows);
-            }, { timeout: BATCH_TX_TIMEOUT });
-          }
+          // Full replace: clear unconditionally then insert. getPlexTVEpisodes THROWS on
+          // a fetch failure (caught below → no clear), so reaching here with an empty
+          // result means the library genuinely has no episodes — clear the stale ones
+          // rather than leaving phantom ownership (the old `if (>0)` guard never cleared).
+          const episodes = await getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections);
+          const episodeRows = episodes.map((e) => ({ source: "plex" as const, ...e }));
+          await prisma.$transaction(async (tx) => {
+            // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
+            // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
+            await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
+            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+          }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Plex TV episode cache failed:", err);
         }
@@ -453,9 +463,15 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
       try {
         const baseUrl = jfUrlRow.value.replace(/\/$/, "");
         const apiKey  = jfKeyRow.value;
+        // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
+        // otherwise the scheduled full sync ingests every library and marks excluded
+        // media as owned.
+        const selectedJellyfinIds = jfLibrariesRow?.value
+          ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+          : undefined;
         [jfMovieIds, jfTvIds] = await Promise.all([
-          getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE"),
-          getJellyfinTmdbIds(baseUrl, apiKey, "TV"),
+          getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
+          getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
         ]);
         const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
         const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
@@ -479,16 +495,17 @@ async function runSyncOrchestrator(signal?: AbortSignal): Promise<NextResponse> 
           if (data.itemId) jfSeriesMap.set(data.itemId, tmdbId);
         }
         try {
-          const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, undefined, jfSeriesMap);
-          if (episodes.length > 0) {
-            const episodeRows = episodes.map((e) => ({ source: "jellyfin" as const, ...e }));
-            await prisma.$transaction(async (tx) => {
-              // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
-              await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-              await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
-              await batchCreateMany(tx.tVEpisodeCache, episodeRows);
-            }, { timeout: BATCH_TX_TIMEOUT });
-          }
+          // Full replace: clear then insert (see the Plex block above). getJellyfinTVEpisodes
+          // throws on a fetch failure (caught below → no clear), so an empty result here is a
+          // genuinely-empty library and the stale episode ownership should be cleared.
+          const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, jfSeriesMap);
+          const episodeRows = episodes.map((e) => ({ source: "jellyfin" as const, ...e }));
+          await prisma.$transaction(async (tx) => {
+            // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
+            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
+            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+          }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Jellyfin TV episode cache failed:", err);
         }

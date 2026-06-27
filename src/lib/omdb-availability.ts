@@ -6,6 +6,13 @@ import type { OmdbRatings } from "@/lib/omdb";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
 import type { MdblistRatings } from "@/lib/mdblist";
 import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
+import { mapLimit } from "@/lib/concurrency";
+
+// Cap concurrent OMDB fallback chains. Each chain does a TMDB external_ids lookup
+// + an OMDB fetch + cache reads/writes; an unbounded Promise.all over up to
+// MAX_BATCH (200) misses would saturate the Prisma pool and burst OMDB (free tier
+// is 1k/day). 6 keeps it gentle while still parallelizing.
+const OMDB_FALLBACK_CONCURRENCY = 6;
 
 // MDBList provides richer data than OMDB; this is the canonical merge function for list-based flows.
 function applyMdblist(item: TmdbMedia, d: MdblistRatings): TmdbMedia {
@@ -71,11 +78,13 @@ export async function attachRatingsUnified(
           if (stillMissing.length > 0) {
             const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate).catch(() => null);
             if (probe && !probe.found && !probe.keyConfigured) {
-              await Promise.all(stillMissing.map((item) => getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {})));
+              await mapLimit(stillMissing, OMDB_FALLBACK_CONCURRENCY, (item) =>
+                getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
             }
           }
         } else {
-          await Promise.all(uncached.map((item) => getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {})));
+          await mapLimit(uncached, OMDB_FALLBACK_CONCURRENCY, (item) =>
+            getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
         }
       });
     }
@@ -83,7 +92,10 @@ export async function attachRatingsUnified(
   }
 
   const misses: TmdbMedia[] = [];
-  const fetched = new Map<number, { source: "mdblist"; data: MdblistRatings } | { source: "omdb"; data: OmdbRatings }>();
+  // Keyed by `${mediaType}:${id}`, NOT bare tmdbId — a movie and a TV show can
+  // share a TMDB id (independent id spaces), so a bare-id map would cross-
+  // contaminate their ratings within a single batch.
+  const fetched = new Map<string, { source: "mdblist"; data: MdblistRatings } | { source: "omdb"; data: OmdbRatings }>();
   for (const item of items) {
     if (!warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item))) misses.push(item);
   }
@@ -99,37 +111,32 @@ export async function attachRatingsUnified(
         tvMisses.length    > 0 ? fetchMdblistBatch(tvMisses,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
       ]);
 
-      for (const [id, data] of movieRatings) fetched.set(id, { source: "mdblist", data });
-      for (const [id, data] of tvRatings)    fetched.set(id, { source: "mdblist", data });
+      for (const [id, data] of movieRatings) fetched.set(`movie:${id}`, { source: "mdblist", data });
+      for (const [id, data] of tvRatings)    fetched.set(`tv:${id}`,    { source: "mdblist", data });
 
-      const mdbMisses = misses.filter((m) => !fetched.has(m.id));
+      const mdbMisses = misses.filter((m) => !fetched.has(fetchedKey(m)));
       if (mdbMisses.length > 0) {
         // Probe a single item to check whether MDBList is configured; if it isn't, fall back to OMDB
         // for all remaining misses rather than checking every item individually.
         const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate).catch(() => null);
         const useFallback = probe && !probe.found && !probe.keyConfigured;
         if (useFallback) {
-          await Promise.all(
-            mdbMisses.map(async (item) => {
-              const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
-              if (omdb && omdb.found) fetched.set(item.id, { source: "omdb", data: omdb.data });
-            }),
-          );
+          await mapLimit(mdbMisses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
+            const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
+            if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
+          });
         }
       }
     } else {
-
-      await Promise.all(
-        misses.map(async (item) => {
-          const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
-          if (omdb && omdb.found) fetched.set(item.id, { source: "omdb", data: omdb.data });
-        }),
-      );
+      await mapLimit(misses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
+        const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
+        if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
+      });
     }
   }
 
   return items.map((item) => {
-    const fresh = fetched.get(item.id);
+    const fresh = fetched.get(fetchedKey(item));
     if (fresh) return fresh.source === "mdblist" ? applyMdblist(item, fresh.data) : applyOmdb(item, fresh.data);
     return mergeWarm(item, warm);
   });
@@ -137,6 +144,7 @@ export async function attachRatingsUnified(
 
 function mdblistKey(item: TmdbMedia): string { return `mdblist:tmdb:${item.mediaType}:${item.id}`; }
 function omdbKey(item: TmdbMedia): string    { return `omdb:tmdb:${item.mediaType}:${item.id}`; }
+function fetchedKey(item: TmdbMedia): string { return `${item.mediaType}:${item.id}`; }
 
 type WarmCache = { byMdblist: Map<string, MdblistRatings>; byOmdb: Map<string, OmdbRatings>; negativeKeys: Set<string> };
 

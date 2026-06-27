@@ -181,20 +181,20 @@ function WebMergeFlow() {
       {step === "code-sent" && (
         <>
           <div className="rounded-md bg-zinc-800 border border-zinc-700 px-4 py-3 text-sm text-zinc-300 space-y-1">
-            <p>A 6-digit code was sent to your Discord DMs.</p>
+            <p>A 12-character code was sent to your Discord DMs.</p>
           </div>
           <div className="flex gap-2">
             <input
               type="text"
               value={code}
-              onChange={(e) => { setCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setError(null); }}
-              placeholder="000000"
-              maxLength={6}
-              className="w-32 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); setError(null); }}
+              placeholder="A1B2C3D4E5F6"
+              maxLength={12}
+              className="w-48 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button
               onClick={confirmCode}
-              disabled={loading || code.length !== 6}
+              disabled={loading || code.length !== 12}
               className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md transition-colors flex items-center gap-2"
             >
               {loading && <Loader2 className="w-3 h-3 animate-spin" />}

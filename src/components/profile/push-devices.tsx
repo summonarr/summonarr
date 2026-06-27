@@ -8,7 +8,6 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface PushDevice {
   id: string;
-  endpoint: string;
   label: string | null;
   createdAt: Date;
 }
@@ -24,14 +23,14 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState<string | null>(null);
 
-  async function remove(endpoint: string) {
-    setRemoving(endpoint);
+  async function remove(id: string) {
+    setRemoving(id);
     setConfirmingRemove(null);
     try {
       await fetch("/api/push/subscribe", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ endpoint }),
+        body: JSON.stringify({ id }),
       });
       router.refresh();
     } finally {
@@ -66,7 +65,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 </p>
               </div>
             </div>
-            {confirmingRemove !== device.endpoint && (
+            {confirmingRemove !== device.id && (
               <Button
                 type="button"
                 size="sm"
@@ -74,22 +73,22 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 aria-label={`Remove ${deviceLabel}`}
                 title="Remove device"
                 className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0"
-                disabled={removing === device.endpoint}
-                onClick={() => setConfirmingRemove(device.endpoint)}
+                disabled={removing === device.id}
+                onClick={() => setConfirmingRemove(device.id)}
               >
-                {removing === device.endpoint
+                {removing === device.id
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <Trash2 className="w-3.5 h-3.5" />}
               </Button>
             )}
-            {confirmingRemove === device.endpoint && (
+            {confirmingRemove === device.id && (
               <div className="flex items-center gap-1.5 shrink-0">
                 <Button
                   type="button"
                   size="sm"
                   aria-label={`Confirm remove ${deviceLabel}`}
                   className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
-                  onClick={() => remove(device.endpoint)}
+                  onClick={() => remove(device.id)}
                   autoFocus
                 >
                   <Trash2 className="w-3.5 h-3.5" />

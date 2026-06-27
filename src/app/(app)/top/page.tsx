@@ -176,30 +176,56 @@ export default async function TopRatedPage({
   const showMovies = mediaType !== "tv";
   const showTV     = mediaType !== "movies";
 
-  const movieOffset = (page - 1) * PER_PAGE;
-  const tvOffset    = (page - 1) * PER_PAGE;
-  let moviePage     = allMovies.slice(movieOffset, movieOffset + PER_PAGE);
-  let tvPage        = allTV.slice(tvOffset, tvOffset + PER_PAGE);
+  const offset = (page - 1) * PER_PAGE;
+  // See the native /api/top-rated route for the rationale: applyFilters + the
+  // rating sort read post-enrichment fields, so enrich+filter+sort the whole pool
+  // only when a filter or non-default sort is active. Otherwise the default view is
+  // already rating-ordered by source and we enrich just the visible slice.
+  const filtersActive = hasFilters || sortBy !== "imdb";
 
-  [moviePage, tvPage] = await Promise.all([
-    backfillMetadata(moviePage),
-    backfillMetadata(tvPage),
-  ]);
+  let movies: TmdbMedia[];
+  let tv: TmdbMedia[];
+  let totalMovieCount: number;
+  let totalTvCount: number;
 
-  let [movies, tv] = await Promise.all([
-    showMovies && moviePage.length > 0
-      ? attachAllAvailability(moviePage, session?.user.id, { show4k })
-      : Promise.resolve([] as TmdbMedia[]),
-    showTV && tvPage.length > 0
-      ? attachAllAvailability(tvPage, session?.user.id, { show4k })
-      : Promise.resolve([] as TmdbMedia[]),
-  ]);
+  if (filtersActive) {
+    const [enrichedMovies, enrichedTV] = await Promise.all([
+      showMovies && allMovies.length > 0
+        ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session?.user.id, { show4k }))
+        : Promise.resolve([] as TmdbMedia[]),
+      showTV && allTV.length > 0
+        ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session?.user.id, { show4k }))
+        : Promise.resolve([] as TmdbMedia[]),
+    ]);
+    const filteredMovies = sortByRating(applyFilters(enrichedMovies, filterOpts), sortBy);
+    const filteredTV     = sortByRating(applyFilters(enrichedTV, filterOpts), sortBy);
+    totalMovieCount = filteredMovies.length;
+    totalTvCount    = filteredTV.length;
+    movies = filteredMovies.slice(offset, offset + PER_PAGE);
+    tv     = filteredTV.slice(offset, offset + PER_PAGE);
+  } else {
+    let moviePage = allMovies.slice(offset, offset + PER_PAGE);
+    let tvPage    = allTV.slice(offset, offset + PER_PAGE);
+    [moviePage, tvPage] = await Promise.all([
+      backfillMetadata(moviePage),
+      backfillMetadata(tvPage),
+    ]);
+    [movies, tv] = await Promise.all([
+      showMovies && moviePage.length > 0
+        ? attachAllAvailability(moviePage, session?.user.id, { show4k })
+        : Promise.resolve([] as TmdbMedia[]),
+      showTV && tvPage.length > 0
+        ? attachAllAvailability(tvPage, session?.user.id, { show4k })
+        : Promise.resolve([] as TmdbMedia[]),
+    ]);
+    movies = sortByRating(movies, sortBy);
+    tv     = sortByRating(tv, sortBy);
+    totalMovieCount = allMovies.length;
+    totalTvCount    = allTV.length;
+  }
 
-  movies = sortByRating(applyFilters(movies, filterOpts), sortBy);
-  tv     = sortByRating(applyFilters(tv, filterOpts), sortBy);
-
-  const totalMoviePages = Math.max(1, Math.ceil(allMovies.length / PER_PAGE));
-  const totalTvPages    = Math.max(1, Math.ceil(allTV.length / PER_PAGE));
+  const totalMoviePages = Math.max(1, Math.ceil(totalMovieCount / PER_PAGE));
+  const totalTvPages    = Math.max(1, Math.ceil(totalTvCount / PER_PAGE));
   const totalPages      = Math.max(totalMoviePages, totalTvPages);
 
   const sourceCount = [rawTmdbMovies.length || rawTmdbTV.length, rawTraktMovies.length || rawTraktTV.length, rawMdbMovies.length || rawMdbTV.length].filter(Boolean).length;
@@ -234,7 +260,7 @@ export default async function TopRatedPage({
             title="Movies"
             range={
               allMovies.length > 0
-                ? `${movieOffset + 1}–${Math.min(movieOffset + movies.length, allMovies.length)} of ${allMovies.length}`
+                ? `${offset + 1}–${Math.min(offset + movies.length, allMovies.length)} of ${allMovies.length}`
                 : undefined
             }
           />
@@ -278,7 +304,7 @@ export default async function TopRatedPage({
             title="TV Shows"
             range={
               allTV.length > 0
-                ? `${tvOffset + 1}–${Math.min(tvOffset + tv.length, allTV.length)} of ${allTV.length}`
+                ? `${offset + 1}–${Math.min(offset + tv.length, allTV.length)} of ${allTV.length}`
                 : undefined
             }
           />

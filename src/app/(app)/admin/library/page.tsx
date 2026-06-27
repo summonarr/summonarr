@@ -105,6 +105,35 @@ async function enrichItems(
   });
 }
 
+// `overview` is excluded from the whole-library pull in the page (it is the
+// heaviest column and is only rendered for the onlyPlex / onlyJellyfin difference
+// sets). Backfill it for a specific, small set of rows from the source library
+// table, keyed by `${tmdbId}:${mediaType}`. Split by mediaType to hit the
+// composite (tmdbId, mediaType) index — same shape as enrichItems.
+async function fetchOverviews(
+  source: "plex" | "jellyfin",
+  rows: { tmdbId: number; mediaType: "MOVIE" | "TV" }[],
+): Promise<Map<string, string | null>> {
+  const map = new Map<string, string | null>();
+  if (rows.length === 0) return map;
+
+  const movieIds = rows.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
+  const tvIds    = rows.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
+  const where = {
+    OR: [
+      ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+      ...(tvIds.length    ? [{ mediaType: "TV"    as const, tmdbId: { in: tvIds } }]    : []),
+    ],
+  };
+  if (where.OR.length === 0) return map;
+
+  const found = source === "plex"
+    ? await prisma.plexLibraryItem.findMany({ where, select: { tmdbId: true, mediaType: true, overview: true } })
+    : await prisma.jellyfinLibraryItem.findMany({ where, select: { tmdbId: true, mediaType: true, overview: true } });
+  for (const r of found) map.set(`${r.tmdbId}:${r.mediaType}`, r.overview);
+  return map;
+}
+
 function commonPathPrefix(paths: (string | null)[]): string {
   const valid = paths.filter((p): p is string => p !== null && p.length > 0);
   if (valid.length === 0) return "";
@@ -221,9 +250,12 @@ export default async function LibraryDiffPage({
     : null;
 
   const LIBRARY_ITEM_CAP = 25_000;
+  // overview is omitted here on purpose: it is the heaviest column and is only
+  // rendered for the difference sets, so pulling it for up to 50k rows per render
+  // is wasted. fetchOverviews backfills it for just the displayed rows below.
   const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, overview: true }, take: LIBRARY_ITEM_CAP }),
-    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, overview: true }, take: LIBRARY_ITEM_CAP }),
+    prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true }, take: LIBRARY_ITEM_CAP }),
+    prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true }, take: LIBRARY_ITEM_CAP }),
     prisma.setting.findMany({ where: { key: { in: ["plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix"] } } }),
   ]);
   const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
@@ -270,9 +302,15 @@ export default async function LibraryDiffPage({
     ? rawOnlyJellyfin.filter((i) => i.mediaType === activeType)
     : rawOnlyJellyfin;
 
+  // Backfill overview for just the difference rows (the only place it is rendered),
+  // then merge it into the enrichItems input.
+  const [plexOverviews, jellyfinOverviews] = await Promise.all([
+    fetchOverviews("plex", filteredOnlyPlex),
+    fetchOverviews("jellyfin", filteredOnlyJellyfin),
+  ]);
   const [onlyPlex, onlyJellyfin] = await Promise.all([
-    enrichItems(filteredOnlyPlex),
-    enrichItems(filteredOnlyJellyfin),
+    enrichItems(filteredOnlyPlex.map((i) => ({ ...i, overview: plexOverviews.get(`${i.tmdbId}:${i.mediaType}`) ?? null }))),
+    enrichItems(filteredOnlyJellyfin.map((i) => ({ ...i, overview: jellyfinOverviews.get(`${i.tmdbId}:${i.mediaType}`) ?? null }))),
   ]);
 
   const plexMountPoint     = commonPathPrefix(plexItems.map((i) => i.filePath));
@@ -283,15 +321,16 @@ export default async function LibraryDiffPage({
     return rel;
   }
 
-  type PlexPathEntry     = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string; ratingKey: string | null; title: string | null; year: string | null; overview: string | null };
-  type JellyfinPathEntry = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string; itemId: string | null;   title: string | null; year: string | null; overview: string | null };
+  // No overview here: bad-match rows never render it (clientBadMatches omits it).
+  type PlexPathEntry     = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string; ratingKey: string | null; title: string | null; year: string | null };
+  type JellyfinPathEntry = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string; itemId: string | null;   title: string | null; year: string | null };
 
   const plexPathMap = new Map<string, PlexPathEntry>();
   for (const item of plexItems) {
     if (!item.filePath) continue;
     const rel = stripMountPoint(item.filePath, plexMountPoint);
     const plexPrefix = item.mediaType === "MOVIE" ? plexMovieStripPrefix : plexTvStripPrefix;
-    if (rel) plexPathMap.set(toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year, overview: item.overview });
+    if (rel) plexPathMap.set(toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
   }
 
   const jellyfinPathMap = new Map<string, JellyfinPathEntry>();
@@ -299,7 +338,7 @@ export default async function LibraryDiffPage({
     if (!item.filePath) continue;
     const rel = stripMountPoint(item.filePath, jellyfinMountPoint);
     const jellyfinPrefix = item.mediaType === "MOVIE" ? jellyfinMovieStripPrefix : jellyfinTvStripPrefix;
-    if (rel) jellyfinPathMap.set(toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year, overview: item.overview });
+    if (rel) jellyfinPathMap.set(toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
   }
 
   type RawBadMatch = {
@@ -322,8 +361,8 @@ export default async function LibraryDiffPage({
     : allRawBadMatches;
 
   const [bmPlexItems, bmJellyfinItems, movieArrMap, tvArrMap] = await Promise.all([
-    enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.plexItem.tmdbId,     mediaType: m.plexItem.mediaType,     filePath: m.plexItem.filePath,     title: m.plexItem.title,     year: m.plexItem.year,     overview: m.plexItem.overview }))),
-    enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.jellyfinItem.tmdbId, mediaType: m.jellyfinItem.mediaType, filePath: m.jellyfinItem.filePath, title: m.jellyfinItem.title, year: m.jellyfinItem.year, overview: m.jellyfinItem.overview }))),
+    enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.plexItem.tmdbId,     mediaType: m.plexItem.mediaType,     filePath: m.plexItem.filePath,     title: m.plexItem.title,     year: m.plexItem.year }))),
+    enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.jellyfinItem.tmdbId, mediaType: m.jellyfinItem.mediaType, filePath: m.jellyfinItem.filePath, title: m.jellyfinItem.title, year: m.jellyfinItem.year }))),
     buildArrPathMap("MOVIE"),
     buildArrPathMap("TV"),
   ]);

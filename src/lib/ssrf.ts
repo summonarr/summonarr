@@ -23,6 +23,69 @@ function unwrapV4Mapped(addr: string): string | null {
   return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
 }
 
+// Parse any valid IPv6 textual form — including `::` compression and a trailing
+// embedded IPv4 dotted-quad — into its 128-bit integer value, or null if it isn't
+// a parseable IPv6 literal. Used to recognise embedded-IPv4 addresses regardless
+// of how they're spelled/compressed, which the per-spelling regexes miss.
+function ipv6ToBigInt(addr: string): bigint | null {
+  let s = addr;
+  const pct = s.indexOf("%"); // strip zone id (fe80::1%eth0) — irrelevant to the value
+  if (pct !== -1) s = s.slice(0, pct);
+  if (!/^[0-9a-f:.]+$/i.test(s)) return null;
+
+  // Convert a trailing embedded IPv4 (…:a.b.c.d) into two hex groups first so the
+  // remainder parses as pure hextets.
+  const v4m = /:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (v4m) {
+    const o = [v4m[1], v4m[2], v4m[3], v4m[4]].map(Number);
+    if (o.some((n) => n > 255)) return null;
+    const hex = `${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
+    s = s.slice(0, v4m.index + 1) + hex; // +1 keeps the colon before the v4
+  }
+
+  const dbl = s.indexOf("::");
+  let groups: string[];
+  if (dbl !== -1) {
+    if (s.indexOf("::", dbl + 1) !== -1) return null; // at most one `::`
+    const head = s.slice(0, dbl).split(":").filter(Boolean);
+    const tail = s.slice(dbl + 2).split(":").filter(Boolean);
+    const missing = 8 - head.length - tail.length;
+    if (missing < 1) return null;
+    groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  } else {
+    groups = s.split(":");
+  }
+  if (groups.length !== 8) return null;
+
+  let value = 0n;
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
+    value = (value << 16n) | BigInt(parseInt(g, 16));
+  }
+  return value;
+}
+
+// Recognise an IPv4 address embedded in IPv6 via well-known prefixes that the
+// textual `unwrapV4Mapped`/regexes miss: NAT64 (64:ff9b::/96) in non-compressed
+// form, the deprecated IPv4-compatible (::/96), and SIIT (::ffff:0:0/96). Returns
+// the embedded IPv4 dotted string so callers can apply IPv4 rules; null otherwise.
+function unwrapEmbeddedV4(addr: string): string | null {
+  if (!addr.includes(":")) return null;
+  const v = ipv6ToBigInt(addr);
+  if (v === null) return null;
+
+  const low32 = v & 0xffffffffn;
+  const prefix96 = v >> 32n; // top 96 bits
+  const toDotted = (n: bigint) =>
+    `${(n >> 24n) & 0xffn}.${(n >> 16n) & 0xffn}.${(n >> 8n) & 0xffn}.${n & 0xffn}`;
+
+  if (prefix96 === 0xffffn) return toDotted(low32);                     // ::ffff:0:0/96  (IPv4-mapped)
+  if (prefix96 === 0xffff0000n) return toDotted(low32);                 // ::ffff:0:0:0/96 (SIIT translatable)
+  if (prefix96 === 0x0064ff9b0000000000000000n) return toDotted(low32); // 64:ff9b::/96   (NAT64)
+  if (prefix96 === 0n && low32 > 1n) return toDotted(low32);            // ::/96          (IPv4-compatible; skips ::, ::1)
+  return null;
+}
+
 // Detect the IPv6 unspecified address (`::`) in any of its valid notations.
 // The previous regex `/^::?0?$/` only caught `::`, `::0`, and the bogus `:0`/`:`.
 // It missed the fully-expanded form (`0:0:0:0:0:0:0:0`), the zero-padded form
@@ -55,8 +118,9 @@ function isUnspecifiedV6(addr: string): boolean {
 }
 
 function isSafeAddr(addr: string): boolean {
-  // IPv4-mapped IPv6 — unwrap and recurse so IPv4 rules apply to both ::ffff:1.2.3.4 and ::ffff:0102:0304
-  const v4 = unwrapV4Mapped(addr);
+  // Embedded-IPv4 IPv6 — unwrap and recurse so IPv4 rules apply to ::ffff:1.2.3.4,
+  // ::ffff:0102:0304, NAT64 (incl. non-compressed), IPv4-compatible, and SIIT forms.
+  const v4 = unwrapV4Mapped(addr) ?? unwrapEmbeddedV4(addr);
   if (v4 !== null) return isSafeAddr(v4);
 
   // Loopback
@@ -100,7 +164,7 @@ function isSafeAddr(addr: string): boolean {
 // blocking link-local and unspecified — the goal is to keep cloud metadata services and
 // 0.0.0.0 unreachable even when the admin has typo'd the URL.
 export function isSafeAddrForAdmin(addr: string): boolean {
-  const v4 = unwrapV4Mapped(addr);
+  const v4 = unwrapV4Mapped(addr) ?? unwrapEmbeddedV4(addr);
   if (v4 !== null) return isSafeAddrForAdmin(v4);
 
   if (/^169\.254\./.test(addr)) return false;

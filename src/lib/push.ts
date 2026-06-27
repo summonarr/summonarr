@@ -319,7 +319,7 @@ export async function notifyUserIssueMessagePush(data: {
     const payload: PushPayload = {
       title: `Admin replied on: ${data.title}`,
       body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
-      url: data.issueId ? `/issues/${data.issueId}` : "/issues",
+      url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_reply",
     };
 
@@ -351,7 +351,7 @@ export async function notifyAdminsIssueMessagePush(data: {
     const payload: PushPayload = {
       title: data.fromAdmin ? `Admin reply on issue: ${data.title}` : `User reply on issue: ${data.title}`,
       body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
-      url: data.issueId ? `/issues/${data.issueId}` : "/admin/issues",
+      url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "issue_reply",
     };
 
@@ -406,7 +406,7 @@ export async function notifyAdminGrabCompletedPush(data: {
     const payload: PushPayload = {
       title: "Download complete",
       body: `${data.title}${scopeLabel} has finished downloading`,
-      url: `/issues/${data.issueId}`,
+      url: `/issues?selected=${data.issueId}`,
       category: "grab_complete",
     };
 
@@ -654,7 +654,7 @@ export async function notifyAdminsNewIssuePush(data: {
     const payload: PushPayload = {
       title: "New Issue Report",
       body: `${data.title} — ${issueLabel} reported by ${data.reportedBy}`,
-      url: data.issueId ? `/issues/${data.issueId}` : "/admin/issues",
+      url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "new_issue",
     };
 

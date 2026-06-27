@@ -347,7 +347,20 @@ export const DELETE = withAuth(async (
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  await prisma.mediaRequest.delete({ where: { id } });
+  if (isAdmin) {
+    await prisma.mediaRequest.delete({ where: { id } });
+  } else {
+    // Owner self-cancel: delete only if STILL pending. An admin may have approved
+    // (and pushed to ARR) between the read above and here — a guarded deleteMany
+    // makes the status check atomic so we never orphan an approved/grabbed request
+    // behind a stale pre-read.
+    const { count } = await prisma.mediaRequest.deleteMany({
+      where: { id, requestedBy: session.user.id, status: "PENDING" },
+    });
+    if (count === 0) {
+      return NextResponse.json({ error: "Request was already actioned — refresh and try again." }, { status: 409 });
+    }
+  }
   emitSSE({ type: "request:deleted", requestId: id, userId: existing.requestedBy });
   // Only an admin-initiated delete is an audit-worthy moderation action; a user
   // cancelling their own pending request is routine and stays out of the log.

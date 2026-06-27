@@ -178,7 +178,7 @@ export async function POST(req: NextRequest) {
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
-    await scheduleLibraryScan("movie", tmdbId);
+    await scheduleLibraryScan("movie", tmdbId, is4k ? "4k" : "hd");
 
     const pending = await prisma.mediaRequest.findMany({
       where: { tmdbId, mediaType: "MOVIE", status: "AVAILABLE", notifiedAvailable: false },

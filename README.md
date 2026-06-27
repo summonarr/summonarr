@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.7 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.8 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -33,7 +33,8 @@ Then open <http://localhost:3001>. The first user to register is auto-promoted t
 - Per-device session tracking, Web Push notifications, optional SMTP email
 - AES-256-GCM encryption at rest for provider secrets and push/OAuth tokens
 - Encrypted, password-protected database backups (export/import via the admin UI)
-- Webhook support for Plex, Jellyfin, Sonarr, and Radarr
+- Radarr and Sonarr webhooks for instant request fulfillment (Plex activity via a real-time SSE stream, Jellyfin via a 5-second poller — no Plex/Jellyfin webhook needed)
+- Optional Discord (bot), SMTP/Resend email, and ratings providers (OMDb, MDBList, Trakt) — all configured in-app
 - Admin debug endpoint (`/api/admin/debug/arr-state`) for inspecting the Radarr/Sonarr pipeline end-to-end
 
 ## Architecture at a glance
@@ -75,7 +76,7 @@ docker compose up -d
 docker compose logs -f summonarr
 ```
 
-The Dockerfile is a four-stage build (deps → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
+The Dockerfile is a five-stage build (deps → prisma-gen → builder → migrate-deps → runner), produces a Next.js standalone bundle, runs as non-root `nextjs:nodejs` (UID 1001), and strips `npm`/`npx` from the final image to eliminate npm-bundled CVEs.
 
 The set of required env vars is the same as the GHCR deploy — see [`docker-container/README.md`](./docker-container/README.md#environment-variables) for the full reference.
 
@@ -91,8 +92,14 @@ npm install
 cp .env.example .env
 # Set DATABASE_URL directly when running Postgres yourself, e.g.:
 #   DATABASE_URL=postgresql://summonarr:password@localhost:5432/summonarr
-# Then fill in NEXTAUTH_SECRET (≥32 chars), AUTH_URL, CRON_SECRET (≥32 chars),
-# TMDB_READ_TOKEN, TRUST_PROXY.
+# Then fill in the boot-required secrets:
+#   NEXTAUTH_SECRET       (≥ 32 chars)
+#   CRON_SECRET           (≥ 32 chars)
+#   TOKEN_ENCRYPTION_KEY  (exactly 64 hex chars — `openssl rand -hex 32`; the app
+#                          exits at boot without it)
+#   AUTH_URL, TMDB_READ_TOKEN, TRUST_PROXY
+# Optional sign-in: OIDC_ISSUER / OIDC_CLIENT_ID / OIDC_CLIENT_SECRET (see
+# docker-container/README.md → Connecting external services → OIDC / SSO).
 
 npx prisma db push    # apply schema (no migrations folder)
 npx prisma generate   # regenerate client (outputs to src/generated/prisma)
@@ -156,6 +163,26 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.8
+
+**Changed**
+
+- Admin "delete user" now anonymizes the account and keeps its request, issue, and vote history — matching self-delete — instead of hard-deleting and discarding it.
+- Discovery, browse, library, and Top Rated pages do less redundant work and bound their concurrency, staying responsive under load and on a cold cache.
+- Sub-path hosting (`BASE_PATH`) works end to end: it is applied at image build time, and the internal cron/health URLs and documentation were corrected.
+
+**Fixed**
+
+- OIDC: OAuth tokens are now encrypted at rest on first sign-in, and a pre-setup OIDC sign-in can no longer lock an instance out of creating its first admin.
+- Discord: the `/link` and account-merge flows work again (a code-length mismatch had broken them), and requests made through Discord now respect each user's request permission.
+- Scheduled library sync now honours the admin's selected Plex/Jellyfin libraries, so media in excluded libraries is no longer shown as available.
+- Requests: an owner can no longer cancel a request the instant after an admin approves it, and a failed auto-approve now reports the correct pending state.
+- Top Rated: filtering and sorting no longer yield short or empty pages or wrong totals; search results now reflect already-requested and availability state.
+- Notifications: issue links in push and email now open the correct page instead of a dead link.
+- Ratings: movies and TV shows that share a TMDB id no longer cross-contaminate each other's ratings, and a transient ratings-provider outage is no longer cached as "no ratings."
+- Privacy & integrity: device push tokens are no longer exposed to the browser; deleting an account cleans up its push and Discord-link records; additional SSRF address forms (NAT64 / IPv4-mapped) are blocked; manual fix-match edits are no longer clobbered by a concurrent sync; and backup exports paginate deterministically.
+- Radarr/Sonarr: retry adding a title with an id-tagged folder path when the default folder name collides with an existing one.
 
 ### v0.13.7
 
@@ -662,7 +689,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.7 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.8 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

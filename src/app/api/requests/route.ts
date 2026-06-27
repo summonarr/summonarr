@@ -351,6 +351,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     } catch (err) {
       console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
       await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
+      // The client already saw request:new with status APPROVED; emit a corrective
+      // update so it reflects the rolled-back PENDING state, and return the PENDING
+      // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).
+      emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: session.user.id });
+      return NextResponse.json({ ...request, status: "PENDING" }, { status: 201 });
     }
 
     return NextResponse.json(request, { status: 201 });

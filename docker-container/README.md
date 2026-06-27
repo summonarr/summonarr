@@ -102,9 +102,9 @@ Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, schedule overrides, …) is opt
 3. Open **Admin → Settings** and wire up the services you want:
    - **Plex** — URL + token (or sign in via plex.tv), then pick libraries.
    - **Jellyfin** — paste an API key from the Jellyfin dashboard, then pick libraries.
-   - **Radarr / Sonarr** — base URL, API key, default quality profile, root folder (and for Sonarr a language profile).
-   - **Webhooks** — generate the shared secret; paste it into each upstream service's webhook settings.
-   - **SMTP / Push** — optional email and browser push notifications.
+   - **Radarr / Sonarr** — base URL, API key, default quality profile, and root folder. (No language-profile field — Sonarr v3 dropped it; season monitoring and search-on-add are handled automatically.)
+   - **Webhooks** — set a Radarr/Sonarr webhook secret and copy the generated URL into each service's Connect → Webhook settings.
+   - **Discord / SMTP / Push** — optional notification channels (all configured in-app, see [Connecting external services](#connecting-external-services)).
 4. Click **Resync** on Plex/Jellyfin for the first full library pull. From there the internal cron loop takes over on `SYNC_INTERVAL`.
 
 ## Environment variables
@@ -119,7 +119,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TMDB_READ_TOKEN`      | v4 bearer token                            | Required TMDB credential. Sent as a header, so the key never leaks into upstream access logs.                                                                                           |
 | `NEXTAUTH_SECRET`      | **≥ 32 chars**                             | Signs JWT session tokens. `openssl rand -base64 32`.                                                                                                                                     |
-| `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins NextAuth's base URL and blocks Host-header injection behind a proxy.                                                                                         |
+| `AUTH_URL`             | Absolute URL incl. scheme                  | Public URL of the app. Pins the app's own base URL (used for redirects, the OIDC callback, trusted-origin/CSRF checks, and cookie-`Secure` detection) and blocks Host-header injection behind a proxy. Use `https://…` in production so session cookies get the `Secure` + `__Host-` treatment. |
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
@@ -140,6 +140,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `OIDC_CLIENT_ID`     | provider-defined                                            | Client ID registered with the IdP.                                                                                 |
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
 | `OIDC_DISPLAY_NAME`  | free-form; default `SSO`                                    | Optional label shown on the login button.                                                                          |
+| `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN` | `"true"` to enable; default off                 | Lets the first Plex / Jellyfin / OIDC sign-in bootstrap as ADMIN. Off by default — normally the first **local** registration becomes admin. Enable only for OAuth-only deployments. |
 
 Plex OAuth is configured inside the app (**Admin → Settings → Plex**), not through environment variables.
 
@@ -166,7 +167,8 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.13.7`.                                                                                                   |
+| `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.13.8`.                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -175,9 +177,17 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 
 ## Sub-path deployment (`BASE_PATH`)
 
+> **`BASE_PATH` is a BUILD-TIME setting.** Next.js inlines it into the client bundle, so it **cannot** be changed by a runtime env var — setting `BASE_PATH=` in `.env` on the prebuilt image has no effect. The published image is built **without** a sub-path, so serving under one requires building your own image.
+
 Running Summonarr at `https://example.com/request` instead of a dedicated hostname:
 
-1. Set `BASE_PATH=/request` in your `.env`.
+1. Build an image with the prefix baked in, and point your compose service at it:
+
+   ```bash
+   docker build --build-arg BASE_PATH=/request -t summonarr:subpath .
+   ```
+
+   Then set `image: summonarr:subpath` (or a `build:` block passing the same `--build-arg`) for the `summonarr` service.
 2. Set `AUTH_URL=https://example.com/request`.
 3. Configure the proxy to forward requests under `/request/` **without stripping the prefix** — Summonarr's router expects to see the full path. Example for Nginx:
 
@@ -193,7 +203,9 @@ Running Summonarr at `https://example.com/request` instead of a dedicated hostna
    }
    ```
 
-4. `docker compose up -d --force-recreate summonarr` so the new `BASE_PATH` is picked up.
+4. `docker compose up -d --force-recreate summonarr`.
+
+The internal cron loop and the container health probe read `BASE_PATH` from the image env (baked in at build), so they target the prefixed paths automatically. **Caveat:** web-push service-worker registration is not sub-path-aware, so push notifications may not work under a sub-path.
 
 ## Internal cron schedule
 
@@ -229,32 +241,34 @@ curl -X POST \
   http://localhost:3001/api/sync
 ```
 
-Pass `{"full": true}` for a full atomic `delete-and-replace` sync; omit it for the default `recentOnly` path (insert-only within a 2-hour window).
+The orchestrator `/api/sync` always runs a full pass and ignores the request body. The `{"full": true}` flag matters only on the **per-source** routes `/api/sync/plex` and `/api/sync/jellyfin` (what the admin **Resync** button calls): `true` does an atomic delete-and-replace; omitting it uses the default `recentOnly` path (insert-only within a 2-hour window). The internal cron loop sends no body at all.
 
 ## Webhooks
 
-All four webhook handlers (Plex, Jellyfin, Sonarr, Radarr) authenticate the request against a shared secret using SHA-256 + `timingSafeEqual`. Configure the secret in **Admin → Settings → Webhooks**.
+**Only Radarr and Sonarr have webhook handlers.** They authenticate each request against the configured secret using SHA-256 + `timingSafeEqual`. Configure the secret(s) in **Admin → Settings → Media** (the Radarr/Sonarr panels), then use the **Copy webhook URL** button — it embeds the secret for you.
+
+> **There is no Plex or Jellyfin webhook.** Those routes were removed. Plex real-time activity comes from a Server-Sent Events stream (`/:/eventsource/notifications`) — **no Plex Pass required** — and Jellyfin activity comes from the 5-second play-history poller. Both are automatic once you configure the server URL + token/key under Admin → Settings → Media; there is nothing to register in Plex or Jellyfin.
+
+Each instance reads its own secret (`radarrWebhookSecret`, `sonarrWebhookSecret`, and the 4K variants `radarr4kWebhookSecret` / `sonarr4kWebhookSecret`). A single legacy `webhookSecret` is accepted as a fallback for the HD instances. The supplied token selects which instance the event belongs to, so set a distinct secret per instance if you run separate HD and 4K Radarr/Sonarr.
 
 Two equivalent auth modes are supported — pick whichever the upstream service allows:
 
 ```
-# Header (preferred where supported)
+# Header (accepted)
 Authorization: Bearer <WEBHOOK_SECRET>
 
-# Query-string fallback (Sonarr and Radarr webhook UIs have no header field)
+# Query-string (what Radarr/Sonarr use — their webhook UIs have no header field)
 https://requests.example.com/api/webhooks/sonarr?token=<WEBHOOK_SECRET>
 ```
 
 Endpoints:
 
-| Service  | URL                                              |
-| -------- | ------------------------------------------------ |
-| Plex     | `${AUTH_URL}/api/webhooks/plex`                  |
-| Jellyfin | `${AUTH_URL}/api/webhooks/jellyfin`              |
-| Sonarr   | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
-| Radarr   | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
+| Service | URL                                              |
+| ------- | ------------------------------------------------ |
+| Sonarr  | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
+| Radarr  | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
 
-No HMAC payload signing — none of the upstream services sign their bodies.
+In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. No HMAC payload signing — none of the upstream services sign their bodies.
 
 ## Connecting external services
 
@@ -273,22 +287,42 @@ All service wiring is done in the running app (**Admin → Settings**) and persi
 
 ### Radarr & Sonarr
 
-1. Admin → Settings → Radarr (or Sonarr) → paste the base URL + API key.
-2. Pick a default quality profile, root folder, and (for Sonarr) a language profile.
-3. Approving a request sends it to Radarr/Sonarr and the wanted-items cache refreshes on the next sync tick.
+1. Admin → Settings → Radarr (or Sonarr) → paste the base URL + API key (Radarr/Sonarr → Settings → General → Security → API Key). Saving runs a `/api/v3/system/status` connection test.
+2. Pick a default quality profile and root folder from the dropdowns (live-fetched from the instance). Both are optional — if left blank, Summonarr uses the instance's first profile and first root folder. There is **no** language-profile setting (Sonarr v3 removed it).
+3. Set a webhook secret and copy the webhook URL into Radarr/Sonarr (see [Webhooks](#webhooks)).
+4. Approving a request adds it to Radarr/Sonarr (monitored, with search-on-add for already-released titles); the wanted-items cache and the import webhook then flip the request to *Available*.
+
+Optional **4K instances** use a parallel set of fields (`radarr4kUrl`, `sonarr4kUrl`, …) and their own webhook secrets.
 
 ### OIDC / SSO
 
-1. Register a new application with your IdP. Callback URL: `${AUTH_URL}/api/auth/callback/oidc`.
-2. Copy the issuer, client ID, and client secret into your `.env`:
+Summonarr ships a native OIDC client (`openid-client`) — Authorization Code flow with mandatory PKCE (`S256`), `client_secret_post` token auth, and scopes `openid profile email`. The IdP **must** support discovery (`.well-known/openid-configuration`).
+
+1. Register a new confidential application with your IdP. **Callback / redirect URI:** `${AUTH_URL}/api/auth/oidc/callback` (e.g. `https://requests.example.com/api/auth/oidc/callback`; for a sub-path deploy include the prefix, `https://example.com/request/api/auth/oidc/callback`).
+2. Ensure the IdP releases `email` and `name`/`preferred_username` **in the ID token** and asserts `email_verified=true` — Summonarr reads claims from the ID token (no userinfo call) and **refuses sign-in if the email is unverified or missing**.
+3. Copy the issuer, client ID, and client secret into your `.env`:
 
    ```dotenv
    OIDC_ISSUER=https://auth.example.com
    OIDC_CLIENT_ID=summonarr
    OIDC_CLIENT_SECRET=...
-   OIDC_DISPLAY_NAME=Authentik
+   OIDC_DISPLAY_NAME=Authentik    # optional; login-button label, defaults to "SSO"
    ```
-3. `docker compose up -d --force-recreate summonarr`. The "Sign in with SSO" button appears automatically.
+4. `docker compose up -d --force-recreate summonarr`. OIDC discovery is cached at boot, so env or IdP-metadata changes require this restart. The "Sign in with …" button then appears automatically.
+
+> **First admin & OIDC.** The first OIDC sign-in is **not** auto-promoted to ADMIN — bootstrap your admin via local registration first, and keep that local account as a break-glass login (the recovery script can't reset OIDC users). To let an OAuth/OIDC user become the first admin instead, set `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN=true`. A self-hosted IdP on a private LAN IP is supported; link-local (`169.254.x`) issuers are blocked by the SSRF policy.
+
+### Notifications (Discord, Email, Web Push)
+
+All three are **optional**, configured in **Admin → Settings** (not via environment variables), stored in the database (secrets encrypted at rest), and each is governed by a default-on feature flag.
+
+- **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
+- **Email** — two backends selectable via `emailBackend`: **SMTP** (set `smtpHost`, optional `smtpPort` [default 587 STARTTLS; 465 = implicit TLS], `smtpUser`/`smtpPassword`, `smtpFrom`) or **Resend** (`resendApiKey`, `resendFrom`). Admin notifications send whenever email is configured; user-facing emails require toggling `enableUserEmails`.
+- **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push is relayed via a central/`apnsRelayUrl` APNs relay with end-to-end-encrypted payloads.
+
+### Ratings & metadata enrichment (optional)
+
+TMDB (the only required upstream) is set via the `TMDB_READ_TOKEN` env var. Additional ratings/metadata providers are **optional** and configured in **Admin → Settings** (encrypted at rest), not via env vars: **OMDb** (`omdbApiKey`), **MDBList** (`mdblistApiKey`), **Trakt** (`traktClientId`), and **ipinfo.io** (`ipinfoToken`, for play-history geolocation). Leaving them blank simply omits those ratings/columns.
 
 ## Backups & restore
 
@@ -466,7 +500,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.13.7
+SUMMONARR_VERSION=v0.13.8
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

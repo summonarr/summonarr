@@ -6,12 +6,12 @@ Self-hosted media request aggregator. Users browse TMDB (trending / popular / di
 
 ## Stack
 
-- **Next.js 16.2.3** (App Router). AGENTS.md is not a suggestion — **read [node_modules/next/dist/docs/](node_modules/next/dist/docs/) before touching framework code**.
+- **Next.js 16.2.9** (App Router). AGENTS.md is not a suggestion — **read [node_modules/next/dist/docs/](node_modules/next/dist/docs/) before touching framework code**.
 - **TypeScript** strict, path alias `@/*` → `./src/*`
-- **Prisma 7.7** + **PostgreSQL 17**, schema-first. No `prisma/migrations/` directory — changes are applied via `prisma db push`.
+- **Prisma 7.8** + **PostgreSQL 17**, schema-first. No `prisma/migrations/` directory — changes are applied via `prisma db push`.
 - **Custom session auth** — a `jose`-signed (HS256) session JWT, not NextAuth (the project migrated off it; there is no `next-auth` dependency and no `auth.config.ts`). Session lifecycle lives in [src/lib/session-jwt.ts](src/lib/session-jwt.ts) (sign/verify), [src/lib/session-refresh.ts](src/lib/session-refresh.ts) (`verifyAndRefreshSession`: DB revocation, `sessionsRevokedAt`/`passwordChangedAt` cutoffs, role rotation, sliding window), [src/lib/session-cookie.ts](src/lib/session-cookie.ts), and [src/lib/auth.ts](src/lib/auth.ts) (`auth()` — JWT-only read). A custom `AuthSession` table backs per-device tracking + revocation. Providers: local credentials, Plex OAuth, Jellyfin (standard + QuickConnect), OIDC (`openid-client`).
 - **Tailwind v4** — **no `tailwind.config.js`**. Theme lives inline in [src/app/globals.css](src/app/globals.css) under `@theme inline` with oklch variables and `.dark` class-based dark mode.
-- **UI**: [src/components/ui/](src/components/ui/) — `@base-ui/react` (Radix-style) primitives scaffolded via the `shadcn` CLI, composed with `class-variance-authority` and `tailwind-merge`.
+- **UI**: [src/components/ui/](src/components/ui/) — `@base-ui/react` (Radix-style) primitives scaffolded via the `shadcn` CLI, composed with the in-repo `@/lib/cva` and `@/lib/tw-merge` reimplementations (the `class-variance-authority` and `tailwind-merge` npm packages are **not** installed — these are hand-written equivalents).
 - **Client state**: plain `useState` + URL `searchParams`. No Zustand, Jotai, Redux, or TanStack Query.
 - **Data fetching**: REST API routes + `fetch` on the client, or server components calling Prisma directly. No tRPC. No server actions.
 - **Package manager**: npm (see `package-lock.json`). No `packageManager` field, no `.nvmrc`.
@@ -42,12 +42,12 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 
 **Sync orchestrator** — [src/app/api/sync/route.ts](src/app/api/sync/route.ts)
 - External-cron entry point, Bearer-authed via `CRON_SECRET` (or admin session).
-- Runs Plex + Jellyfin library fetch+write *concurrently* via `Promise.allSettled`; Radarr/Sonarr/TMDB jobs run in parallel inside the same `Promise.all`.
-- One shared `stillPending` snapshot is reused across both sources' marking passes. An atomic compare-and-swap on `notifiedAvailable` prevents duplicate user notifications when an item appears in both libraries in the same run.
-- Landed in commit `3dcbd79` ("parallel Plex+Jellyfin sync, shared auth util, recentOnly for Jellyfin, and batch tx timeouts").
+- Runs the download-policy sync + Plex + Jellyfin library fetch+write *concurrently* via `Promise.allSettled`. The Radarr and Sonarr wanted/available refreshes run earlier and are **sequential to each other** (HD+4K fetches parallelize *within* each); there is no separate TMDB "job" here beyond an expired-`TmdbCache` purge near the end.
+- One shared `stillPending` snapshot is reused across both sources' marking passes. The "now available" notification fire-exactly-once guarantee is an atomic claim (`claimAvailableNotificationWinners`, an `UPDATE … RETURNING` compare-and-swap on `notifiedAvailable`) — not a plain update — so an item appearing in both libraries in the same run notifies once.
+- Parallel Plex+Jellyfin sync, shared `stillPending` snapshot, `recentOnly` for Jellyfin, and batch tx timeouts landed together (the original commit hash cited here, `3dcbd79`, is not reachable in the current squashed history — see the audit note).
 
 **Sync modes**
-- **Full sync** — atomic `deleteMany` + repopulate inside one `$transaction`. Triggered by `{ "full": true }` in the POST body (admin "Resync" button).
+- **Full sync** — atomic `deleteMany` + repopulate inside one `$transaction`. The orchestrator `/api/sync` route does **not** read the body — it always does a full library replace. The `{ "full": true }` body flag is parsed only by the per-source routes `/api/sync/plex` and `/api/sync/jellyfin` (the admin "Resync" button), where `recentOnly = rawBody.full !== true`.
 - **recentOnly** (default for Jellyfin) — incremental insert-only, bounded by a 2-hour `MinDateLastSaved` window (`RECENT_WINDOW_MS`). Intentionally wider than `SYNC_INTERVAL=3600s` so one missed run is survivable.
 
 **Batch writes** — [src/lib/cron-auth.ts](src/lib/cron-auth.ts)
@@ -58,38 +58,39 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 
 **arrFetch** — [src/lib/arr.ts](src/lib/arr.ts)
 - Shared Radarr/Sonarr HTTP client. 30s timeout, **50 MB** response cap (`ARR_FETCH_MAX_BYTES`), injects `X-Api-Key`, throws `ArrResponseError` on non-2xx, routes through `safeFetchAdminConfigured`.
-- Body cap was raised from 10 MB in `c7902db` because libraries with >3k movies were being silently truncated. Do not lower it.
+- Body cap was raised from 10 MB because libraries with >3k movies were being silently truncated. Do not lower it.
 
 **safe-fetch helpers** — [src/lib/safe-fetch.ts](src/lib/safe-fetch.ts)
 - `safeFetch(url)` — full SSRF policy (resolve+pin, blocks RFC1918/loopback/link-local/CGNAT/multicast). For user-supplied URLs.
-- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; skips DNS-based SSRF. For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com).
+- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; skips DNS-based SSRF. For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com, api.resend.com).
 - `safeFetchAdminConfigured(url)` — runs SSRF policy with `allowPrivate=true` (RFC1918/ULA/loopback OK; link-local + 0.0.0.0 still blocked). For URLs persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server).
 
-**Webhook auth** — [src/app/api/webhooks/](src/app/api/webhooks/) (plex, jellyfin, sonarr, radarr)
-- SHA-256 + `timingSafeEqual` against the stored webhook secret.
+**Webhook auth** — [src/app/api/webhooks/](src/app/api/webhooks/) (**sonarr, radarr only**)
+- There is **no Plex or Jellyfin webhook handler** — those routes were removed. Plex real-time activity comes from the SSE stream ([src/lib/plex-events.ts](src/lib/plex-events.ts)); Jellyfin activity from the 5s play-history poller. Only `radarr/route.ts` and `sonarr/route.ts` exist.
+- SHA-256 + `timingSafeEqual` against the stored webhook secret (`radarrWebhookSecret` / `sonarrWebhookSecret` + 4K variants, with a legacy shared `webhookSecret` fallback).
 - Accepts either `Authorization: Bearer …` **or** a `?token=…` query param. The query-string fallback is load-bearing — see guardrails.
 - No HMAC signature validation; none of these services send one.
 
 **Play history** — [src/lib/play-history.ts](src/lib/play-history.ts)
 - `recordCompletedSession()` ingests when an `ActiveSession` completes and writes a `PlayHistory` row with full playback metrics (duration, pause, codec, resolution, bitrate, device, IP, etc).
-- `getActivityCalendarUncached()` (~line 827) backs the GitHub-style 365-day heatmap in [src/components/admin/activity-calendar.tsx](src/components/admin/activity-calendar.tsx). Commit `803cd11` fixed a `$1` placeholder offset bug in its filtered-query path — the dynamic SQL builder starts parameters at `$1`, not `$2`.
+- `getActivityCalendarUncached()` (~line 1892) backs the GitHub-style 365-day heatmap in [src/components/admin/activity-calendar.tsx](src/components/admin/activity-calendar.tsx). A `$1` placeholder offset bug in its filtered-query path was fixed — the dynamic SQL builder starts parameters at `$1`, not `$2`.
 
 **Observability** — admin-only `GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv` dumps the whole pipeline: cache rows, `attachArrPending` result, live Radarr/Sonarr check, tvdb→tmdb mapping, total wanted-table counts, and the most recent `LIBRARY_SYNC` audit row. Use this before guessing when a badge is missing.
 
-**Logging** — custom `console.error`/`console.warn` wrapper. Namespaced with `[scope]` prefixes. `console.log` success/progress messages were intentionally removed in `88c20c5`. Silent success is the convention.
+**Logging** — custom `console.error`/`console.warn` wrapper. Namespaced with `[scope]` prefixes. `console.log` success/progress messages were intentionally removed. Silent success is the convention.
 
 **Errors** — API routes return `NextResponse.json({ error }, { status })`, no try/catch wrapper. Shared error classes: `SafeFetchError`, `ArrResponseError`, `BackupCryptoError`. React boundaries at [src/app/(app)/error.tsx](src/app/(app)/error.tsx) and [src/app/global-error.tsx](src/app/global-error.tsx).
 
 ## Environment
 
-Required: `DATABASE_URL`, `NEXTAUTH_SECRET`, `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (production refuses to boot only when `AUTH_URL` is a *public* host and this isn't `true` — an internet-facing instance must sit behind a trusted reverse proxy; a LAN/loopback `AUTH_URL` boots in local-only mode with the spoofable Host guard. NEVER unconditionally exit on a blank value — the default docker deployment ships it blank. See [instrumentation.ts](src/instrumentation.ts)), `TMDB_READ_TOKEN`.
-Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+Required: `DATABASE_URL`, `NEXTAUTH_SECRET` (≥32 chars), `TOKEN_ENCRYPTION_KEY` (**exactly 64 hex chars / 32 bytes** — the AES-256-GCM key for all encrypted `Setting.value` / `Account` token fields; checked **first** at boot via `assertTokenEncryptionKey()` and `process.exit(1)` on failure in *every* environment, not just production), `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (production refuses to boot only when `AUTH_URL` is a *public* host and this isn't `true` — an internet-facing instance must sit behind a trusted reverse proxy; a LAN/loopback `AUTH_URL` boots in local-only mode with the spoofable Host guard. NEVER unconditionally exit on a blank value — the default docker deployment ships it blank. See [instrumentation.ts](src/instrumentation.ts)). `TMDB_READ_TOKEN` is functionally required (core browse/search) but is **warn-only** at boot — its absence logs a warning and the app still starts.
+Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `TRUSTED_PROXY_HOPS` (default 1), `DELAYED_JOBS_MAX_{PENDING,QUEUE,CONCURRENCY}`, and the cron interval knobs (`SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, plus `LIST_CACHE_SYNC_INTERVAL`, `WARM_ACTIVITY_INTERVAL`, `WARM_MDBLIST_INTERVAL`, `WARM_OMDB_INTERVAL`, `SCRUB_AUDIT_PII_INTERVAL`, `TRASH_SYNC_INTERVAL`, `PURGE_SESSIONS_INTERVAL`), `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
 
 Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
 
 ## Deployment
 
-Multi-stage Docker: `node:22-alpine3.21` → standalone Next build, non-root `nextjs` user. Postgres 17-alpine sidecar with `postgres-data` volume. Internal port 3000 → host 3001. Volumes: `/data` (app) and `/app/.next/cache`. External `sync-cron` / `upcoming-cron` services POST to the API routes with `CRON_SECRET`.
+Multi-stage Docker (`node:26.3.0-alpine3.23`, five stages: deps → prisma-gen → builder → migrate-deps → runner) → standalone Next build, non-root `nextjs` user (UID 1001). Postgres 17-alpine sidecar with `postgres-data` volume. Internal port 3000 → host 3001. The image creates `/data` (app) and `/app/.next/cache` dirs, but neither compose file mounts them as volumes — only `postgres-data` is persisted. There are **no** external `sync-cron` / `upcoming-cron` compose services: the app container runs its **own internal cron loop** (`docker-entrypoint.sh` `_cron_loop` + `_play_history_loop`), POSTing to `http://localhost:3000/api/...` with `Bearer ${CRON_SECRET}` so the secret never leaves the container.
 
 ## Releasing — PR-then-tag flow
 
@@ -131,7 +132,7 @@ git push origin v<X.Y.Z>
 ### Why this order
 
 - The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) once on the `main` push → publishes `:main` and `:sha-<merge>`.
-- The tag push fires it a second time → publishes `:v<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>`. Because both events hit the **same commit**, the second build hits the GHA buildx cache (`cache-from: type=gha` on [docker-publish.yml:70](.github/workflows/docker-publish.yml#L70)) and finishes in ~3 min instead of ~15.
+- The tag push fires it a second time → publishes `:v<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>`. Because both events hit the **same commit**, the second build hits the GHA buildx cache (`cache-from: type=gha` on [docker-publish.yml:98](.github/workflows/docker-publish.yml#L98)) and finishes in ~3 min instead of ~15.
 - Tag is reachable from `main` — `git describe` works, and `:latest` / `:main` / `:v<X.Y.Z>` all reference the same commit SHA.
 
 **NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=v<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
@@ -142,7 +143,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 1. **Next.js 16 is not the Next.js in your training data.** Before editing routing, caching, metadata, `fetch`, server/client boundaries, or anything framework-shaped, read the relevant file under [node_modules/next/dist/docs/](node_modules/next/dist/docs/) (`01-app/`, `03-architecture/`). Do not pattern-match from Next 13/14/15 memory.
 
-2. **Never remove the `?token=` webhook query param.** Sonarr and Radarr webhook UIs have no header field, and the Plex/Jellyfin handlers share the same code path. Keep the timing-safe compare. Do not "upgrade" to HMAC — the upstream services do not sign requests.
+2. **Never remove the `?token=` webhook query param.** Sonarr and Radarr webhook UIs have no header field, and both handlers share the same code path. (There are no Plex/Jellyfin webhook handlers — only `radarr` and `sonarr`.) Keep the timing-safe compare. Do not "upgrade" to HMAC — the upstream services do not sign requests.
 
 3. **Schema-first Prisma.** No migrations directory exists. Schema changes are applied with `prisma db push`, then `prisma generate`. Do not scaffold `prisma migrate` workflows.
 
@@ -207,7 +208,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Client-side: the value is captured again at hydration, milliseconds-to-hours later.
     - The two values disagree → React #418 hydration error (`args[]=text` for relative-time strings, `args[]=HTML` for `<option>` lists derived from `getFullYear()`).
     - Bundlers can also bake module-level values at build time, widening the drift to days.
-    - Six distinct hydration bugs in this codebase have come from this single antipattern: `filter-bar.tsx`, `top-filter-bar.tsx`, `activity-history-table.tsx`, `activity-recent-plays.tsx`, `trash-guides-client.tsx`, `activity-calendar.tsx`.
+    - Six distinct hydration bugs in this codebase have come from this single antipattern: `top-filter-bar.tsx`, `activity-history-table.tsx`, `activity-recent-plays.tsx`, `trash-guides/spec-section.tsx`, `activity-calendar.tsx` (the year-dropdown logic that bit `filter-bar.tsx` now lives in `top-filter-bar.tsx`; the trash-guides client was split under `src/components/admin/trash-guides/`).
 
     Fix shape — pick one:
 
@@ -393,6 +394,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - Don't reintroduce a bare `await req.json()`. Upload/binary bodies (thumbnails, backup restore) are the only legitimate bypass.
     - Admin/settings/sync routes (ADMIN/CRON-auth + the 50 MB backstop) are lower-priority but should adopt the helper when next touched — they still read uncapped today.
 
+31. **Bound large async fan-outs with `mapLimit` / `settleLimit` from [src/lib/concurrency.ts](src/lib/concurrency.ts) — never a bare `Promise.all(items.map(...))` over a user/library-sized list.**
+
+    Why:
+    - A bare `Promise.all` issues every task at once. Over a request-batch- or library-sized list this saturates the small Prisma connection pool and bursts hundreds of requests at upstream APIs (TMDB ~50 req/s; OMDB free tier 1k/day). Two live cases motivated the helper: the blocking ratings batch fanned out up to 200 OMDB chains ([omdb-availability.ts](src/lib/omdb-availability.ts)), and the cold Discover page fired ~105 concurrent TMDB list fetches ([tmdb.ts](src/lib/tmdb.ts)).
+    - `mapLimit` is a bounded `Promise.all` (rejects if a task rejects — use when tasks self-catch). `settleLimit` is a bounded `Promise.allSettled` (never rejects) — a drop-in for the paged TMDB `Promise.allSettled(Array.from(...))` pattern.
+
+    Rules:
+    - Fixed-size fan-outs (2–3 elements, e.g. movie+tv split, similar+recommendations) stay as plain `Promise.all` — the cap is only for lists whose length scales with input/library size.
+    - Pair the cap with `coalesce(key, fn)` ([tmdb.ts](src/lib/tmdb.ts)) on shared cache-key computations (the TMDB list helpers) so simultaneous callers share one fan-out instead of multiplying it. The list helpers wrap their whole body in `coalesce` and bound the page fetch with `settleLimit`; match that shape for any new list helper.
+    - Don't add a third copy of the OMDB API key read — `getApiKey()` in [omdb.ts](src/lib/omdb.ts) is memoized + in-flight-coalesced (30s TTL) precisely so a 200-item batch doesn't issue ~400 identical `setting.findUnique` reads. Pass `{ fresh: true }` only for the admin connection test.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
@@ -442,7 +454,7 @@ rg "fetch\(['\"]/api/<route>" -t ts -t tsx
 **Why**: "Movie stays pending forever" can mean Radarr never grabbed it, the webhook was dropped, the `RadarrWantedItem` cache is stale, or `tvdb→tmdb` resolution is negative-cached. Symptoms are identical, fixes are not.
 
 **ALWAYS** when a Plex/Jellyfin/Radarr/Sonarr/TMDB-facing bug lands:
-1. Hit [GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv](src/app/api/admin/debug/) first — it dumps cache rows, live ARR check, `tvdb→tmdb` mapping, wanted-table counts, and the last `LIBRARY_SYNC` audit row. Built for exactly this (commit `81ee465`).
+1. Hit [GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv](src/app/api/admin/debug/) first — it dumps cache rows, live ARR check, `tvdb→tmdb` mapping, wanted-table counts, and the last `LIBRARY_SYNC` audit row. Built for exactly this.
 2. If it's not an ARR problem, call the upstream API directly (`arrFetch`, or `curl` with the stored token) to see the raw response.
 3. Only then design a fix.
 
@@ -457,7 +469,7 @@ High-traffic shared state in this project:
 - `MediaRequest.notifiedAvailable` — atomic CAS in the sync orchestrator (guardrail 14).
 - `PlexLibraryItem` / `JellyfinLibraryItem` — replaced wholesale by `full` sync, appended by `recentOnly` (guardrail 13).
 - `Setting` table — shared config for Plex, Jellyfin, Radarr, Sonarr, and webhook secrets.
-- `ActiveSession` — written by Plex *and* Jellyfin webhook handlers.
+- `ActiveSession` — written by the 5s play-history poller ([src/app/api/sync/play-history/route.ts](src/app/api/sync/play-history/route.ts)) and the Plex SSE handler ([src/lib/plex-events.ts](src/lib/plex-events.ts)), **not** by webhook handlers (there are no Plex/Jellyfin webhooks).
 
 **ALWAYS** when touching logic that writes shared state:
 1. Grep every assignment / `update` / `updateMany` / `upsert` / `createMany` / `deleteMany` on the field.
@@ -474,10 +486,12 @@ rg "mediaRequest\.(update|updateMany|upsert)|notifiedAvailable" -t ts
 
 **Why**: A fix that reverts an earlier improvement needs to be an explicit, acknowledged decision — not a silent regression. This repo has several deliberate performance/correctness trades you should not undo by accident:
 
-- `88c20c5` — success logs intentionally silenced.
-- `3dcbd79` — Plex + Jellyfin sync parallelized; shared `stillPending` snapshot; `recentOnly` for Jellyfin.
-- `c7902db` — `arrFetch` body cap raised to 50 MB.
-- `803cd11` — activity calendar `$1` offset fix.
+- Success logs intentionally silenced (`console.log` removed; silent-success convention).
+- Plex + Jellyfin sync parallelized; shared `stillPending` snapshot; `recentOnly` for Jellyfin.
+- `arrFetch` body cap raised to 50 MB.
+- Activity calendar `$1` offset fix.
+
+  (These four trades originally cited commit hashes that no longer resolve in the current squashed history — the behaviors above are all still present in source; verify against the code, not a hash.)
 
 **ALWAYS** before implementing a fix that undoes prior work, state it plainly:
 > "This resolves [problem X] but reverts [improvement Y]. Impact: [metric]. Alternatives: [if any]."

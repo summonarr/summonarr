@@ -114,12 +114,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
-  const parsed = await readJsonCapped<{ endpoint?: string }>(req, 32768);
+  const parsed = await readJsonCapped<{ endpoint?: string; id?: string }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
+  // The device-management UI deletes by row `id` so the raw endpoint/APNs token
+  // never has to be exposed to the client; the web push client self-unsubscribes
+  // by its own `endpoint`. Accept either — always scoped to the caller's userId,
+  // so a user can only remove their own subscriptions.
+  if (typeof body.id === "string" && body.id.length > 0) {
+    await prisma.pushSubscription.deleteMany({ where: { id: body.id, userId: session.user.id } });
+    return NextResponse.json({ ok: true });
+  }
+
   if (!body.endpoint) {
-    return NextResponse.json({ error: "endpoint is required" }, { status: 400 });
+    return NextResponse.json({ error: "id or endpoint is required" }, { status: 400 });
   }
 
   const canonicalEndpoint = (await resolveToSafeUrl(body.endpoint)) ?? body.endpoint;

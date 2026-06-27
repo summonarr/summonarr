@@ -6,6 +6,7 @@ import {
   countSonarrQueue,
   isMovieDownloadingInRadarr,
   isSeriesDownloadingInSonarr,
+  type ArrVariant,
 } from "./arr";
 import { sanitizeForLog } from "./sanitize";
 
@@ -24,6 +25,10 @@ interface PendingScan {
   retries: number;
 
   tmdbId?: number;
+  // Which ARR instance's queue to gate on. A 4K-only grab lives in the 4K queue, so
+  // checking HD (the default) reports "not downloading" and the rescan fires before
+  // the file imports. undefined → "hd" via the helper defaults.
+  variant?: ArrVariant;
 }
 
 const pending = new Map<ScanMediaType, PendingScan>();
@@ -31,7 +36,7 @@ const pending = new Map<ScanMediaType, PendingScan>();
 // instead of firing a parallel scan against the same backend.
 const inFlight = new Map<ScanMediaType, Promise<void>>();
 
-export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): Promise<void> {
+export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, variant?: ArrVariant): Promise<void> {
   const running = inFlight.get(mediaType);
   if (running) {
     return running;
@@ -41,6 +46,8 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): 
   if (existing) {
     clearTimeout(existing.timer);
     existing.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
+    // Queue-gate hint; last writer wins on coalesce (a best-effort timing optimisation).
+    if (variant !== undefined) existing.variant = variant;
 
     if (tmdbId !== undefined && existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
       // Two different titles coalesced into the same scan window — fall back to full queue check
@@ -63,6 +70,7 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number): 
     resolve,
     retries: 0,
     tmdbId,
+    variant,
   };
   pending.set(mediaType, entry);
   return promise;
@@ -75,12 +83,12 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   let stillInQueue: boolean;
   if (entry.tmdbId !== undefined) {
     stillInQueue = mediaType === "movie"
-      ? await isMovieDownloadingInRadarr(entry.tmdbId)
-      : await isSeriesDownloadingInSonarr(entry.tmdbId);
+      ? await isMovieDownloadingInRadarr(entry.tmdbId, entry.variant)
+      : await isSeriesDownloadingInSonarr(entry.tmdbId, entry.variant);
   } else {
     const count = mediaType === "movie"
-      ? await countRadarrQueue()
-      : await countSonarrQueue();
+      ? await countRadarrQueue(entry.variant)
+      : await countSonarrQueue(entry.variant);
     stillInQueue = count !== null && count > 0;
   }
 

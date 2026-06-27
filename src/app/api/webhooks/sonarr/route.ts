@@ -240,7 +240,7 @@ export async function POST(req: NextRequest) {
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
-    await scheduleLibraryScan("tv", safeMdbId ?? undefined);
+    await scheduleLibraryScan("tv", safeMdbId ?? undefined, is4k ? "4k" : "hd");
 
     const whereNotify = effectiveMdbId
       ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, status: "AVAILABLE" as const, notifiedAvailable: false }

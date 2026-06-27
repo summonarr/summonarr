@@ -7,6 +7,10 @@ import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
 
+// Thrown inside the anonymization transaction to roll it back when the target is
+// the last active admin (guardrail 23: propagate out of the tx, don't swallow).
+class LastAdminError extends Error {}
+
 export const PATCH = withAdmin(async (
   req,
   { params }: { params: Promise<{ id: string }> },
@@ -159,7 +163,7 @@ export const PATCH = withAdmin(async (
         UPDATE "User" SET role = ${newRole}, permissions = ${defaultPermissionsForRole(newRole)}, "updatedAt" = ${now}
         WHERE id = ${id}
         AND role = 'ADMIN'
-        AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN') > 1
+        AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
       `;
     });
     if (rowsAffected === 0) {
@@ -205,28 +209,61 @@ export const DELETE = withAdmin(async (
     prisma.deletionVote.count({ where: { userId: id } }),
   ]);
 
-  if (target.role === "ADMIN") {
-    // Advisory lock 42 + atomic row count ensures we never delete the last admin under concurrent requests
-    const rowsAffected = await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      return tx.$executeRaw`
-        DELETE FROM "User"
-        WHERE id = ${id}
-        AND role = 'ADMIN'
-        AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN') > 1
-      `;
+  // Admin delete ANONYMIZES rather than hard-deletes, mirroring the self-delete
+  // path (/api/profile): a hard delete cascades and destroys the user's
+  // requests/issues/votes, whereas self-delete deliberately preserves that
+  // instance history behind a de-identified row. Keep the two consistent — scrub
+  // PII + revoke sessions + remove device/link rows, but keep the row.
+  const now = new Date();
+  const anon = {
+    name: "Deleted user",
+    email: `deleted-${id}@deleted.invalid`,
+    emailVerified: null,
+    image: null,
+    passwordHash: null,
+    discordId: null,
+    notificationEmail: null,
+    plexClientId: null,
+    plexUserId: null,
+    jellyfinUserId: null,
+    deactivatedAt: now,
+    sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
+  };
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (target.role === "ADMIN") {
+        // Advisory lock 42 + atomic count of NON-deactivated admins ensures we
+        // never disable the last active admin under concurrent requests. A 0-row
+        // result throws to roll the whole anonymization back (guardrail 23).
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+        const rows = await tx.$executeRaw`
+          UPDATE "User" SET "deactivatedAt" = ${now}
+          WHERE id = ${id} AND "deactivatedAt" IS NULL
+          AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
+        `;
+        if (rows === 0) throw new LastAdminError();
+      }
+      await tx.account.deleteMany({ where: { userId: id } });
+      await tx.authSession.deleteMany({ where: { userId: id } });
+      await tx.session.deleteMany({ where: { userId: id } });
+      await tx.pushSubscription.deleteMany({ where: { userId: id } });
+      await tx.discordLinkToken.deleteMany({ where: { userId: id } });
+      await tx.discordMergeCode.deleteMany({ where: { userId: id } });
+      await tx.user.update({ where: { id }, data: anon });
     });
-    if (rowsAffected === 0) {
+  } catch (err) {
+    if (err instanceof LastAdminError) {
       return NextResponse.json({ error: "Cannot delete the last admin" }, { status: 400 });
     }
-  } else {
-    await prisma.user.delete({ where: { id } });
+    throw err;
   }
 
   invalidateUserSession(id);
 
-  // User already deleted; a failed audit write must not 500 it (a retry 404s and
-  // loses the trail). logAudit swallows write failures by design.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, cascadeDeleted: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
+  // Account already anonymized; a failed audit write must not 500 it (guardrail 26
+  // — logAudit swallows write failures). History (requests/issues/votes) is
+  // preserved on the de-identified row, not cascade-deleted.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { kind: "admin-delete-anonymize", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
   return NextResponse.json({ ok: true });
 });

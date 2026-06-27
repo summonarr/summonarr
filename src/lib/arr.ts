@@ -183,6 +183,38 @@ function isDuplicate(err: unknown): boolean {
   return /already (been )?added/i.test(String(err));
 }
 
+/**
+ * Radarr's `MoviePathValidator` / Sonarr's `SeriesPathValidator` reject an add
+ * with a 400 when the `Title (Year)` folder the item would use is already
+ * occupied by a *different* item (different tmdb/tvdb id) — two genuinely
+ * distinct films/shows that map to the same folder name. This is NOT a
+ * duplicate: the requested item still needs to be added under its own id.
+ *
+ * Returns the colliding path Radarr/Sonarr reported so the caller can retry
+ * with an id-disambiguated path; null when the error is anything else. Prefers
+ * the structured body (stable `errorCode` + `path` placeholder) and falls back
+ * to the human-readable message.
+ */
+function pathCollisionTarget(err: unknown): string | null {
+  if (!(err instanceof ArrResponseError) || err.status !== 400) return null;
+  try {
+    const parsed = JSON.parse(err.body) as Array<{
+      errorCode?: string;
+      attemptedValue?: string;
+      formattedMessagePlaceholderValues?: { path?: string };
+    }>;
+    const hit = Array.isArray(parsed)
+      ? parsed.find((e) => e?.errorCode === "MoviePathValidator" || e?.errorCode === "SeriesPathValidator")
+      : undefined;
+    const p = hit?.formattedMessagePlaceholderValues?.path ?? hit?.attemptedValue;
+    if (typeof p === "string" && p.length > 0) return p;
+  } catch {
+    // body wasn't JSON — fall through to the message regex
+  }
+  const m = err.body.match(/Path '([^']+)' is already configured for an existing/);
+  return m && m[1] ? m[1] : null;
+}
+
 export function arrErrorMessage(err: unknown): string {
   if (err instanceof ArrResponseError) {
     if (err.status === 401 || err.status === 403) return `Arr authentication failed (${err.status}) — check the API key`;
@@ -290,12 +322,13 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd
     ? releaseDates.some((d) => d <= now)
     : movie.year > 0 && movie.year < now.getFullYear();
 
-  try {
-    // Explicit allowlist of the Radarr POST body fields we own — previous code
-    // spread the entire lookup row (~30 fields, untyped) which would silently
-    // forward whatever Radarr returned at lookup time, exposing us to a
-    // future Radarr API tightening that rejects unexpected fields on add.
-    await arrFetch<unknown>(cfg, "/api/v3/movie", {
+  // Explicit allowlist of the Radarr POST body fields we own — previous code
+  // spread the entire lookup row (~30 fields, untyped) which would silently
+  // forward whatever Radarr returned at lookup time, exposing us to a
+  // future Radarr API tightening that rejects unexpected fields on add.
+  // `pathOverride` is set only on the collision-retry below.
+  const postMovie = (pathOverride?: string) =>
+    arrFetch<unknown>(cfg, "/api/v3/movie", {
       method: "POST",
       body: JSON.stringify({
         tmdbId: movie.tmdbId,
@@ -304,17 +337,37 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd
         titleSlug: movie.titleSlug,
         images: movie.images,
         rootFolderPath,
+        ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
         monitored: true,
         addOptions: { searchForMovie: movieReleased },
       }),
     });
+
+  try {
+    await postMovie();
   } catch (err) {
     if (isDuplicate(err)) {
       console.warn("[arr] movie already in Radarr — skipping add, request may need manual review", { tmdbId });
       return;
     }
-    throw err;
+    // A *different* movie (different tmdbId) already occupies the `Title (Year)`
+    // folder this title would use. Retry once with a tmdbId-tagged path —
+    // mirrors Radarr's own `{tmdb-<id>}` folder token — so two genuinely
+    // distinct same-title films can coexist instead of the request hard-failing.
+    const collidedPath = pathCollisionTarget(err);
+    if (!collidedPath) throw err;
+    try {
+      await postMovie(`${collidedPath} {tmdb-${movie.tmdbId}}`);
+    } catch (retryErr) {
+      // The id-tagged path can only collide if this exact tmdbId is already in
+      // Radarr — a real duplicate, which surfaces as "already added".
+      if (isDuplicate(retryErr)) {
+        console.warn("[arr] movie already in Radarr — skipping add, request may need manual review", { tmdbId });
+        return;
+      }
+      throw retryErr;
+    }
   }
 }
 
@@ -558,9 +611,9 @@ export async function isMovieDownloadingInRadarr(tmdbId: number, variant: ArrVar
   } catch { return false; }
 }
 
-export async function countRadarrQueue(): Promise<number | null> {
+export async function countRadarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
   try {
-    const cfg = await getCfg("radarr");
+    const cfg = await getCfg("radarr", variant);
     if (!cfg) return null;
     const queueSet = await getRadarrQueueSet(cfg);
     return queueSet.size;
@@ -581,9 +634,9 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
   } catch { return false; }
 }
 
-export async function countSonarrQueue(): Promise<number | null> {
+export async function countSonarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
   try {
-    const cfg = await getCfg("sonarr");
+    const cfg = await getCfg("sonarr", variant);
     if (!cfg) return null;
     const queueSet = await getSonarrQueueSet(cfg);
     return queueSet.size;
@@ -691,12 +744,12 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
 
-  try {
-    // Explicit allowlist of POST body fields — previous code spread the entire
-    // lookup row (~30 fields, untyped) which silently forwarded whatever Sonarr
-    // returned, exposing us to a future Sonarr API tightening that rejects
-    // unexpected fields on add.
-    await arrFetch<unknown>(cfg, "/api/v3/series", {
+  // Explicit allowlist of POST body fields — previous code spread the entire
+  // lookup row (~30 fields, untyped) which silently forwarded whatever Sonarr
+  // returned, exposing us to a future Sonarr API tightening that rejects
+  // unexpected fields on add. `pathOverride` is set only on the collision-retry.
+  const postSeries = (pathOverride?: string) =>
+    arrFetch<unknown>(cfg, "/api/v3/series", {
       method: "POST",
       body: JSON.stringify({
         tvdbId: series.tvdbId,
@@ -706,16 +759,33 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
         images: series.images,
         seasons: series.seasons.map((s) => ({ ...s, monitored: s.seasonNumber > 0 })),
         rootFolderPath,
+        ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
         monitored: true,
         addOptions: { searchForMissingEpisodes: seriesReleased },
       }),
     });
+
+  try {
+    await postSeries();
   } catch (err) {
     if (isDuplicate(err)) {
       console.warn("[arr] series already in Sonarr — skipping add, request may need manual review", { tmdbId });
     } else {
-      throw err;
+      // A *different* series (different tvdbId) already occupies the folder this
+      // title would use. Retry once with a tvdbId-tagged path — mirrors Sonarr's
+      // own `{tvdb-<id>}` folder token — so distinct same-title shows coexist.
+      const collidedPath = pathCollisionTarget(err);
+      if (!collidedPath) throw err;
+      try {
+        await postSeries(`${collidedPath} {tvdb-${series.tvdbId}}`);
+      } catch (retryErr) {
+        if (isDuplicate(retryErr)) {
+          console.warn("[arr] series already in Sonarr — skipping add, request may need manual review", { tmdbId });
+        } else {
+          throw retryErr;
+        }
+      }
     }
   }
 
