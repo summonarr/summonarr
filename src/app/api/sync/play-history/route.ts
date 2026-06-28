@@ -17,6 +17,7 @@ import {
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
+import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import {
@@ -143,16 +144,18 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   // isServerAdmin = accountId matches the admin token's plex user id. When
   // plexAdminId couldn't be fetched, leave the flag undefined so the upsert
   // doesn't blindly flip an existing true→false.
-  const userIds = await Promise.all(
-    valid.map((s) =>
-      resolveMediaServerUser({
-        source: "plex",
-        sourceUserId: s.accountId,
-        username: s.accountName,
-        thumbUrl: s.accountThumb || null,
-        ...(plexAdminId !== null ? { isServerAdmin: s.accountId === plexAdminId } : {}),
-      }),
-    ),
+  // Bound concurrency (guardrail 31): each resolveMediaServerUser holds its own
+  // $transaction and the pool is max:5, so an unbounded Promise.all over N sessions —
+  // running concurrently with the Jellyfin pass — saturates the pool every tick. Cap
+  // below the pool size.
+  const userIds = await mapLimit(valid, 4, (s) =>
+    resolveMediaServerUser({
+      source: "plex",
+      sourceUserId: s.accountId,
+      username: s.accountName,
+      thumbUrl: s.accountThumb || null,
+      ...(plexAdminId !== null ? { isServerAdmin: s.accountId === plexAdminId } : {}),
+    }),
   );
 
   // Resolve TMDB ids per session (TV episodes hit DB, movies are mostly in-memory).
@@ -452,16 +455,16 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const seenSessionKeys = new Set<string>();
   for (const s of valid) seenSessionKeys.add(s.playSessionId);
 
-  // Resolve media server users in parallel so we have msUserId before the existing-row prefetch
-  // (the (source, mediaServerUserId, sourceItemId) fallback lookup needs it).
-  const userIds = await Promise.all(
-    valid.map((s) =>
-      resolveMediaServerUser({
-        source: "jellyfin",
-        sourceUserId: s.userId,
-        username: s.userName,
-      }),
-    ),
+  // Resolve media server users so we have msUserId before the existing-row prefetch
+  // (the (source, mediaServerUserId, sourceItemId) fallback lookup needs it). Bound
+  // concurrency (guardrail 31): each call holds its own $transaction against the max:5
+  // pool, and this runs concurrently with the Plex pass — cap below 5.
+  const userIds = await mapLimit(valid, 4, (s) =>
+    resolveMediaServerUser({
+      source: "jellyfin",
+      sourceUserId: s.userId,
+      username: s.userName,
+    }),
   );
 
   // Bulk prefetch: existing ActiveSession rows. Three lookup keys per session — primary id,
@@ -576,36 +579,52 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         fallbackMap.get(`${msUserId}:${s.itemId ?? ""}`);
 
       if (existing) {
-        // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
-        // hand-rolled version below used to gate on s.state — the new state — so a
-        // session that was paused all interval and started playing in the final ms
-        // got the full wall-clock interval credited. Plex uses the helper at line 178;
-        // align Jellyfin to it for consistency and correctness.
-        const increment = computePlaytimeIncrement(existing, now);
-        // CAS on (id, lastSeenAt): mirrors the Plex branch (line 244). If the
-        // row was deleted/rewritten between our prefetch and this write — an
-        // overlapping tick (poll >5s), the same run's absence-finalize, or
-        // cleanupStaleSessions — a plain `update` throws P2025 and rejects the
-        // whole Promise.all batch, aborting every other session's write this
-        // tick. updateMany returns 0 instead, so we silently skip and the next
-        // poll re-reads state and resumes.
-        await prisma.activeSession.updateMany({
-          where: { id: existing.id, lastSeenAt: existing.lastSeenAt },
-          data: {
-            sessionKey: s.playSessionId,
-            lastSeenAt: now,
-            state: s.state,
-            progressPercent,
-            progressMs: BigInt(positionMs),
-            playMethod: s.playMethod,
-            resolution: s.resolution ?? null,
-            transcodeReason: s.transcodeReason ?? null,
-            ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
-            ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
-            ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
-          },
-        });
-        return "updated";
+        // Auto-play next episode: a Jellyfin client advancing to the next item can
+        // reuse the same PlaySessionId while swapping the itemId. The update path below
+        // never rewrites title/sourceItemId/episode metadata/durationMs (write-once at
+        // create), so without finalizing here the prior item's watch silently merges
+        // into the next episode's PlayHistory row. Mirror the Plex ratingKey-change
+        // branch (line 223): force-finalize the previous item, then fall through to
+        // create a fresh row for the new one.
+        if (existing.sourceItemId && s.itemId && existing.sourceItemId !== s.itemId) {
+          try {
+            await recordCompletedSession(applyFinalTick(existing, now), { skipSSE: true, stoppedAt: now });
+          } catch (err) {
+            console.warn(`[play-history] itemId-change finalize failed for ${sessionId}:`, err);
+          }
+          // Fall through to the create branch below — existing is now finalized.
+        } else {
+          // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
+          // hand-rolled version below used to gate on s.state — the new state — so a
+          // session that was paused all interval and started playing in the final ms
+          // got the full wall-clock interval credited. Plex uses the helper at line 178;
+          // align Jellyfin to it for consistency and correctness.
+          const increment = computePlaytimeIncrement(existing, now);
+          // CAS on (id, lastSeenAt): mirrors the Plex branch (line 244). If the
+          // row was deleted/rewritten between our prefetch and this write — an
+          // overlapping tick (poll >5s), the same run's absence-finalize, or
+          // cleanupStaleSessions — a plain `update` throws P2025 and rejects the
+          // whole Promise.all batch, aborting every other session's write this
+          // tick. updateMany returns 0 instead, so we silently skip and the next
+          // poll re-reads state and resumes.
+          await prisma.activeSession.updateMany({
+            where: { id: existing.id, lastSeenAt: existing.lastSeenAt },
+            data: {
+              sessionKey: s.playSessionId,
+              lastSeenAt: now,
+              state: s.state,
+              progressPercent,
+              progressMs: BigInt(positionMs),
+              playMethod: s.playMethod,
+              resolution: s.resolution ?? null,
+              transcodeReason: s.transcodeReason ?? null,
+              ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+              ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
+              ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
+            },
+          });
+          return "updated";
+        }
       }
 
       // See the Plex create above: single-row createMany({skipDuplicates}) so

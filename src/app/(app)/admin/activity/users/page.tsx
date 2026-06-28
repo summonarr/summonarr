@@ -160,11 +160,10 @@ export default async function UsersActivityPage({
                 <SortHeader label="Plays" field="plays" currentSort={sort} currentDir={dir} search={search} align="right" />
                 <SortHeader label="Watch Time" field="hours" currentSort={sort} currentDir={dir} search={search} align="right" />
                 <SortHeader label="Last Active" field="lastActive" currentSort={sort} currentDir={dir} search={search} />
-                {/* Mobile audit F-6.3: hide Fav Platform + Direct % below the
-                    sm breakpoint — the 7-col table sums to ~831 px (≈1.9× a
-                    440 px viewport). User / Source / Plays / Watch Time / Last
-                    Active are the at-a-glance columns; the two hidden columns
-                    are the lowest-information for a mobile leaderboard view. */}
+                {/* Hide Fav Platform + Direct % below the sm breakpoint — the
+                    7-col table sums to ~831 px (≈1.9× a 440 px viewport). The
+                    two hidden columns are the lowest-information for a mobile
+                    leaderboard view. */}
                 <th className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
                 <th className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
               </tr>

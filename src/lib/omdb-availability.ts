@@ -119,8 +119,12 @@ export async function attachRatingsUnified(
         tvMisses.length    > 0 ? fetchMdblistBatch(tvMisses,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
       ]);
 
-      for (const [id, data] of movieRatings) fetched.set(`movie:${id}`, { source: "mdblist", data });
-      for (const [id, data] of tvRatings)    fetched.set(`tv:${id}`,    { source: "mdblist", data });
+      // Only count an MDBList batch row as a hit when it carries a rating. Rows for
+      // indexed-but-unscored titles (every score null) would otherwise be excluded
+      // from mdbMisses below and skip the OMDB fallback, leaving a title OMDB *could*
+      // rate showing none. (mergeWarm gates the warm-cache path the same way.)
+      for (const [id, data] of movieRatings) if (hasAnyMdblistRating(data)) fetched.set(`movie:${id}`, { source: "mdblist", data });
+      for (const [id, data] of tvRatings)    if (hasAnyMdblistRating(data)) fetched.set(`tv:${id}`,    { source: "mdblist", data });
 
       const mdbMisses = misses.filter((m) => !fetched.has(fetchedKey(m)));
       if (mdbMisses.length > 0) {
@@ -202,7 +206,7 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
 // An MDBList batch row is cached as a real value even when every ratings field is
 // null (the item is in MDBList's index but carries no scores). Such a row must not
 // shadow a populated OMDB row, so treat it as "no data" when deciding which source wins.
-function hasAnyMdblistRating(d: MdblistRatings): boolean {
+export function hasAnyMdblistRating(d: MdblistRatings): boolean {
   return Boolean(
     d.imdbRating || d.rottenTomatoes || d.rtAudienceScore || d.metacritic ||
     d.traktRating || d.letterboxdRating || d.mdblistScore || d.malRating || d.rogerEbertRating,

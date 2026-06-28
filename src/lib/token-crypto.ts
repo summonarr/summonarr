@@ -37,10 +37,10 @@ export function assertTokenEncryptionKey(): void {
   resolveKey();
 }
 
-// Non-reversible fingerprint of the encryption key — lets callers tell "same key or
-// not" across instances (e.g. backup restore) WITHOUT revealing the key. A
-// domain-separated (not per-value-salted) SHA-256, truncated. Returns null when no valid key is configured (caller treats
-// as unknown). Does NOT use resolveKey() so it never throws on a misconfigured key.
+// Non-reversible fingerprint of the encryption key — lets callers tell "same key or not"
+// across instances (e.g. backup restore) WITHOUT revealing the key. Domain-separated,
+// truncated SHA-256. Returns null when no valid key is configured. Does NOT use
+// resolveKey() so it never throws on a misconfigured key.
 export function tokenEncryptionKeyFingerprint(): string | null {
   const hex = process.env.TOKEN_ENCRYPTION_KEY;
   if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) return null;

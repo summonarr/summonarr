@@ -136,18 +136,13 @@ export async function POST(req: NextRequest) {
         select: { id: true, email: true, name: true, role: true },
       });
       await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } });
-      // Default fresh installs to the safer Discord posture: require a Discord
-      // user to have a linked Summonarr account before they can create requests
-      // from the guild, rather than letting any guild member request anonymously.
-      // This is seeded exactly once, here in the first-admin bootstrap, because an
-      // insecure-by-default would let unlinked Discord members file requests on a
-      // brand-new instance before the operator has reviewed the setting. Existing
-      // installs never re-enter this first-admin block, so their already-saved (or
-      // deliberately absent) value is left untouched — only genuinely new installs
-      // pick up this default, guaranteeing no behavior change for upgrades.
-      // createMany+skipDuplicates makes the seed idempotent: a pre-existing key
-      // is silently ignored instead of raising a unique-constraint violation that
-      // would abort and roll back this whole registration transaction (guardrail 23).
+      // Default fresh installs to the safer Discord posture: require a linked
+      // Summonarr account before a guild member can request, rather than allowing
+      // anonymous requests. Seeded once in the first-admin bootstrap so a brand-new
+      // instance is secure before the operator reviews the setting; existing installs
+      // never re-enter this block, so upgrades are untouched.
+      // createMany+skipDuplicates keeps the seed idempotent — a pre-existing key is
+      // ignored rather than aborting this registration transaction (guardrail 23).
       await tx.setting.createMany({
         data: [{ key: "discordRequireLinkedAccount", value: "true" }],
         skipDuplicates: true,

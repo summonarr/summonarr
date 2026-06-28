@@ -130,9 +130,7 @@ export async function POST(req: NextRequest) {
 
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
   // Post-read cap for Transfer-Encoding: chunked uploads, where checkBodySize's
-  // Content-Length check above can't fire (mirrors db-import-chunk). Release the
-  // slot claimed on chunk 0 so an oversized first chunk doesn't strand the
-  // uploader for the session TTL.
+  // Content-Length check above can't fire (mirrors db-import-chunk).
   if (chunkBytes.byteLength > MAX_CHUNK_BYTES) {
     // An oversized chunk corrupts the upload — release the slot for ANY index
     // (not just chunk 0) so it isn't stranded until the session TTL.

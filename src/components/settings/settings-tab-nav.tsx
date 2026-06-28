@@ -15,11 +15,9 @@ export type TabId = typeof TABS[number]["id"];
 
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
   return (
-    // Mobile audit F-5.1: switched from `overflow-x-auto` (with hidden scrollbar
-    // and no scroll affordance — "System" was being cut off mid-word at 440 px)
-    // to `flex-wrap gap-1`. With 6 short tab labels, the row wraps to two lines
-    // on narrow viewports and stays a single row when content fits naturally.
-    // Removed `width: fit-content` so wrap can use the full container width.
+    // `flex-wrap gap-1` (not `overflow-x-auto`, which cut off "System" with no
+    // scroll affordance at ~440px): the row wraps to two lines on narrow
+    // viewports and stays one row when content fits.
     <nav
       aria-label="Settings sections"
       className="flex flex-wrap gap-1 max-w-full"

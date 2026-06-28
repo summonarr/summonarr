@@ -88,10 +88,8 @@ export const GET = withAdmin(async (req, _ctx, session) => {
 
   const date = new Date().toISOString().slice(0, 10);
 
-  // Audit-log export is itself an audit-relevant action — a malicious admin
-  // could otherwise exfiltrate the entire trail with no record. Filter
-  // values are captured pre-stream so the audit row reflects what was
-  // actually queried; the row count is filled in once the stream completes.
+  // Capture filter values pre-stream so the audit row reflects what was actually
+  // queried; the row count is filled in once the stream completes.
   const filters = {
     format,
     action: action ?? null,

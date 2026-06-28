@@ -4,13 +4,10 @@ import { prisma } from "@/lib/prisma";
 // Central registry for admin-toggleable feature flags.
 //
 // Two kinds of keys show up here:
-//   - "feature.*"   — new, Features-tab-native flags (default enabled for most).
-//   - legacy keys   — existing Setting rows we expose alongside the new flags so
-//                     the Features tab is a single source of truth for on/off
-//                     switches (e.g., motdEnabled). The underlying key is reused
-//                     to avoid divergent state between the old form and the new
-//                     one; changing the legacy key's value via either UI keeps
-//                     both in sync.
+//   - "feature.*"   — Features-tab-native flags (default enabled for most).
+//   - legacy keys   — existing Setting rows (e.g. motdEnabled) exposed alongside
+//                     so the Features tab is one source of truth. The key is
+//                     reused so old and new UIs stay in sync.
 //
 // All values are stored as "true" | "false" strings in the Setting table, the
 // same convention used elsewhere in the app (see maintenanceEnabled,

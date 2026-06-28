@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "./auth";
+import { authActive } from "./auth";
 import { prisma } from "./prisma";
 
 export async function getMaintenanceStatus(): Promise<{ enabled: boolean; message: string }> {
@@ -20,10 +20,10 @@ export async function getMaintenanceStatus(): Promise<{ enabled: boolean; messag
 }
 
 export async function maintenanceGuard(): Promise<NextResponse | null> {
-  // Read role from session inside the guard rather than trusting a caller-supplied value.
-  // NextAuth resolves the session from cookies/JWT without a DB hit, so the cost is negligible
-  // even when the caller has already invoked auth() for its own purposes.
-  const session = await auth();
+  // DB-checked session (authActive, not JWT-only auth) so a demoted admin holding an
+  // unexpired JWT can't bypass maintenance: the admin-bypass is an authz decision and
+  // must see the current role, not a stale one.
+  const session = await authActive();
   if (session?.user?.role === "ADMIN") return null;
   const { enabled, message } = await getMaintenanceStatus();
   if (!enabled) return null;

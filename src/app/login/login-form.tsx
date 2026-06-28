@@ -561,8 +561,8 @@ function ProviderTab({
       onClick={onClick}
       className="flex-1 font-medium transition-colors"
       style={{
-        // Mobile audit F-1.5: padding alone landed at ~43.5 px (just under 44),
-        // so we add an explicit minHeight to guarantee Apple HIG compliance.
+        // Padding alone landed at ~43.5px (just under 44), so an explicit
+        // minHeight guarantees Apple HIG tap-target compliance.
         padding: "12px 12px",
         minHeight: 44,
         borderRadius: 6,

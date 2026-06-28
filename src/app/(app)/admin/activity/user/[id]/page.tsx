@@ -48,12 +48,10 @@ export default async function UserActivityPage({
         (a.lastSeenIso ? Date.parse(a.lastSeenIso) : 0),
     );
 
-  // PlayHistory.tmdbId is null for plays unmapped at record time, so the
-  // affected "Most watched" / "Recent plays" rows render with no media link
-  // (and "Most watched" with no resolvable cover art). The same title was
-  // often resolved on another play — match against those rows (the
-  // authoritative signal the overview's session backfill also uses) so the
-  // link target and poster lookup both work.
+  // PlayHistory.tmdbId is null for plays unmapped at record time, so those rows
+  // render with no media link (and no cover art). The same title was often
+  // resolved on another play — match against those rows so the link target and
+  // poster lookup both work.
   const recentPlaysSlice = stats.recentPlays.slice(0, 12);
   const unmappedTitles = [
     ...new Set(
@@ -78,8 +76,7 @@ export default async function UserActivityPage({
 
     // A title may be in a library but never resolved on any *play* (so the
     // PlayHistory match above misses it). The library tables are an
-    // authoritative title→tmdbId mapping — use them so the title still links
-    // to its media page even when no cached poster exists.
+    // authoritative title→tmdbId mapping — use them so the title still links.
     const stillUnmapped = unmappedTitles.filter((t) => !titleResolved[t]);
     if (stillUnmapped.length > 0) {
       const [plexLib, jellyfinLib] = await Promise.all([
@@ -145,10 +142,10 @@ export default async function UserActivityPage({
       mediaType: m.mediaType,
       count: m.count,
       // Live TmdbCache (resolvePosterMap) is authoritative and current; the
-      // PlayHistory.posterPath snapshot is a point-in-time heuristic that is
-      // null for older rows and stale if the poster later changed. Prefer the
-      // cache, fall back to the snapshot only for titles no longer cached.
-      // (f1d609a preferred the snapshot, which regressed cover art here.)
+      // PlayHistory.posterPath snapshot is null for older rows and stale if the
+      // poster later changed. Prefer the cache, fall back to the snapshot only
+      // for titles no longer cached. (f1d609a preferred the snapshot, which
+      // regressed cover art here.)
       posterSrc:
         (m.tmdbId != null ? topMediaPosters[m.tmdbId] : undefined) ??
         (m.posterPath ? posterUrl(m.posterPath, "w342") : null),

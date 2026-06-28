@@ -6,11 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
 
-// Self-service account deletion (App Store Guideline 5.1.1(v) parity with the iOS
-// app). Calls DELETE /api/profile, which anonymizes + disables the account
-// (scrubs PII, revokes sessions) while keeping the user's requests/votes/issues
-// de-identified. The server already revoked the session, so — like the
-// change-password flow — we just bounce to /login.
+// Self-service account deletion (App Store Guideline 5.1.1(v)). Calls
+// DELETE /api/profile, which anonymizes + disables the account (scrubs PII,
+// revokes sessions) while keeping requests/votes/issues de-identified. The
+// server already revoked the session, so we just bounce to /login.
 export function DeleteAccount({ requiresPassword = false }: { requiresPassword?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");

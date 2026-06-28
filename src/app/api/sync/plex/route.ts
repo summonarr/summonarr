@@ -193,16 +193,43 @@ async function syncPlex(request: NextRequest) {
   );
 
   if (toMark.length > 0) {
-    const toNotify = toMark.filter((r) => !r.notifiedAvailable);
-    if (toNotify.length > 0) {
-      // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
-      // winner filter ensures we only notify on rows we actually flipped.
-      const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
-      if (winners.length > 0) {
-        void clearDeletionVotesForTmdbs(winners);
-        notifyUsersRequestsAvailable(winners).catch(() => {});
-        notifyUsersRequestsAvailablePush(winners).catch(() => {});
-        void notifyUsersRequestsAvailableEmail(winners, "sync/plex");
+    const unnotified = toMark.filter((r) => !r.notifiedAvailable);
+    if (unnotified.length > 0) {
+      // Gate notification by the requester's mediaServer preference — mirror the
+      // orchestrator's markLibraryRequests. A Plex-pinned user must NOT get a "ready to
+      // watch" ping from a Jellyfin resync (and vice versa); users with no preference
+      // are notified by whichever source sees the item first.
+      const userRows = await prisma.user.findMany({
+        where: { id: { in: unnotified.map((r) => r.requestedBy) } },
+        select: { id: true, mediaServer: true },
+      });
+      const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+      const toNotify = unnotified.filter((r) => {
+        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        return !ms || ms === "plex";
+      });
+      // Preferred server is the OTHER source: flip to AVAILABLE but don't notify here.
+      const toMarkOnly = unnotified.filter((r) => {
+        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        return !!ms && ms !== "plex";
+      });
+      if (toNotify.length > 0) {
+        // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
+        // winner filter ensures we only notify on rows we actually flipped.
+        const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
+        if (winners.length > 0) {
+          void clearDeletionVotesForTmdbs(winners);
+          notifyUsersRequestsAvailable(winners).catch(() => {});
+          notifyUsersRequestsAvailablePush(winners).catch(() => {});
+          void notifyUsersRequestsAvailableEmail(winners, "sync/plex");
+        }
+      }
+      if (toMarkOnly.length > 0) {
+        const flipped = await prisma.mediaRequest.updateMany({
+          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+          data: { status: "AVAILABLE", availableAt: new Date() },
+        });
+        if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
       }
     }
 

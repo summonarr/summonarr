@@ -68,15 +68,12 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   let steppedUp = false;
 
   if (!isSelf) {
-    // Revoking a session OTHER than the caller's own is a high-value action: a
-    // hijacked or CSRF-riding session could otherwise sign the legitimate user out
-    // of all their devices (denial of service) or kick a victim off so the attacker
-    // alone remains. Require a fresh proof of identity (step-up authentication)
-    // before allowing it. Self-revocation (signing out the current device) is benign
-    // and skips this. Local-credential users prove possession by re-entering their
-    // password (bcrypt-verified below); SSO users have no local passwordHash, so we
-    // instead require that the caller's own session was created within the last 5
-    // minutes (STEP_UP_MAX_AGE_MS) — i.e. they recently completed a full IdP sign-in.
+    // Revoking a session OTHER than the caller's own is high-value: a hijacked or
+    // CSRF-riding session could sign the user out everywhere or kick a victim off so
+    // the attacker alone remains. Require step-up auth; self-revocation is benign and
+    // skips it. Credential users re-enter their password (bcrypt-verified below); SSO
+    // users have no passwordHash, so instead require the caller's own session be
+    // younger than STEP_UP_MAX_AGE_MS — i.e. a recent full IdP sign-in.
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
       select: { passwordHash: true },

@@ -4,14 +4,10 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
-// Hosts that Plex's metadata agents return for candidate thumbnails. The external-URL
-// branch below routes through safeFetchTrusted with this fixed allowlist so the
-// `path` query param — which an admin (or a forged request riding an admin session)
-// fully controls — cannot turn this route into an open image/request proxy that
-// fetches arbitrary URLs on the server's behalf (server-side request forgery: probing
-// internal services, exfiltrating data via redirects, or proxying attacker content).
-// The allowlist is the trust boundary: only these known agent CDNs are reachable.
-// Add entries here if Plex starts returning thumbs from a new agent CDN.
+// Hosts Plex's metadata agents return for candidate thumbnails. The external-URL
+// branch routes through safeFetchTrusted with this allowlist so the admin-controlled
+// `path` param can't turn this into an SSRF proxy fetching arbitrary URLs. The
+// allowlist is the trust boundary — add entries if Plex returns thumbs from a new CDN.
 const PLEX_AGENT_THUMB_HOSTS = [
   "image.tmdb.org",
   "metadata-static.plex.tv",
@@ -27,17 +23,12 @@ export async function GET(request: NextRequest) {
   // insufficient on the prefetch-header path. role:"ISSUE_ADMIN" admits ADMIN
   // too. requireAuth returns 401 (no/expired/revoked session) or 403 (wrong role).
   //
-  // Note: this route intentionally does NOT thread a sliding-refresh Set-Cookie
-  // back to the client. requireAuth (api-auth.ts) deliberately discards any
-  // refreshed JWT — it returns only the validated session, not the `refreshed`
-  // token (see its JSDoc) — so re-issuing the slid cookie here would mean either
+  // Intentionally does NOT thread a sliding-refresh Set-Cookie. requireAuth
+  // (api-auth.ts) discards the refreshed JWT; re-issuing it here would mean
   // re-implementing the verify/fingerprint/role boilerplate inline (guardrail 6a
-  // forbids that) or widening the shared api-auth return signature (out of scope;
-  // other direct callers depend on its current shape). The practical impact is
-  // nil: this is a binary image proxy whose response carries no Set-Cookie, and
-  // the very next normal withAuth-wrapped API request re-runs the sliding refresh.
-  // So the session's sliding window is never lost — only this one image fetch
-  // declines to advance it.
+  // forbids) or widening the shared api-auth signature (out of scope). Impact is
+  // nil — this binary image proxy carries no Set-Cookie, and the next normal
+  // withAuth request re-runs the sliding refresh, so the window is never lost.
   const gate = await requireAuth({ role: "ISSUE_ADMIN" });
   if (gate instanceof NextResponse) return gate;
   // Authoritative on the MANAGE_ISSUES bit (same gate as the sibling fix-match

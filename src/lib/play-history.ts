@@ -181,8 +181,12 @@ export async function resolveMediaServerUser(params: {
 
     let userId: string | null = null;
     if (email) {
-      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
-      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true, deactivatedAt: true } });
+      // Never relink play history to a deactivated account. A deleted user's email
+      // is rewritten to deleted-<id>@deleted.invalid so it can't match here, but an
+      // admin-deactivated (not deleted) account keeps its email — without this guard
+      // the poller would attribute fresh watches to that dead account.
+      if (user && !user.deactivatedAt && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
         userId = user.id;
       }
     }

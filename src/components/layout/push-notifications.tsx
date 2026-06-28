@@ -10,10 +10,8 @@ type TestState = "idle" | "sending" | "ok" | "error";
 
 export function PushNotifications() {
   // Gate first render on `useHasMounted` so SSR and the first client render
-  // both emit nothing. Without this, the parent's child count can disagree
-  // with the SSR DOM (canonical React #418 source on /, /movies, /admin/library
-  // etc.) — we observed the parent receiving an extra <div> child between
-  // hydration and useEffect resolution.
+  // both emit nothing — otherwise the parent's child count disagrees with the
+  // SSR DOM (React #418 on /, /movies, /admin/library etc.).
   const mounted = useHasMounted();
   const [state, setState] = useState<State>("loading");
   const [busy, setBusy] = useState(false);
@@ -127,8 +125,8 @@ export function PushNotifications() {
   if (!mounted || state === "loading") return null;
 
   if (state === "unsupported") {
-    // Mobile audit F-1.9: chrome icon button — 32x32 hit area + aria-label so
-    // VoiceOver/TalkBack announce purpose (title alone is unreliable on mobile).
+    // Icon button — 32x32 hit area + aria-label so VoiceOver/TalkBack announce
+    // purpose (title alone is unreliable on mobile).
     return (
       <button
         disabled

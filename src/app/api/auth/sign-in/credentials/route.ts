@@ -3,11 +3,10 @@ import { authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
 import { buildSignInResponse } from "@/lib/sign-in-response";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 
-// Summonarr-native credentials sign-in. Hits the same authorize() body that
-// next-auth's Credentials provider uses, then mints a Summonarr JWT we own.
+// Summonarr-native credentials sign-in: authorize(), then mint a Summonarr JWT we own.
 
-// Sign-in bodies carry only email/password/rememberMe — 16 KB is overkill
-// and protects this unauthenticated surface against memory-exhaustion DoS.
+// Sign-in bodies carry only email/password/rememberMe — 16 KB cap protects
+// this unauthenticated surface against memory-exhaustion DoS.
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {

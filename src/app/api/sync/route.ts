@@ -64,7 +64,7 @@ export async function POST(request: NextRequest) {
   ));
 }
 
-// Me-4: signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
+// Signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
 // Prisma 7's $transaction(fn, opts) does not accept an AbortSignal, so abortion is best-effort —
 // long-running outbound HTTP (Plex/Jellyfin/ARR fetches) can observe it; Prisma queries cannot.
 // Strips angle brackets and null bytes, caps length. Shared between the
@@ -156,7 +156,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     availableTvSet    = new Set(availableTvRows.map((r) => vkey(r.tmdbId, r.is4k)));
   }
 
-  // C3: collapse the per-request update loop into two updateMany calls — one CAS for the
+  // Collapse the per-request update loop into two updateMany calls — one CAS for the
   // unnotified candidates (which produces the arrNotify list), one bulk catch-up for the
   // already-notified rows. Snapshot pre-state so we can attribute the CAS winners.
   const nowAvailableApproved = approved.filter((r) =>
@@ -219,8 +219,13 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       const downloading = req.mediaType === "MOVIE"
         ? await isMovieDownloadingInRadarr(req.tmdbId, variant)
         : await isSeriesDownloadingInSonarr(req.tmdbId, variant);
-      if (downloading) {
-        await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
+      // null = couldn't read the queue. Don't clear pendingNotifyAt — leave it so a
+      // later tick re-checks once the queue API recovers. Only a confirmed `true`
+      // clears the backstop.
+      if (downloading !== false) {
+        if (downloading === true) {
+          await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
+        }
         return;
       }
       let released = true;
@@ -651,17 +656,28 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // Runs after the library sync so the maps are populated; library presence is only trusted
   // when that source synced successfully (an empty map from a failed/disabled source falls
   // back to the *arr-only decision).
+  // A configured+enabled source that failed to refresh has an empty map that is NOT
+  // proof of absence — reading it as "not in library" would false-demote an item that's
+  // actually present in the unreached library. Only trust a library map when its source
+  // synced; skip the demote entirely while a configured source is down.
+  const plexConfiguredEnabled = plexEnabled && !!(plexUrlRow?.value && plexTokenRow?.value);
+  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jfUrlRow?.value && jfKeyRow?.value);
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
     // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
     if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
     if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
+    // Don't demote while a configured library source is down — we can't prove absence
+    // from a library we never reached this run.
+    if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
+    if (jellyfinConfiguredEnabled && !jellyfinSyncSucceeded) return false;
     const inArr = req.mediaType === "MOVIE"
       ? inRadarrSet.has(vkey(req.tmdbId, req.is4k))
       : inSonarrSet.has(vkey(req.tmdbId, req.is4k));
+    // Only count a source's map as authoritative-present when it actually synced.
     const inLibrary = req.mediaType === "MOVIE"
-      ? plexMovieIds.has(req.tmdbId) || jfMovieIds.has(req.tmdbId)
-      : plexTvIds.has(req.tmdbId)    || jfTvIds.has(req.tmdbId);
+      ? (plexSyncSucceeded && plexMovieIds.has(req.tmdbId)) || (jellyfinSyncSucceeded && jfMovieIds.has(req.tmdbId))
+      : (plexSyncSucceeded && plexTvIds.has(req.tmdbId))    || (jellyfinSyncSucceeded && jfTvIds.has(req.tmdbId));
     return !inArr && !inLibrary;
   });
   const revertedIds = new Set<string>();
@@ -671,7 +687,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // run-start `available` snapshot, so a row that a concurrent path moved out of
       // AVAILABLE must not be blind-written back to APPROVED.
       where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE" },
-      data: { status: "APPROVED" },
+      // Clear pendingNotifyAt on demote: a stale overdue timestamp left from the
+      // original approve would otherwise fire a false "download pending" notify
+      // once the row is back to APPROVED.
+      data: { status: "APPROVED", pendingNotifyAt: null },
     });
     reverted = result.count;
     for (const r of toRevert) revertedIds.add(r.id);
@@ -806,7 +825,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     });
     const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
 
-    // C3: collect candidate ids, then do a single CAS updateMany + a single notify per channel
+    // Collect candidate ids, then do a single CAS updateMany + a single notify per channel
     // rather than one-DB-roundtrip-per-request and one-notify-call-per-request.
     const toNotify: typeof pendingAvailableNotify = [];
     for (const req of pendingAvailableNotify) {

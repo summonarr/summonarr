@@ -250,6 +250,11 @@ export const DELETE = withAdmin(async (
       await tx.pushSubscription.deleteMany({ where: { userId: id } });
       await tx.discordLinkToken.deleteMany({ where: { userId: id } });
       await tx.discordMergeCode.deleteMany({ where: { userId: id } });
+      // Sever the play-history identity link: MediaServerUser rows FK this user and
+      // are NOT cascade-deleted (guardrail 28). Leaving userId set would let a new
+      // account with the same email/sub inherit this user's watch history. History
+      // rows stay (server data), just unattributed.
+      await tx.mediaServerUser.updateMany({ where: { userId: id }, data: { userId: null } });
       await tx.user.update({ where: { id }, data: anon });
     });
   } catch (err) {

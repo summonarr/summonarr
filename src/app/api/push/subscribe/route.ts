@@ -6,10 +6,17 @@ import { resolveToSafeUrl } from "@/lib/ssrf";
 import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
+import { isFeatureEnabled } from "@/lib/features";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  // Don't accept new subscriptions while push is disabled: the send path already
+  // no-ops when off, so a registration stored here would never deliver. DELETE
+  // (unsubscribe) intentionally stays open so users can always opt out.
+  if (!(await isFeatureEnabled("feature.integration.push"))) {
+    return NextResponse.json({ error: "Push notifications are disabled" }, { status: 403 });
+  }
   if (!checkRateLimit(`push-sub:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }

@@ -69,9 +69,6 @@ export async function POST(req: NextRequest) {
   const is4k = matched4k && !matchedHd;
   const secret = is4k ? fourKSecret : hdSecret;
 
-  // Radarr's webhook UI has no Authorization header field — ?token= is the only
-  // option upstream supports. Don't warn about it; nothing the user can do.
-
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {
     console.warn(`[webhook/radarr] 413 payload too large bytes=${rawBytes.length}`);
@@ -186,11 +183,17 @@ export async function POST(req: NextRequest) {
     // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
     const resetNotify = await tx.mediaRequest.updateMany({
       where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: null },
-      data: { status: "AVAILABLE", availableAt: new Date() },
+      // Clear the approve-time 90s backstop: the item is downloaded, so a stale
+      // timer would fire a false "download pending" if a later sync revert flips
+      // this back to APPROVED.
+      data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
     const alreadyAvailable = await tx.mediaRequest.updateMany({
       where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: { not: null } },
-      data: { status: "AVAILABLE", availableAt: new Date() },
+      // Clear the approve-time 90s backstop: the item is downloaded, so a stale
+      // timer would fire a false "download pending" if a later sync revert flips
+      // this back to APPROVED.
+      data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
     updated = { count: resetNotify.count + alreadyAvailable.count };
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId, is4k } });

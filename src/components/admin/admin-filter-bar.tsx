@@ -46,11 +46,9 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      {/* Mobile audit F-6.4: same fix as F-4.1 in user-list-filters.tsx —
-          dropped overflow-x-auto + ds-no-scrollbar in favour of flex-wrap so
-          the 5 status pills (All / Pending / Approved / Declined / Available)
-          can wrap to a second row on narrow viewports instead of "Available"
-          being clipped at the right edge. */}
+      {/* Same fix as user-list-filters.tsx: flex-wrap instead of
+          overflow-x-auto so the 5 status pills wrap to a second row on narrow
+          viewports instead of "Available" being clipped at the right edge. */}
       <div
         className="flex flex-wrap gap-1 max-w-full"
         style={{

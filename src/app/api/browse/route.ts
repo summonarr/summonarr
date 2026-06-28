@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
 import {
   getPopularMoviesPage, getPopularTVPage,
   discoverMoviesPage, discoverTVPage,
@@ -55,6 +56,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const watchProvider = sp.get("watchProvider") || undefined;
   const watchRegion   = sp.get("watchRegion") || undefined;
   const hideAvailable = sp.get("hideAvailable") === "1";
+  // Per-user server visibility for the hideAvailable gate.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider);
   const filters: DiscoverFilters = { genreId, keywordId, minRating, minVoteCount, fromYear, toYear, sortBy, watchProvider, watchRegion };
@@ -88,9 +91,12 @@ export const GET = withAuth(async (request, _ctx, session) => {
       );
       const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
 
-      let enriched = await attachAllAvailability(rawItems, session.user.id, { show4k });
+      // Block on ratings when a filter is active — non-blocking leaves uncached items
+      // unrated and they'd be dropped, yielding an empty page on a cold cache.
+      let enriched = await attachAllAvailability(rawItems, session.user.id, { show4k, blockRatings: !!ratingFilter });
       if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
-      if (hideAvailable) enriched = enriched.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+      // Gate hideAvailable on the user's pinned server (a Plex-pinned user shouldn't hide Jellyfin-only titles).
+      if (hideAvailable) enriched = enriched.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
       items = enriched.slice(0, PAGE_SIZE);
     } else {
       totalPages = firstPaged.totalPages;

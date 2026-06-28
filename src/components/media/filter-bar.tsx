@@ -21,10 +21,8 @@ interface FilterBarProps {
   activeSortBy?: string;
   activeWatchProvider?: string;
   activeHideAvailable?: boolean;
-  // Latest year to show in the From/To Year dropdowns. Computed by the
-  // server component (so SSR and hydration share one value) and threaded
-  // through. Module-level `new Date()` here is the canonical React #418
-  // source — see the comment over `buildYears` below.
+  // Latest year for the From/To Year dropdowns. Computed server-side so SSR
+  // and hydration share one value — see the comment over `buildYears` below.
   maxYear: number;
 }
 

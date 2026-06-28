@@ -14,14 +14,10 @@ function safeCompare(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-// Hard cap on a machine session's lifetime: 15 minutes (900s). A machine session
-// impersonates an admin, so its token is effectively an admin credential. These
-// sessions are minted on demand for short automated tasks, so there is no reason
-// to grant a long-lived token — and a tight cap bounds the blast radius if one
-// leaks (from logs, a CI artifact, process memory, etc.): a stolen token expires
-// in at most 15 minutes instead of granting hours of admin access. A caller may
-// request a shorter lifetime, but never a longer one — anything above this is
-// clamped down to MAX_EXPIRES_IN below.
+// Hard cap on a machine session's lifetime: 15 minutes (900s). The token is
+// effectively an admin credential, so a tight cap bounds the blast radius if it
+// leaks. A caller may request a shorter lifetime but never a longer one — anything
+// above this is clamped to MAX_EXPIRES_IN below.
 const MAX_EXPIRES_IN = 900;
 const DEFAULT_EXPIRES_IN = 900;
 
@@ -106,11 +102,9 @@ export async function POST(req: NextRequest) {
   const expiresAt = nowSec + expiresIn;
 
   // Bind the JWT to a per-session fingerprint. proxy.ts skips the browser-style
-  // fingerprint check for any value starting with "machine:" — replay defense
-  // relies on the short lifetime and CRON_SECRET to mint fresh tokens — but
-  // deriving the value from the unique sessionId (rather than the static
-  // CRON_SECRET) means every minted token carries a distinct fingerprint, so a
-  // future enforcement path can distinguish individual machine sessions.
+  // fingerprint check for any "machine:" value (replay defense relies on the short
+  // lifetime). Deriving from the unique sessionId (not the static CRON_SECRET) gives
+  // each token a distinct fingerprint a future enforcement path can distinguish.
   const uaFingerprint =
     "machine:" + createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
 
@@ -162,11 +156,9 @@ export async function POST(req: NextRequest) {
     details: { kind: "machine-session", assumedAdmin: user.id, expiresIn, expiresAt },
   });
 
-  // Deliver the session token ONLY as an HttpOnly Set-Cookie, never in the JSON
-  // response body. Returning the raw admin-impersonating JWT in the body would
-  // expose it to anything that can read the response (client-side JS, logging
-  // proxies, browser history/devtools, CI logs that capture stdout), defeating the
-  // HttpOnly protection that keeps the cookie out of script reach. The body carries
+  // Deliver the session token ONLY as an HttpOnly Set-Cookie, never in the body —
+  // a body would expose the admin-impersonating JWT to anything that can read the
+  // response (JS, logging proxies, CI logs), defeating HttpOnly. The body carries
   // only the non-sensitive expiry so the caller knows when to re-mint.
   const response = NextResponse.json({ ok: true, expiresAt });
   response.headers.set(

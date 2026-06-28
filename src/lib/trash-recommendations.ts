@@ -122,9 +122,8 @@ async function resolveCurated(item: StarterPackItem) {
 export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
   const curatedSpecIds = new Set<string>();
 
-  // Resolve all starter-pack items in parallel — was a serial for-of loop that
-  // ran up to 3 queries per item back-to-back (12 serial round-trips for the
-  // current 4-item pack). Promise.all collapses the wall-clock to one slot.
+  // Resolve all starter-pack items in parallel — replaces a serial loop that ran
+  // up to 3 queries per item back-to-back (12 round-trips for the 4-item pack).
   const specs = await Promise.all(STARTER_PACK.map((item) => resolveCurated(item)));
 
   const results: StarterPackStatus[] = STARTER_PACK.map((item, i) => {

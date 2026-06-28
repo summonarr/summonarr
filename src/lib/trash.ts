@@ -934,8 +934,7 @@ export async function applyCustomFormatGroups(
   });
   if (groups.length === 0) return [];
 
-  // Collect every referenced member trash_id across all selected groups, then
-  // resolve them to local TrashSpec rows in a single query — duplicates collapse naturally
+  // Collect every referenced member trash_id, then resolve to local TrashSpec rows in one query
   const memberTrashIds = new Set<string>();
   const groupMembers = new Map<string, string[]>();
   for (const g of groups) {

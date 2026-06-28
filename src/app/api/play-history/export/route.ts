@@ -89,7 +89,10 @@ export async function GET(request: NextRequest) {
   // export is attributable — mirrors the audit-log export. The filters are
   // logged (not the rows) so the trail captures scope without re-deriving PII.
   const ctx = auditContext(request, { user: { provider: session.user.provider } });
-  void logAudit({
+  // await (not void) so the paper-trail row is durably written before up to
+  // MAX_EXPORT_ROWS of viewer PII stream out. A fire-and-forget audit could lose
+  // the record if the process/stream dies first.
+  await logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? session.user.id,
     action: "PLAY_HISTORY_EXPORT",

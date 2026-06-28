@@ -22,13 +22,12 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  // DB-checked login gate. The proxy enforces auth on normal navigations, but its
-  // matcher (src/proxy.ts) deliberately skips prefetch requests (next-router-prefetch
-  // / purpose=prefetch), and the (app) pages carry no own login guard — so without
-  // this a forged prefetch could render them unauthenticated. Next's own guidance is
-  // to verify auth close to the data rather than rely on the proxy alone (proxy.md /
-  // data-security.md). authActive() is DB-checked, so a revoked session or role
-  // demotion is honored here too, not just the JWT signature + expiry.
+  // DB-checked login gate. The proxy's matcher (src/proxy.ts) deliberately skips
+  // prefetch requests (next-router-prefetch / purpose=prefetch) and the (app)
+  // pages carry no own login guard, so without this a forged prefetch could
+  // render them unauthenticated (Next guidance: verify auth close to the data,
+  // not the proxy alone — proxy.md / data-security.md). authActive() is
+  // DB-checked, so revocation + role demotion are honored, not just JWT sig+expiry.
   const session = await authActive();
   if (!session) redirect("/login");
   const isAdmin = session.user.role === "ADMIN";

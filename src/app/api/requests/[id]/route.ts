@@ -187,17 +187,28 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       return NextResponse.json({ error: "Request was modified concurrently" }, { status: 409 });
     }
   } else {
-    await prisma.mediaRequest.update({
-      where: { id },
+    // CAS on current status: the transition-table check ran against the stale
+    // `existing` read, so two concurrent admins could both pass it. The status
+    // predicate makes the write atomic — a row already moved yields count=0 → 409.
+    const claimed = await prisma.mediaRequest.updateMany({
+      where: { id, status: existing.status },
       data: {
         status: status as ValidStatus,
         ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
 
         ...(status === "AVAILABLE" || status === "DECLINED" ? { pendingNotifyAt: null } : {}),
 
+        // Reopening a permanently-declined request to PENDING must clear the sticky
+        // flag, else the row shows PENDING while the user stays blocked from re-requesting
+        // (requests/route.ts permanentlyDeclined gate).
+        ...(status === "PENDING" && existing.status === "DECLINED" ? { permanentlyDeclined: false } : {}),
+
         ...(status === "AVAILABLE" && !existing.availableAt ? { availableAt: new Date() } : {}),
       },
     });
+    if (claimed.count === 0) {
+      return NextResponse.json({ error: "Request was modified concurrently" }, { status: 409 });
+    }
   }
 
   const updated = await prisma.mediaRequest.findUnique({
@@ -260,7 +271,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         const downloading = updated.mediaType === "MOVIE"
           ? await isMovieDownloadingInRadarr(updated.tmdbId, variant)
           : await isSeriesDownloadingInSonarr(updated.tmdbId, variant);
-        if (downloading) return;
+        // Skip on true (downloading) and null (queue unreadable) — only a confirmed
+        // "not downloading" fires the pending notify. Returning leaves pendingNotifyAt
+        // set so the orchestrator backstop retries.
+        if (downloading !== false) return;
 
         const now = new Date();
         let released = true;

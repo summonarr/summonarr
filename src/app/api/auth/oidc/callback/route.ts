@@ -88,7 +88,7 @@ export async function GET(req: NextRequest) {
   }
 
   // Keep notificationEmail in lock-step with the OIDC provider's email claim
-  // on every sign-in. Mirrors the events.signIn handler in next-auth's flow.
+  // on every sign-in.
   if (claims.email) {
     const oidcEmail = normalizeEmail(claims.email);
     await prisma.user

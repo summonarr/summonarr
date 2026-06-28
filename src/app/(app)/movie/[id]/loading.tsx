@@ -1,6 +1,6 @@
-// Instant loading skeleton for the movie detail page. The route fetches TMDB
-// details + credits + suggestions + several Prisma lookups before render, so a
-// fallback keeps navigation feeling immediate.
+// Loading skeleton for the movie detail page — the route fetches TMDB details +
+// credits + suggestions + several Prisma lookups before render, so a fallback
+// keeps navigation feeling immediate.
 export default function Loading() {
   return (
     <div className="animate-pulse">

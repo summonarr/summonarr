@@ -5,11 +5,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 
 export const GET = withAdmin(async (req, _ctx, session) => {
   // Per-admin rate limit. Every lookup makes a billed call to ipinfo.io, so an
-  // unbounded loop (a compromised admin session, or a runaway client) would burn
-  // through the account's monthly request quota and start returning errors for
-  // legitimate lookups. The window is deliberately generous — the activity UI can
-  // legitimately fire several lookups in a row when resolving a list of session
-  // IPs — so 60 lookups per 60-second window absorbs normal bursts while still
+  // unbounded loop would burn the monthly quota. 60 per 60s is generous enough to
+  // absorb the activity UI's bursts (resolving a list of session IPs) while still
   // capping a sustained abuse loop.
   if (!checkRateLimit(`admin-ip-lookup:${session.user.id}`, 60, 60 * 1000)) {
     return NextResponse.json({ error: "Too many lookups — try again shortly." }, { status: 429 });

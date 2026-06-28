@@ -50,9 +50,9 @@ async function enrichItems(
 ): Promise<LibraryItem[]> {
   if (items.length === 0) return [];
 
-  // Split by mediaType so each predicate is `tmdbId IN [...]` against the composite
-  // (tmdbId, mediaType) index — at LIBRARY_ITEM_CAP=25_000 the prior wide OR clause
-  // was too large for the planner to optimize. Post-filter by mediaType in JS.
+  // Split by mediaType so each predicate is `tmdbId IN [...]` against the
+  // composite (tmdbId, mediaType) index — at LIBRARY_ITEM_CAP=25_000 the prior
+  // wide OR clause was too large for the planner to optimize.
   const movieIds = items.filter((i) => i.mediaType === "MOVIE").map((i) => i.tmdbId);
   const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const allRequests = await prisma.mediaRequest.findMany({
@@ -105,11 +105,10 @@ async function enrichItems(
   });
 }
 
-// `overview` is excluded from the whole-library pull in the page (it is the
-// heaviest column and is only rendered for the onlyPlex / onlyJellyfin difference
-// sets). Backfill it for a specific, small set of rows from the source library
-// table, keyed by `${tmdbId}:${mediaType}`. Split by mediaType to hit the
-// composite (tmdbId, mediaType) index — same shape as enrichItems.
+// `overview` is excluded from the whole-library pull (heaviest column, only
+// rendered for the difference sets). Backfill it for a small set of rows from
+// the source library table, keyed by `${tmdbId}:${mediaType}`. Split by
+// mediaType to hit the composite index — same shape as enrichItems.
 async function fetchOverviews(
   source: "plex" | "jellyfin",
   rows: { tmdbId: number; mediaType: "MOVIE" | "TV" }[],
@@ -178,8 +177,7 @@ async function buildArrPathMap(
   const map = new Map<string, number>();
   try {
     // Route through arrFetch so this full-library list call inherits the 30s
-    // timeout + 50 MB cap (guardrail 5 — large libraries silently truncated at
-    // the old 10 MB safe-fetch default) + X-Api-Key injection + ArrResponseError.
+    // timeout + 50 MB cap (guardrail 5) + X-Api-Key injection + ArrResponseError.
     const { arrFetch, getArrCfg } = await import("@/lib/arr");
     const cfg = await getArrCfg(mediaType === "MOVIE" ? "radarr" : "sonarr");
     if (!cfg) return map;

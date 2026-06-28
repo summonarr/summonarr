@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/generated/prisma";
+import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -76,26 +76,6 @@ class QuotaExceeded extends Error {
     readonly used: number,
   ) {
     super("QUOTA_EXCEEDED");
-  }
-}
-
-// Retry a Serializable transaction a few times on a write-conflict (P2034): two
-// concurrent batches for the same target legitimately conflict on the quota
-// read+insert and Postgres aborts one; retrying re-reads the now-committed count.
-async function runWithSerializableRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (
-        attempt < attempts &&
-        err instanceof Prisma.PrismaClientKnownRequestError &&
-        err.code === "P2034"
-      ) {
-        continue;
-      }
-      throw err;
-    }
   }
 }
 
@@ -253,7 +233,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Drop stale declined rows before the create transaction so their fresh
   // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, is4k).
   if (staleDeclinedIds.length > 0) {
-    await prisma.mediaRequest.deleteMany({ where: { id: { in: staleDeclinedIds } } });
+    // CAS on status + permanentlyDeclined: an admin who re-approved or made the decline
+    // permanent between the snapshot and here leaves that row intact. The createMany
+    // below skipDuplicates, so a surviving row is simply not recreated rather than
+    // orphaning its ARR grab or evading a permanent ban.
+    await prisma.mediaRequest.deleteMany({ where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false } });
   }
 
   if (toCreate.length === 0) {
@@ -361,6 +345,10 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
                 const mirror = greenlitMap.get(k);
                 if (mirror) mirroredKeys.add(k);
                 const status = mirror ?? (p.autoApprove ? "APPROVED" : "PENDING");
+                // Auto-approved (non-mirrored) rows arm the orchestrator's 90s
+                // download-pending backstop, matching the single POST route. Mirrored
+                // rows skip it — the original greenlit row drives notifications.
+                const isAutoApproved = !mirror && p.autoApprove;
                 return {
                   tmdbId: p.tmdbId,
                   mediaType: p.mediaType,
@@ -371,6 +359,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
                   requestedBy: targetUserId,
                   status,
                   ...(mirror === "AVAILABLE" ? { availableAt: now } : {}),
+                  ...(isAutoApproved ? { pendingNotifyAt: new Date(now.getTime() + 90_000) } : {}),
                 };
               }),
               skipDuplicates: true,
@@ -395,6 +384,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       }
       throw err;
     }
+
+    // Clear the target user's own delete-votes for the titles they just requested —
+    // a request and a deletion vote are contradictory, and the vote route already
+    // blocks the reverse direction.
+    void prisma.deletionVote.deleteMany({ where: { userId: targetUserId, OR: pairs } });
   }
 
   // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back
@@ -427,7 +421,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       console.error(
         `[requests/bulk] auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
       );
-      await prisma.mediaRequest.update({ where: { id: row.id }, data: { status: "PENDING" } }).catch(() => {});
+      // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+      // may have flipped this row to AVAILABLE. Clear pendingNotifyAt too.
+      await prisma.mediaRequest.updateMany({ where: { id: row.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } }).catch(() => {});
       // The client already saw request:new for an APPROVED row; emit a corrective
       // update so it reflects the rolled-back PENDING state (mirrors the single route).
       emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });

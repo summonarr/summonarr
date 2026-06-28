@@ -380,10 +380,16 @@ async function fixJellyfinMatch(
     throw new Error(`Jellyfin found no match for TMDB #${correctTmdbId} — check that Jellyfin can reach the metadata provider`);
   }
 
+  // Require a result that actually carries correctTmdbId — never fall back to
+  // searchResults[0], which fuzzy matching can make a different title and remap
+  // the library item to the wrong media. Matches the Plex path.
   const target = searchResults.find((r) => {
     const id = r.ProviderIds?.Tmdb ?? r.ProviderIds?.tmdb;
     return id === String(correctTmdbId);
-  }) ?? searchResults[0];
+  });
+  if (!target) {
+    throw new Error(`Jellyfin remote search returned no candidate matching TMDB #${correctTmdbId} — refusing to apply a different match`);
+  }
 
   const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
     method: "POST",
@@ -451,9 +457,11 @@ async function fixJellyfinMatch(
   }
 
   if (!confirmed) {
-    console.warn("[fix-match]", `${tag} could not confirm new item ID after all attempts — item ID unchanged in DB`);
+    // Throw when unconfirmed so the caller's DB write aborts — otherwise we'd persist
+    // a tmdbId Jellyfin never confirmed. Matches the Plex path.
+    throw new Error(`Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`);
   }
-  return { newItemId: confirmed ? resolvedItemId : safeItemId, baseUrl, apiKey };
+  return { newItemId: resolvedItemId, baseUrl, apiKey };
 }
 
 // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges

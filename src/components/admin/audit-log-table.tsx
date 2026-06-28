@@ -500,13 +500,10 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800 text-zinc-500 text-xs uppercase tracking-wider">
-              {/* Mobile audit F-6.1: 6 columns at full width sum to ~903 px,
-                  more than 2× a 440 px viewport. Hide Details + Source below
-                  the sm: breakpoint — they're the lowest-information columns
-                  for a mobile glance (Source is usually inferable from the
-                  Action verb; Details is often very long and truncates anyway).
-                  The wrapping <div className="overflow-x-auto"> at line 536
-                  remains as a safety net. */}
+              {/* Hide Details + Source below the sm: breakpoint — they're the
+                  lowest-information columns for a mobile glance (Source is
+                  usually inferable from the Action verb; Details truncates
+                  anyway). The wrapping overflow-x-auto div remains a safety net. */}
               <th className="text-left px-4 py-3 font-medium">Time</th>
               <th className="text-left px-4 py-3 font-medium">User</th>
               <th className="text-left px-4 py-3 font-medium">Action</th>

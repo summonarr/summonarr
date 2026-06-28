@@ -15,11 +15,12 @@ export async function triggerFullSync(): Promise<void> {
   if (!secret) return; // no auth token available — silently skip (matches prior behaviour)
 
   const port = process.env.PORT ?? "3000";
-  const url = `http://127.0.0.1:${port}/api/sync`;
-  // Assumes the documented single long-lived process deployment model
-  // (Docker container listening on PORT, external crons hitting this instance).
-  // In that model the loopback hits the correct process; multi-instance would
-  // only affect the local container (same as the original inline code this replaced).
+  // On a sub-path deployment Next serves the route at `${BASE_PATH}/api/sync`;
+  // a bare `/api/sync` would 404 and the SSE-driven full sync would never run.
+  const basePath = process.env.BASE_PATH ?? "";
+  const url = `http://127.0.0.1:${port}${basePath}/api/sync`;
+  // Assumes the single long-lived process model (Docker container on PORT), so
+  // the loopback hits the correct process; multi-instance affects only the local one.
 
   // Cap the wait so a slow or stuck orchestrator run does not hold the
   // debounced Plex timeline handler indefinitely.
@@ -27,9 +28,8 @@ export async function triggerFullSync(): Promise<void> {
   const timeout = setTimeout(() => controller.abort(), 30_000);
 
   try {
-    // We await the request so errors are visible, but we do not care about
-    // the response body on success. The handler itself performs the work
-    // (or returns 200 { skipped: true } if the lock is held).
+    // Await so errors are visible; the body is ignored on success (the handler
+    // does the work, or returns 200 { skipped: true } when the lock is held).
     const res = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${secret}` },
