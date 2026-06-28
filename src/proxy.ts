@@ -240,22 +240,17 @@ export async function proxy(request: NextRequest) {
       }
     }
 
-    // Defense-in-depth backstop for the admin API surface. Per-route
-    // withAdmin/withIssueAdmin/withPermission guards are the source of truth for
-    // the exact decision; this only fails closed if such a guard is ever missing,
-    // and only for principals with NO admin-surface access at all.
+    // Defense-in-depth backstop for the admin API surface — fails closed only if a
+    // per-route withAdmin/withIssueAdmin/withPermission guard is ever missing, and
+    // only for principals with NO admin-surface access at all.
     //
-    // The backstop must honor management permission bits, not just the legacy
-    // ADMIN/ISSUE_ADMIN roles. A principal whose role is plain USER may still
-    // hold a granular management bit — e.g. MANAGE_ISSUES (the modern equivalent
-    // of legacy ISSUE_ADMIN), which the per-route withIssueAdmin guard honors for
-    // routes like /api/admin/fix-match/*. A role-only backstop would 403 those
-    // legitimately-permissioned callers before their route ever ran, wrongly
-    // denying access the per-route guard would have granted. So after the role
-    // check, we also let through any principal holding a management bit; the
-    // per-route guard still makes the precise ADMIN-vs-permission allow/deny
-    // call. We deny here only when the principal has no admin-surface access of
-    // any kind, where a missing per-route guard would otherwise fail open.
+    // Must honor management permission bits, not just legacy ADMIN/ISSUE_ADMIN: a
+    // plain USER may hold a granular bit (e.g. MANAGE_ISSUES, the modern equivalent
+    // of ISSUE_ADMIN) that the per-route guard honors for routes like
+    // /api/admin/fix-match/*. A role-only backstop would 403 those callers before
+    // their route ran. So we also let through any principal holding a management
+    // bit and deny here only when the principal has no admin-surface access of any
+    // kind, where a missing per-route guard would otherwise fail open.
     if (
       pathname.startsWith("/api/admin/") &&
       role !== "ADMIN" &&

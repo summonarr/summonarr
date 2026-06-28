@@ -4,6 +4,7 @@ import { logAudit } from "@/lib/audit";
 import { applySpecs, describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { isFeatureEnabled } from "@/lib/features";
 
 function busyResponse() {
   return NextResponse.json(
@@ -29,6 +30,11 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const POST = withAdmin(async (_req, _ctx, session) => {
+  // Kill-switch parity: applies curated specs to Radarr/Sonarr, so a disabled TRaSH
+  // integration must block it. (GET is a read-only preview and stays open.)
+  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
+    return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+  }
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
     async () => {

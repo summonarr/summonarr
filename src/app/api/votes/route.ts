@@ -221,13 +221,20 @@ export const POST = withAuth(async (req, _ctx, session) => {
         skipDuplicates: true,
       });
       if (claim.count === 1) {
-        const data = { title: verified.title, mediaType, voteCount, posterPath: verified.posterPath ?? null, tmdbId };
-        after(async () => {
-          await Promise.allSettled([
-            notifyAdminsDeletionVoteThreshold(data),
-            notifyAdminsDeletionVoteThresholdPush(data),
-          ]);
-        });
+        // Re-count after winning the claim: an admin "dismiss" deletes all votes AND
+        // this claim key in one tx, so a dismiss racing between the count above and the
+        // claim insert would re-create the key and fire a false threshold alert for a
+        // title whose votes were just wiped. Only notify if still over.
+        const recount = await prisma.deletionVote.count({ where: { tmdbId, mediaType } });
+        if (recount >= threshold) {
+          const data = { title: verified.title, mediaType, voteCount: recount, posterPath: verified.posterPath ?? null, tmdbId };
+          after(async () => {
+            await Promise.allSettled([
+              notifyAdminsDeletionVoteThreshold(data),
+              notifyAdminsDeletionVoteThresholdPush(data),
+            ]);
+          });
+        }
       }
     }
   }

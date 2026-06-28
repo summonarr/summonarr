@@ -12,9 +12,8 @@ export const dynamic = "force-dynamic";
 const PAGE_SIZE = 50;
 
 // Derived from the shared audit-actions module so the schema enum is the single
-// source of truth. Previously this page had its own hand-maintained list (16 of
-// 27 values) — a filter for any missing enum value silently returned the full
-// unfiltered set (audit-log H34 / S8-Pass3-F1).
+// source of truth. A hand-maintained list previously missed values, so a filter
+// for any missing enum value silently returned the full unfiltered set.
 const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
 const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {

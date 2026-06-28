@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
@@ -43,6 +44,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
+  // Per-user server visibility for the hideAvailable gate.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const raw: TmdbMedia[] = [];
 
   try {
@@ -78,7 +81,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const show4k = await getShow4kVisibility(session);
   let items = await attachAllAvailability(raw, session.user.id, { show4k });
   if (hideAvailable) {
-    items = items.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    items = items.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
   }
 
   return NextResponse.json({ items });

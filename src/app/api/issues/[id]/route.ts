@@ -7,6 +7,7 @@ import {
   searchSeriesInSonarr,
   searchSeasonInSonarr,
   searchEpisodeInSonarr,
+  resolveTvdbIdFromTmdbId,
 } from "@/lib/arr";
 import { notifyUserIssueResolved } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -42,13 +43,16 @@ export const PATCH = withIssueAdmin(async (
       if (issue.mediaType === "MOVIE") {
         await searchMovieInRadarr(issue.tmdbId);
       } else {
-        if (!issue.tvdbId) throw new Error("No TVDB ID on this issue — cannot search in Sonarr");
+        // Resolve authoritatively from tmdbId when the stored tvdbId is absent
+        // (client-supplied tvdbId is no longer trusted, so older/null rows resolve here).
+        const tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId));
+        if (!tvdbId) throw new Error("Could not resolve a TVDB ID for this series — cannot search in Sonarr");
         if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
-          await searchEpisodeInSonarr(issue.tvdbId, issue.seasonNumber, issue.episodeNumber);
+          await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber);
         } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
-          await searchSeasonInSonarr(issue.tvdbId, issue.seasonNumber);
+          await searchSeasonInSonarr(tvdbId, issue.seasonNumber);
         } else {
-          await searchSeriesInSonarr(issue.tvdbId);
+          await searchSeriesInSonarr(tvdbId);
         }
       }
       // CAS on status: don't clobber a RESOLVED issue if another admin closed it

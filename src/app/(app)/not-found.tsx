@@ -1,10 +1,10 @@
 import Link from "next/link";
 import { Home, Film, Tv } from "@/components/icons";
 
-// Mobile audit F-2.1: replaces Next.js's default "404 / This page could not
-// be found." text-only page. Server Component (no props per Next.js 16
-// not-found convention). Renders inside (app) layout, so the mobile bottom
-// tab bar and drawer remain available for recovery alongside these CTAs.
+// Replaces Next.js's default "404 / This page could not be found." text-only
+// page. Server Component (no props per Next.js 16 not-found convention). Renders
+// inside (app) layout, so the mobile bottom tab bar and drawer remain available
+// for recovery alongside these CTAs.
 export default function NotFound() {
   return (
     <div

@@ -99,9 +99,13 @@ export default async function TVPage({
     const rest = await Promise.all(restPages.map(fetchPage));
     const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
 
-    let enriched = await attachAllAvailability(rawItems, session?.user.id, { show4k });
+    // Block on ratings when a filter is active — non-blocking leaves uncached items
+    // unrated and they'd be dropped, yielding an empty page on a cold cache.
+    let enriched = await attachAllAvailability(rawItems, session?.user.id, { show4k, blockRatings: !!ratingFilter });
     if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
-    if (hideAvailable) enriched = enriched.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    // Gate hideAvailable on the user's pinned server so a Plex-pinned user doesn't hide
+    // Jellyfin-only titles (and vice versa).
+    if (hideAvailable) enriched = enriched.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
     items = enriched.slice(0, 20);
   } else {
     totalPages = firstPaged.totalPages;

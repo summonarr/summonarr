@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
 import {
   getTrending,
   getPopularMovies,
@@ -38,12 +39,16 @@ function project(
   raw: TmdbMedia[],
   enriched: Map<string, TmdbMedia>,
   hideAvailable: boolean,
+  showPlex: boolean,
+  showJellyfin: boolean,
   limit: number,
 ): TmdbMedia[] {
   const out: TmdbMedia[] = [];
   for (const m of raw) {
     const e = enriched.get(`${m.mediaType}-${m.id}`) ?? m;
-    if (hideAvailable && (e.plexAvailable || e.jellyfinAvailable)) continue;
+    // Gate hideAvailable on the user's pinned server so a Plex-pinned user doesn't hide
+    // Jellyfin-only titles (and vice versa).
+    if (hideAvailable && ((showPlex && e.plexAvailable) || (showJellyfin && e.jellyfinAvailable))) continue;
     out.push(e);
     if (out.length >= limit) break;
   }
@@ -60,6 +65,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
+  // Per-user server visibility for the hideAvailable gate.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   try {
     const [
@@ -116,7 +123,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const enriched = await attachAllAvailability(displaySet, session.user.id, { show4k });
     const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
-    const trendingItems = project(trending, emap, hideAvailable, trending.length);
+    const trendingItems = project(trending, emap, hideAvailable, showPlex, showJellyfin, trending.length);
     const featuredMovie = trendingItems.find((m) => m.mediaType === "movie");
     const featuredTV = trendingItems.find((m) => m.mediaType === "tv");
     const featuredKeys = new Set(
@@ -130,12 +137,12 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
     const carousels = [
       { id: "trending", title: "Trending this week", items: trendingRest },
-      { id: "popular-movies", title: "Popular Movies", items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
-      { id: "popular-tv", title: "Popular TV", items: project(popTV, emap, hideAvailable, RAIL_SIZE) },
-      { id: "upcoming-movies", title: "Upcoming Movies", items: project(upMovies, emap, hideAvailable, RAIL_SIZE) },
-      { id: "on-the-air-tv", title: "On The Air TV", items: project(upTV, emap, hideAvailable, RAIL_SIZE) },
-      { id: "top-rated-movies", title: "Top Rated Movies", items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
-      { id: "top-rated-tv", title: "Top Rated TV", items: project(topTV, emap, hideAvailable, RAIL_SIZE) },
+      { id: "popular-movies", title: "Popular Movies", items: project(popMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "popular-tv", title: "Popular TV", items: project(popTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "upcoming-movies", title: "Upcoming Movies", items: project(upMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "on-the-air-tv", title: "On The Air TV", items: project(upTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "top-rated-movies", title: "Top Rated Movies", items: project(topMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "top-rated-tv", title: "Top Rated TV", items: project(topTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
     ].filter((c) => c.items.length > 0);
 
     const featured = [featuredMovie, featuredTV].filter((m): m is TmdbMedia => m != null);

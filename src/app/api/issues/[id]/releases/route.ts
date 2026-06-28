@@ -86,6 +86,20 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "indexerId must be a positive integer" }, { status: 400 });
   }
 
+  // Claim the issue (CAS → IN_PROGRESS) BEFORE the grab: the findUnique above is
+  // stale, and a concurrent resolve would otherwise still fire an unwanted *arr
+  // download. count 0 ⇒ already resolved → abort. (The grab is an HTTP call, so it
+  // can't go inside a tx; a pre-grab CAS is what prevents it. A failed grab leaving
+  // IN_PROGRESS is fine — an admin attempted it.)
+  const claim = await prisma.issue.updateMany({
+    where: { id, status: { not: "RESOLVED" } },
+    data: { status: "IN_PROGRESS" },
+  });
+  if (claim.count === 0) {
+    return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
+  }
+  const statusChanged = issue.status !== "IN_PROGRESS";
+
   let resolvedTvdbId: number | null = issue.tvdbId;
 
   try {
@@ -108,27 +122,19 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       );
     }
 
-    // CAS on issue status so we don't clobber a concurrent RESOLVED transition.
-    // Always create the IssueGrab row (it's an audit of what was attempted).
-    const result = await prisma.$transaction(async (tx) => {
-      const claimed = await tx.issue.updateMany({
-        where: { id, status: { not: "RESOLVED" } },
-        data: { status: "IN_PROGRESS" },
-      });
-      const grab = await tx.issueGrab.create({
-        data: {
-          issueId: id,
-          triggeredById: session.user.id,
-          tmdbId: issue.tmdbId,
-          tvdbId: resolvedTvdbId,
-          mediaType: issue.mediaType,
-          title: issue.title,
-          scope: issue.scope,
-          seasonNumber: issue.seasonNumber,
-          episodeNumber: issue.episodeNumber,
-        },
-      });
-      return { statusChanged: claimed.count > 0, grabId: grab.id };
+    // Issue already claimed IN_PROGRESS above; record the grab attempt for audit.
+    const grab = await prisma.issueGrab.create({
+      data: {
+        issueId: id,
+        triggeredById: session.user.id,
+        tmdbId: issue.tmdbId,
+        tvdbId: resolvedTvdbId,
+        mediaType: issue.mediaType,
+        title: issue.title,
+        scope: issue.scope,
+        seasonNumber: issue.seasonNumber,
+        episodeNumber: issue.episodeNumber,
+      },
     });
 
     void logAudit({
@@ -138,9 +144,9 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       target: `issue:${id}`,
       details: {
         trigger: "grab",
-        grabId: result.grabId,
+        grabId: grab.id,
         scope: issue.scope,
-        ...(result.statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
+        ...(statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
       },
       ...auditContext(req, session),
     });

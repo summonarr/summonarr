@@ -17,6 +17,7 @@ function coalesce<T>(key: string, factory: () => Promise<T>): Promise<T> {
 import { syncTmdbMediaCore, upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { getOmdbRatingsForTmdb } from "./omdb";
 import { getMdblistRatingsForTmdb } from "./mdblist";
+import { hasAnyMdblistRating } from "./omdb-availability";
 import { tmdbAuth } from "./tmdb-auth";
 import type {
   TmdbMedia, MediaType, CastMember, PersonDetails, PersonCredit,
@@ -45,7 +46,10 @@ async function fetchUnifiedRatings(
   const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
     () => ({ found: false, keyConfigured: true, transient: true } as const),
   );
-  if (mdb.found) {
+  // Require an actual score before letting MDBList win — a `found` row with every
+  // field null must not shadow OMDB, which may carry the rating. Fall through to
+  // OMDB when MDBList has no usable data.
+  if (mdb.found && hasAnyMdblistRating(mdb.data)) {
     return {
       found: true,
       keyConfigured: true,
@@ -81,8 +85,13 @@ async function fetchUnifiedRatings(
   }
   // If either source failed transiently, the null is not authoritative — callers must
   // not pin it into the long-lived details cache, so the next read retries.
-  const transient = Boolean(mdb.transient || omdb.transient);
-  return { found: false, keyConfigured: mdb.keyConfigured || omdb.keyConfigured, transient };
+  // mdb can reach here as not-found OR as found-but-unscored. A found result means
+  // the key worked and the response was real → keyConfigured, not transient —
+  // narrow on mdb.found before touching the not-found-only fields.
+  const mdbKeyConfigured = mdb.found ? true : mdb.keyConfigured;
+  const mdbTransient = mdb.found ? false : Boolean(mdb.transient);
+  const transient = Boolean(mdbTransient || omdb.transient);
+  return { found: false, keyConfigured: mdbKeyConfigured || omdb.keyConfigured, transient };
 }
 
 export type {
@@ -445,6 +454,12 @@ const UPCOMING_PAGES = 10;
 // home page fires seven of them at once — ~105 concurrent requests on a cold
 // cache without a bound. Cap the per-list page fan-out, and wrap each helper in
 // coalesce() so simultaneous callers share one fan-out instead of multiplying it.
+//
+// Each helper below caches its result ONLY when every page settled fulfilled.
+// settleLimit swallows per-page rejections, so without this gate a transient TMDB
+// degradation (e.g. 2/10 pages succeed) would cache a truncated list for the full
+// TTL.DISCOVER. On partial success the helper still returns what it has (so the
+// page renders) but doesn't cache it, so the next request re-fetches.
 const LIST_PAGE_CONCURRENCY = 5;
 
 export async function getTrending(): Promise<TmdbMedia[]> {
@@ -468,7 +483,7 @@ export async function getTrending(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -492,7 +507,7 @@ export async function getPopularMovies(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeMovie);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -516,7 +531,7 @@ export async function getPopularTV(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -561,7 +576,7 @@ export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeMovie);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -585,7 +600,7 @@ export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -623,7 +638,7 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -959,7 +974,7 @@ export async function getTopRatedMovies(): Promise<TmdbMedia[]> {
     .filter((r) => r.vote_count >= TOP_MIN_VOTES_MOVIE)
     .map(normalizeMovie);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });
@@ -984,7 +999,7 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
     .filter((r) => r.vote_count >= TOP_MIN_VOTES_TV)
     .map(normalizeTV);
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
   });

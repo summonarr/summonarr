@@ -1,6 +1,6 @@
-// Instant loading skeleton for the admin Activity page. The route is
-// force-dynamic and runs several play-history aggregation queries before
-// render, so a fallback keeps navigation feeling immediate.
+// Loading skeleton for the admin Activity page — force-dynamic with several
+// play-history aggregation queries before render, so a fallback keeps
+// navigation feeling immediate.
 export default function Loading() {
   return (
     <div className="animate-pulse">

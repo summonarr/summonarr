@@ -21,9 +21,9 @@ export interface AdvisoryLockOptions {
   timeoutMs?: number;
 }
 
-// Me-4: callers may opt into signal-aware work by accepting an AbortSignal argument. The signal
-// fires on timeout (before pg_advisory_unlock releases the lock) so callers can stop hitting the
-// DB rather than letting the racing work() continue in the background. Abortion is best-effort —
+// Callers may opt into signal-aware work by accepting an AbortSignal argument. The signal fires
+// on timeout (before pg_advisory_unlock releases the lock) so callers can stop hitting the DB
+// rather than letting the racing work() continue in the background. Abortion is best-effort —
 // the underlying work must explicitly observe the signal (e.g. pass it to fetch() / forward to
 // Prisma where supported) for it to have any effect.
 export type AdvisoryLockWork<T> = (() => Promise<T>) | ((signal: AbortSignal) => Promise<T>);

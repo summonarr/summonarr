@@ -138,19 +138,16 @@ export default async function ActivityPage({
     }),
   ]);
 
-  // Parse the persisted Plex reachability snapshot. The value is JSON written
-  // by plex-events.persistReachability — defensive parse so a malformed row
-  // (manual edit, schema drift) falls back to null (= "unknown") instead of
-  // crashing the page.
+  // Parse the persisted Plex reachability snapshot (JSON written by
+  // plex-events.persistReachability) — defensive parse so a malformed row falls
+  // back to null (= "unknown") instead of crashing the page.
   //
-  // Only trust the reachability flag when the Plex poller that maintains it is
-  // actually running. plexServerReachable now tracks *local* reachability — it's
-  // written by the 5s poller (true when getPlexSessions succeeds, false when it
-  // throws) plus the SSE connect-time probe. The poller only runs when
-  // play-history is enabled AND the Plex source is enabled AND url+token are set
-  // (mirrored by doReconcile's `shouldRun`). If any of those is off, the value
-  // is stale and unmaintained, so the badge must not be driven by it. Gating
-  // here on the same conditions keeps the badge aligned with its data source.
+  // Only trust the flag when the poller that maintains it is running:
+  // plexServerReachable tracks *local* reachability, written by the 5s poller
+  // (true on getPlexSessions success, false on throw) plus the SSE connect-time
+  // probe. The poller only runs when play-history + Plex source are enabled and
+  // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
+  // value is stale, so gate the badge on the same conditions as its data source.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
   const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
   const [phEnabled, plexSourceEnabled] = await Promise.all([
@@ -167,10 +164,8 @@ export default async function ActivityPage({
     } catch { /* leave null */ }
   }
 
-  // Inline raw queries here used to re-compute uniqueViewers / totalWatchTimeHours
-  // and prevPeriod totals that getPlayHistoryStats already returns above. Removed
-  // the four duplicates — only the window-function leaderboard and the peak-day
-  // pick remain (genuinely unique to this page).
+  // Only the window-function leaderboard and the peak-day pick remain inline —
+  // genuinely unique to this page; the rest comes from getPlayHistoryStats.
   const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
   const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
 
@@ -286,12 +281,11 @@ export default async function ActivityPage({
     (s: typeof effectiveSessions[0]) => s.tmdbId == null && s.effectiveTmdbId != null,
   );
   // INTENTIONAL fire-and-forget: persist the resolved tmdbId so future renders
-  // skip the lookup chain. Deliberately NOT awaited — it's a cache warm, not
-  // part of the response, and must not delay the page. Safe because Summonarr
-  // runs as a single long-lived Node server (not serverless/edge), so the
-  // promise survives past render. Do NOT "fix" this by awaiting it or moving it
-  // into the request path. See CLAUDE.md guardrail 17. Errors are swallowed by
-  // design (next sync re-resolves).
+  // skip the lookup chain. NOT awaited — a cache warm, not part of the response,
+  // must not delay the page. Safe because Summonarr is a single long-lived Node
+  // server (not serverless/edge), so the promise survives past render. Do NOT
+  // "fix" by awaiting or moving into the request path — see CLAUDE.md guardrail
+  // 17. Errors swallowed by design (next sync re-resolves).
   if (sessionsToBackfill.length > 0) {
     void Promise.all(
       sessionsToBackfill.map((s: typeof sessionsToBackfill[0]) =>

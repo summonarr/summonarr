@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getTopRatedMovies, getTopRatedTV, type TmdbMedia } from "@/lib/tmdb";
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
@@ -92,11 +93,13 @@ async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
 
 function applyFilters(
   items: TmdbMedia[],
-  opts: { hideAvailable: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },
+  opts: { hideAvailable: boolean; showPlex: boolean; showJellyfin: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },
 ): TmdbMedia[] {
   let result = items;
   if (opts.hideAvailable) {
-    result = result.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    // Gate on the user's own server visibility: a Plex-pinned user must not have
+    // Jellyfin-only titles hidden (and vice versa).
+    result = result.filter((m) => !((opts.showPlex && m.plexAvailable) || (opts.showJellyfin && m.jellyfinAvailable)));
   }
   if (opts.minImdb) {
     const threshold = parseFloat(opts.minImdb);
@@ -148,7 +151,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const show4k = await getShow4kVisibility(session);
 
-  const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
+  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
 
   try {
     // A single down source degrades to an empty contribution rather than failing

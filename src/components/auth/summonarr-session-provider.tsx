@@ -28,17 +28,10 @@ interface ContextValue {
 
 const Ctx = React.createContext<ContextValue | null>(null);
 
-// Parallel session provider for the next-auth replacement work. The
-// initialSession prop is populated server-side from the Summonarr session
-// cookie (see src/lib/session-server.ts) so consumers don't see a loading
-// flash on the first paint when the new cookie is already set.
-//
-// When initialSession is null we still hit /api/auth/me on mount, because
-// that endpoint can backfill the new cookie from an existing next-auth
-// session during the migration window. Once PR 5 lands and next-auth is
-// gone, that backfill goes away — at which point initialSession=null means
-// the user is genuinely unauthenticated and the useEffect is a wasted
-// fetch we'll be safe to drop.
+// initialSession is populated server-side from the Summonarr session cookie
+// (see src/lib/session-server.ts) so consumers don't see a loading flash on
+// first paint. When it's null we still hit /api/auth/me on mount to backfill
+// the cookie from a legacy next-auth session during the migration window.
 export function SummonarrSessionProvider({
   initialSession,
   children,

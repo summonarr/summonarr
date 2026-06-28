@@ -5,6 +5,7 @@ import { logAudit } from "@/lib/audit";
 import { refreshCatalog, describeSchemaError, type RefreshResult } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isFeatureEnabled } from "@/lib/features";
 import type { TrashService } from "@/generated/prisma";
 
 function busyResponse() {
@@ -15,13 +16,15 @@ function busyResponse() {
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  // Per-admin rate limit. A refresh fans out to GitHub (pulling the TRaSH-Guides
-  // catalog) AND to the configured Radarr/Sonarr instances, so calling it in a
-  // tight loop would hammer GitHub's raw-content endpoints (risking 429s that
-  // break the catalog fetch for everyone) and pile mutation requests onto the Arr
-  // servers. Bounding it to 10 refreshes per 5-minute window per admin caps a
-  // compromised admin session while still covering an operator's legitimate
-  // manual refreshes.
+  // Kill-switch parity with the nightly cron: refresh fans out to the configured
+  // Radarr/Sonarr instances, so a disabled TRaSH integration must block it too.
+  if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
+    return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+  }
+  // Per-admin rate limit. A refresh fans out to GitHub (catalog pull) AND to
+  // Radarr/Sonarr; a tight loop risks GitHub 429s (breaking the fetch for everyone)
+  // and piles mutations on the Arr servers. 10 per 5-minute window caps a
+  // compromised session while covering legitimate manual refreshes.
   if (!checkRateLimit(`admin-trash-refresh:${session.user.id}`, 10, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many refreshes — try again shortly." }, { status: 429 });
   }

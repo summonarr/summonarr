@@ -573,9 +573,11 @@ export async function isMovieDownloadedInRadarr(
 // arbitrary payload) can't mark a series AVAILABLE that Sonarr never grabbed.
 // Same tri-state contract as isMovieDownloadedInRadarr (true / false / null when
 // unverifiable). Resolves the series by tvdbId (Sonarr's primary key); falls
-// back to a tmdb→tvdb lookup when only tmdbId is present. A Download event means
-// an episode imported, so a single episode file (episodeFileCount > 0) is
-// sufficient confirmation.
+// back to a tmdb→tvdb lookup when only tmdbId is present. The "available"
+// threshold MUST match getSonarrWantedTmdbIds (the sync writer): a continuing
+// series is available with any episode file, an *ended* series only once fully
+// downloaded. Otherwise an ended series at 1/N flips AVAILABLE on the webhook,
+// and the next sync reverts it to APPROVED — a per-tick flip-flop.
 export async function isSeriesDownloadedInSonarr(
   ids: { tvdbId?: number | null; tmdbId?: number | null },
   variant: ArrVariant = "hd",
@@ -592,12 +594,15 @@ export async function isSeriesDownloadedInSonarr(
       tvdbId = lookup.length ? lookup[0].tvdbId : null;
     }
     if (tvdbId === null) return null;
-    const library = await arrFetch<{ tvdbId: number; statistics?: { episodeFileCount: number } }[]>(
+    const library = await arrFetch<{ tvdbId: number; status?: string; statistics?: { episodeFileCount: number; totalEpisodeCount: number } }[]>(
       cfg, "/api/v3/series",
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
     if (!match) return false;
-    return (match.statistics?.episodeFileCount ?? 0) > 0;
+    const episodeFileCount = match.statistics?.episodeFileCount ?? 0;
+    const totalEpisodeCount = match.statistics?.totalEpisodeCount ?? 0;
+    const allDownloaded = episodeFileCount >= totalEpisodeCount;
+    return episodeFileCount > 0 && (match.status !== "ended" || allDownloaded);
   } catch (err) {
     console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));
     return null;
@@ -646,7 +651,11 @@ export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: 
   });
 }
 
-async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
+// Returns null when the queue could not be read AND no stale cache exists, so
+// callers don't mistake a fetch failure for an empty queue (which would yield
+// false "not downloading" → spurious notifies / premature scans). A successful
+// read (even empty) returns a Set.
+async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
   const now = Date.now();
   const cacheKey = `radarr::${cfg.url}`;
   const cached = queueCache.get(cacheKey);
@@ -673,11 +682,12 @@ async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
       return cached.tmdbIds;
     }
     console.error("[arr] getRadarrQueueSet failed, no cache:", err instanceof Error ? err.message : err);
-    return new Set();
+    return null;
   }
 }
 
-async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
+// Null = unknown (fetch failed, no stale cache) vs Set = read succeeded. See getRadarrQueueSet.
+async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
   const now = Date.now();
   const cacheKey = `sonarr::${cfg.url}`;
   const cached = queueCache.get(cacheKey);
@@ -703,17 +713,22 @@ async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number>> {
       return cached.tvdbIds;
     }
     console.error("[arr] getSonarrQueueSet failed, no cache:", err instanceof Error ? err.message : err);
-    return new Set();
+    return null;
   }
 }
 
-export async function isMovieDownloadingInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+// Tri-state: true = in queue; false = confirmed not in queue (or no Radarr
+// configured); null = couldn't determine (queue fetch failed). Callers MUST treat
+// null as "still pending", not "not downloading", or a queue outage fires false
+// "download pending" notifies and premature scans.
+export async function isMovieDownloadingInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean | null> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) return false;
   try {
     const queueSet = await getRadarrQueueSet(cfg);
+    if (queueSet === null) return null;
     return queueSet.has(tmdbId);
-  } catch { return false; }
+  } catch { return null; }
 }
 
 export async function countRadarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
@@ -721,11 +736,13 @@ export async function countRadarrQueue(variant: ArrVariant = "hd"): Promise<numb
     const cfg = await getCfg("radarr", variant);
     if (!cfg) return null;
     const queueSet = await getRadarrQueueSet(cfg);
+    if (queueSet === null) return null;
     return queueSet.size;
   } catch { return null; }
 }
 
-export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+// Same tri-state contract as isMovieDownloadingInRadarr — null = unknown.
+export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean | null> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
@@ -735,8 +752,9 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
     if (!lookup.length) return false;
     const { tvdbId } = lookup[0];
     const queueSet = await getSonarrQueueSet(cfg);
+    if (queueSet === null) return null;
     return queueSet.has(tvdbId);
-  } catch { return false; }
+  } catch { return null; }
 }
 
 export async function countSonarrQueue(variant: ArrVariant = "hd"): Promise<number | null> {
@@ -744,6 +762,7 @@ export async function countSonarrQueue(variant: ArrVariant = "hd"): Promise<numb
     const cfg = await getCfg("sonarr", variant);
     if (!cfg) return null;
     const queueSet = await getSonarrQueueSet(cfg);
+    if (queueSet === null) return null;
     return queueSet.size;
   } catch { return null; }
 }

@@ -89,19 +89,22 @@ export default async function MoviesPage({
     totalPages = Math.max(1, Math.ceil(firstPaged.totalPages / TMDB_PAGES_PER_VIRTUAL));
     const tmdbEndPage = Math.min(firstPaged.totalPages, tmdbStartPage + TMDB_PAGES_PER_VIRTUAL - 1);
 
-    // Fetch the whole virtual-page window up front (in parallel) and enrich once.
-    // The old loop ran a sequential fetch+enrich per page; when filtering discards
-    // most results (e.g. hideAvailable on a fully-owned library) that was up to 5
-    // serial round-trips of TMDB-fetch + attachAllAvailability. fetchPage already
-    // catches per-page, so a failed page yields no items rather than rejecting.
+    // Fetch the whole virtual-page window up front (in parallel) and enrich once
+    // — a sequential fetch+enrich per page was up to 5 serial round-trips when
+    // filtering discards most results. fetchPage already catches per-page, so a
+    // failed page yields no items rather than rejecting.
     const restPages: number[] = [];
     for (let p = tmdbStartPage + 1; p <= tmdbEndPage; p++) restPages.push(p);
     const rest = await Promise.all(restPages.map(fetchPage));
     const rawItems = [firstPaged, ...rest].flatMap((pg) => pg.items);
 
-    let enriched = await attachAllAvailability(rawItems, session?.user.id, { show4k });
+    // Block on ratings when a filter is active — non-blocking leaves uncached items
+    // unrated and they'd be dropped, yielding an empty page on a cold cache.
+    let enriched = await attachAllAvailability(rawItems, session?.user.id, { show4k, blockRatings: !!ratingFilter });
     if (ratingFilter) enriched = applyExternalRatingFilter(enriched, ratingFilter);
-    if (hideAvailable) enriched = enriched.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    // Gate hideAvailable on the user's pinned server so a Plex-pinned user doesn't hide
+    // Jellyfin-only titles (and vice versa).
+    if (hideAvailable) enriched = enriched.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
     items = enriched.slice(0, 20);
   } else {
     totalPages = firstPaged.totalPages;

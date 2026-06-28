@@ -82,14 +82,18 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
 
   let stillInQueue: boolean;
   if (entry.tmdbId !== undefined) {
-    stillInQueue = mediaType === "movie"
+    const downloading = mediaType === "movie"
       ? await isMovieDownloadingInRadarr(entry.tmdbId, entry.variant)
       : await isSeriesDownloadingInSonarr(entry.tmdbId, entry.variant);
+    // null = queue unreadable → treat as "still pending" so we defer + retry
+    // rather than scan prematurely against a download that may be in flight.
+    stillInQueue = downloading !== false;
   } else {
     const count = mediaType === "movie"
       ? await countRadarrQueue(entry.variant)
       : await countSonarrQueue(entry.variant);
-    stillInQueue = count !== null && count > 0;
+    // null = couldn't read the queue → defer rather than scan prematurely.
+    stillInQueue = count === null || count > 0;
   }
 
   if (stillInQueue) {

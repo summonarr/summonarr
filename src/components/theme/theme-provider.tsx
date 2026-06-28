@@ -54,21 +54,19 @@ function applyAccent(accent: Accent) {
   document.documentElement.setAttribute("data-accent", accent);
 }
 
-// Initial state mirrors the SSR defaults exactly so the first client paint
-// matches SSR (no hydration mismatch). A useEffect below then reads the
-// per-device persisted values from <html> (already applied by the inline
-// blocking script in src/app/layout.tsx) and reconciles state. Visual color
-// never flashes because the inline script set the CSS variables before paint.
+// Initial state mirrors the SSR defaults so the first client paint matches SSR
+// (no hydration mismatch). The useEffect below reconciles with the per-device
+// persisted values already applied to <html> by the inline blocking script in
+// src/app/layout.tsx — which also set the CSS variables before paint, so color
+// never flashes.
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
   const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
 
-  // One-time post-mount reconciliation with values the inline blocking script
-  // already applied to <html data-theme/data-accent>. The set-state-in-effect
-  // rule is intentionally suppressed: this is exactly the "sync React state
-  // with an external system (DOM attribute set before hydration)" pattern that
-  // effects exist for. No subscription is needed — the attribute is owned by
-  // this provider after mount.
+  // One-time post-mount reconciliation with the <html data-theme/data-accent>
+  // values the inline blocking script already applied — the legitimate "sync
+  // React state with an external system" use of an effect. The attribute is
+  // owned by this provider after mount, so no subscription is needed.
   useEffect(() => {
     const t = document.documentElement.getAttribute("data-theme");
     const a = document.documentElement.getAttribute("data-accent");

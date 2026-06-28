@@ -505,6 +505,18 @@ async function handleComponent(interaction: any): Promise<void> {
 
       prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
 
+      // Maintenance gate: a user who ran /request BEFORE maintenance was enabled could
+      // still click a result button afterward and create a request (incl. auto-approve
+      // → ARR push). Block unless the clicker is a linked Discord admin (admins bypass).
+      const componentMaintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
+      if (componentMaintRow?.value === "true") {
+        const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
+        if (!discordAdmin) {
+          await editOriginal(appId, token, { content: "The site is currently under maintenance. Please try again later.", embeds: [], components: [] });
+          return;
+        }
+      }
+
       const mediaType = selected.mediaType === "movie" ? "MOVIE" : "TV";
 
       const componentMemberRoles: string[] = interaction.member?.roles ?? [];
@@ -570,7 +582,10 @@ async function handleComponent(interaction: any): Promise<void> {
         // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
         // double re-request instead of throwing.
         if (existing.status === "DECLINED") {
-          await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+          // CAS on status + permanentlyDeclined: if an admin re-approved or made the
+          // decline permanent between the read and here, the delete no-ops and the
+          // create below 409s on the surviving row instead of orphaning/evading it.
+          await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
         } else {
           confirmEmbed.color = 0xfee75c;
           confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
@@ -648,15 +663,23 @@ async function handleComponent(interaction: any): Promise<void> {
 
       const mayAutoApprove = hasAutoApproveRole || canAutoApprove(effPerms, mediaType, false);
 
+      // Clear the requester's own delete-vote for this title — a request and a deletion
+      // vote are contradictory, and the vote route already blocks the reverse.
+      void prisma.deletionVote.deleteMany({ where: { userId: dbUser.id, tmdbId: selected.id, mediaType } });
+
       let note: string;
       try {
         if (alreadyAvailable) {
-          await prisma.mediaRequest.create({ data: { ...baseData, status: "AVAILABLE", availableAt: new Date() } });
+          // Parity with the web route (requests/route.ts alreadyAvailable branch):
+          // a library hit is NOT a request — don't create a row, so it doesn't
+          // consume the user's rolling quota. Still clear any deletion votes.
           void clearDeletionVotesForTmdbs([{ tmdbId: selected.id, mediaType }]);
           note = "It's already in the library!";
           confirmEmbed.color = 0x57f287;
         } else if (mayAutoApprove) {
-          const request = await prisma.mediaRequest.create({ data: { ...baseData, status: "APPROVED" } });
+          // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
+          // scheduleDelayed job still yields a follow-up notification.
+          const request = await prisma.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
@@ -667,7 +690,10 @@ async function handleComponent(interaction: any): Promise<void> {
             }
           } catch (err) {
             console.error("[interactions] arr push failed:", err);
-            await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
+            // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+            // may have flipped this row to AVAILABLE between create and here. Clear
+            // pendingNotifyAt too: the push failed, so there's no download to pend.
+            await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
             arrFailed = true;
           }
           if (arrFailed) {
@@ -688,7 +714,9 @@ async function handleComponent(interaction: any): Promise<void> {
               const downloading = mediaType === "MOVIE"
                 ? await isMovieDownloadingInRadarr(selected.id)
                 : await isSeriesDownloadingInSonarr(selected.id);
-              if (downloading) return;
+              // Skip on true (downloading) AND null (queue unreadable); only a
+              // confirmed "not downloading" fires the pending notify.
+              if (downloading !== false) return;
 
               const now = new Date();
               let released = true;
@@ -860,7 +888,9 @@ async function handleComponent(interaction: any): Promise<void> {
           }
         } catch (err) {
           console.error("[interactions] admin_approve arr push failed:", err);
-          await prisma.mediaRequest.update({ where: { id: requestId }, data: { status: "PENDING", pendingNotifyAt: null } });
+          // CAS on status: only roll back if still APPROVED — a concurrent webhook/sync
+          // may have flipped this row to AVAILABLE since we claimed it.
+          await prisma.mediaRequest.updateMany({ where: { id: requestId, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
           arrFailed = true;
         }
         // Audit the Discord-driven approval the same way the HTTP /api/requests/[id] PATCH path does.

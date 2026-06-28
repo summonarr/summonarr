@@ -6,17 +6,14 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
 
 // One-shot backfill for PlayHistory rows written before ActiveSession.playtimeMs landed.
+// Pre-fix `playDuration` stored the playhead position at session end (so a scrub-to-credits
+// looked like a full watch); post-fix it stores accumulated wall-clock "playing" seconds.
 //
-// Pre-fix `playDuration` stored the playhead position at session end — so a user who scrubbed
-// to the credits looked like they watched the whole runtime. Post-fix it stores accumulated
-// wall-clock seconds in the "playing" state.
+// Clamp: a session can't play longer than (stoppedAt - startedAt). LEAST(playDuration, wallClock)
+// collapses scrub-to-end inflation; `watched` and `pausedDuration` recompute from the clamped value.
 //
-// Best-effort clamp: a session physically cannot have played longer than (stoppedAt - startedAt).
-// LEAST(playDuration, wallClock) collapses scrub-to-end inflation while leaving correctly-
-// tracked rows untouched. `watched` and `pausedDuration` are recomputed from the clamped value.
-//
-// Default = dry run (returns counts + a five-row sample). Pass `?execute=true` to apply.
-// Idempotent — the WHERE clause excludes rows that don't need clamping, so re-runs are a no-op.
+// Default = dry run (counts + a five-row sample); `?execute=true` applies. Idempotent — the WHERE
+// clause excludes rows that don't need clamping, so re-runs are a no-op.
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const execute = req.nextUrl.searchParams.get("execute") === "true";

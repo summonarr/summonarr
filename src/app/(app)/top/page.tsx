@@ -189,12 +189,14 @@ export default async function TopRatedPage({
   let totalTvCount: number;
 
   if (filtersActive) {
+    // Block on ratings when minImdb is active — applyFilters needs a parsed rating, and
+    // non-blocking enrichment leaves uncached items unrated and filtered out.
     const [enrichedMovies, enrichedTV] = await Promise.all([
       showMovies && allMovies.length > 0
-        ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session?.user.id, { show4k }))
+        ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session?.user.id, { show4k, blockRatings: !!minImdb }))
         : Promise.resolve([] as TmdbMedia[]),
       showTV && allTV.length > 0
-        ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session?.user.id, { show4k }))
+        ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session?.user.id, { show4k, blockRatings: !!minImdb }))
         : Promise.resolve([] as TmdbMedia[]),
     ]);
     const filteredMovies = sortByRating(applyFilters(enrichedMovies, filterOpts), sortBy);

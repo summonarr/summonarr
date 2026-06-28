@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
+import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
 import { notifyAdminsNewRequest } from "@/lib/email";
@@ -222,7 +223,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // deleteMany (not delete) — on a concurrent double re-request the second
       // delete would throw P2025 (500); deleteMany no-ops, and the create below
       // then surfaces a clean 409 via its P2002 catch instead.
-      await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+      //
+      // CAS on status + permanentlyDeclined: if an admin re-approved or made the decline
+      // permanent between the read and here, the predicate no-ops the delete — the create
+      // below then 409s on the surviving row rather than orphaning an APPROVED row's ARR
+      // grab or evading a fresh permanent ban.
+      await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
     } else {
       return NextResponse.json({ error: "Already requested" }, { status: 409 });
     }
@@ -257,7 +263,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
 
   try {
-    await prisma.$transaction(async (tx) => {
+    // Serializable + P2034 retry: concurrent creates at the quota boundary conflict
+    // on the count+create and Postgres aborts one; without the retry that's a 500
+    // instead of the correct 429/409. (bulk/route.ts wraps its tx the same way.)
+    await runWithSerializableRetry(() => prisma.$transaction(async (tx) => {
 
       // Re-check quota inside the transaction to prevent races on concurrent requests
       if (enforceQuota && resolvedQuota) {
@@ -280,7 +289,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
         // auto-approvals BOTH "succeed" and both fire ARR side effects + a 201/SSE
         // for the same row (guardrail 23).
         createdRequest = await tx.mediaRequest.create({
-          data: { ...baseData, status: "APPROVED" },
+          // pendingNotifyAt arms the orchestrator's 90s "download pending / awaiting
+          // release" backstop (sync/route.ts overdue scan only looks at rows with it set).
+          // Web auto-approve previously had no backstop — unlike admin PATCH approve
+          // (requests/[id]/route.ts) — so a stuck request never got a follow-up notification.
+          data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
         });
         createdBranch = "auto-approve";
         return;
@@ -313,7 +326,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
       createdRequest = await tx.mediaRequest.create({ data: baseData });
       createdBranch = "pending";
-    }, { isolationLevel: "Serializable" });
+    }, { isolationLevel: "Serializable" }));
   } catch (err) {
     if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
       return NextResponse.json(
@@ -338,6 +351,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const request = createdRequest as MediaRequest;
 
+  // A request and a deletion vote for the same title are contradictory. The vote route
+  // already blocks voting when you've requested; mirror it here by clearing the caller's
+  // own delete-vote on request, so a vote-then-request can't leave both rows persisting.
+  void prisma.deletionVote.deleteMany({ where: { userId: session.user.id, tmdbId, mediaType } });
+
   if (createdBranch === "auto-approve") {
     emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
@@ -350,7 +368,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
       }
     } catch (err) {
       console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
-      await prisma.mediaRequest.update({ where: { id: request.id }, data: { status: "PENDING" } });
+      // CAS on status: only roll back if still APPROVED. A concurrent webhook/sync could
+      // have flipped this freshly-created row to AVAILABLE; a blind update would clobber
+      // that back to PENDING. Clear the pendingNotifyAt too — the ARR push failed, so
+      // there's no download to pend.
+      await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
       // The client already saw request:new with status APPROVED; emit a corrective
       // update so it reflects the rolled-back PENDING state, and return the PENDING
       // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).

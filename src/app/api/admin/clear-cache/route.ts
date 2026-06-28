@@ -20,13 +20,10 @@ function isSource(v: string): v is Source {
 }
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
-  // Per-admin rate limit on this destructive TmdbCache wipe. Clearing the cache
-  // forces every subsequent page load to re-fetch its metadata from upstream
-  // (TMDB / MDBList / OMDB), so clearing it repeatedly in a tight loop turns into
-  // a self-inflicted refetch storm that hammers those APIs and burns their rate
-  // limits. Bounding it to 5 clears per 5-minute window per admin stops a
-  // compromised admin session — or an accidental UI double-click — from looping
-  // the wipe, while still allowing a handful of legitimate manual clears.
+  // Per-admin rate limit on this destructive TmdbCache wipe. Clearing forces every
+  // page load to re-fetch from upstream (TMDB / MDBList / OMDB), so looping it is a
+  // self-inflicted refetch storm that burns their rate limits. 5 per 5-min window
+  // stops a compromised session (or a double-click) from looping the wipe.
   if (!checkRateLimit(`admin-clear-cache:${session.user.id}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many cache clears — try again shortly." }, { status: 429 });
   }

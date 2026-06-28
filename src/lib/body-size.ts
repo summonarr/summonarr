@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Picks the right unit so a 16 KB cap doesn't render as "max 0MB". MB for
-// >=1 MiB, KB otherwise. Output is intentionally an integer + unit suffix —
-// 413 message strings need to be terse, not precise.
+// Picks the right unit so a 16 KB cap doesn't render as "max 0MB": MB for
+// >=1 MiB, KB otherwise. Integer + unit suffix — 413 messages stay terse.
 function formatByteCap(maxBytes: number): string {
   const ONE_MB = 1024 * 1024;
   if (maxBytes >= ONE_MB) {
@@ -58,14 +57,12 @@ export function assertBodyBytesUnderCap(
   return null;
 }
 
-// One-shot capped JSON read. Combines the Content-Length fast-reject, the
-// post-read byte assertion (catches chunked-encoding bypasses), and JSON.parse,
-// so a route replaces `const body = await req.json()` with one size-bounded call.
-// Returns the parsed value on success, or a NextResponse the caller returns
-// verbatim: 413 when over the cap, 400 on malformed JSON. Discriminate on
-// `instanceof NextResponse`. Use on every non-upload JSON route — the global
-// proxyClientMaxBodySize (50 MB) is only a backstop; pick a cap that comfortably
-// fits the largest legitimate payload (single objects ~64 KB, bulk arrays more).
+// One-shot capped JSON read: Content-Length fast-reject + post-read byte
+// assertion (catches chunked-encoding bypasses) + JSON.parse. Returns the parsed
+// value, or a NextResponse to return verbatim (413 over cap, 400 on malformed
+// JSON; discriminate on `instanceof NextResponse`). Use on every non-upload JSON
+// route — proxyClientMaxBodySize (50 MB) is only a backstop. Pick a cap fitting
+// the largest legitimate payload (single objects ~64 KB, bulk arrays more).
 export async function readJsonCapped<T = unknown>(
   req: NextRequest,
   maxBytes: number,
@@ -82,11 +79,10 @@ export async function readJsonCapped<T = unknown>(
   }
 }
 
-// Tolerant variant of readJsonCapped for routes where a missing/empty/malformed
-// body is a VALID request (all fields optional). Still enforces the size cap
-// (returns a 413 NextResponse when over), but on an empty or unparseable body it
-// returns `fallback` instead of a 400 — preserving the "no body = defaults"
-// contract those routes document. Discriminate the 413 on `instanceof NextResponse`.
+// Tolerant variant for routes where a missing/empty/malformed body is VALID
+// (all fields optional). Still enforces the size cap (413 over cap), but on an
+// empty/unparseable body returns `fallback` instead of 400 — preserving the
+// "no body = defaults" contract. Discriminate the 413 on `instanceof NextResponse`.
 export async function readJsonCappedOr<T>(
   req: NextRequest,
   maxBytes: number,

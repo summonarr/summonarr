@@ -8,6 +8,7 @@ import { notifyAdminsNewIssuePush } from "@/lib/push";
 import { notifyAdminsNewIssueDiscord } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { resolveTvdbIdFromTmdbId } from "@/lib/arr";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
@@ -71,7 +72,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const { mediaType, tmdbId, tvdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
+  // tvdbId is intentionally NOT destructured from the body: a client could pair a
+  // library title's tmdbId with a DIFFERENT show's tvdbId, so the admin Sonarr
+  // grab/search downloads the wrong series. We resolve it from the verified tmdbId below.
+  const { mediaType, tmdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
 
   if (!mediaType || !tmdbId || !issueType) {
     return NextResponse.json({ error: "mediaType, tmdbId, and issueType are required" }, { status: 400 });
@@ -99,12 +103,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   const sanitizedNote = sanitizeOptional(note);
 
-  if (tvdbId !== undefined && tvdbId !== null) {
-    if (!Number.isInteger(tvdbId) || tvdbId <= 0) {
-      return NextResponse.json({ error: "tvdbId must be a positive integer" }, { status: 400 });
-    }
-  }
-
   if (resolvedScope === "SEASON" || resolvedScope === "EPISODE") {
     if (!Number.isInteger(seasonNumber) || (seasonNumber as number) < 1) {
       return NextResponse.json({ error: "seasonNumber is required for SEASON or EPISODE scope" }, { status: 400 });
@@ -122,6 +120,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }
+
+  // Resolve tvdbId server-side from the verified tmdbId for TV. May be null if
+  // resolution fails — the admin grab/search paths resolve on demand and fall back
+  // gracefully, so a null here is safe (never a client-chosen id).
+  const resolvedTvdbId = mediaType === "TV" ? await resolveTvdbIdFromTmdbId(tmdbId) : null;
 
   // Issues presuppose the title is in the library — every type (bad video, wrong
   // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
@@ -141,7 +144,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       reportedBy: session.user.id,
       mediaType: mediaType as "MOVIE" | "TV",
       tmdbId,
-      tvdbId: tvdbId ?? null,
+      tvdbId: resolvedTvdbId,
       title: verified.title,
       posterPath: verified.posterPath,
       issueType: issueType as (typeof VALID_ISSUE_TYPES)[number],

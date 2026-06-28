@@ -52,11 +52,10 @@ function isSameOriginRequest(request: NextRequest): boolean {
 }
 
 // Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET.
-// These routes are in proxy.ts's isPublicPath(), so the proxy does NOT DB-validate the session here;
-// readActiveSummonarrSessionFromRequest() does it instead (bearer-first then cookie, revocation/cutoff/
-// role-demotion honored immediately), rather than auth() which would trust a revoked admin's JWT until
-// its exp (up to the 7d admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound
-// CRON_SECRET guessing without affecting the valid-session or valid-secret happy paths.
+// These routes are in proxy.ts's isPublicPath(), so the proxy does NOT DB-validate the session;
+// readActiveSummonarrSessionFromRequest() does (bearer-first then cookie, revocation/cutoff/role-demotion
+// honored immediately), not auth() which would trust a revoked admin's JWT until its exp (up to the 7d
+// admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound CRON_SECRET guessing.
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   // Request-aware read: resolves a bearer JWT (native admin) FIRST, then the
   // cookie, so a native admin holding only a bearer token can use the session

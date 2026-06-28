@@ -54,9 +54,8 @@ export async function notifyAvailablePerServer(
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
 
-    // Email channel — H3 in audit. Until this fix, AVAILABLE notifications on
-    // webhook/sync paths only fanned out Discord + push; `emailOnAvailable` was
-    // a dead preference for those paths.
+    // Email channel — webhook/sync AVAILABLE paths previously fanned out only
+    // Discord + push, leaving `emailOnAvailable` a dead preference there.
     await notifyUsersRequestsAvailableEmail(winners, logScope);
   }
 }
