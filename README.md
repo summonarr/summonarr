@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.8 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.9 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -164,6 +164,28 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.9
+
+**Added**
+
+- An operational security hardening guide for self-hosters.
+
+**Changed**
+
+- Discovery and admin views now update in place — the browse grid, votes, requests, and issue threads refresh from live events without a full page reload.
+- Sub-path hosting (`BASE_PATH`) now covers the remaining client paths: API requests, live events, the web-push service worker, sign-out, and static assets.
+
+**Fixed**
+
+- Sessions: a revoked or demoted admin loses live admin event access within a minute instead of at the next reconnect, and self-service account deletion now requires re-entering your password.
+- Setup: concurrent first-admin creation paths can no longer both produce an admin, and a Plex or Jellyfin sign-in before setup can no longer lock an instance out of creating its first admin.
+- Availability & notifications: newly available titles are marked within the same sync instead of waiting a full cycle, "now available" alerts no longer cross between HD and 4K variants, and a failed push or Discord delivery is logged rather than silently lost.
+- Ratings: rate-limit and authentication errors from a ratings provider are no longer cached as "no ratings," and a brief provider outage no longer pins missing ratings for the cache lifetime.
+- Maintenance mode now stays enabled if the settings database is briefly unreachable, instead of letting writes through during an incident.
+- Discord: a request can be re-submitted after a non-permanent decline, and guild/client IDs are validated before they are saved.
+- Admin: the audit-log export honours the category filter and records its own export, and a fix-match that changes the library server but not the local cache now reports a clear, recoverable error.
+- Continued hardening across the authentication, webhook, sync, and admin paths.
 
 ### v0.13.8
 
@@ -690,7 +712,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.8 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.9 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
