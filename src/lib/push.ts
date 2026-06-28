@@ -7,6 +7,16 @@ import { encryptForDevice } from "@/lib/push-e2e";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
+// Thrown when only one half of the VAPID keypair is present. Regenerating both
+// would invalidate every stored web push subscription, so the locked init path
+// refuses instead — the caller treats it as "web push not ready".
+class VapidPartialKeypairError extends Error {
+  constructor() {
+    super("VAPID keypair is incomplete; refusing to regenerate over a partial pair");
+    this.name = "VapidPartialKeypairError";
+  }
+}
+
 // Shape every notify* helper passes to sendPush. `title`/`body` are the rich web
 // text; `category` selects the GENERIC iOS alert (see APNS_ALERTS) so no titles
 // or usernames ever reach the central relay.
@@ -39,7 +49,8 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
   if (existing) return existing.publicKey;
 
   const generated = generateVapidKeys();
-  await prisma.$transaction(async (tx) => {
+  try {
+    await prisma.$transaction(async (tx) => {
     // Advisory lock prevents two concurrent requests both generating and storing different key pairs
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 5)`;
 
@@ -49,6 +60,16 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
     const hasPublic = rows.some((r) => r.key === "vapidPublicKey");
     const hasPrivate = rows.some((r) => r.key === "vapidPrivateKey");
     if (hasPublic && hasPrivate) return;
+    // A partial keypair (exactly one half present) must NOT trigger a full
+    // regenerate — overwriting the surviving key invalidates every existing web
+    // push subscription. Backfill the missing half from the surviving one would
+    // be impossible (the secret half can't be derived from the public half), so
+    // the only safe move is to refuse and leave the stored half untouched. The
+    // outer getVapidKeysRaw() then returns null (both must be present), and web
+    // push stays disabled until an operator repairs the pair.
+    if (hasPublic || hasPrivate) {
+      throw new VapidPartialKeypairError();
+    }
     await Promise.all([
       tx.setting.upsert({
         where: { key: "vapidPublicKey" },
@@ -61,7 +82,18 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
         update: { value: generated.privateKey },
       }),
     ]);
-  });
+    });
+  } catch (err) {
+    if (err instanceof VapidPartialKeypairError) {
+      // Leave the stored half intact. Return whatever public key exists so a
+      // subscription registered against it still validates; never the freshly
+      // generated one (its private half was never stored).
+      console.error("[push] VAPID keypair is incomplete — repair the vapidPublicKey/vapidPrivateKey Settings; web push is disabled until then");
+      const row = await prisma.setting.findUnique({ where: { key: "vapidPublicKey" } });
+      return row?.value ?? "";
+    }
+    throw err;
+  }
 
   const keys = await getVapidKeysRaw();
   return keys?.publicKey ?? generated.publicKey;

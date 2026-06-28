@@ -9,6 +9,7 @@ import { PaginationBar } from "./pagination-bar";
 import { Loader2, Filter, AlertTriangle } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
 import { usePathname } from "next/navigation";
+import { withBasePath } from "@/lib/base-path";
 
 interface BrowseGridProps {
   mediaType: "movie" | "tv";
@@ -48,6 +49,7 @@ export function BrowseGrid({
   const [totalPages, setTotalPages] = useState(initialTotalPages);
   const [currentPage, setCurrentPage] = useState(initialPage);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   const genreId       = searchParams.get("genreId") || undefined;
   const keywordId     = searchParams.get("keywordId") || undefined;
@@ -79,21 +81,28 @@ export function BrowseGrid({
       if (watchProvider) params.set("watchProvider", watchProvider);
       if (hideAvailable) params.set("hideAvailable", "1");
 
-      const res = await fetch(`/api/browse?${params.toString()}`, { signal });
-      if (!res.ok) return;
+      const res = await fetch(withBasePath(`/api/browse?${params.toString()}`), { signal });
+      if (!res.ok) {
+        setError(true);
+        return;
+      }
       const data = await res.json() as BrowseResult;
       setItems(data.items);
       setTotalPages(data.totalPages);
       setCurrentPage(data.page);
+      setError(false);
     } catch (err) {
       // A superseded fetch (filters changed mid-flight) is aborted — ignore it so
       // the newer request's results aren't clobbered by this stale one. Leave the
       // prior results in place on any other error.
       if ((err as Error)?.name === "AbortError") return;
+      setError(true);
     } finally {
       if (!signal?.aborted) setLoading(false);
     }
   }, [mediaType, page, genreId, keywordId, minRating, ratingFilter, minVoteCount, fromYear, toYear, sortBy, watchProvider, hideAvailable]);
+
+  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
 
   const [isInitial, setIsInitial] = useState(true);
   useEffect(() => {
@@ -107,7 +116,16 @@ export function BrowseGrid({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchResults]);
 
-  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  // On the unfiltered grid the server component is the source of truth, so a
+  // router.refresh() (driven by LiveRefresh on request:* SSE events) passes
+  // fresh initialItems that must replace local state. With filters active the
+  // grid is client-fetched, so leave that state untouched.
+  useEffect(() => {
+    if (hasFilters) return;
+    setItems(initialItems);
+    setTotalPages(initialTotalPages);
+    setCurrentPage(initialPage);
+  }, [initialItems, initialTotalPages, initialPage, hasFilters]);
   const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
 
   return (
@@ -140,6 +158,28 @@ export function BrowseGrid({
         activeHideAvailable={hideAvailable}
         maxYear={maxYear}
       />
+
+      {error && !loading && (
+        <div
+          role="alert"
+          className="ds-mono"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--ds-danger)",
+            background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 35%, transparent)",
+            borderRadius: 8,
+            padding: "8px 12px",
+            marginBottom: 12,
+          }}
+        >
+          <AlertTriangle style={{ width: 14, height: 14, flexShrink: 0 }} />
+          Couldn&apos;t load results. Showing the previous view — try again.
+        </div>
+      )}
 
       <div className="relative min-h-[200px]">
         {loading && (

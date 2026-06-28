@@ -21,7 +21,7 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 // Client uploader defaults to 16 MiB chunks; cap at 32 MiB to leave headroom while still bounding memory.
 const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
-async function gate(): Promise<NextResponse | { password: string }> {
+async function gate(): Promise<NextResponse | { password: string } | { closed: true }> {
   // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Mirroring the
   // setup/import gate guarantees a racing register can't sneak between the freshness check and
   // the eventual processBackupImport on the final chunk. processBackupImport re-takes the lock
@@ -34,10 +34,10 @@ async function gate(): Promise<NextResponse | { password: string }> {
     return setupCompleted !== null || userCount > 0;
   });
   if (closed) {
-    return NextResponse.json(
-      { error: "Setup import is only available on a fresh server with no users." },
-      { status: 409 },
-    );
+    // Signalled distinctly so the caller can release the single global upload
+    // slot for this uploadId. Otherwise an in-flight session keeps the slot
+    // pinned until its TTL when a legitimate admin completes setup mid-upload.
+    return { closed: true };
   }
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
@@ -85,6 +85,16 @@ export async function POST(req: NextRequest) {
 
   const g = await gate();
   if (g instanceof NextResponse) return g;
+  if ("closed" in g) {
+    // Setup completed (or a user appeared) mid-upload. Free the single global
+    // slot this uploadId holds so a subsequent legitimate restore isn't blocked
+    // by a stale in-flight session until its TTL.
+    await clearSession(uploadId);
+    return NextResponse.json(
+      { error: "Setup import is only available on a fresh server with no users." },
+      { status: 409 },
+    );
+  }
   const { password } = g;
 
   if (fileSize > MAX_CIPHERTEXT_BYTES) {
@@ -146,6 +156,12 @@ export async function POST(req: NextRequest) {
     }
     if (e.kind === "out-of-order") {
       return NextResponse.json({ error: `Out-of-order chunk. Next expected index: ${e.expected}.` }, { status: 409 });
+    }
+    if (e.kind === "size-mismatch") {
+      return NextResponse.json(
+        { error: `Upload incomplete: received ${e.received} of ${e.expected} declared bytes. Restart from chunk 0.` },
+        { status: 400 },
+      );
     }
     return NextResponse.json({ error: "Chunk exceeds declared file size." }, { status: 413 });
   }
@@ -221,13 +237,14 @@ export async function POST(req: NextRequest) {
 
 // DELETE: cancel the in-flight upload and remove the temp file.
 export async function DELETE(req: NextRequest) {
-  const g = await gate();
-  if (g instanceof NextResponse) return g;
-
   const uploadId = req.headers.get("x-upload-id") ?? "";
   if (!uploadId) {
     return NextResponse.json({ error: "Missing X-Upload-Id." }, { status: 400 });
   }
+  // Cancel only releases the in-memory upload slot + temp file for this
+  // uploadId (no DB mutation), and clearSession is a no-op unless this uploadId
+  // owns the active session. It must always succeed so a stale slot can be
+  // freed even after setup has closed or backup config changed.
   await clearSession(uploadId);
   return NextResponse.json({ ok: true });
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Loader2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface LoginAuth {
   flow: "login";
@@ -56,7 +57,7 @@ export default function PlexDonePage() {
     }
 
     setMessage("Signing in…");
-    const result = await fetch("/api/auth/sign-in/plex", {
+    const result = await fetch(withBasePath("/api/auth/sign-in/plex"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -88,7 +89,7 @@ export default function PlexDonePage() {
     };
 
     window.location.href =
-      safeRedirect(auth.siteUrl) ?? safeRedirect(auth.callbackUrl) ?? "/";
+      safeRedirect(auth.siteUrl) ?? safeRedirect(auth.callbackUrl) ?? withBasePath("/");
   }
 
   async function completeSettings(auth: SettingsAuth) {
@@ -96,7 +97,7 @@ export default function PlexDonePage() {
     let authToken: string | null = null;
     for (let i = 0; i < 120; i++) {
       try {
-        const r = await fetch(`/api/auth/plex/pin?id=${auth.pinId}`);
+        const r = await fetch(withBasePath(`/api/auth/plex/pin?id=${auth.pinId}`));
         const d: { authToken?: string | null } = await r.json();
         if (d.authToken) { authToken = d.authToken; break; }
       } catch { }
@@ -110,7 +111,7 @@ export default function PlexDonePage() {
 
     setMessage("Saving connection…");
     try {
-      const res = await fetch("/api/settings/plex", {
+      const res = await fetch(withBasePath("/api/settings/plex"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ authToken }),
@@ -121,7 +122,7 @@ export default function PlexDonePage() {
       return;
     }
 
-    window.location.href = "/settings";
+    window.location.href = withBasePath("/settings");
   }
 
   useEffect(() => {

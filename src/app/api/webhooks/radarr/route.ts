@@ -10,6 +10,7 @@ import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isMovieDownloadedInRadarr } from "@/lib/arr";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -114,8 +115,11 @@ export async function POST(req: NextRequest) {
   // mark available — alert admins (best-effort) so they can resolve it in Radarr's queue.
   if (payload.eventType === "ManualInteractionRequired") {
     const title = payload.movie?.title ?? "A movie";
-    // Don't log the payload-supplied title (CodeQL js/log-injection — it's a
-    // remote source). The title still reaches admins via the push below.
+    // Don't interpolate the payload-supplied title into the log line. It's a
+    // remote-controlled string, and logging it verbatim is a log-injection vector:
+    // an attacker could embed newlines/control characters to forge or corrupt log
+    // entries. The title still reaches admins through the structured push below,
+    // which doesn't share the log's plain-text framing.
     console.warn("[webhook/radarr] manual interaction required — resolve it in Radarr's queue");
     // Per-item one-shot gate (same idempotent pattern as the deletion-vote
     // threshold in /api/votes): Radarr re-emits ManualInteractionRequired for the
@@ -155,6 +159,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
   }
 
+  // Never trust the payload's tmdbId on its own. The webhook secret authenticates
+  // the request but does NOT prove the named title was actually downloaded: anyone
+  // who learns the secret (or any process that can replay a captured request) could
+  // POST a forged Download event for an arbitrary tmdbId and flip an APPROVED
+  // request straight to AVAILABLE for a movie Radarr never grabbed. To close that,
+  // verify the title against Radarr's own authoritative API before changing any
+  // status. Tri-state result: `false` = Radarr is reachable and confirms there is
+  // NO file, so we SKIP the flip (this is the forgery case we reject); `true` =
+  // confirmed downloaded, proceed; `null` = we couldn't determine it (the HD/4K
+  // variant isn't configured, or Radarr is unreachable) so we proceed optimistically
+  // and let the periodic library sync reconcile availability later. Proceeding on
+  // null is safe against forgery because an attacker cannot force a null result
+  // without first breaking the operator's own Radarr connectivity.
+  const downloaded = await isMovieDownloadedInRadarr(tmdbId, is4k ? "4k" : "hd");
+  if (downloaded === false) {
+    console.warn(`[webhook/radarr] Download event for tmdbId=${tmdbId} not confirmed downloaded in Radarr; skipping status flip.`);
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
+  }
+
   // Advisory lock 1001,1 prevents a concurrent Radarr sync from overwriting the wanted table mid-transaction
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
   await prisma.$transaction(async (tx) => {
@@ -180,8 +204,10 @@ export async function POST(req: NextRequest) {
   after(async () => {
     await scheduleLibraryScan("movie", tmdbId, is4k ? "4k" : "hd");
 
+    // Scope by is4k to the variant that fired this webhook: an HD Download must not
+    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
     const pending = await prisma.mediaRequest.findMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "AVAILABLE", notifiedAvailable: false },
+      where: { tmdbId, mediaType: "MOVIE", is4k, status: "AVAILABLE", notifiedAvailable: false },
       select: { id: true, requestedBy: true, title: true, mediaType: true, posterPath: true, tmdbId: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;

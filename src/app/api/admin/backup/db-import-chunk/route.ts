@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -71,6 +72,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
   }
 
+  // Rate-limit the restore *attempt*, not each chunk: consume one slot when the
+  // client opens the session (chunk 0). A real backup is split into many 16 MiB
+  // chunks, so a per-chunk limiter would burn the bucket and 429 the restore
+  // partway through. Bounds how often a compromised admin can drive the
+  // destructive TRUNCATE+INSERT / PBKDF2 import.
+  if (chunkIndex === 0 && !checkRateLimit(`admin-db-import:${session.user.id}`, 5, 60 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many restore attempts — try again later." }, { status: 429 });
+  }
+
   // Header-only size check BEFORE claiming the single upload slot. startSession()
   // mkdtemps a temp dir and occupies the one global slot; an oversized chunk 0 that
   // bailed after it would strand that slot (409 for everyone else) until the 30-min TTL.
@@ -123,6 +133,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
     if (e.kind === "out-of-order") {
       return NextResponse.json({ error: `Out-of-order chunk. Next expected index: ${e.expected}.` }, { status: 409 });
+    }
+    if (e.kind === "size-mismatch") {
+      return NextResponse.json(
+        { error: `Upload incomplete: received ${e.received} of ${e.expected} declared bytes. Restart from chunk 0.` },
+        { status: 400 },
+      );
     }
     return NextResponse.json({ error: "Chunk exceeds declared file size." }, { status: 413 });
   }

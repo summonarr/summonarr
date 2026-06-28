@@ -42,6 +42,12 @@ function getDummyHash(): Promise<string> {
   return dummyHashPromise;
 }
 
+// Warm the dummy hash at module load so the FIRST failure-path call doesn't pay
+// an extra scrypt (getDummyHash + verify ≈ 2x) before the cache fills — that
+// one-time doubling is the only timing divergence between the real-verify and
+// dummy-verify paths. Errors are irrelevant here; the lazy path recomputes.
+void getDummyHash().catch(() => {});
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(SCRYPT_SALT_BYTES);
   const key = await scrypt(password, salt, SCRYPT_KEYLEN, {

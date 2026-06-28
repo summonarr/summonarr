@@ -17,16 +17,17 @@ import { PushNotifications } from "@/components/layout/push-notifications";
 
 async function signOutAndRedirect(callbackUrl: string) {
   try {
-    await fetch("/api/auth/sign-out", { method: "POST", credentials: "include" });
+    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
     // ignore — best-effort
   }
-  window.location.href = callbackUrl;
+  window.location.href = withBasePath(callbackUrl);
 }
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
+import { withBasePath } from "@/lib/base-path";
 
 type MediaFilter = "all" | "movie" | "tv";
 
@@ -169,6 +170,10 @@ export function SearchBar({
           ref={inputRef}
           type="search"
           aria-label="Search"
+          role="combobox"
+          aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
+          aria-controls="header-search-results"
+          aria-autocomplete="list"
           placeholder="Search movies, TV, requests…"
           value={query}
           onChange={(e) => {
@@ -198,6 +203,9 @@ export function SearchBar({
 
       {open && (query.trim() || results.length > 0) && (
         <div
+          id="header-search-results"
+          role="listbox"
+          aria-label="Search results"
           style={{
             position: "absolute",
             top: "calc(100% + 6px)",
@@ -258,6 +266,8 @@ export function SearchBar({
               return (
                 <button
                   key={`${media.mediaType}-${media.id}`}
+                  role="option"
+                  aria-selected={false}
                   onClick={() => handleSelect(media)}
                   className="flex items-center gap-2.5 w-full text-left transition-colors"
                   style={{
@@ -436,7 +446,7 @@ export function Header() {
         {session && <PushNotifications />}
 
         <DropdownMenu>
-          <DropdownMenuTrigger className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
+          <DropdownMenuTrigger aria-label="Account menu" className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
             <Avatar
               className="cursor-pointer"
               style={{

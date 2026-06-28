@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 export function ResyncLibraryButton() {
   const router = useRouter();
@@ -17,20 +18,24 @@ export function ResyncLibraryButton() {
     setResult(null);
     try {
       const [plexRes, jellyfinRes] = await Promise.all([
-        fetch("/api/sync/plex", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
-        fetch("/api/sync/jellyfin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
+        fetch(withBasePath("/api/sync/plex"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
+        fetch(withBasePath("/api/sync/jellyfin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
       ]);
 
-      const plexData   = await plexRes.json()   as { scanned?: { movies: number; tv: number }; error?: string };
-      const jellyData  = await jellyfinRes.json() as { scanned?: { movies: number; tv: number }; error?: string };
+      const plexData   = await plexRes.json().catch(() => null)   as { scanned?: { movies: number; tv: number }; error?: string } | null;
+      const jellyData  = await jellyfinRes.json().catch(() => null) as { scanned?: { movies: number; tv: number }; error?: string } | null;
 
-      const err = plexData.error ?? jellyData.error;
+      const err =
+        plexData?.error ??
+        jellyData?.error ??
+        (!plexRes.ok ? `Plex sync failed (${plexRes.status})` : undefined) ??
+        (!jellyfinRes.ok ? `Jellyfin sync failed (${jellyfinRes.status})` : undefined);
       if (err) {
         setStatus("error");
         setResult(err);
       } else {
-        const plexCount   = (plexData.scanned?.movies  ?? 0) + (plexData.scanned?.tv  ?? 0);
-        const jellyCount  = (jellyData.scanned?.movies ?? 0) + (jellyData.scanned?.tv ?? 0);
+        const plexCount   = (plexData?.scanned?.movies  ?? 0) + (plexData?.scanned?.tv  ?? 0);
+        const jellyCount  = (jellyData?.scanned?.movies ?? 0) + (jellyData?.scanned?.tv ?? 0);
         setStatus("done");
         setResult(`Plex ${plexCount}, Jellyfin ${jellyCount} items`);
         const search = searchParams.toString();

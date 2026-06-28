@@ -47,6 +47,7 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   RATINGS_CACHE_CLEAR: "system",
   PLAY_HISTORY_BACKFILL: "system",
   PLAY_HISTORY_DELETE: "system",
+  PLAY_HISTORY_EXPORT: "admin",
 };
 
 export interface ActionLabel {
@@ -87,6 +88,7 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   RATINGS_CACHE_CLEAR:   { label: "Ratings Cache Cleared",     color: "bg-purple-900/50 text-purple-400",      icon: "sync" },
   PLAY_HISTORY_BACKFILL: { label: "Play History Backfilled",   color: "bg-purple-900/50 text-purple-400",      icon: "sync" },
   PLAY_HISTORY_DELETE:   { label: "Play History Deleted",      color: "bg-red-900/50 text-red-400",            icon: "delete" },
+  PLAY_HISTORY_EXPORT:   { label: "Play History Exported",     color: "bg-indigo-900/50 text-indigo-400",      icon: "export" },
   VOTE_DISMISS_ALL:      { label: "Votes Dismissed",           color: "bg-zinc-700/50 text-zinc-400",          icon: "approve" },
   FIX_MATCH:             { label: "Library Match Fixed",       color: "bg-blue-900/50 text-blue-400",          icon: "sync" },
   SERVER_USERS_BULK:     { label: "Bulk Media-Server Action",  color: "bg-blue-900/50 text-blue-400",          icon: "role" },

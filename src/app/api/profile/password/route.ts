@@ -24,8 +24,8 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "New password is required" }, { status: 400 });
   }
 
-  if (newPassword.length < 8) {
-    return NextResponse.json({ error: "New password must be at least 8 characters" }, { status: 400 });
+  if (newPassword.length < 12) {
+    return NextResponse.json({ error: "New password must be at least 12 characters" }, { status: 400 });
   }
 
   if (newPassword.length > MAX_PASSWORD_LENGTH) {
@@ -39,8 +39,13 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
 
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  // C-3: SSO accounts have no passwordHash. Hard-refuse password set so a
-  // shadow local password can't be created and used to bypass the IdP.
+  // SSO-provisioned accounts (Plex, Jellyfin, OIDC) authenticate against their
+  // upstream identity provider and never have a local passwordHash. Allowing a
+  // password to be set on such an account would create a "shadow" local credential
+  // that bypasses the IdP entirely: anyone knowing that password could sign in via
+  // the local-credentials provider without ever proving control of the SSO identity,
+  // defeating provider-side controls (MFA, account disable, password rotation).
+  // Hard-refuse the operation for any account with no existing passwordHash.
   if (user.passwordHash === null) {
     return NextResponse.json(
       { error: "Local passwords are not available for SSO accounts. Sign in with your provider." },
@@ -62,7 +67,13 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   const now = new Date();
 
   await prisma.$transaction([
-    // passwordChangedAt + sessionsRevokedAt: cross-replica JWT invalidation via auth.ts refreshToken()
+    // Stamp passwordChangedAt + sessionsRevokedAt so that any still-valid session
+    // JWT issued before this change is invalidated everywhere: the session-refresh
+    // path (auth.ts) treats a token whose issue time predates these cutoffs as
+    // revoked, so the change takes effect across all replicas without needing
+    // server-local session state. The deleteMany below removes the per-device
+    // AuthSession rows; the cutoffs are the DB-checked backstop for any JWT that
+    // hasn't yet hit a refresh.
     prisma.user.update({
       where: { id: session.user.id },
       data: {

@@ -130,7 +130,8 @@ export type AppendError =
   | { kind: "session-mismatch" }
   | { kind: "expired" }
   | { kind: "out-of-order"; expected: number }
-  | { kind: "size-overflow"; max: number };
+  | { kind: "size-overflow"; max: number }
+  | { kind: "size-mismatch"; expected: number; received: number };
 
 type AppendResult =
   | { ok: true; received: number; total: number; bytesWritten: number; complete: boolean }
@@ -164,6 +165,19 @@ async function appendChunkUnsafe(
   active.receivedChunks += 1;
   active.bytesWritten += data.byteLength;
   active.expiresAt = Date.now() + SESSION_TTL_MS;
+
+  // On the final declared chunk the assembled file must match the declared
+  // size exactly. The overflow guard above rejects too-many bytes; this rejects
+  // a SHORT upload (client truncated, or sent fewer/smaller chunks than
+  // declared), which would otherwise feed an incomplete ciphertext straight
+  // into the importer.
+  if (active.receivedChunks === active.totalChunks && active.bytesWritten !== active.totalSize) {
+    const expected = active.totalSize;
+    const received = active.bytesWritten;
+    await cleanupSession(active);
+    active = null;
+    return { ok: false, error: { kind: "size-mismatch", expected, received } };
+  }
 
   return {
     ok: true,

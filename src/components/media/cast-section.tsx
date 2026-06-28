@@ -7,6 +7,7 @@ import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, 
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";
 import type { CastMember, PersonDetails, PersonCredit } from "@/lib/tmdb-types";
+import { withBasePath } from "@/lib/base-path";
 
 type CreditReqState = "idle" | "confirm" | "loading" | "requested" | "error";
 
@@ -36,10 +37,10 @@ export function CastSection({ cast }: CastSectionProps) {
       const mt = credit.mediaType === "movie" ? "MOVIE" : "TV";
       let token = (credit as unknown as Record<string, unknown>).requestToken as string | undefined;
       if (!token) {
-        const tokenRes = await fetch(`/api/requests/token?tmdbId=${credit.id}&mediaType=${mt}`);
+        const tokenRes = await fetch(withBasePath(`/api/requests/token?tmdbId=${credit.id}&mediaType=${mt}`));
         if (tokenRes.ok) token = (await tokenRes.json()).token;
       }
-      const res = await fetch("/api/requests", {
+      const res = await fetch(withBasePath("/api/requests"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tmdbId: credit.id, mediaType: mt, _token: token }),
@@ -85,7 +86,7 @@ export function CastSection({ cast }: CastSectionProps) {
     setPersonData(null);
     setLoading(true);
     try {
-      const res = await fetch(`/api/person/${member.id}`);
+      const res = await fetch(withBasePath(`/api/person/${member.id}`));
       if (res.ok) setPersonData(await res.json());
     } finally {
       setLoading(false);

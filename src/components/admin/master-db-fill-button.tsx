@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Database, Loader2, AlertTriangle } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "error";
 
@@ -18,12 +19,12 @@ export function MasterDbFillButton() {
     let jellyCount = 0;
     try {
       const [plexRes, jellyRes] = await Promise.all([
-        fetch("/api/sync/plex", {
+        fetch(withBasePath("/api/sync/plex"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ full: true }),
         }),
-        fetch("/api/sync/jellyfin", {
+        fetch(withBasePath("/api/sync/jellyfin"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ full: true }),
@@ -50,7 +51,7 @@ export function MasterDbFillButton() {
 
     setPhase("phase2");
     try {
-      const warmRes = await fetch("/api/admin/library-warm", { method: "POST" });
+      const warmRes = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
       const warmData = await warmRes.json() as { fetched?: number; backfilled?: number; skipped?: number; error?: string };
       if (warmData.error) {
         setPhase("error");

@@ -11,6 +11,7 @@ import { RequestActions } from "./request-actions";
 import { Chip } from "@/components/ui/design";
 import type { ChipTone } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
+import { withBasePath } from "@/lib/base-path";
 
 const STATUS_TONE: Record<string, ChipTone> = {
   PENDING: "pending",
@@ -111,6 +112,8 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [confirmingApprove, setConfirmingApprove] = useState(false);
 
   const allPendingIds = requests.flatMap((g) =>
     g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
@@ -147,20 +150,25 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
 
   async function batchAction(status: "APPROVED" | "DECLINED", adminNote?: string) {
     setBatchLoading(true);
+    setBatchError(null);
     try {
-      const res = await fetch("/api/requests/batch", {
+      const res = await fetch(withBasePath("/api/requests/batch"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: Array.from(selected), status, adminNote: adminNote || undefined }),
       });
       if (!res.ok) {
-        console.error("[admin] batch action failed:", res.status);
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setBatchError(data?.error ?? `Request failed (${res.status})`);
         return;
       }
       setSelected(new Set());
       setShowBatchNote(null);
       setBatchNote("");
+      setConfirmingApprove(false);
       router.refresh();
+    } catch {
+      setBatchError("Network error — please try again");
     } finally {
       setBatchLoading(false);
     }
@@ -266,11 +274,50 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 Decline {selected.size}
               </button>
             </>
+          ) : confirmingApprove ? (
+            <>
+              <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
+                Approve {selected.size} request{selected.size === 1 ? "" : "s"}?
+              </span>
+              <button
+                type="button"
+                onClick={() => setConfirmingApprove(false)}
+                disabled={batchLoading}
+                style={{
+                  ...actionBtn,
+                  background: "var(--ds-bg-2)",
+                  color: "var(--ds-fg-muted)",
+                  borderColor: "var(--ds-border)",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => batchAction("APPROVED")}
+                disabled={batchLoading}
+                style={{
+                  ...actionBtn,
+                  background: "var(--ds-success)",
+                  color: "oklch(0.14 0 0)",
+                }}
+              >
+                {batchLoading ? (
+                  <Loader2
+                    className="animate-spin"
+                    style={{ width: 12, height: 12 }}
+                  />
+                ) : (
+                  <Check style={{ width: 12, height: 12 }} />
+                )}
+                Confirm approve
+              </button>
+            </>
           ) : (
             <>
               <button
                 type="button"
-                onClick={() => batchAction("APPROVED")}
+                onClick={() => setConfirmingApprove(true)}
                 disabled={batchLoading}
                 style={{
                   ...actionBtn,
@@ -318,6 +365,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 Clear
               </button>
             </>
+          )}
+          {batchError && (
+            <span
+              className="w-full"
+              style={{ fontSize: 12, color: "var(--ds-danger)" }}
+            >
+              {batchError}
+            </span>
           )}
         </div>
       )}

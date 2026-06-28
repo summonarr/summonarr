@@ -11,6 +11,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { IpInfo } from "@/components/admin/ip-info";
+import { withBasePath } from "@/lib/base-path";
 import {
   ActivityCard,
   Avatar,
@@ -398,7 +399,7 @@ function DetailRow({
         <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
           {play.tmdbId && (
             <Link
-              href={`/admin/activity/media/${play.tmdbId}`}
+              href={`/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`}
               style={{
                 fontSize: 11.5,
                 padding: "5px 11px",
@@ -437,11 +438,13 @@ function DetailRow({
 function DeleteConfirm({
   row,
   deleting,
+  error,
   onConfirm,
   onCancel,
 }: {
   row: HistoryRow;
   deleting: boolean;
+  error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -497,6 +500,19 @@ function DeleteConfirm({
           </span>{" "}
           will be permanently removed from history.
         </div>
+        {error && (
+          <div
+            role="alert"
+            style={{
+              fontSize: 12,
+              color: "var(--ds-danger)",
+              marginBottom: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            {error}
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
             onClick={onCancel}
@@ -590,6 +606,7 @@ export function ActivityHistoryTable({
 
   const [deleteRow, setDeleteRow] = useState<HistoryRow | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -624,13 +641,13 @@ export function ActivityHistoryTable({
     // payload to the array shape the setters expect; non-array responses are
     // silently dropped (empty dropdown is preferable to a render crash).
     const ac = new AbortController();
-    fetch("/api/play-history?distinct=platforms", { signal: ac.signal })
+    fetch(withBasePath("/api/play-history?distinct=platforms"), { signal: ac.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((data: unknown) => {
         if (Array.isArray(data)) setPlatforms(data as string[]);
       })
       .catch(() => {});
-    fetch("/api/play-history?distinct=users", { signal: ac.signal })
+    fetch(withBasePath("/api/play-history?distinct=users"), { signal: ac.signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((data: unknown) => {
         if (Array.isArray(data)) setUsers(data as MediaServerUserOption[]);
@@ -688,7 +705,7 @@ export function ActivityHistoryTable({
     params.set("page", String(page));
     params.set("limit", String(limit));
 
-    fetch(`/api/play-history?${params.toString()}`, {
+    fetch(withBasePath(`/api/play-history?${params.toString()}`), {
       signal: controller.signal,
     })
       .then((r) => {
@@ -723,8 +740,9 @@ export function ActivityHistoryTable({
   async function confirmDelete() {
     if (!deleteRow) return;
     setDeleting(true);
+    setDeleteError(null);
     try {
-      const res = await fetch(`/api/play-history/${deleteRow.id}`, {
+      const res = await fetch(withBasePath(`/api/play-history/${deleteRow.id}`), {
         method: "DELETE",
       });
       if (res.ok) {
@@ -732,7 +750,11 @@ export function ActivityHistoryTable({
         setTotal((t) => Math.max(0, t - 1));
         setExpandedId(null);
         setDeleteRow(null);
+      } else {
+        setDeleteError("Couldn't delete this play record. Please try again.");
       }
+    } catch {
+      setDeleteError("Couldn't delete this play record. Please try again.");
     } finally {
       setDeleting(false);
     }
@@ -741,7 +763,7 @@ export function ActivityHistoryTable({
   function exportAs(format: "csv" | "json") {
     const params = buildFilterParams();
     params.set("format", format);
-    window.open(`/api/play-history/export?${params.toString()}`, "_blank");
+    window.open(withBasePath(`/api/play-history/export?${params.toString()}`), "_blank");
   }
 
   function clearFilters() {
@@ -1584,8 +1606,12 @@ export function ActivityHistoryTable({
         <DeleteConfirm
           row={deleteRow}
           deleting={deleting}
+          error={deleteError}
           onConfirm={confirmDelete}
-          onCancel={() => setDeleteRow(null)}
+          onCancel={() => {
+            setDeleteRow(null);
+            setDeleteError(null);
+          }}
         />
       )}
     </div>

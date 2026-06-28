@@ -9,30 +9,36 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 
 const BATCH = 5;
 
-async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped: number }> {
+async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped: number; quotaExhausted: boolean }> {
   let warmed = 0;
   let skipped = 0;
+  // Once MDBList reports its daily quota is exhausted, every further request just
+  // burns a 429 and re-confirms the same exhaustion. Stop the remaining batches
+  // rather than hammering the upstream for the rest of the run.
+  let quotaExhausted = false;
 
-  for (let i = 0; i < items.length; i += BATCH) {
+  for (let i = 0; i < items.length && !quotaExhausted; i += BATCH) {
     const batch = items.slice(i, i + BATCH);
     const results = await Promise.all(
       batch.map(async (item) => {
         const mdb = await getMdblistRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => ({ found: false as const, keyConfigured: true }));
-        if (mdb.found) return true;
+        if (mdb.found) return { found: true, quotaExhausted: false };
+        if ("quotaExhausted" in mdb && mdb.quotaExhausted) return { found: false, quotaExhausted: true };
         if (!mdb.keyConfigured) {
           const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => ({ found: false as const, keyConfigured: true }));
-          return omdb.found;
+          return { found: omdb.found, quotaExhausted: false };
         }
-        return false;
+        return { found: false, quotaExhausted: false };
       })
     );
-    for (const found of results) {
-      if (found) warmed++;
+    for (const r of results) {
+      if (r.found) warmed++;
       else skipped++;
+      if (r.quotaExhausted) quotaExhausted = true;
     }
   }
 
-  return { warmed, skipped };
+  return { warmed, skipped, quotaExhausted };
 }
 
 export async function POST(request: NextRequest) {
@@ -75,10 +81,10 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      const { warmed, skipped } = await warmBatch(all);
+      const { warmed, skipped, quotaExhausted } = await warmBatch(all);
       const durationMs = Date.now() - startTime;
 
-      return NextResponse.json({ total: all.length, warmed, skipped, durationMs });
+      return NextResponse.json({ total: all.length, warmed, skipped, quotaExhausted, durationMs });
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   ));

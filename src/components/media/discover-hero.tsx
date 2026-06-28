@@ -9,6 +9,7 @@ import {
   PlayCircle,
   MonitorPlay,
   Clock,
+  CheckCircle,
   Play,
   ChevronRight,
 } from "@/components/icons";
@@ -157,6 +158,42 @@ export function DiscoverHero({
               >
                 <Clock style={{ width: 9, height: 9 }} />
                 Queued
+              </span>
+            )}
+          {/* 4K chips — arr4k* are only populated when the viewer has 4K access (enrichment gate) */}
+          {media.arr4kAvailable && (
+            <span
+              className="ds-chip"
+              style={{
+                paddingLeft: 5,
+                paddingRight: 6,
+                background: "var(--ds-accent-soft)",
+                color: "var(--ds-accent)",
+                border: "1px solid var(--ds-accent-ring)",
+              }}
+            >
+              <CheckCircle style={{ width: 9, height: 9 }} />
+              4K
+            </span>
+          )}
+          {!media.arr4kAvailable && media.arr4kPending && (
+            <span
+              className="ds-chip ds-chip-pending"
+              style={{ paddingLeft: 5, paddingRight: 6 }}
+            >
+              <Clock style={{ width: 9, height: 9 }} />
+              4K Queued
+            </span>
+          )}
+          {!media.plexAvailable &&
+            !media.jellyfinAvailable &&
+            media.requested && (
+              <span
+                className="ds-chip ds-chip-accent"
+                style={{ paddingLeft: 5, paddingRight: 6 }}
+              >
+                <CheckCircle style={{ width: 9, height: 9 }} />
+                Requested
               </span>
             )}
         </div>

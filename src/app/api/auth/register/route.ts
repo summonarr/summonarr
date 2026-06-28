@@ -7,15 +7,39 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
+import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 // In-process mutex: DB advisory lock is the real guard, but this catches obvious double-submits quickly
 let registrationInFlight = false;
 
 export async function POST(req: NextRequest) {
-  const origin = req.headers.get("origin") ?? "";
-  const allowedOrigin = (process.env.AUTH_URL ?? "").replace(/\/$/, "");
-  if (!allowedOrigin || (origin && origin !== allowedOrigin)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  // CSRF Origin check. A native/bearer client (custom Authorization / X-Summonarr-Client
+  // headers a cross-origin page can't forge) carries no ambient-cookie CSRF risk and
+  // legitimately sends no browser Origin — exempt it, mirroring the proxy.ts CSRF skip.
+  // For everyone else, require a matching Origin: a missing Origin is now REJECTED
+  // (previously a blank Origin slipped through), closing the login-CSRF gap.
+  const isNativeClient =
+    parseBearerToken(req.headers.get("authorization")) !== null ||
+    hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
+  if (!isNativeClient) {
+    const origin = req.headers.get("origin") ?? "";
+    // Mirror proxy.ts's trusted-origin set: AUTH_URL plus any comma-separated
+    // AUTH_TRUSTED_ORIGIN entries, normalized to bare origins. Reading only
+    // AUTH_URL here would 403 a legitimately-configured additional origin that
+    // the proxy already trusts.
+    const allowed = new Set<string>();
+    for (const raw of [process.env.AUTH_URL, ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(",")]) {
+      const trimmed = raw?.trim();
+      if (!trimmed) continue;
+      try { allowed.add(new URL(trimmed).origin); } catch { }
+    }
+    let originOk = false;
+    if (origin) {
+      try { originOk = allowed.has(new URL(origin).origin); } catch { }
+    }
+    if (allowed.size === 0 || !originOk) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
   }
 
   const { enabled } = await getMaintenanceStatus();
@@ -66,8 +90,8 @@ export async function POST(req: NextRequest) {
   }
   const sanitizedName = sanitizeOptional(name);
 
-  if (password.length < 8) {
-    return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
+  if (password.length < 12) {
+    return NextResponse.json({ error: "Password must be at least 12 characters" }, { status: 400 });
   }
 
   if (password.length > MAX_PASSWORD_LENGTH) {
@@ -112,6 +136,22 @@ export async function POST(req: NextRequest) {
         select: { id: true, email: true, name: true, role: true },
       });
       await tx.setting.create({ data: { key: "setup_completed_at", value: new Date().toISOString() } });
+      // Default fresh installs to the safer Discord posture: require a Discord
+      // user to have a linked Summonarr account before they can create requests
+      // from the guild, rather than letting any guild member request anonymously.
+      // This is seeded exactly once, here in the first-admin bootstrap, because an
+      // insecure-by-default would let unlinked Discord members file requests on a
+      // brand-new instance before the operator has reviewed the setting. Existing
+      // installs never re-enter this first-admin block, so their already-saved (or
+      // deliberately absent) value is left untouched — only genuinely new installs
+      // pick up this default, guaranteeing no behavior change for upgrades.
+      // createMany+skipDuplicates makes the seed idempotent: a pre-existing key
+      // is silently ignored instead of raising a unique-constraint violation that
+      // would abort and roll back this whole registration transaction (guardrail 23).
+      await tx.setting.createMany({
+        data: [{ key: "discordRequireLinkedAccount", value: "true" }],
+        skipDuplicates: true,
+      });
       return created;
     });
   } catch (err) {

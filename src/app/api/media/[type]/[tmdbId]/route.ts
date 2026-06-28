@@ -13,6 +13,7 @@ import {
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Lightweight projection for related/collection rails on native clients — the
 // app only needs poster + label for these, not the full detail payload.
@@ -35,6 +36,10 @@ export const GET = withAuth(async (
   { params }: { params: Promise<{ type: string; tmdbId: string }> },
   session,
 ) => {
+  if (!checkRateLimit(`media:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const { type, tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
 

@@ -54,6 +54,23 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ error: "plex pin poll failed" }, { status: 502 });
   }
 
+  // Returning a Plex authToken in a GET response body is normally something to
+  // avoid (tokens in URLs/GET responses are prone to caching and logging), but it
+  // is required and safe here. The Plex link flow is a PIN-claim handshake: the
+  // client page (src/app/auth/plex/done/page.tsx) opens plex.tv so the user signs
+  // in and claims the PIN, then polls this GET until the authToken materializes,
+  // and finally posts that token back to link the Plex account. So the token MUST
+  // be surfaced on GET, but only AFTER the PIN has actually been claimed. Plex
+  // itself enforces that ordering: it returns `authToken: null` on every poll
+  // before the user completes sign-in, and only emits the real token once the PIN
+  // is claimed. Forwarding `data.authToken ?? null` therefore reveals nothing on
+  // intermediate polls — there is no token to leak until the user has authorized
+  // it. We additionally set Cache-Control: no-store so that once the real token IS
+  // returned, no intermediary proxy or the browser caches it where it could later
+  // be replayed or scraped.
   const data = (await res.json()) as { authToken?: string | null };
-  return NextResponse.json({ authToken: data.authToken ?? null });
+  return NextResponse.json(
+    { authToken: data.authToken ?? null },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 });

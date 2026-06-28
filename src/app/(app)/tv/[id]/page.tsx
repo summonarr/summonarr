@@ -22,6 +22,7 @@ import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { isFeatureEnabled } from "@/lib/features";
 
 export default async function TVDetailPage({
   params,
@@ -89,7 +90,6 @@ export default async function TVDetailPage({
   const arrPending        = !!sonarrWanted;
   const requested         = !!userRequest;
   const tvdbId = tvdbRequest?.tvdbId ?? null;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
   const [has4k, userRequest4k, request4kAllRow, sonarr4kAvailable, sonarr4kWanted] = await Promise.all([
     isArrConfigured("sonarr", "4k"),
@@ -110,7 +110,14 @@ export default async function TVDetailPage({
   const arr4kAvailable = show4k && !!sonarr4kAvailable;
   const arr4kPending = show4k && !!sonarr4kWanted;
 
-  const suggestions = await attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true });
+  const [suggestions, votesEnabled, issuesEnabled, plexEnabled, jellyfinEnabled] = await Promise.all([
+    attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true, show4k }),
+    isFeatureEnabled("feature.page.votes"),
+    isFeatureEnabled("feature.page.issues"),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -291,9 +298,10 @@ export default async function TVDetailPage({
                   requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                   requested={requested4k}
                   available={arr4kAvailable}
+                  pending={arr4kPending}
                 />
               )}
-              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
+              {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
                   tmdbId={media.id}
                   tvdbId={tvdbId}
@@ -302,7 +310,7 @@ export default async function TVDetailPage({
                   posterPath={media.posterPath}
                 />
               )}
-              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
+              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
                 <VoteDeleteButton
                   tmdbId={media.id}
                   mediaType="TV"

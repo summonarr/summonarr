@@ -12,6 +12,7 @@ import { notifyUserIssueResolved } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -21,6 +22,9 @@ export const PATCH = withIssueAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   const { id } = await params;
 
   const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: boolean }>(req, 16384);

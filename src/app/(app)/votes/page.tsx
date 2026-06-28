@@ -5,11 +5,12 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 import Image from "next/image";
+import Link from "next/link";
 import { VoteActions } from "@/components/votes/vote-actions";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
-import type { Prisma } from "@/generated/prisma";
+import { Prisma } from "@/generated/prisma";
 import { Chip, PageHeader } from "@/components/ui/design";
 
 const PAGE_SIZE = 40;
@@ -47,12 +48,20 @@ export default async function VotesPage({
     take: PAGE_SIZE,
   });
 
-  const totalGrouped = await prisma.deletionVote.groupBy({
-    by: ["tmdbId", "mediaType"],
-    where,
-    _count: { id: true },
-  });
-  const totalPages = Math.max(1, Math.ceil(totalGrouped.length / PAGE_SIZE));
+  // Count distinct (tmdbId, mediaType) groups for pagination without
+  // materializing one row per group into memory (which scales with the number
+  // of distinct voted titles). Mirrors the `where` above with parameterized
+  // fragments.
+  const conditions: Prisma.Sql[] = [];
+  if (mine && session) conditions.push(Prisma.sql`"userId" = ${session.user.id}`);
+  if (q) conditions.push(Prisma.sql`"title" ILIKE ${`%${q}%`}`);
+  const whereSql = conditions.length
+    ? Prisma.sql`WHERE ${Prisma.join(conditions, " AND ")}`
+    : Prisma.empty;
+  const [{ count }] = await prisma.$queryRaw<{ count: bigint }[]>(
+    Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
+  );
+  const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
 
   // Batched lookup: 2 queries total (was 3×PAGE_SIZE = up to 120 round-trips/render).
   // Split by mediaType so each becomes a `tmdbId: { in: [...] }` predicate that
@@ -176,6 +185,7 @@ export default async function VotesPage({
         <div className="flex flex-col" style={{ gap: 8 }}>
           {items.map((item) => {
             const poster = posterUrl(item.posterPath);
+            const href = `/${item.mediaType === "MOVIE" ? "movie" : "tv"}/${item.tmdbId}`;
             return (
               <div
                 key={`${item.mediaType}-${item.tmdbId}`}
@@ -188,7 +198,8 @@ export default async function VotesPage({
                   borderRadius: 8,
                 }}
               >
-                <div
+                <Link
+                  href={href}
                   className="relative shrink-0 overflow-hidden"
                   style={{
                     width: 56,
@@ -213,7 +224,7 @@ export default async function VotesPage({
                       No poster
                     </div>
                   )}
-                </div>
+                </Link>
 
                 <div className="flex-1 min-w-0">
                   <div
@@ -222,9 +233,15 @@ export default async function VotesPage({
                   >
                     <h3
                       className="font-medium truncate"
-                      style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}
+                      style={{ fontSize: 14, margin: 0 }}
                     >
-                      {item.title}
+                      <Link
+                        href={href}
+                        className="hover:underline"
+                        style={{ color: "var(--ds-fg)" }}
+                      >
+                        {item.title}
+                      </Link>
                     </h3>
                     <Chip>{item.mediaType === "MOVIE" ? "MOVIE" : "TV"}</Chip>
                   </div>

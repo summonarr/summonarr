@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 function safeUrl(v: string): string | null {
   try {
     const u = new URL(v);
-    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : null;
+    return u.protocol === "https:" ? u.toString() : null;
   } catch {
     return null;
   }

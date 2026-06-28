@@ -12,6 +12,10 @@ const MAX_CONNECTIONS_PER_USER = 5;
 const MAX_TOTAL_CONNECTIONS = SSE_MAX_LISTENERS;
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MAX_CONNECTION_DURATION_MS = 3_600_000;
+// Re-validate the session against the DB on this cadence so a revoked or role-demoted
+// session stops receiving events (and admin-only streams) mid-connection rather than
+// riding the original connect-time authorization until the 1h hard cap.
+const REAUTH_INTERVAL_MS = 60_000;
 
 const connectionCounts = new Map<string, number>();
 let totalConnections = 0;
@@ -48,11 +52,14 @@ export async function GET() {
   if (maint) return maint;
 
   const userId = session.user.id;
-  const isSystemAdmin = session.user.role === "ADMIN";
+  // Mutable so the periodic re-auth below can demote delivery scope live: a session
+  // demoted from ADMIN / stripped of MANAGE_ISSUES stops receiving admin/issue events
+  // on the next re-auth tick instead of at the next reconnect.
+  let isSystemAdmin = session.user.role === "ADMIN";
   // Bitmask-authoritative (not role) so a demoted ISSUE_ADMIN with MANAGE_ISSUES
   // cleared stops receiving issue:* / issuemessage:* events. ADMIN still passes via
   // isSystemAdmin above, so this only governs the issue-event bypass.
-  const isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  let isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
 
   if (!incrementConnection(userId)) {
     return new Response("Too many SSE connections", { status: 429 });
@@ -84,6 +91,7 @@ export async function GET() {
   let listener: ((event: SSEEvent) => void) | null = null;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+  let reauthTimer: ReturnType<typeof setInterval> | null = null;
   let cleaned = false;
 
   function cleanup(controller?: ReadableStreamDefaultController) {
@@ -92,6 +100,7 @@ export async function GET() {
     if (listener) sseEmitter.off("event", listener);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (maxDurationTimer) clearTimeout(maxDurationTimer);
+    if (reauthTimer) clearInterval(reauthTimer);
     decrementConnection(userId);
     try { controller?.close(); } catch { }
   }
@@ -135,6 +144,23 @@ export async function GET() {
       maxDurationTimer = setTimeout(() => {
         cleanup(controller);
       }, MAX_CONNECTION_DURATION_MS);
+
+      reauthTimer = setInterval(() => {
+        // Re-run the DB-checked auth against the original request's cookie/bearer.
+        // A revoked/expired session yields a NextResponse → tear down; a still-valid
+        // session refreshes the admin/issue delivery scope so a demotion takes effect.
+        void requireAuth()
+          .then((fresh) => {
+            if (cleaned) return;
+            if (fresh instanceof NextResponse || fresh.user.id !== userId) {
+              cleanup(controller);
+              return;
+            }
+            isSystemAdmin = fresh.user.role === "ADMIN";
+            isIssueAdmin = hasPermission(fresh.user.permissions, Permission.MANAGE_ISSUES);
+          })
+          .catch(() => cleanup(controller));
+      }, REAUTH_INTERVAL_MS);
     },
     cancel() {
       cleanup();

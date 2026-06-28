@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { auth } from "@/lib/auth";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
@@ -57,16 +57,20 @@ async function syncPlex(request: NextRequest) {
     );
   }
 
-  // Fire-and-forget: episode cache is best-effort and must not block the main library write
+  // Fire-and-forget: episode cache is best-effort and must not block the main library write.
+  // Full replace: clear unconditionally then insert. getPlexTVEpisodes throws on a fetch
+  // failure (rejects → .catch, no clear), so an empty result is a genuinely empty library
+  // and the stale episode ownership must be cleared rather than left behind.
   getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
     .then(async (episodes) => {
-      if (episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
         // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
         // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-        await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
+        if (episodes.length > 0) {
+          await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
+        }
       }, { timeout: BATCH_TX_TIMEOUT });
     })
     .catch((err) => console.error("[sync/plex] Episode cache failed:", err));
@@ -214,11 +218,14 @@ async function syncPlex(request: NextRequest) {
     }
   }
 
-  const session = await auth();
-  if (session?.user) {
+  // DB-checked attribution (bearer-first then cookie) so a stale/revoked admin
+  // JWT can't mis-attribute the audit row. Access control stays isCronAuthorized
+  // (in POST above); this only attributes the admin-triggered run.
+  const attributionClaims = await readActiveSummonarrSessionFromRequest(request);
+  if (attributionClaims) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.id,
+      userId: attributionClaims.id,
+      userName: attributionClaims.name ?? attributionClaims.id,
       action: "LIBRARY_SYNC",
       target: "sync:plex",
       details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length },

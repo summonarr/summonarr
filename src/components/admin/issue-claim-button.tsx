@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, UserCheck, UserX, X } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface IssueClaimButtonProps {
   issueId: string;
@@ -26,7 +27,7 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
     setError(null);
     setConfirmingTakeover(false);
     try {
-      const res = await fetch(`/api/issues/${issueId}/claim`, { method: "POST" });
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/claim`), { method: "POST" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error ?? "Failed");

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface ServerUser {
   id: string;
@@ -53,7 +54,7 @@ function DownloadToggle({
     setOptimistic(next);
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/server-users/${userId}`, {
+      const res = await fetch(withBasePath(`/api/admin/server-users/${userId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ downloadsEnabled: next }),
@@ -107,26 +108,37 @@ function DownloadToggle({
 function SyncUsersButton() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   async function sync() {
     setLoading(true);
+    setError(false);
     try {
-      await fetch("/api/cron/sync-download-policies", { method: "POST" });
+      const res = await fetch(withBasePath("/api/cron/sync-download-policies"), { method: "POST" });
+      if (!res.ok) {
+        setError(true);
+        return;
+      }
       router.refresh();
+    } catch {
+      setError(true);
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <button
-      onClick={sync}
-      disabled={loading}
-      className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors disabled:opacity-50"
-    >
-      {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-      {loading ? "Syncing…" : "Sync users from server"}
-    </button>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={sync}
+        disabled={loading}
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors disabled:opacity-50"
+      >
+        {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+        {loading ? "Syncing…" : "Sync users from server"}
+      </button>
+      {error && <span className="text-xs text-red-400">Sync failed</span>}
+    </div>
   );
 }
 
@@ -139,16 +151,24 @@ function BulkBar({
 }) {
   const router = useRouter();
   const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
+  const [error, setError] = useState(false);
 
   async function bulk(downloadsEnabled: boolean) {
     setLoading(downloadsEnabled ? "enable" : "disable");
+    setError(false);
     try {
-      await fetch("/api/admin/server-users/bulk", {
+      const res = await fetch(withBasePath("/api/admin/server-users/bulk"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source, downloadsEnabled }),
       });
+      if (!res.ok) {
+        setError(true);
+        return;
+      }
       router.refresh();
+    } catch {
+      setError(true);
     } finally {
       setLoading(null);
     }
@@ -173,6 +193,7 @@ function BulkBar({
         {loading === "enable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
         Enable all
       </button>
+      {error && <span className="text-xs text-red-400">Failed</span>}
     </div>
   );
 }
@@ -187,7 +208,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
     setOn(next);
     setLoading(true);
     try {
-      const res = await fetch("/api/admin/server-users", {
+      const res = await fetch(withBasePath("/api/admin/server-users"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ autoDisableNew: next }),

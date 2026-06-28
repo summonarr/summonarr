@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 export type LiveEvent =
   | { type: "connected" }
@@ -65,7 +66,7 @@ let singleton: EventSource | null = null;
 function ensureEventSource() {
   if (singleton) return;
   // SSE reconnects automatically on error; do not replace with WebSocket
-  const es = new EventSource("/api/events");
+  const es = new EventSource(withBasePath("/api/events"));
   es.onmessage = (e: MessageEvent) => {
     try {
       const event = JSON.parse(e.data as string) as LiveEvent;

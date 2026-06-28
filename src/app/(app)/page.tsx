@@ -16,6 +16,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { auth } from "@/lib/auth";
+import { getFeatureFlags } from "@/lib/features";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -63,9 +64,11 @@ export default async function DiscoverPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session] = await Promise.all([searchParams, auth()]);
+  const [sp, session, flags] = await Promise.all([searchParams, auth(), getFeatureFlags()]);
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const upcomingEnabled = flags["feature.page.upcoming"];
+  const topEnabled = flags["feature.page.top"];
 
   const [
     trendingRes,
@@ -121,10 +124,18 @@ export default async function DiscoverPage({
   const rails: { title: string; subtitle: string; href: string; items: TmdbMedia[] }[] = [
     { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
     { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
-    { title: "Upcoming Movies",  subtitle: "Hitting theaters soon",                 href: "/upcoming", items: project(upMovies,  emap, hideAvailable, RAIL_SIZE) },
-    { title: "On The Air TV",    subtitle: "New episodes this week",                href: "/upcoming", items: project(upTV,      emap, hideAvailable, RAIL_SIZE) },
-    { title: "Top Rated Movies", subtitle: "Highest-rated films of all time",       href: "/top",      items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
-    { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time",       href: "/top",      items: project(topTV,     emap, hideAvailable, RAIL_SIZE) },
+    ...(upcomingEnabled
+      ? [
+          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", items: project(upMovies, emap, hideAvailable, RAIL_SIZE) },
+          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", items: project(upTV,     emap, hideAvailable, RAIL_SIZE) },
+        ]
+      : []),
+    ...(topEnabled
+      ? [
+          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
+          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", items: project(topTV,     emap, hideAvailable, RAIL_SIZE) },
+        ]
+      : []),
   ];
 
   return (

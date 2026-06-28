@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Loader2, Check } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { withBasePath } from "@/lib/base-path";
 
 interface ChangePasswordProps {
   hasPassword: boolean;
@@ -32,7 +33,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       const body: Record<string, string> = { newPassword };
       if (hasPassword) body.currentPassword = currentPassword;
 
-      const res = await fetch("/api/profile/password", {
+      const res = await fetch(withBasePath("/api/profile/password"), {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify(body),
@@ -44,7 +45,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       }
       const data = await res.json();
       if (data.requiresRelogin) {
-        window.location.href = "/login";
+        window.location.href = withBasePath("/login");
         return;
       }
       setSuccess(true);
@@ -86,7 +87,8 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
           className="bg-zinc-800 border-zinc-700"
-          minLength={8}
+          placeholder="Min. 12 characters"
+          minLength={12}
           required
         />
       </div>
@@ -102,7 +104,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
           className="bg-zinc-800 border-zinc-700"
-          minLength={8}
+          minLength={12}
           required
         />
       </div>

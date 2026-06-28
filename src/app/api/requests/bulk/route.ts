@@ -294,6 +294,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // skipDuplicates so a racing duplicate doesn't abort the batch (a P2002 inside a tx
   // would); re-query to recover row ids for the *arr phase.
   let createdRows: { id: string; tmdbId: number; mediaType: MediaType; status: string }[] = [];
+  // Keys (tmdbId:mediaType) whose status was mirrored from another user's already
+  // APPROVED/AVAILABLE request — already greenlit, so phase 3 must NOT re-push them to *arr.
+  const mirroredKeys = new Set<string>();
   if (prepared.length > 0) {
     const enforceQuota = !hasPermission(targetPerms, Permission.QUOTA_UNLIMITED);
     let gLimit = 0;
@@ -332,17 +335,44 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
               select: { id: true },
             });
             const beforeIds = new Set(before.map((r) => r.id));
+
+            // If another user's HD request for the same title is already APPROVED or
+            // AVAILABLE, the content is greenlit/fulfilled — mirror that status so the
+            // bulk requester is tracked (and gets the "now available" ping) instead of
+            // queuing a duplicate PENDING for an admin to re-review. Matches the single
+            // POST /api/requests "mirror-approved" branch.
+            const greenlit = await tx.mediaRequest.findMany({
+              where: { is4k: false, status: { in: ["APPROVED", "AVAILABLE"] }, OR: pairs },
+              select: { tmdbId: true, mediaType: true, status: true },
+            });
+            const greenlitMap = new Map<string, "APPROVED" | "AVAILABLE">();
+            for (const g of greenlit) {
+              const k = keyOf(g.tmdbId, g.mediaType);
+              // Prefer AVAILABLE over APPROVED if both exist for the title.
+              if (g.status === "AVAILABLE" || !greenlitMap.has(k)) {
+                greenlitMap.set(k, g.status as "APPROVED" | "AVAILABLE");
+              }
+            }
+            mirroredKeys.clear();
+            const now = new Date();
             await tx.mediaRequest.createMany({
-              data: prepared.map((p) => ({
-                tmdbId: p.tmdbId,
-                mediaType: p.mediaType,
-                title: p.title,
-                posterPath: p.posterPath,
-                releaseYear: p.releaseYear,
-                note: null,
-                requestedBy: targetUserId,
-                status: p.autoApprove ? "APPROVED" : "PENDING",
-              })),
+              data: prepared.map((p) => {
+                const k = keyOf(p.tmdbId, p.mediaType);
+                const mirror = greenlitMap.get(k);
+                if (mirror) mirroredKeys.add(k);
+                const status = mirror ?? (p.autoApprove ? "APPROVED" : "PENDING");
+                return {
+                  tmdbId: p.tmdbId,
+                  mediaType: p.mediaType,
+                  title: p.title,
+                  posterPath: p.posterPath,
+                  releaseYear: p.releaseYear,
+                  note: null,
+                  requestedBy: targetUserId,
+                  status,
+                  ...(mirror === "AVAILABLE" ? { availableAt: now } : {}),
+                };
+              }),
               skipDuplicates: true,
             });
             const after = await tx.mediaRequest.findMany({
@@ -376,6 +406,12 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
 
     emitSSE({ type: "request:new", requestId: row.id, userId: targetUserId });
 
+    // Mirrored rows (greenlit by another user) are already in *arr — re-pushing
+    // would be a no-op at best; just track the row.
+    if (mirroredKeys.has(keyOf(p.tmdbId, p.mediaType))) {
+      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: row.status === "AVAILABLE" ? "already-available" : "auto-approved" };
+    }
+
     if (row.status !== "APPROVED") {
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
     }
@@ -392,6 +428,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
         `[requests/bulk] auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
       );
       await prisma.mediaRequest.update({ where: { id: row.id }, data: { status: "PENDING" } }).catch(() => {});
+      // The client already saw request:new for an APPROVED row; emit a corrective
+      // update so it reflects the rolled-back PENDING state (mirrors the single route).
+      emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
     }
   });

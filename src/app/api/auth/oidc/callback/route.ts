@@ -8,6 +8,7 @@ import {
   verifyOidcStateCookie,
 } from "@/lib/oidc";
 import { serializeSessionCookie } from "@/lib/session-cookie";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 function readStateCookie(req: NextRequest): string | null {
   const header = req.headers.get("cookie");
@@ -24,8 +25,13 @@ function clearStateCookieHeader(): string {
   return `${OIDC_STATE_COOKIE}=; Path=/api/auth/oidc; Max-Age=0; HttpOnly; SameSite=Lax`;
 }
 
-function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
-  const base = process.env.AUTH_URL ?? new URL("/", req.url).toString();
+function loginErrorRedirect(_req: NextRequest, code: string): NextResponse {
+  // AUTH_URL is guaranteed set by the early guard in GET; fail closed otherwise
+  // rather than deriving the base from an attacker-influenceable request Host.
+  const base = process.env.AUTH_URL;
+  if (!base) {
+    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+  }
   const url = new URL("/login", base);
   url.searchParams.set("error", code);
   const res = NextResponse.redirect(url.toString());
@@ -34,6 +40,17 @@ function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
 }
 
 export async function GET(req: NextRequest) {
+  const authUrl = process.env.AUTH_URL;
+  if (!authUrl) {
+    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+  }
+
+  // Throttle the callback like /start — each hit triggers an outbound IdP token
+  // exchange and a DB user lookup/create even before the state cookie is checked.
+  if (!checkRateLimit(`oidc-callback:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
+    return loginErrorRedirect(req, "rate_limited");
+  }
+
   if (!isOidcConfigured()) {
     return loginErrorRedirect(req, "oidc_not_configured");
   }
@@ -51,7 +68,7 @@ export async function GET(req: NextRequest) {
   try {
     claims = await exchangeOidcCode(new URL(req.url), flowState);
   } catch (err) {
-    console.error("[oidc/callback] code exchange failed:", err);
+    console.error("[oidc/callback] code exchange failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_exchange_failed");
   }
 
@@ -59,7 +76,7 @@ export async function GET(req: NextRequest) {
   try {
     dbUser = await findOrCreateOidcUser(claims);
   } catch (err) {
-    console.error("[oidc/callback] user lookup failed:", err);
+    console.error("[oidc/callback] user lookup failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_user_rejected");
   }
 
@@ -94,7 +111,8 @@ export async function GET(req: NextRequest) {
     return loginErrorRedirect(req, "oidc_session_error");
   }
 
-  const base = process.env.AUTH_URL ?? new URL("/", req.url).toString();
+  // AUTH_URL is guaranteed non-empty by the early guard at the top of GET.
+  const base = authUrl;
   // returnTo was already validated at /start (must start with "/", not "//")
   // and signed into the state cookie, so re-validating here is belt-and-
   // suspenders — defends against a future regression in /start.

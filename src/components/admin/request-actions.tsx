@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface RequestActionsProps {
   requestId: string;
@@ -47,7 +48,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     setProfilesLoading(true);
     setProfilesError(null);
     try {
-      const res = await fetch(`/api/requests/quality-profiles?mediaType=${mediaType}&is4k=${is4k}`);
+      const res = await fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}&is4k=${is4k}`));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setProfilesError((data as { error?: string }).error ?? "Couldn't load quality profiles");
@@ -71,7 +72,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
       const targetIds = groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : [requestId];
       const results = await Promise.all(
         targetIds.map((id) =>
-          fetch(`/api/requests/${id}`, {
+          fetch(withBasePath(`/api/requests/${id}`), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ status, adminNote: note }),
@@ -105,7 +106,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     try {
       const isBatch = (groupPendingIds?.length ?? 0) > 1;
       const res = isBatch
-        ? await fetch("/api/requests/batch", {
+        ? await fetch(withBasePath("/api/requests/batch"), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -115,7 +116,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
               ...(permanent !== undefined ? { permanent } : {}),
             }),
           })
-        : await fetch(`/api/requests/${requestId}`, {
+        : await fetch(withBasePath(`/api/requests/${requestId}`), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -150,7 +151,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     setArrError(null);
     setRetryOk(false);
     try {
-      const res = await fetch(`/api/requests/${requestId}`, {
+      const res = await fetch(withBasePath(`/api/requests/${requestId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ search: true }),
@@ -176,7 +177,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     setArrError(null);
     setRetryOk(false);
     try {
-      const res = await fetch(`/api/requests/${requestId}`, {
+      const res = await fetch(withBasePath(`/api/requests/${requestId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ retry: true }),
@@ -200,7 +201,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
   async function deleteRequest() {
     setLoading("DELETE");
     try {
-      const res = await fetch(`/api/requests/${requestId}`, { method: "DELETE" });
+      const res = await fetch(withBasePath(`/api/requests/${requestId}`), { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setArrError((data as { error?: string }).error ?? "Delete failed");
@@ -526,8 +527,8 @@ export function SyncButton() {
     setResult(null);
     try {
       const [arrRes, jellyfinRes] = await Promise.all([
-        fetch("/api/sync", { method: "POST" }),
-        fetch("/api/sync/jellyfin", { method: "POST" }),
+        fetch(withBasePath("/api/sync"), { method: "POST" }),
+        fetch(withBasePath("/api/sync/jellyfin"), { method: "POST" }),
       ]);
 
       const arrData: { marked: number; reverted: number; plexMarked: number; error?: string } = await arrRes.json();
@@ -574,7 +575,7 @@ export function SyncRolesButton() {
     setResult(null);
     setIsError(false);
     try {
-      const res = await fetch("/api/discord/sync-roles", { method: "POST" });
+      const res = await fetch(withBasePath("/api/discord/sync-roles"), { method: "POST" });
       const data: { synced?: number; error?: string } = await res.json();
       if (data.error) {
         setIsError(true);

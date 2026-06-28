@@ -37,7 +37,10 @@ async function getApiKey(): Promise<string | null> {
 
 export type MdblistResult =
   | { found: true; data: MdblistRatings }
-  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean };
+  // `transient` marks a failure that is NOT an authoritative "no ratings" — a 5xx,
+  // network/timeout, quota lockout, or a partial/error response — so callers must not
+  // pin a null/not-found result into a long-lived cache.
+  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean };
 
 const mdblistRevalidating = new Set<string>();
 
@@ -71,7 +74,7 @@ export async function fetchAndCacheMdblistForTmdb(
   if (!apiKey) return { found: false, keyConfigured: false };
 
   if (isMdblistQuotaLocked()) {
-    return { found: false, keyConfigured: true, quotaExhausted: true };
+    return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
   }
 
   try {
@@ -83,7 +86,7 @@ export async function fetchAndCacheMdblistForTmdb(
 
     if (res.status === 429) {
       tripQuotaLockout(`HTTP 429 for ${mediaType}:${tmdbId}`);
-      return { found: false, keyConfigured: true, quotaExhausted: true };
+      return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
     }
 
     if (res.status === 404) {
@@ -96,7 +99,7 @@ export async function fetchAndCacheMdblistForTmdb(
       // A transient 5xx must NOT be negative-cached — that would suppress a valid
       // item's ratings for the full 24h TTL. Only a 404 (handled above) is a real
       // "not found" worth caching. Matches the batch path's reasoning.
-      return { found: false, keyConfigured: true };
+      return { found: false, keyConfigured: true, transient: true };
     }
 
     const data = await res.json() as unknown;
@@ -110,11 +113,13 @@ export async function fetchAndCacheMdblistForTmdb(
       if (errMsg) {
         if (isQuotaErrorMessage(errMsg)) {
           tripQuotaLockout(`${errMsg} for ${mediaType}:${tmdbId}`);
-          return { found: false, keyConfigured: true, quotaExhausted: true };
+          return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
         }
         console.warn(`[mdblist] API error for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}: ${sanitizeForLog(errMsg)}`);
-        await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
-        return { found: false, keyConfigured: true };
+        // A 200-with-error-body (other than 404, handled above as a real not-found) is an
+        // app-level error that may be transient — do NOT negative-cache it for 24h, or a
+        // valid item's ratings stay suppressed for the full TTL. Matches the 5xx reasoning.
+        return { found: false, keyConfigured: true, transient: true };
       }
     }
 
@@ -126,7 +131,7 @@ export async function fetchAndCacheMdblistForTmdb(
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     console.error(`[mdblist] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(reason)}`);
-    return { found: false, keyConfigured: true };
+    return { found: false, keyConfigured: true, transient: true };
   }
 }
 
@@ -265,19 +270,23 @@ export async function fetchMdblistBatch(
         await setCache(cacheKey, ratings, libraryDetailsTtl(pageItem.releaseDate));
       }
 
-      if (arr.length > 0) {
-        // Any request ID that was absent from the response body is genuinely not in MDBList;
-        // negative-cache it to avoid re-requesting the same item on every prewarm run.
+      if (arr.length >= page.length) {
+        // Only negative-cache when the response covered the full request. MDBList normally
+        // echoes one entry per requested id (with null ratings for ones it has no data on),
+        // so a short response means a truncated/partial batch, not genuine absence — caching
+        // the omitted ids would suppress their ratings for 24h even though they exist.
         for (const item of page) {
           if (!result.has(item.id)) {
             const cacheKey = `mdblist:tmdb:${mediaType}:${item.id}`;
             await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
           }
         }
-      } else {
+      } else if (arr.length === 0) {
         // An empty array likely means MDBList had a transient issue, not that all items are absent —
         // skip negative-caching to avoid poisoning future lookups.
         console.warn(`[mdblist] batch ${mediaType} returned empty array for ${page.length} items — skipping NOT_FOUND caching`);
+      } else {
+        console.warn(`[mdblist] batch ${mediaType} returned partial response (${arr.length}/${page.length}) — skipping NOT_FOUND caching for omitted ids`);
       }
     } catch (err) {
       const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));

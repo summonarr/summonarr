@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2 } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { withBasePath } from "@/lib/base-path";
 
 // "Request all (N missing)" for a TMDB collection. The items arrive already
 // enriched with availability flags (attachAllAvailability ran upstream), so the
@@ -29,7 +30,7 @@ export function CollectionRequestAllButton({
     setState("loading");
     setMsg("");
     try {
-      const res = await fetch("/api/requests/bulk", {
+      const res = await fetch(withBasePath("/api/requests/bulk"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

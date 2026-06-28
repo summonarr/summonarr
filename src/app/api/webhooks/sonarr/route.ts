@@ -11,6 +11,7 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isSeriesDownloadedInSonarr, resolveSingleTvdbToTmdb } from "@/lib/arr";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -122,8 +123,11 @@ export async function POST(req: NextRequest) {
       scope = ` (${eps.length} episodes)`;
     }
     const title = `${seriesTitle}${scope}`;
-    // Don't log the payload-supplied series title (CodeQL js/log-injection — it's
-    // a remote source). The title still reaches admins via the push below.
+    // Don't interpolate the payload-supplied series title into the log line. It's a
+    // remote-controlled string, and logging it verbatim is a log-injection vector:
+    // an attacker could embed newlines/control characters to forge or corrupt log
+    // entries. The title still reaches admins through the structured push below,
+    // which doesn't share the log's plain-text framing.
     console.warn("[webhook/sonarr] manual interaction required — resolve it in Sonarr's queue");
     // Per-item one-shot gate (same idempotent pattern as the deletion-vote
     // threshold in /api/votes): Sonarr re-emits ManualInteractionRequired for the
@@ -167,12 +171,39 @@ export async function POST(req: NextRequest) {
   const safeVdbId = Number.isInteger(tvdbId) && tvdbId > 0 ? tvdbId : null;
   const safeMdbId = typeof tmdbId === "number" && Number.isInteger(tmdbId) && tmdbId > 0 ? tmdbId : null;
 
+  // Never trust the payload's ids on their own. The webhook secret authenticates
+  // the request but does NOT prove the named series was actually downloaded: anyone
+  // who learns the secret (or replays a captured request) could POST a forged
+  // Download event for arbitrary tvdbId/tmdbId and flip an APPROVED request straight
+  // to AVAILABLE for a series Sonarr never grabbed. Verify against Sonarr's own
+  // authoritative API before changing any status. Tri-state result: `false` =
+  // Sonarr is reachable and confirms NO episode file exists, so we SKIP the flip
+  // (the forgery case we reject); `true` = confirmed downloaded, proceed; `null` =
+  // indeterminate (the HD/4K variant isn't configured, or Sonarr is unreachable) so
+  // we proceed optimistically and let the periodic library sync reconcile
+  // availability independently. Proceeding on null is safe against forgery because
+  // an attacker cannot force a null result without breaking the operator's own
+  // Sonarr connectivity.
+  const seriesDownloaded = await isSeriesDownloadedInSonarr(
+    { tvdbId: safeVdbId, tmdbId: safeMdbId },
+    is4k ? "4k" : "hd",
+  );
+  if (seriesDownloaded === false) {
+    console.warn(`[webhook/sonarr] Download event for tvdbId=${safeVdbId ?? "?"} tmdbId=${safeMdbId ?? "?"} not confirmed downloaded in Sonarr; skipping status flip.`);
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
+  }
+
   let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
 
   let effectiveMdbId: number | null = null;
   let effectiveVdbId: number | null = null;
   // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
   let tvdbPathTmdbId: number | null = null;
+  // True when the tvdb-path flipped a request but no MediaRequest carried the tvdbId,
+  // so the tmdbId-keyed wanted row couldn't be evicted inside the tx — resolve + evict
+  // it after the tx commits (best-effort; the next full sync rewrites it regardless).
+  let tvdbWantedEvictPending = false;
 
   // Try tmdbId first; fall back to tvdbId because Sonarr may not always send tmdbId
   if (safeMdbId) {
@@ -226,14 +257,26 @@ export async function POST(req: NextRequest) {
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, is4k } });
         tvdbPathTmdbId = req.tmdbId;
-      } else if (!req) {
-        console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId ${sanitizeForLog(safeVdbId)}`);
+      } else if (!req && updated.count > 0) {
+        // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
+        // defer the eviction to after the tx where we can resolve tvdb→tmdb.
+        tvdbWantedEvictPending = true;
       }
     }, { timeout: 30_000 });
     if (updated.count > 0) {
       effectiveVdbId = safeVdbId;
       if (tvdbPathTmdbId !== null) {
         void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
+      }
+      if (tvdbWantedEvictPending) {
+        void (async () => {
+          const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
+          if (resolved !== null) {
+            await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, is4k } });
+          } else {
+            console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
+          }
+        })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
       }
     }
   }
@@ -242,10 +285,12 @@ export async function POST(req: NextRequest) {
   after(async () => {
     await scheduleLibraryScan("tv", safeMdbId ?? undefined, is4k ? "4k" : "hd");
 
+    // Scope by is4k to the variant that fired this webhook: an HD Download must not
+    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
     const whereNotify = effectiveMdbId
-      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
       : effectiveVdbId
-      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
       : null;
     if (!whereNotify) return;
 

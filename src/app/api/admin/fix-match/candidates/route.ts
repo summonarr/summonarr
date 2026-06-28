@@ -3,6 +3,7 @@ import { withIssueAdmin } from "@/lib/api-auth";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
+import { arrFetch } from "@/lib/arr";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
@@ -292,35 +293,30 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   ]);
 
   if (arrUrlRow?.value && arrKeyRow?.value) {
-    const arrBaseUrl = arrUrlRow.value.replace(/\/$/, "");
     if (item.filePath) {
-      const arrHeaders = {
-        "X-Api-Key": arrKeyRow.value,
-        "Content-Type": "application/json",
-      };
+      // Route Arr library lookups through arrFetch so they inherit the 30s
+      // timeout, 50 MB cap (guardrail 5), X-Api-Key injection, and
+      // ArrResponseError handling instead of a bare safeFetchAdminConfigured
+      // (which defaulted to an 8s timeout + 10 MB cap and raw Response handling).
+      const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
       const folderPath = nodePath.posix.normalize(item.filePath.replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
+      type ArrMovie = { tmdbId: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
+
       const [correctRes, wrongRes] = await Promise.allSettled([
-        safeFetchAdminConfigured(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${correctTmdbId}`, {
-          headers: arrHeaders, timeoutMs: 8_000,
-        }),
-        safeFetchAdminConfigured(`${arrBaseUrl}/api/v3/${endpoint}?tmdbId=${tmdbId}`, {
-          headers: arrHeaders, timeoutMs: 8_000,
-        }),
+        arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
+        arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${tmdbId}`),
       ]);
 
       for (const result of [correctRes, wrongRes]) {
         if (result.status === "rejected") {
-          console.error("[fix-match/candidates] Arr fetch rejected:", result.reason);
+          console.error("[fix-match/candidates] Arr fetch rejected:", result.reason instanceof Error ? result.reason.message : result.reason);
         }
       }
 
-      type ArrMovie = { tmdbId: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
-
-      if (correctRes.status === "fulfilled" && correctRes.value.ok) {
-        const data = await correctRes.value.json() as ArrMovie[];
-        const match = data.find((m) => m.tmdbId === correctTmdbId);
+      if (correctRes.status === "fulfilled") {
+        const match = correctRes.value.find((m) => m.tmdbId === correctTmdbId);
         if (match) {
           const arrPath = nodePath.posix.normalize(match.path ?? "");
           if (arrPath && folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"))) {
@@ -331,9 +327,8 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
         }
       }
 
-      if (arrConfirmedTmdbId === null && wrongRes.status === "fulfilled" && wrongRes.value.ok) {
-        const data = await wrongRes.value.json() as ArrMovie[];
-        const match = data.find((m) => m.tmdbId === tmdbId);
+      if (arrConfirmedTmdbId === null && wrongRes.status === "fulfilled") {
+        const match = wrongRes.value.find((m) => m.tmdbId === tmdbId);
         if (match?.path && folderPath && (nodePath.posix.normalize(match.path) === folderPath || folderPath.startsWith(nodePath.posix.normalize(match.path) + "/"))) {
           arrConfirmedTmdbId = null;
         }

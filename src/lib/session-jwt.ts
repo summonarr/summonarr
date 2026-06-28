@@ -24,6 +24,12 @@ export interface SessionClaims extends JWTPayload {
   isMobile?: boolean;
   deviceLabel?: string;
   expiresAt?: number;
+  // Machine sessions only: the IP allowlist that was in effect when the token
+  // was minted, snapshotted into the claims so the Node-runtime auth guards can
+  // re-check the caller's IP on every use (the mint-time check alone would let a
+  // leaked token be replayed from any address). Absent / empty ⇒ no allowlist was
+  // configured ⇒ no per-request IP restriction.
+  machineAllowedIps?: string[];
 }
 
 const ENCODER = new TextEncoder();

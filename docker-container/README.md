@@ -13,12 +13,13 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 5. [Sub-path deployment (`BASE_PATH`)](#sub-path-deployment-base_path)
 6. [Internal cron schedule](#internal-cron-schedule)
 7. [Webhooks](#webhooks)
-8. [Connecting external services](#connecting-external-services)
-9. [Backups & restore](#backups--restore)
-10. [Health, observability, troubleshooting](#health-observability-troubleshooting)
-11. [Recovery — admin locked out](#recovery--admin-locked-out)
-12. [Upgrading](#upgrading)
-13. [Common commands](#common-commands)
+8. [Security hardening (operational)](#security-hardening-operational)
+9. [Connecting external services](#connecting-external-services)
+10. [Backups & restore](#backups--restore)
+11. [Health, observability, troubleshooting](#health-observability-troubleshooting)
+12. [Recovery — admin locked out](#recovery--admin-locked-out)
+13. [Upgrading](#upgrading)
+14. [Common commands](#common-commands)
 
 > **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
 
@@ -166,9 +167,9 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
+| `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.13.8`.                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.13.9`.                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -268,7 +269,63 @@ Endpoints:
 | Sonarr  | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
 | Radarr  | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
 
-In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. No HMAC payload signing — none of the upstream services sign their bodies.
+In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. Before applying the flip the handler cross-checks the title against Radarr/Sonarr's own API — but that check is fail-open: if Radarr/Sonarr is unreachable (or the HD/4K variant isn't configured) the flip proceeds optimistically, so the API check is a best-effort guard, not a hard barrier against a forged event. The `?token` secret is the real authentication. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
+
+## Security hardening (operational)
+
+Code-level defenses (CSRF origin checks, SSRF protection via per-request DNS re-resolution, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
+
+### Keep webhook tokens out of proxy logs
+
+Radarr/Sonarr webhook UIs have no header field, so the secret rides in the query string (`?token=…`). That value can land in reverse-proxy access logs, WAF logs, and `Referer` headers. The compare is timing-safe and the secret is per-instance, but **treat any logged token as compromised**.
+
+- Don't log the webhook requests (or strip their query string). Nginx:
+
+  ```nginx
+  location ~ ^/api/webhooks/ {
+      access_log off;                       # these requests carry ?token=
+      proxy_pass http://summonarr:3000;
+  }
+  ```
+
+  If you need the logs, define an `http`-scope `log_format` that uses `$uri` (which excludes the query string) instead of `$request`, and reference it here. Caddy: filter the `request>uri` field or disable access logging on `/api/webhooks/*`. Traefik: don't capture the full request URL in `accessLog.fields`.
+- Use a long random per-instance secret and **rotate** it (regenerate in Admin → Settings → Media) if a URL was ever logged or shared.
+
+### Block `/api/setup/*` until first-run completes
+
+The setup/import routes are **intentionally public while the instance has zero users** — that is what lets you restore a backup *before* the first login. On an internet-exposed fresh instance, a weak or leaked `BACKUP_DB_PASSWORD` could let an attacker replace the database before you register.
+
+- **Register the admin immediately after first boot** — the setup surface closes the moment the first admin exists.
+- Until then, block the routes at the proxy. Nginx:
+
+  ```nginx
+  location ^~ /api/setup/ { return 403; }   # remove once you've registered the admin
+  ```
+- Use a strong `BACKUP_DB_PASSWORD` (≥ 20 chars).
+
+### Treat `CRON_SECRET` like a root password
+
+`CRON_SECRET` authenticates `/api/sync*` and `/api/cron*`. If you also enable **machine sessions** (`enableMachineSession=true`, Admin → Settings), possession of `CRON_SECRET` can mint a 15-minute **admin** cookie — so the secret is effectively an admin credential.
+
+- Keep `enableMachineSession=false` unless you need API automation that holds an admin cookie.
+- If you enable it, **always** set `machineSessionAllowedIps` to the automation host(s) — an empty allowlist accepts any caller IP. (The app now rejects enabling machine sessions with an empty allowlist, but set it deliberately.)
+- Prefer the file mount `/run/secrets/cron_secret` so the secret never appears in `docker inspect`.
+- **Rotate `CRON_SECRET` immediately if it leaks** (compose files, CI logs, backups).
+
+### APNs relay trust (iOS push)
+
+iOS notifications are delivered through an APNs relay (default `summonapns.gadgetusaf.com`). Notification **content** is end-to-end encrypted once a device registers its public key, but the relay always receives the device's **APNs token** in clear.
+
+- For privacy-sensitive deployments, **self-host the relay** and point `apnsRelayUrl` (Admin → Settings) at it. It must be **HTTPS** (the setting now validates this).
+- Or leave iOS push disabled if you don't use the iOS app.
+
+### Move secrets to file mounts
+
+`docker-compose.yml` passes secrets via the `.env` file, which is visible to `docker inspect <container>` and `docker compose config`. To reduce exposure:
+
+- Restrict the env file: `chmod 600 .env`, and keep it out of version control.
+- Mount high-value secrets as files where supported — the entrypoint already reads `CRON_SECRET` from `/run/secrets/cron_secret` (Docker/Swarm secret); prefer that over the env var, and extend the same pattern to other secrets your orchestrator supports.
+- Avoid running `docker inspect` / `docker compose config` in shared or CI logs where the output is retained.
 
 ## Connecting external services
 
@@ -316,6 +373,8 @@ Summonarr ships a native OIDC client (`openid-client`) — Authorization Code fl
 
 All three are **optional**, configured in **Admin → Settings** (not via environment variables), stored in the database (secrets encrypted at rest), and each is governed by a default-on feature flag.
 
+> **What a feature flag actually disables.** Flags fall into three classes — `page` (a user-facing page or nav item), `integration` (an upstream service: Radarr/Sonarr/Discord/Plex/Jellyfin/push), and `admin`. Today a flag reliably hides the **page / UI surface** it names, but it does **not** uniformly gate the underlying mirror APIs or every integration code path: disabling a `page` flag removes the page and its nav entry while the corresponding `/api/*` endpoint may still respond, and an `integration` flag does not gate every notification/login/interaction path that touches that service. Treat flags as a UI/visibility control, not a hard security or access boundary — to fully cut off a surface, also remove its configuration (clear the relevant `Setting` keys) or block the route at your reverse proxy.
+
 - **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
 - **Email** — two backends selectable via `emailBackend`: **SMTP** (set `smtpHost`, optional `smtpPort` [default 587 STARTTLS; 465 = implicit TLS], `smtpUser`/`smtpPassword`, `smtpFrom`) or **Resend** (`resendApiKey`, `resendFrom`). Admin notifications send whenever email is configured; user-facing emails require toggling `enableUserEmails`.
 - **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push is relayed via a central/`apnsRelayUrl` APNs relay with end-to-end-encrypted payloads.
@@ -345,9 +404,9 @@ docker compose exec -T postgres psql -U summonarr -d summonarr < summonarr.sql
 
 ## Health, observability, troubleshooting
 
-- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target (10s interval, 30s start period).
+- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target (30s interval, 60s start period). Under a sub-path deployment the probe targets `${BASE_PATH}/api/health` (the image bakes `BASE_PATH` into both the probe and the cron loop), so prefix the path when probing manually:
   ```bash
-  docker compose exec summonarr wget -qO- http://localhost:3000/api/health
+  docker compose exec summonarr wget -qO- "http://localhost:3000${BASE_PATH}/api/health"
   ```
 - **Debug endpoint** — admin-only. `GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv` dumps cache rows, `attachArrPending` output, a live Radarr/Sonarr probe, the tvdb→tmdb mapping, wanted-table counts, and the most recent `LIBRARY_SYNC` audit row. **Start here** when a request is "stuck pending" or a badge looks wrong.
 - **Audit log** — **Admin → Audit Log** surfaces every sync run, webhook delivery, admin mutation, and webhook auth failure. PII is scrubbed on `SCRUB_AUDIT_PII_INTERVAL`.
@@ -500,7 +559,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.13.8
+SUMMONARR_VERSION=v0.13.9
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

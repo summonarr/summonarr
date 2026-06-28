@@ -296,7 +296,7 @@ export function ActivityStatsRedesign({
               {topMovies.map((m, i) => (
                 <LbRow
                   key={m.tmdbId}
-                  href={`/admin/activity/media/${m.tmdbId}`}
+                  href={`/admin/activity/media/${m.tmdbId}?type=MOVIE`}
                   rank={i + 1}
                   avatar={
                     <Poster
@@ -322,7 +322,7 @@ export function ActivityStatsRedesign({
               {topTV.map((m, i) => (
                 <LbRow
                   key={m.tmdbId}
-                  href={`/admin/activity/media/${m.tmdbId}`}
+                  href={`/admin/activity/media/${m.tmdbId}?type=TV`}
                   rank={i + 1}
                   avatar={
                     <Poster

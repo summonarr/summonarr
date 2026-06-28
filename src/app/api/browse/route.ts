@@ -7,6 +7,7 @@ import {
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const TMDB_PAGES_PER_VIRTUAL = 5;
 const PAGE_SIZE = 20;
@@ -36,6 +37,10 @@ function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): Tm
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!checkRateLimit(`browse:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const sp = request.nextUrl.searchParams;
   const mediaType     = sp.get("mediaType") === "tv" ? "tv" : "movie";
   const page          = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);

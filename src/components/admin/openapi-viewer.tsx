@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 interface SchemaObject {
   $ref?: string;
@@ -143,7 +144,7 @@ export function OpenApiViewer() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/openapi")
+    fetch(withBasePath("/api/openapi"))
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to load spec (${res.status})`);
         return res.json();
@@ -208,14 +209,24 @@ export function OpenApiViewer() {
 
   const copyCurl = (method: string, path: string, op: Operation) => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
+    // Substitute {id}-style path params with an uppercase placeholder the user
+    // replaces, rather than leaving the literal brace syntax in the URL.
+    const resolvedPath = path.replace(/\{(\w+)\}/g, (_, name: string) => name.toUpperCase());
     const query = (op.parameters ?? [])
       .filter((p) => p.in === "query")
       .map((p) => `${p.name}=`)
       .join("&");
-    const url = `${origin}${serverUrl}${path}${query ? `?${query}` : ""}`;
+    const url = `${origin}${serverUrl}${resolvedPath}${query ? `?${query}` : ""}`;
     const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
-    if (op.security?.length !== 0) {
-      lines.push(`  --cookie '__Host-summonarr-session=YOUR_SESSION_TOKEN'`);
+    const sec = op.security ?? globalSecurity;
+    if (sec.length > 0) {
+      // The `__Host-` prefix only applies over HTTPS; an HTTP (dev) instance
+      // carries the unprefixed cookie name, matching getSessionCookieName().
+      const cookieName =
+        typeof window !== "undefined" && window.location.protocol !== "https:"
+          ? "summonarr-session"
+          : "__Host-summonarr-session";
+      lines.push(`  --cookie '${cookieName}=YOUR_SESSION_TOKEN'`);
     }
     const bodySchema = op.requestBody?.content?.["application/json"]?.schema;
     if (bodySchema) {

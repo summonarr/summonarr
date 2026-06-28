@@ -66,7 +66,11 @@ function connectionParams() {
 
 async function main() {
   const email = process.env.E2E_ADMIN_EMAIL || "e2e-admin@summonarr.local";
-  const password = process.env.E2E_ADMIN_PASSWORD || "e2e-admin-password-not-for-production";
+  const password = process.env.E2E_ADMIN_PASSWORD;
+  if (!password) {
+    console.error("[e2e-seed] E2E_ADMIN_PASSWORD is required (no default is permitted)");
+    process.exit(1);
+  }
   const hash = await hashPassword(password);
 
   const client = new Client(connectionParams());

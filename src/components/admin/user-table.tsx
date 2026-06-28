@@ -26,6 +26,7 @@ import {
   AlertTriangle,
 } from "@/components/icons";
 import { Permission, PRESETS, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/permissions";
+import { withBasePath } from "@/lib/base-path";
 
 interface User {
   id: string;
@@ -149,7 +150,7 @@ function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
     setPrefs((p) => ({ ...p, [key]: newVal }));
     setSaving(true);
     try {
-      const res = await fetch(`/api/admin/users/${u.id}`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [key]: newVal }),
@@ -375,7 +376,7 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
   async function savePerms(next: bigint, prev: bigint) {
     setSaving(true);
     try {
-      const res = await fetch(`/api/admin/users/${u.id}`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ permissions: next.toString() }),
@@ -413,7 +414,7 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
     if (value !== null && !Number.isFinite(value)) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/admin/users/${u.id}`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [field]: value }),
@@ -552,6 +553,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [loading, setLoading]         = useState(true);
   const [revoking, setRevoking]       = useState<string | null>(null);
   const [revokingAll, setRevokingAll] = useState(false);
+  const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
   // Guardrail 16: timeAgo uses Date.now() and toLocaleDateString varies by locale
   const mounted = useHasMounted();
@@ -576,7 +578,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   }, [onClose]);
 
   useEffect(() => {
-    fetch(`/api/admin/users/${u.id}/sessions`)
+    fetch(withBasePath(`/api/admin/users/${u.id}/sessions`))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: AdminAuthSession[]) => setSessions(Array.isArray(data) ? data : []))
       .catch(() => setSessions([]))
@@ -584,9 +586,10 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   }, [u.id]);
 
   async function revoke(sessionId: string) {
+    setConfirmingRevoke(null);
     setRevoking(sessionId);
     try {
-      const res = await fetch(`/api/admin/users/${u.id}/sessions`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
         method:  "DELETE",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ sessionId }),
@@ -605,7 +608,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
     setConfirmingRevokeAll(false);
     setRevokingAll(true);
     try {
-      const res = await fetch(`/api/admin/users/${u.id}/sessions`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
         method:  "DELETE",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ all: true }),
@@ -695,18 +698,42 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
                 </div>
               </div>
 
-              <button
-                type="button"
-                disabled={revoking === s.sessionId || revokingAll}
-                onClick={() => revoke(s.sessionId)}
-                aria-label="Revoke this session"
-                className="shrink-0 mt-0.5 text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
-                title="Revoke this session"
-              >
-                {revoking === s.sessionId
-                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  : <Trash2  className="w-3.5 h-3.5" />}
-              </button>
+              {confirmingRevoke === s.sessionId ? (
+                <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
+                  <button
+                    type="button"
+                    aria-label="Confirm revoke this session"
+                    disabled={revoking === s.sessionId || revokingAll}
+                    onClick={() => revoke(s.sessionId)}
+                    autoFocus
+                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                  >
+                    {revoking === s.sessionId
+                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                      : "Revoke"}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Cancel revoke this session"
+                    disabled={revoking === s.sessionId || revokingAll}
+                    onClick={() => setConfirmingRevoke(null)}
+                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  disabled={revoking === s.sessionId || revokingAll}
+                  onClick={() => setConfirmingRevoke(s.sessionId)}
+                  aria-label="Revoke this session"
+                  className="shrink-0 mt-0.5 text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
+                  title="Revoke this session"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
           ))}
         </div>
@@ -909,14 +936,19 @@ export function UserTable({ users, currentUserId, has4k }: UserTableProps) {
     setBusy(id + key);
     setError(null);
     try {
-      const res = await fetch(`/api/admin/users/${id}`, {
+      const res = await fetch(withBasePath(`/api/admin/users/${id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data: { error?: string } = await res.json();
-      if (data.error) { setError(data.error); return; }
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok || data?.error) {
+        setError(data?.error ?? `Request failed (${res.status})`);
+        return;
+      }
       router.refresh();
+    } catch {
+      setError("Network error — please try again");
     } finally {
       setBusy(null);
     }
@@ -927,10 +959,15 @@ export function UserTable({ users, currentUserId, has4k }: UserTableProps) {
     setBusy(id + "del");
     setError(null);
     try {
-      const res = await fetch(`/api/admin/users/${id}`, { method: "DELETE" });
-      const data: { error?: string } = await res.json();
-      if (data.error) { setError(data.error); return; }
+      const res = await fetch(withBasePath(`/api/admin/users/${id}`), { method: "DELETE" });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok || data?.error) {
+        setError(data?.error ?? `Request failed (${res.status})`);
+        return;
+      }
       router.refresh();
+    } catch {
+      setError("Network error — please try again");
     } finally {
       setBusy(null);
     }

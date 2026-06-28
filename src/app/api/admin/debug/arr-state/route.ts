@@ -2,9 +2,8 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
-import { isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
+import { arrFetch, getArrCfg, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
 import { getCache } from "@/lib/tmdb-cache";
-import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
@@ -54,7 +53,10 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       : await isSeriesWantedInSonarr(tmdbId);
     liveCheck = { result };
   } catch (err) {
-    liveCheck = { result: false, error: err instanceof Error ? err.message : String(err) };
+    // Don't leak raw Arr error detail (may carry the configured server URL /
+    // upstream body) to the client — log it server-side, return a generic flag.
+    console.error("[arr-state] live Arr check failed:", err instanceof Error ? err.message : err);
+    liveCheck = { result: false, error: "live Arr check failed" };
   }
 
   let tvdbInfo: {
@@ -63,31 +65,27 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   } | null = null;
   if (type === "tv") {
     try {
-      const cfgRows = await prisma.setting.findMany({
-        where: { key: { in: ["sonarrUrl", "sonarrApiKey"] } },
-      });
-      const cfgMap = Object.fromEntries(cfgRows.map((r) => [r.key, r.value]));
-      if (cfgMap.sonarrUrl && cfgMap.sonarrApiKey) {
-        const url = `${cfgMap.sonarrUrl.replace(/\/$/, "")}/api/v3/series/lookup?term=tmdb:${tmdbId}`;
-        const res = await safeFetchAdminConfigured(url, {
-          headers: { "X-Api-Key": cfgMap.sonarrApiKey },
-          timeoutMs: 10_000,
-        });
-        if (res.ok) {
-          const lookup = await res.json() as { tvdbId?: number }[];
-          const tvdbId = lookup[0]?.tvdbId ?? null;
-          let cachedMapping: { tmdbId: number | null } | null = null;
-          // Expose any negative-cached tvdb→tmdb mapping so stale entries can be diagnosed
-          if (tvdbId) {
-            cachedMapping = await getCache<{ tmdbId: number | null }>(`tvdb-to-tmdb:${tvdbId}`);
-          }
-          tvdbInfo = { tvdbId, cachedMapping };
-        } else {
-          tvdbInfo = { tvdbId: null };
+      // Route through arrFetch so the lookup inherits the 30s timeout, 50 MB
+      // cap, X-Api-Key injection, and ArrResponseError handling (vs. a bare
+      // safeFetchAdminConfigured that defaulted to a 10 MB cap / 15s timeout).
+      const cfg = await getArrCfg("sonarr");
+      if (cfg) {
+        const lookup = await arrFetch<{ tvdbId?: number }[]>(
+          cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`,
+        );
+        const tvdbId = lookup[0]?.tvdbId ?? null;
+        let cachedMapping: { tmdbId: number | null } | null = null;
+        // Expose any negative-cached tvdb→tmdb mapping so stale entries can be diagnosed
+        if (tvdbId) {
+          cachedMapping = await getCache<{ tmdbId: number | null }>(`tvdb-to-tmdb:${tvdbId}`);
         }
+        tvdbInfo = { tvdbId, cachedMapping };
       }
     } catch (err) {
-      tvdbInfo = { tvdbId: null, cachedMapping: { tmdbId: null }, ...(err instanceof Error ? { error: err.message } : {}) } as typeof tvdbInfo;
+      // Don't surface raw Arr error detail (configured server URL / upstream
+      // body) to the client — log server-side, return a generic flag.
+      console.error("[arr-state] sonarr series lookup failed:", err instanceof Error ? err.message : err);
+      tvdbInfo = { tvdbId: null, cachedMapping: { tmdbId: null }, error: "sonarr lookup failed" } as typeof tvdbInfo;
     }
   }
 

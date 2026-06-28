@@ -1,9 +1,11 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Loader2, Send, ShieldCheck } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useLiveEvents } from "@/hooks/use-live-events";
+import { withBasePath } from "@/lib/base-path";
 
 interface IssueMessageData {
   id: string;
@@ -30,26 +32,48 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   // (locale + timezone resolution). Empty string on the server, fill on mount.
   const mounted = useHasMounted();
 
+  const loadMessages = useCallback(
+    (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
+      if (!silent) setLoadState("loading");
+      return fetch(withBasePath(`/api/issues/${issueId}/messages`), { signal })
+        .then((r) => {
+          // A 403/404 returns { error }; without this guard setMessages({error})
+          // makes messages.map throw in render (uncaught by .catch).
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((data: IssueMessageData[]) => {
+          setMessages(Array.isArray(data) ? data : []);
+          setLoadState("ready");
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") return;
+          // A silent refresh failure leaves the existing thread intact rather
+          // than blanking a healthy view over a transient hiccup.
+          if (!silent) setLoadState("error");
+        });
+    },
+    [issueId],
+  );
+
   useEffect(() => {
     const ctrl = new AbortController();
-    setLoadState("loading");
-    fetch(`/api/issues/${issueId}/messages`, { signal: ctrl.signal })
-      .then((r) => {
-        // A 403/404 returns { error }; without this guard setMessages({error})
-        // makes messages.map throw in render (uncaught by .catch).
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
-      })
-      .then((data: IssueMessageData[]) => {
-        setMessages(Array.isArray(data) ? data : []);
-        setLoadState("ready");
-      })
-      .catch((err) => {
-        if (err?.name === "AbortError") return;
-        setLoadState("error");
-      });
+    loadMessages(ctrl.signal);
     return () => ctrl.abort();
-  }, [issueId]);
+  }, [loadMessages]);
+
+  // The SSE stream emits issuemessage:created when the other party replies;
+  // re-pull the thread so the new message appears without a manual refresh.
+  useLiveEvents(
+    useCallback(
+      (event) => {
+        if (event.type === "issuemessage:created" && event.issueId === issueId) {
+          void loadMessages(undefined, { silent: true });
+        }
+      },
+      [issueId, loadMessages],
+    ),
+  );
 
   useEffect(() => {
     if (loadState === "ready") {
@@ -64,7 +88,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
     setSending(true);
     setSendError(null);
     try {
-      const res = await fetch(`/api/issues/${issueId}/messages`, {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/messages`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body: text }),

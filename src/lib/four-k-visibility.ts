@@ -8,9 +8,16 @@ import type { SummonarrSession } from "@/lib/api-auth";
 // or the server-wide request4kAll toggle). Mirrors the gate on the detail-page "Request in 4K"
 // button so HD-only users are never shown 4K state they can't act on.
 //
+// `mediaType` scopes the check to a single backend so a page that lists only one
+// type (e.g. /movies, /tv) doesn't surface 4K state for the other backend when
+// only its 4K instance is configured. Omit it for mixed lists (the combined OR).
+//
 // Single settings query (presence checks + the server-wide flag) so callers can pass the result
 // straight into attachAllAvailability without fanning out extra round-trips per page.
-export async function getShow4kVisibility(session: SummonarrSession | null): Promise<boolean> {
+export async function getShow4kVisibility(
+  session: SummonarrSession | null,
+  mediaType?: "movie" | "tv",
+): Promise<boolean> {
   if (!session) return false;
 
   const rows = await prisma.setting.findMany({
@@ -24,8 +31,10 @@ export async function getShow4kVisibility(session: SummonarrSession | null): Pro
 
   const serverAll4k = map.request4kAll === "true";
   const perms = session.user.permissions;
-  return (
-    (radarr4k && canRequest(perms, "MOVIE", true, serverAll4k)) ||
-    (sonarr4k && canRequest(perms, "TV", true, serverAll4k))
-  );
+  const movieShow = radarr4k && canRequest(perms, "MOVIE", true, serverAll4k);
+  const tvShow = sonarr4k && canRequest(perms, "TV", true, serverAll4k);
+
+  if (mediaType === "movie") return movieShow;
+  if (mediaType === "tv") return tvShow;
+  return movieShow || tvShow;
 }

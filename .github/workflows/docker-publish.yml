@@ -54,6 +54,10 @@ jobs:
       # attestations: write lets `docker/build-push-action` upload the
       # provenance + SBOM attestation referrers alongside the image.
       attestations: write
+      # security-events: write uploads the post-publish Trivy SARIF so
+      # every published tag is scanned at publish time, not only `:latest`
+      # on the weekly schedule.
+      security-events: write
 
     steps:
       - name: Checkout
@@ -87,6 +91,7 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
@@ -105,3 +110,25 @@ jobs:
           # via `cosign verify-attestation` / `docker buildx imagetools`.
           provenance: mode=max
           sbom: true
+
+      # Scan the freshly published image by digest so every published tag
+      # (not just `:latest` on the weekly trivy.yml schedule) gets its
+      # runtime surface checked. Findings upload to the Security tab;
+      # exit-code 0 keeps publishing non-blocking, matching trivy.yml.
+      - name: Scan published image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-publish.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          sarif_file: trivy-publish.sarif
+          category: trivy-publish

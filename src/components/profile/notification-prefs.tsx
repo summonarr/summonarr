@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface NotificationPrefsProps {
   discordLinked: boolean;
@@ -91,6 +92,7 @@ export function NotificationPrefs({
   });
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Jellyfin-only local state for the manually-entered notification email.
   const [emailInput, setEmailInput] = useState(notificationEmail ?? "");
@@ -100,6 +102,8 @@ export function NotificationPrefs({
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPrefsRef = useRef<AllPrefs | null>(null);
+  // Last state the server confirmed — the toggles revert here if a save fails.
+  const savedPrefsRef = useRef<AllPrefs>(prefs);
 
   useEffect(() => () => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -111,17 +115,27 @@ export function NotificationPrefs({
     pendingPrefsRef.current = null;
     setSaving(true);
     setSaved(false);
+    setSaveError(null);
     try {
-      const res = await fetch("/api/profile/notifications", {
+      const res = await fetch(withBasePath("/api/profile/notifications"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updated),
       });
       if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        // Roll the toggles back to the last confirmed state so the UI never
+        // shows a position the server rejected.
+        setPrefs(savedPrefsRef.current);
+        setSaveError(data?.error ?? "Failed to save — please try again");
         return;
       }
+      savedPrefsRef.current = updated;
       setSaved(true);
       router.refresh();
+    } catch {
+      setPrefs(savedPrefsRef.current);
+      setSaveError("Network error — please try again");
     } finally {
       setSaving(false);
     }
@@ -130,6 +144,7 @@ export function NotificationPrefs({
   function toggle(key: keyof AllPrefs) {
     const updated = { ...(pendingPrefsRef.current ?? prefs), [key]: !(pendingPrefsRef.current ?? prefs)[key] };
     setPrefs(updated);
+    setSaveError(null);
     pendingPrefsRef.current = updated;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(flush, 400);
@@ -146,7 +161,7 @@ export function NotificationPrefs({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch("/api/profile/notifications", {
+      const res = await fetch(withBasePath("/api/profile/notifications"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ notificationEmail: trimmed === "" ? null : trimmed }),
@@ -323,7 +338,12 @@ export function NotificationPrefs({
         </div>
       )}
 
-      {(saving || saved) && (
+      {saveError ? (
+        <p className="text-xs text-red-400 flex items-center gap-1">
+          <AlertTriangle className="w-3 h-3" />
+          {saveError}
+        </p>
+      ) : (saving || saved) && (
         <p className="text-xs text-zinc-500 flex items-center gap-1">
           {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-green-400" />}
           {saving ? "Saving…" : "Saved"}

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Flame } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface WarmCacheButtonProps {
   uncachedCount: number;
@@ -18,14 +19,14 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
     setStatus("loading");
     setResult(null);
     try {
-      const res = await fetch("/api/admin/library-warm", { method: "POST" });
-      const data: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } = await res.json();
-      if (data.error) {
+      const res = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } | null;
+      if (!res.ok || data?.error) {
         setStatus("error");
-        setResult(data.error);
+        setResult(data?.error ?? `Request failed (${res.status})`);
       } else {
         setStatus("done");
-        setResult(`Fetched ${data.fetched ?? 0}, skipped ${data.skipped ?? 0} fresh`);
+        setResult(`Fetched ${data?.fetched ?? 0}, skipped ${data?.skipped ?? 0} fresh`);
         router.refresh();
       }
     } catch {

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
+import { withBasePath } from "@/lib/base-path";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -24,7 +25,7 @@ async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
 ): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(`/api/auth/sign-in/${provider}`, {
+  const res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
@@ -94,7 +95,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   useEffect(() => {
     // Sync client ID with the server-assigned value so SSR and client stay in agreement
     let cancelled = false;
-    fetch("/api/auth/plex/client-id", { cache: "no-store" })
+    fetch(withBasePath("/api/auth/plex/client-id"), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data: { clientId?: string | null } | null) => {
         if (cancelled || !data?.clientId) return;
@@ -146,7 +147,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       // PIN-phishing attacks where an attacker's PIN gets approved by a
       // victim and the resulting token is submitted from the attacker's
       // browser.
-      const res = await fetch("/api/auth/plex/start", {
+      const res = await fetch(withBasePath("/api/auth/plex/start"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -243,7 +244,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     let secret: string;
     let code: string;
     try {
-      const res = await fetch("/api/auth/jellyfin/quickconnect", { method: "POST" });
+      const res = await fetch(withBasePath("/api/auth/jellyfin/quickconnect"), { method: "POST" });
       if (!res.ok) throw new Error("initiate failed");
       const data: { secret: string; code: string } = await res.json();
       secret = data.secret;
@@ -262,7 +263,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     while (Date.now() < deadline) {
       try {
         const poll = await fetch(
-          `/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1`
+          withBasePath(`/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1`)
         );
         if (poll.ok) {
           const data: { authenticated: boolean } = await poll.json();
@@ -339,7 +340,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               const qp = callbackUrl && callbackUrl !== "/"
                 ? `?callbackUrl=${encodeURIComponent(callbackUrl)}`
                 : "";
-              window.location.href = `/api/auth/oidc/start${qp}`;
+              window.location.href = withBasePath(`/api/auth/oidc/start${qp}`);
             }}
             disabled={loading}
             className="w-full min-h-11"

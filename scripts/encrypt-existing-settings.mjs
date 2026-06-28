@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-// One-shot migration: encrypt sensitive Setting and Account rows that were
-// stored plaintext before the H-1 audit fix landed.
+// One-shot migration: encrypt sensitive Setting, Account, and PushSubscription
+// rows that were stored plaintext before encryption-at-rest landed.
 //
 // The Prisma extension at src/lib/prisma.ts encrypts on every Setting and
-// Account write going forward — but pre-existing rows on disk stay plaintext
-// until something updates them. This script reads each affected row and
-// rewrites it using the same AES-256-GCM scheme as src/lib/token-crypto.ts.
+// Account write going forward, and PushSubscription writes are encrypted at the
+// call site — but pre-existing rows on disk stay plaintext until something
+// updates them. This script reads each affected row and rewrites it using the
+// same AES-256-GCM scheme as src/lib/token-crypto.ts.
 //
 // Standalone — uses only `pg` (already in the app bundle) and Node's
 // built-in `crypto`. No Prisma dependency, so it runs inside the
@@ -149,6 +150,42 @@ async function main() {
       console.log(`[account] re-encrypted: id=${a.id}`);
     }
 
+    // ── Push subscription crypto material ────────────────────────────────────
+    // PushSubscription columns are encrypted at the call site (the Prisma
+    // extension does not cover that table), so rows written before that rollout
+    // hold plaintext web-push keys / APNs device tokens. Re-encrypt them with the
+    // same scheme; the ENC_PREFIX check keeps it idempotent.
+    let pushRewrote = 0;
+    let pushClean = 0;
+    const push = await client.query(
+      'SELECT id, p256dh, auth, "deviceToken" FROM "PushSubscription"'
+    );
+    for (const s of push.rows) {
+      const updates = [];
+      const params = [];
+      let i = 1;
+      let needsRewrite = false;
+      for (const col of ["p256dh", "auth", "deviceToken"]) {
+        const v = s[col];
+        if (v && !v.startsWith(ENC_PREFIX)) {
+          updates.push(`"${col}" = $${i++}`);
+          params.push(encrypt(v, key));
+          needsRewrite = true;
+        }
+      }
+      if (!needsRewrite) {
+        pushClean++;
+        continue;
+      }
+      params.push(s.id);
+      await client.query(
+        `UPDATE "PushSubscription" SET ${updates.join(", ")} WHERE id = $${i}`,
+        params
+      );
+      pushRewrote++;
+      console.log(`[push] re-encrypted: id=${s.id}`);
+    }
+
     console.log("");
     console.log("Settings:");
     console.log(`  re-encrypted        ${settingsRewrote}`);
@@ -157,8 +194,11 @@ async function main() {
     console.log("Accounts:");
     console.log(`  re-encrypted        ${accountsRewrote}`);
     console.log(`  already clean       ${accountsClean}`);
+    console.log("Push subscriptions:");
+    console.log(`  re-encrypted        ${pushRewrote}`);
+    console.log(`  already clean       ${pushClean}`);
 
-    if (settingsRewrote === 0 && accountsRewrote === 0) {
+    if (settingsRewrote === 0 && accountsRewrote === 0 && pushRewrote === 0) {
       console.log("\nNothing to do — every sensitive row is already encrypted at rest.");
     } else {
       console.log("\nDone. All sensitive rows are now encrypted at rest.");

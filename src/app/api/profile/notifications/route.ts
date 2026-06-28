@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
+import { getJellyfinUserEmail } from "@/lib/jellyfin";
 import { prisma } from "@/lib/prisma";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
@@ -64,7 +65,63 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       if (raw.length > 320 || !EMAIL_RE.test(raw.trim())) {
         return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
       }
-      data.notificationEmail = normalizeEmail(raw);
+      // A Jellyfin-authenticated user has no provider-verified email the way Plex
+      // and OIDC users do (those addresses are owned and synced by the IdP on every
+      // sign-in). If we accepted an arbitrary notificationEmail here, a user could
+      // redirect Summonarr's outbound mail (approved / available / declined / issue
+      // notifications) to ANY address — including a victim's mailbox — turning the
+      // notification system into an email-bombing / harassment vector with the
+      // server's own SMTP/Resend reputation behind it.
+      //
+      // Mitigation: bind the value to the address THIS Jellyfin server reports for
+      // the account (fetched live below). An attacker cannot point notifications at
+      // a mailbox they don't already control on the upstream Jellyfin server, so the
+      // upstream server's own account ownership becomes the verification boundary.
+      // Summonarr has no self-service email-verification flow (no confirmation-code
+      // round-trip), so this server-authoritative match is the only sound mitigation
+      // available.
+      const candidate = normalizeEmail(raw);
+      const me = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { jellyfinUserId: true },
+      });
+      const jellyfinUserId = me?.jellyfinUserId ?? null;
+
+      let reportedEmail: string | null = null;
+      if (jellyfinUserId) {
+        const [urlRow, keyRow] = await Promise.all([
+          prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
+          prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+        ]);
+        if (urlRow?.value && keyRow?.value) {
+          // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
+          // reads Settings (no encryptToken at the call site — guardrail 7a holds).
+          const fromJellyfin = await getJellyfinUserEmail(urlRow.value, keyRow.value, jellyfinUserId);
+          if (fromJellyfin) reportedEmail = normalizeEmail(fromJellyfin);
+        }
+      }
+
+      // TODO: If the Jellyfin server reports NO email for this account there is
+      // nothing server-authoritative to bind the requested address to. Rather than
+      // fall back to accepting an unverified free-form address (which would reopen
+      // the notification-redirect / harassment vector described above), reject the
+      // write. The proper long-term fix is a self-service email-verification flow
+      // (mail a one-time code to the requested address and persist it only after the
+      // user confirms possession) — deferred because it requires reliable outbound
+      // mail infrastructure to be a hard dependency of the profile flow.
+      if (!reportedEmail) {
+        return NextResponse.json(
+          { error: "Set an email on your Jellyfin account first, then it can be used for notifications." },
+          { status: 403 },
+        );
+      }
+      if (candidate !== reportedEmail) {
+        return NextResponse.json(
+          { error: "notificationEmail must match the email on your Jellyfin account." },
+          { status: 403 },
+        );
+      }
+      data.notificationEmail = candidate;
     } else {
       return NextResponse.json({ error: "Invalid notificationEmail" }, { status: 400 });
     }

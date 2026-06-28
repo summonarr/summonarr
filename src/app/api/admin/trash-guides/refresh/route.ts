@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { refreshCatalog, describeSchemaError, type RefreshResult } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
+import { checkRateLimit } from "@/lib/rate-limit";
 import type { TrashService } from "@/generated/prisma";
 
 function busyResponse() {
@@ -14,6 +15,16 @@ function busyResponse() {
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  // Per-admin rate limit. A refresh fans out to GitHub (pulling the TRaSH-Guides
+  // catalog) AND to the configured Radarr/Sonarr instances, so calling it in a
+  // tight loop would hammer GitHub's raw-content endpoints (risking 429s that
+  // break the catalog fetch for everyone) and pile mutation requests onto the Arr
+  // servers. Bounding it to 10 refreshes per 5-minute window per admin caps a
+  // compromised admin session while still covering an operator's legitimate
+  // manual refreshes.
+  if (!checkRateLimit(`admin-trash-refresh:${session.user.id}`, 10, 5 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many refreshes — try again shortly." }, { status: 429 });
+  }
   // Body is optional. Accept missing/empty body silently (UI's "Refresh both" sends none); reject
   // malformed JSON loudly (typos otherwise silently fall through to "refresh both").
   const contentLength = req.headers.get("content-length");

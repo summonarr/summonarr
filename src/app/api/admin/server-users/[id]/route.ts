@@ -21,9 +21,11 @@ export const PATCH = withAdmin(async (
 
   const record = await prisma.mediaServerUser.findUnique({
     where: { id },
-    select: { isServerAdmin: true, source: true },
+    select: { isServerAdmin: true, source: true, active: true },
   });
-  if (!record) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  // Soft-deleted (active: false) rows are departed users hidden from every
+  // management surface; treat them as absent so policy can't be pushed to them.
+  if (!record || !record.active) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (record.isServerAdmin) {
     return NextResponse.json({ error: "Cannot change download policy for server admins" }, { status: 400 });
   }

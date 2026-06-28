@@ -4,6 +4,7 @@ import { useState } from "react";
 import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
+import { withBasePath } from "@/lib/base-path";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
 type IssueScope = "FULL" | "SEASON" | "EPISODE";
@@ -75,7 +76,7 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
 
     if (isTV) {
       try {
-        const res = await fetch(`/api/tv-availability?tmdbId=${tmdbId}`);
+        const res = await fetch(withBasePath(`/api/tv-availability?tmdbId=${tmdbId}`));
         if (res.ok) {
           const data: TVAvailabilityResponse = await res.json();
           setTvSeasons(data.seasons);
@@ -130,7 +131,7 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
     const { season, episode } = resolveNumbers();
 
     try {
-      const res = await fetch("/api/issues", {
+      const res = await fetch(withBasePath("/api/issues"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

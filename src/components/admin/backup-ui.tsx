@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
+import { withBasePath } from "@/lib/base-path";
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -88,7 +89,7 @@ function DbExportSection() {
     setDownloading(true);
     setError(null);
     try {
-      const res = await fetch("/api/admin/backup/db-export");
+      const res = await fetch(withBasePath("/api/admin/backup/db-export"));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error ?? "Export failed");
@@ -176,6 +177,7 @@ function DbImportSection() {
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
   const [size, setSize] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
     | {
@@ -212,13 +214,14 @@ function DbImportSection() {
       setResult({ ok: false, error: "Backup file is not an encrypted Summonarr dump." });
       return;
     }
+    setConfirming(false);
     setImporting(true);
     setResult(null);
     setProgress({ uploaded: 0, total: file.size, phase: "upload" });
 
     const outcome = await uploadInChunks({
       file,
-      endpoint: "/api/admin/backup/db-import-chunk",
+      endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
       onProgress: setProgress,
     });
 
@@ -243,6 +246,7 @@ function DbImportSection() {
     setSize(null);
     setResult(null);
     setProgress(null);
+    setConfirming(false);
   }
 
   const dropBorder =
@@ -351,9 +355,9 @@ function DbImportSection() {
         {file && <SecondaryButton onClick={clearFile}>Clear</SecondaryButton>}
       </div>
 
-      {!result?.summary && (
+      {!result?.summary && !confirming && (
         <PrimaryButton
-          onClick={handleImport}
+          onClick={() => setConfirming(true)}
           disabled={!file || !encrypted || importing}
         >
           {importing ? (
@@ -371,6 +375,33 @@ function DbImportSection() {
             </>
           )}
         </PrimaryButton>
+      )}
+
+      {!result?.summary && confirming && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+            padding: 14,
+            borderRadius: 8,
+            background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 40%, var(--ds-border))",
+          }}
+        >
+          <span style={{ fontSize: 12.5, color: "var(--ds-fg)" }}>
+            This replaces the current database with the contents of this backup.
+            Existing data will be overwritten and cannot be recovered. Continue?
+          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            <SecondaryButton onClick={() => setConfirming(false)}>
+              Cancel
+            </SecondaryButton>
+            <PrimaryButton onClick={handleImport} disabled={importing}>
+              <Upload className="w-4 h-4" /> Yes, restore and overwrite
+            </PrimaryButton>
+          </div>
+        </div>
       )}
 
       {importing && progress && (

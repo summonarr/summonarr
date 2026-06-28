@@ -13,6 +13,7 @@ import {
   sourceDotColor,
 } from "@/components/admin/activity-ui";
 import { IpInfo } from "@/components/admin/ip-info";
+import { withBasePath } from "@/lib/base-path";
 
 export interface RecentPlay {
   id: string;
@@ -184,7 +185,7 @@ export function ActivityRecentPlays({
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
       if (startDateIso) filterParams.set("startDate", startDateIso);
-      const res = await fetch(`/api/play-history?${filterParams.toString()}`);
+      const res = await fetch(withBasePath(`/api/play-history?${filterParams.toString()}`));
       if (!res.ok) return;
       type PlayHistoryApiItem = Omit<RecentPlay, "username" | "userSource" | "userThumb"> & {
         mediaServerUser?: { username?: string | null; source?: string | null; thumbUrl?: string | null } | null;
@@ -355,7 +356,7 @@ export function ActivityRecentPlays({
                   const isTV = p.mediaType === "TV";
                   const mediaHref =
                     p.tmdbId && p.mediaType
-                      ? `/admin/activity/media/${p.tmdbId}`
+                      ? `/admin/activity/media/${p.tmdbId}?type=${p.mediaType}`
                       : null;
                   const sub = isTV
                     ? [

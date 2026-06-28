@@ -9,6 +9,7 @@ import {
   Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X,
 } from "@/components/icons";
 import type { ArrRelease } from "@/lib/arr";
+import { withBasePath } from "@/lib/base-path";
 
 interface IssueActionsProps {
   issueId: string;
@@ -71,7 +72,7 @@ export function IssueActions({
     setArrError(null);
     setRefetchOk(false);
     try {
-      const res = await fetch(`/api/issues/${issueId}`, {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refetch: true }),
@@ -92,7 +93,7 @@ export function IssueActions({
     setLoading("status");
     setArrError(null);
     try {
-      const res = await fetch(`/api/issues/${issueId}`, {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status, resolution: resolutionNote }),
@@ -112,7 +113,7 @@ export function IssueActions({
   async function deleteIssue() {
     setLoading("delete");
     try {
-      const res = await fetch(`/api/issues/${issueId}`, { method: "DELETE" });
+      const res = await fetch(withBasePath(`/api/issues/${issueId}`), { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setArrError((data as { error?: string }).error ?? "Delete failed");
@@ -135,7 +136,7 @@ export function IssueActions({
     setShowRejected(false);
     setReleaseFilter("");
     try {
-      const res = await fetch(`/api/issues/${issueId}/releases`);
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases`));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setArrError(data.error ?? "Failed to fetch releases");
@@ -158,7 +159,7 @@ export function IssueActions({
     setLoading("grab");
     setArrError(null);
     try {
-      const res = await fetch(`/api/issues/${issueId}/releases`, {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ guid: rel.guid, indexerId: rel.indexerId }),

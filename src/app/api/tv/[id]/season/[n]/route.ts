@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getTVSeasonEpisodes } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -15,6 +16,10 @@ export const GET = withAuth(async (
   { params }: { params: Promise<{ id: string; n: string }> },
   session
 ) => {
+  if (!checkRateLimit(`tv-season:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const { id: rawId, n: rawN } = await params;
   const tmdbId = parseInt(rawId, 10);
   const seasonNumber = parseInt(rawN, 10);

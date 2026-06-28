@@ -7,11 +7,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ApiDocsPage() {
   const session = await authActive();
-  if (
-    !session ||
-    isTokenExpired(session) ||
-    (session.user.role !== "ADMIN" && session.user.role !== "ISSUE_ADMIN")
-  ) {
+  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
     redirect("/");
   }
 

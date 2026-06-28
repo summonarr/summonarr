@@ -3,6 +3,7 @@ import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -13,6 +14,9 @@ type RouteContext = { params: Promise<{ id: string }> };
 // Notifications for replies on a claimed issue narrow to the claimer + the
 // reporter — see src/app/api/issues/[id]/messages/route.ts.
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   const { id } = await params;
   const issue = await prisma.issue.findUnique({
     where: { id },

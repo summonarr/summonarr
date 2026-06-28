@@ -62,7 +62,7 @@ There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. 
 
 **safe-fetch helpers** — [src/lib/safe-fetch.ts](src/lib/safe-fetch.ts)
 - `safeFetch(url)` — full SSRF policy (resolve+pin, blocks RFC1918/loopback/link-local/CGNAT/multicast). For user-supplied URLs.
-- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; skips DNS-based SSRF. For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com, api.resend.com).
+- `safeFetchTrusted(url, { allowedHosts })` — required hostname allowlist; still runs the DNS-based SSRF check (resolve + per-address public-IP check, `allowPrivate=false`, so a DNS rebind to a private address is blocked). For fixed third-party APIs (TMDB, plex.tv, discord.com, ipinfo.io, api.trakt.tv, api.github.com, raw.githubusercontent.com, www.omdbapi.com, api.mdblist.com, api.resend.com).
 - `safeFetchAdminConfigured(url)` — runs SSRF policy with `allowPrivate=true` (RFC1918/ULA/loopback OK; link-local + 0.0.0.0 still blocked). For URLs persisted in `Setting` (Radarr/Sonarr/Jellyfin/Plex server).
 
 **Webhook auth** — [src/app/api/webhooks/](src/app/api/webhooks/) (**sonarr, radarr only**)

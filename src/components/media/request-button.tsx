@@ -14,6 +14,7 @@ import {
   AlertCircle,
 } from "@/components/icons";
 import Link from "next/link";
+import { withBasePath } from "@/lib/base-path";
 
 type State =
   | "idle"
@@ -107,7 +108,7 @@ export function RequestButton({
     setState("loading");
     setErrorMsg("");
     try {
-      const res = await fetch("/api/requests", {
+      const res = await fetch(withBasePath("/api/requests"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -138,7 +139,7 @@ export function RequestButton({
     setObMsg("");
     setState("onbehalf");
     if (obUsers.length === 0) {
-      fetch("/api/requests/users")
+      fetch(withBasePath("/api/requests/users"))
         .then((r) => (r.ok ? r.json() : { users: [] }))
         .then((d: { users?: { id: string; name: string | null; email: string }[] }) =>
           setObUsers(d.users ?? []),
@@ -152,7 +153,7 @@ export function RequestButton({
     setObSubmitting(true);
     setObMsg("");
     try {
-      const res = await fetch("/api/requests/bulk", {
+      const res = await fetch(withBasePath("/api/requests/bulk"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: [{ tmdbId, mediaType }], onBehalfOfUserId: obUserId }),

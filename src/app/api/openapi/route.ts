@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { withIssueAdmin } from "@/lib/api-auth";
+import { withAdmin } from "@/lib/api-auth";
 
 const spec = {
   openapi: "3.0.3",
@@ -17,7 +17,14 @@ const spec = {
         in: "cookie",
         name: "__Host-summonarr-session",
         description:
-          "Summonarr session JWT (jose HS256). Named `summonarr-session` in non-HTTPS contexts.",
+          "Summonarr session JWT (jose HS256), web transport. Named `summonarr-session` in non-HTTPS contexts.",
+      },
+      sessionBearer: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "JWT",
+        description:
+          "Same session JWT delivered to native/mobile clients via the sign-in response body (`Authorization: Bearer <session-jwt>`). Every authenticated route resolves bearer first, then the session cookie, so this is accepted anywhere the `session` cookie scheme is.",
       },
       cronSecret: {
         type: "http",
@@ -34,7 +41,15 @@ const spec = {
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
       IssueType: {
         type: "string",
-        enum: ["VIDEO", "AUDIO", "SUBTITLE", "OTHER"],
+        enum: ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"],
+      },
+      IssueStatus: {
+        type: "string",
+        enum: ["OPEN", "IN_PROGRESS", "RESOLVED"],
+      },
+      IssueScope: {
+        type: "string",
+        enum: ["FULL", "SEASON", "EPISODE"],
       },
       MediaRequest: {
         type: "object",
@@ -57,11 +72,17 @@ const spec = {
         properties: {
           id: { type: "string" },
           tmdbId: { type: "integer" },
+          tvdbId: { type: "integer", nullable: true },
           mediaType: { $ref: "#/components/schemas/MediaType" },
           title: { type: "string" },
-          type: { $ref: "#/components/schemas/IssueType" },
-          description: { type: "string" },
-          status: { type: "string", enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"] },
+          posterPath: { type: "string", nullable: true },
+          issueType: { $ref: "#/components/schemas/IssueType" },
+          scope: { $ref: "#/components/schemas/IssueScope" },
+          seasonNumber: { type: "integer", nullable: true },
+          episodeNumber: { type: "integer", nullable: true },
+          note: { type: "string", nullable: true },
+          status: { $ref: "#/components/schemas/IssueStatus" },
+          resolution: { type: "string", nullable: true },
           createdAt: { type: "string", format: "date-time" },
         },
       },
@@ -80,9 +101,11 @@ const spec = {
       },
     },
   },
-  security: [{ session: [] }],
+  security: [{ session: [] }, { sessionBearer: [] }],
   tags: [
     { name: "Health", description: "Liveness / readiness probes" },
+    { name: "Discovery", description: "Browse / home / popular / upcoming / top-rated lists" },
+    { name: "Config", description: "Public client capability negotiation" },
     { name: "Search", description: "TMDB media search" },
     { name: "Requests", description: "Media request lifecycle" },
     { name: "Issues", description: "Content issue reporting" },
@@ -125,6 +148,100 @@ const spec = {
       },
     },
 
+    "/config/compat": {
+      get: {
+        tags: ["Config"],
+        summary: "Public client capability descriptor (integers only)",
+        security: [],
+        responses: {
+          "200": {
+            description: "API contract floor/ceiling and minimum client build",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    apiVersion: { type: "integer" },
+                    minApiVersion: { type: "integer" },
+                    minClient: { type: "object", additionalProperties: { type: "integer" } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+
+    "/browse": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Discover/browse movies or TV with filters and availability enrichment",
+        parameters: [
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "sortBy", in: "query", schema: { type: "string" } },
+          { name: "genreId", in: "query", schema: { type: "string" } },
+          { name: "keywordId", in: "query", schema: { type: "string" } },
+          { name: "fromYear", in: "query", schema: { type: "integer" } },
+          { name: "toYear", in: "query", schema: { type: "integer" } },
+          { name: "minRating", in: "query", schema: { type: "number" } },
+          { name: "minVoteCount", in: "query", schema: { type: "integer" } },
+          { name: "ratingFilter", in: "query", schema: { type: "string" } },
+          { name: "watchProvider", in: "query", schema: { type: "string" } },
+          { name: "watchRegion", in: "query", schema: { type: "string" } },
+          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "Enriched discovery results" } },
+      },
+    },
+    "/home": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Home discovery rails (trending / popular / etc.)",
+        responses: { "200": { description: "Grouped discovery rails with availability enrichment" } },
+      },
+    },
+    "/popular": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Popular movies or TV",
+        parameters: [
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "sort", in: "query", schema: { type: "string" } },
+        ],
+        responses: { "200": { description: "Popular results with availability enrichment" } },
+      },
+    },
+    "/upcoming": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Upcoming releases",
+        parameters: [
+          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "Upcoming releases with availability enrichment" } },
+      },
+    },
+    "/top-rated": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Top-rated movies or TV",
+        parameters: [
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "sortBy", in: "query", schema: { type: "string" } },
+          { name: "fromYear", in: "query", schema: { type: "integer" } },
+          { name: "toYear", in: "query", schema: { type: "integer" } },
+          { name: "minImdb", in: "query", schema: { type: "number" } },
+          { name: "minVotes", in: "query", schema: { type: "integer" } },
+          { name: "hideAvailable", in: "query", schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "Top-rated results with availability enrichment" } },
+      },
+    },
+
     "/search": {
       get: {
         tags: ["Search"],
@@ -135,7 +252,8 @@ const spec = {
         ],
         responses: {
           "200": {
-            description: "Search results with library availability",
+            description:
+              "Search results enriched with library availability and request/ARR state",
             content: {
               "application/json": {
                 schema: {
@@ -149,6 +267,11 @@ const spec = {
                       posterPath: { type: "string", nullable: true },
                       plexAvailable: { type: "boolean" },
                       jellyfinAvailable: { type: "boolean" },
+                      arrPending: { type: "boolean" },
+                      arr4kPending: { type: "boolean" },
+                      arr4kAvailable: { type: "boolean" },
+                      requested: { type: "boolean" },
+                      requestedByMe: { type: "boolean" },
                     },
                   },
                 },
@@ -169,6 +292,7 @@ const spec = {
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
           { name: "status", in: "query", schema: { $ref: "#/components/schemas/RequestStatus" } },
           { name: "sort", in: "query", schema: { type: "string", enum: ["newest", "oldest", "title"] } },
+          { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter" },
         ],
         responses: {
           "200": {
@@ -218,11 +342,16 @@ const spec = {
       get: {
         tags: ["Requests"],
         summary: "Get an HMAC token required to submit a request",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
         responses: {
           "200": {
             description: "Short-lived HMAC token",
             content: { "application/json": { schema: { type: "object", properties: { token: { type: "string" } } } } },
           },
+          "400": { description: "Missing or invalid tmdbId / mediaType" },
         },
       },
     },
@@ -265,20 +394,21 @@ const spec = {
       },
     },
     "/requests/batch": {
-      post: {
+      patch: {
         tags: ["Requests"],
-        summary: "Bulk approve or decline requests (ADMIN)",
+        summary: "Bulk approve or decline requests (requires MANAGE_REQUESTS)",
         requestBody: {
           required: true,
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["ids", "action"],
+                required: ["ids", "status"],
                 properties: {
-                  ids: { type: "array", items: { type: "string" } },
-                  action: { type: "string", enum: ["approve", "decline"] },
-                  adminNote: { type: "string" },
+                  ids: { type: "array", items: { type: "string" }, maxItems: 100 },
+                  status: { type: "string", enum: ["APPROVED", "DECLINED"] },
+                  adminNote: { type: "string", maxLength: 1000 },
+                  permanent: { type: "boolean", description: "On DECLINED, mark the request permanently declined" },
                 },
               },
             },
@@ -286,6 +416,7 @@ const spec = {
         },
         responses: {
           "200": { description: "Batch result", content: { "application/json": { schema: { type: "object", properties: { updated: { type: "integer" } } } } } },
+          "429": { description: "Rate limited (10/min per admin)" },
         },
       },
     },
@@ -295,20 +426,14 @@ const spec = {
         tags: ["Issues"],
         summary: "List issues",
         parameters: [
-          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "status", in: "query", schema: { type: "string", enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"] } },
+          { name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 100 } },
         ],
         responses: {
           "200": {
-            description: "Paginated issues",
+            description: "Issues for the caller (own issues, or all when MANAGE_ISSUES)",
             content: {
               "application/json": {
-                schema: {
-                  allOf: [
-                    { $ref: "#/components/schemas/PaginatedMeta" },
-                    { type: "object", properties: { issues: { type: "array", items: { $ref: "#/components/schemas/Issue" } } } },
-                  ],
-                },
+                schema: { type: "array", items: { $ref: "#/components/schemas/Issue" } },
               },
             },
           },
@@ -323,12 +448,14 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["tmdbId", "mediaType", "type", "description"],
+                required: ["tmdbId", "mediaType", "issueType"],
                 properties: {
                   tmdbId: { type: "integer" },
+                  tvdbId: { type: "integer" },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
-                  type: { $ref: "#/components/schemas/IssueType" },
-                  description: { type: "string", maxLength: 2000 },
+                  issueType: { $ref: "#/components/schemas/IssueType" },
+                  scope: { $ref: "#/components/schemas/IssueScope" },
+                  note: { type: "string", maxLength: 2000 },
                   seasonNumber: { type: "integer" },
                   episodeNumber: { type: "integer" },
                 },
@@ -342,18 +469,9 @@ const spec = {
       },
     },
     "/issues/{id}": {
-      get: {
-        tags: ["Issues"],
-        summary: "Get issue detail",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: {
-          "200": { description: "Issue with messages", content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } } },
-          "404": { description: "Not found" },
-        },
-      },
       patch: {
         tags: ["Issues"],
-        summary: "Update issue status (ADMIN / ISSUE_ADMIN)",
+        summary: "Update issue status / resolution, or trigger an ARR re-search (ADMIN / ISSUE_ADMIN)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           content: {
@@ -361,7 +479,9 @@ const spec = {
               schema: {
                 type: "object",
                 properties: {
-                  status: { type: "string", enum: ["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"] },
+                  status: { $ref: "#/components/schemas/IssueStatus" },
+                  resolution: { type: "string", maxLength: 1000 },
+                  refetch: { type: "boolean", description: "Trigger a Radarr/Sonarr re-search for the issue media" },
                 },
               },
             },
@@ -370,6 +490,7 @@ const spec = {
         responses: {
           "200": { description: "Updated issue" },
           "403": { description: "Forbidden" },
+          "404": { description: "Not found" },
         },
       },
       delete: {
@@ -382,6 +503,12 @@ const spec = {
       },
     },
     "/issues/{id}/messages": {
+      get: {
+        tags: ["Issues"],
+        summary: "List messages on an issue",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Message list" } },
+      },
       post: {
         tags: ["Issues"],
         summary: "Add a message to an issue",
@@ -392,8 +519,8 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["message"],
-                properties: { message: { type: "string", maxLength: 2000 } },
+                required: ["body"],
+                properties: { body: { type: "string", maxLength: 2000 } },
               },
             },
           },
@@ -414,7 +541,11 @@ const spec = {
       get: {
         tags: ["Votes"],
         summary: "List deletion vote items",
-        parameters: [{ name: "page", in: "query", schema: { type: "integer", default: 1 } }],
+        parameters: [
+          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "mine", in: "query", schema: { type: "boolean" }, description: "Only items the caller has voted on" },
+          { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter" },
+        ],
         responses: {
           "200": {
             description: "Paginated vote items",
@@ -476,20 +607,24 @@ const spec = {
         ],
         responses: {
           "200": {
-            description: "Ratings from external sources",
+            description: "Ratings object, or null when no ratings are found for the title",
             content: {
               "application/json": {
                 schema: {
                   type: "object",
+                  nullable: true,
+                  description:
+                    "String-valued rating fields from MDBList (or OMDB fallback). Any field may be null.",
                   properties: {
-                    title: { type: "string" },
-                    ratings: {
-                      type: "array",
-                      items: {
-                        type: "object",
-                        properties: { source: { type: "string" }, value: { type: "number" } },
-                      },
-                    },
+                    imdbId: { type: "string", nullable: true },
+                    imdbRating: { type: "string", nullable: true },
+                    imdbVotes: { type: "string", nullable: true },
+                    rottenTomatoes: { type: "string", nullable: true },
+                    rtAudienceScore: { type: "string", nullable: true },
+                    metacritic: { type: "string", nullable: true },
+                    traktRating: { type: "string", nullable: true },
+                    letterboxdRating: { type: "string", nullable: true },
+                    mdblistScore: { type: "string", nullable: true },
                   },
                 },
               },
@@ -533,21 +668,35 @@ const spec = {
     "/play-history": {
       get: {
         tags: ["Play History"],
-        summary: "List play history for current user",
+        summary: "List play history across all users (ADMIN)",
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "limit", in: "query", schema: { type: "integer" } },
+          { name: "distinct", in: "query", schema: { type: "boolean" } },
+          { name: "ungrouped", in: "query", schema: { type: "boolean" } },
+          { name: "sortBy", in: "query", schema: { type: "string" } },
+          { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
+          { name: "source", in: "query", schema: { type: "string", enum: ["plex", "jellyfin"] } },
+          { name: "watched", in: "query", schema: { type: "string" } },
+          { name: "playMethod", in: "query", schema: { type: "string" } },
+          { name: "platform", in: "query", schema: { type: "string" } },
+          { name: "startDate", in: "query", schema: { type: "string", format: "date" } },
+          { name: "endDate", in: "query", schema: { type: "string", format: "date" } },
+          { name: "search", in: "query", schema: { type: "string" } },
+          { name: "userId", in: "query", schema: { type: "string" } },
           { name: "tmdbId", in: "query", schema: { type: "integer" } },
-          { name: "userId", in: "query", schema: { type: "string" }, description: "Admin-only filter" },
         ],
-        responses: { "200": { description: "Paginated play history rows" } },
+        responses: { "200": { description: "Paginated play history rows" }, "403": { description: "Forbidden" } },
       },
     },
     "/play-history/sessions": {
       get: {
-        tags: ["Play History"],
-        summary: "Completed session list",
-        parameters: [{ name: "page", in: "query", schema: { type: "integer", default: 1 } }],
-        responses: { "200": { description: "Paginated completed sessions" } },
+        tags: ["Sessions"],
+        summary: "List active playback sessions (ADMIN)",
+        responses: {
+          "200": { description: "Active ActiveSession rows ordered by start time" },
+          "403": { description: "Forbidden" },
+        },
       },
     },
     "/play-history/stats": {
@@ -576,10 +725,10 @@ const spec = {
     "/sessions": {
       get: {
         tags: ["Sessions"],
-        summary: "List active playback sessions",
+        summary: "List the current user's authenticated device sessions",
         responses: {
           "200": {
-            description: "Currently active sessions from Plex and Jellyfin",
+            description: "The caller's AuthSession (login/device) rows",
             content: {
               "application/json": {
                 schema: {
@@ -588,18 +737,44 @@ const spec = {
                     type: "object",
                     properties: {
                       id: { type: "string" },
-                      source: { type: "string", enum: ["plex", "jellyfin"] },
-                      userId: { type: "string", nullable: true },
-                      title: { type: "string" },
-                      state: { type: "string" },
-                      progress: { type: "number" },
-                      updatedAt: { type: "string", format: "date-time" },
+                      sessionId: { type: "string" },
+                      deviceType: { type: "string", nullable: true },
+                      deviceLabel: { type: "string", nullable: true },
+                      ipAddress: { type: "string", nullable: true },
+                      createdAt: { type: "string", format: "date-time" },
+                      lastSeenAt: { type: "string", format: "date-time" },
+                      expiresAt: { type: "string", format: "date-time" },
+                      isCurrent: { type: "boolean" },
                     },
                   },
                 },
               },
             },
           },
+        },
+      },
+      delete: {
+        tags: ["Sessions"],
+        summary: "Revoke one of the caller's own device sessions (step-up auth required)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["sessionId"],
+                properties: {
+                  sessionId: { type: "string" },
+                  confirmPassword: { type: "string", description: "Step-up re-authentication, required to revoke a session other than the caller's own" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Session revoked" },
+          "401": { description: "Step-up authentication required or failed" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -650,7 +825,7 @@ const spec = {
                 required: ["currentPassword", "newPassword"],
                 properties: {
                   currentPassword: { type: "string" },
-                  newPassword: { type: "string", minLength: 8 },
+                  newPassword: { type: "string", minLength: 12 },
                 },
               },
             },
@@ -766,7 +941,7 @@ const spec = {
                 properties: {
                   name: { type: "string" },
                   email: { type: "string", format: "email" },
-                  password: { type: "string", minLength: 8 },
+                  password: { type: "string", minLength: 12 },
                 },
               },
             },
@@ -804,7 +979,88 @@ const spec = {
         responses: { "200": { description: "QuickConnect state or token" } },
       },
     },
+    "/auth/me": {
+      get: {
+        tags: ["Auth"],
+        summary: "Get the current authenticated session (cookie or bearer)",
+        responses: {
+          "200": { description: "Current user/session payload" },
+          "401": { description: "Not authenticated" },
+        },
+      },
+    },
+    "/auth/sign-out": {
+      post: {
+        tags: ["Auth"],
+        summary: "Sign out the current session (clears cookie / revokes session)",
+        responses: { "200": { description: "Signed out" } },
+      },
+    },
 
+    "/sessions/revoke-all": {
+      post: {
+        tags: ["Sessions"],
+        summary: "Revoke all of the caller's device sessions (step-up auth required)",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  confirmPassword: { type: "string", description: "Re-authentication for credentials accounts; SSO callers must hold a session younger than 5 minutes" },
+                  includeCurrent: { type: "boolean", description: "Also revoke the caller's current session" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Sessions revoked" },
+          "401": { description: "Step-up authentication required or failed" },
+        },
+      },
+    },
+
+    "/profile": {
+      delete: {
+        tags: ["Profile"],
+        summary: "Delete (deactivate + anonymize) the caller's own account",
+        responses: {
+          "200": { description: "Account deactivated and anonymized (idempotent)" },
+          "400": { description: "Cannot delete the last admin" },
+        },
+      },
+    },
+
+    "/admin/users": {
+      get: {
+        tags: ["Admin – Users"],
+        summary: "List users (ADMIN)",
+        responses: { "200": { description: "User list" } },
+      },
+      post: {
+        tags: ["Admin – Users"],
+        summary: "Create a user (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["email", "password"],
+                properties: {
+                  email: { type: "string", format: "email" },
+                  password: { type: "string", minLength: 12 },
+                  name: { type: "string", nullable: true, maxLength: 100 },
+                  role: { $ref: "#/components/schemas/UserRole" },
+                },
+              },
+            },
+          },
+        },
+        responses: { "200": { description: "User created" }, "400": { description: "Validation error" } },
+      },
+    },
     "/admin/users/{id}": {
       patch: {
         tags: ["Admin – Users"],
@@ -1125,10 +1381,36 @@ const spec = {
     },
 
     "/discord/generate-link": {
-      get: {
+      post: {
         tags: ["Discord"],
-        summary: "Generate Discord OAuth link",
-        responses: { "200": { description: "Discord authorization URL" } },
+        summary: "Issue a short-lived token to link a Discord account to the current user",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: { discordId: { type: "string", description: "Discord snowflake (17–20 digits)" } },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Link token",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    token: { type: "string" },
+                    expiresAt: { type: "string", format: "date-time" },
+                  },
+                },
+              },
+            },
+          },
+          "429": { description: "Rate limited" },
+        },
       },
     },
     "/discord/initiate-merge": {
@@ -1289,7 +1571,7 @@ const spec = {
   },
 };
 
-export const GET = withIssueAdmin(async (_req, _ctx, _session) => {
+export const GET = withAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json(spec, {
     headers: { "Cache-Control": "no-store" },
   });

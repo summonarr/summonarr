@@ -5,7 +5,7 @@ import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, peekRateLimit, recordFailure, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
@@ -14,6 +14,7 @@ import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
+import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -50,6 +51,20 @@ export type ProviderSetupRequired = typeof PROVIDER_SETUP_REQUIRED;
 
 export type AuthorizedDbUser = { id: string; email: string; name: string | null; role: string };
 
+// True when minting the very FIRST user through an OAuth provider would brick
+// first-admin bootstrap: OAuth bootstrap disabled, setup not yet completed, and no
+// ADMIN exists. Creating a plain USER row in that state trips /api/auth/register's
+// "registration closed" guard while runFirstAdminPromotion won't promote the row,
+// leaving the instance with no admin and no way to create one. The Plex/Jellyfin
+// create paths consult this before minting; OIDC inlines the same check.
+async function isPreSetupBootstrapBlocked(): Promise<boolean> {
+  if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") return false;
+  const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
+  if (setupRow) return false;
+  const existingAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
+  return !existingAdmin;
+}
+
 export async function findOrCreatePlexUser({
   plexUserId,
   email,
@@ -60,15 +75,19 @@ export async function findOrCreatePlexUser({
   email: string;
   name?: string | null;
   image?: string | null;
-}): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
   // the name can't carry markup into any downstream sink (email/Discord/push),
   // mirroring the local-credentials register path.
   name = sanitizeOptional(name);
 
-  // 1) Bind on (provider, sub) first. This is the C-1 fix: never trust email as
-  //    the primary identity anchor for an external IdP.
+  // 1) Bind on (provider, sub) first. The external IdP's stable subject id is the
+  //    only trustworthy identity anchor; email is NEVER the primary key for an
+  //    external provider. Emails are reassignable and an attacker can stand up an
+  //    account whose reported address matches an existing local user, so resolving
+  //    identity by email would let one provider account silently take over another
+  //    user's row. Matching on plexUserId avoids that entirely.
   const bySub = await prisma.user.findUnique({ where: { plexUserId } });
   if (bySub) {
     await prisma.user.update({
@@ -82,13 +101,23 @@ export async function findOrCreatePlexUser({
     return { id: bySub.id, email: bySub.email, name: name ?? bySub.name, role: bySub.role };
   }
 
-  // 2) An existing row with this email but no plexUserId is the C-1 attack
-  //    surface: a Plex friend whose email matches a local-credentials admin
-  //    must NOT auto-link to that admin. Refuse — manual rebind required.
+  // 2) An existing row carrying this email but no plexUserId is the account-takeover
+  //    surface: a Plex friend whose Plex-reported email happens to match a
+  //    local-credentials user (potentially an admin) must NOT auto-link to that
+  //    row and inherit its identity/role. Because we never reached step 1, no Plex
+  //    sub is bound here yet — auto-linking on the email match alone would hand the
+  //    incoming Plex account control of the existing user. Refuse and require an
+  //    admin to perform an explicit, logged-in "link account" (rebind) instead.
   const byEmail = await prisma.user.findUnique({ where: { email: normalized } });
   if (byEmail) {
     console.warn(`[auth] Refused plex sign-in: ${normalized} matches an existing user with no plexUserId. Manual rebind required.`);
     return PROVIDER_REBIND_REQUIRED;
+  }
+
+  // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
+  if (await isPreSetupBootstrapBlocked()) {
+    console.warn(`[auth] Refused pre-setup plex sign-in for ${normalized}: complete initial setup (create the first admin) first.`);
+    return PROVIDER_SETUP_REQUIRED;
   }
 
   // 3) New user — create with provider sub populated.
@@ -110,7 +139,7 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
-): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
   name = sanitizeText(name);
@@ -138,9 +167,12 @@ export async function findOrCreateJellyfinUser(
     return { id: bySynthetic.id, email: bySynthetic.email, name: name ?? bySynthetic.name, role: bySynthetic.role };
   }
 
-  // 3) Real-email lookup is the C-1 hot path: if a user with this Jellyfin
-  //    server's reported email already exists but isn't bound to this Jellyfin
-  //    sub, refuse — manual rebind required.
+  // 3) Real-email lookup is the account-takeover guard: if a user with this
+  //    Jellyfin server's reported email already exists but is NOT bound to this
+  //    Jellyfin sub (jellyfinUserId), auto-linking on the email match would let
+  //    the incoming Jellyfin account inherit that existing row's identity/role.
+  //    Refuse and require an explicit admin rebind. As above, email is never a
+  //    trusted cross-provider identity anchor — only the provider subject id is.
   let realEmail: string | null = null;
   try {
     const [urlRow, keyRow] = await Promise.all([
@@ -161,6 +193,12 @@ export async function findOrCreateJellyfinUser(
       console.warn(`[auth] Refused jellyfin sign-in: ${normalizedReal} matches an existing user with no jellyfinUserId. Manual rebind required.`);
       return PROVIDER_REBIND_REQUIRED;
     }
+  }
+
+  // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
+  if (await isPreSetupBootstrapBlocked()) {
+    console.warn(`[auth] Refused pre-setup jellyfin sign-in for ${jellyfinId}: complete initial setup (create the first admin) first.`);
+    return PROVIDER_SETUP_REQUIRED;
   }
 
   // 4) New user.
@@ -231,11 +269,14 @@ export async function findOrCreateOidcUser(
     };
   }
 
-  // C-1 parity with Plex/Jellyfin: an existing user with this email but no
-  // (provider=oidc, sub=...) Account row is the SSO-takeover attack vector.
-  // Any IdP under attacker control that vouches `email_verified=true` for the
-  // victim's email would otherwise auto-link and inherit role (incl. ADMIN).
-  // Refuse — an admin must rebind via a logged-in "Link account" flow.
+  // Same account-takeover guard as the Plex/Jellyfin paths: an existing user with
+  // this email but no (provider=oidc, sub=...) Account row is the SSO-takeover
+  // attack vector. Any IdP under attacker control (or a misconfigured/multi-tenant
+  // one) that vouches `email_verified=true` for the victim's email would otherwise
+  // auto-link the attacker's OIDC sub to the existing row and inherit its role —
+  // including ADMIN. Email verification by the IdP is not sufficient because the
+  // IdP itself is the untrusted party here. Refuse: an admin must rebind via an
+  // explicit, logged-in "Link account" flow.
   const byEmail = await prisma.user.findUnique({ where: { email: normalizedEmail } });
   if (byEmail) {
     console.warn(`[auth/oidc] Refused sign-in: ${normalizedEmail} matches an existing user with no oidc account binding. Manual rebind required.`);
@@ -510,8 +551,22 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   const isMobile   = token.isMobile as boolean | undefined;
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
+  // The 1-year native-app TTL is reserved for a real native client, identified by
+  // the X-Summonarr-Client header it presents (a custom header a cross-origin web
+  // page cannot forge on a credentialed request — guardrail 6b). A spoofed mobile
+  // User-Agent alone (isMobile is UA-derived) must NOT grant it, or any browser
+  // could mint a 1-year remember-me ceiling by lying about its UA.
+  let isNativeClient = false;
+  try {
+    const { headers: getHeaders } = await import("next/headers");
+    const h = await getHeaders();
+    isNativeClient = hasNativeClientHeader(h.get(NATIVE_CLIENT_HEADER));
+  } catch {
+    // Invoked outside a request context — treat as non-native.
+  }
+
   let ttl: number;
-  if (rememberMe && isMobile) {
+  if (rememberMe && isMobile && isNativeClient) {
     // Native app (iOS Keychain bearer) — long-lived by default. See NATIVE_APP_SESSION_SECONDS.
     ttl = NATIVE_APP_SESSION_SECONDS;
   } else if (rememberMe) {
@@ -576,21 +631,29 @@ export async function authorizeWithCredentials(
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
   const email = normalizeEmail(credentials.email as string);
 
-  // Two independent throttles, both consumed on every attempt:
-  //   • Per-IP — bounds rapid attempts from one source. Skipped when the IP is
-  //     unknowable (TRUST_PROXY unset → getClientIp returns "unknown"); keying a
-  //     single `login-ip:unknown` bucket would let a few typos from any one
-  //     client lock out the whole instance.
+  // Two independent throttles:
+  //   • Per-IP — bounds rapid attempts from one source, counting EVERY attempt
+  //     (consumed here, before the password check). When the IP is unknowable
+  //     (TRUST_PROXY unset → getClientIp returns "unknown"), attempts share one
+  //     looser `login-ip:unknown` bucket rather than going unthrottled: a single
+  //     shared bucket can't pin the lockout on a specific victim, and the higher
+  //     limit keeps ordinary typos across the instance from tripping it.
   //   • Per-account — ALWAYS enforced so a password-spray distributed across
   //     many IPs against one account is still bounded (the per-IP bucket can't
-  //     see that). Generous window so ordinary mistyping doesn't lock a user
-  //     out. Trade-off: an attacker can burn a victim's account bucket to impose
-  //     a temporary (≤15 min) login delay on that one account — the standard
-  //     cost of account-level throttling, and far cheaper than unbounded spray.
+  //     see that). PEEK to gate, RECORD only on an ACTUAL FAILED PASSWORD
+  //     VERIFICATION — an attacker who merely knows the victim's email can no
+  //     longer burn the account's lockout without supplying wrong passwords.
+  //     Generous window so ordinary mistyping doesn't lock a user out.
   //     In-memory and per-replica like the rest of the limiter.
   const emailHash = hashAuditEmail(email);
-  const ipAllowed = ip === "unknown" ? true : checkRateLimit(`login-ip:${ip}`, 20, 5 * 60 * 1000);
-  const accountAllowed = checkRateLimit(`login-email:${emailHash}`, 50, 15 * 60 * 1000);
+  const accountKey = `login-email:${emailHash}`;
+  const accountLimit = 50;
+  const accountWindowMs = 15 * 60 * 1000;
+
+  const ipKey = ip === "unknown" ? "login-ip:unknown" : `login-ip:${ip}`;
+  const ipLimit = ip === "unknown" ? 100 : 20;
+  const ipAllowed = checkRateLimit(ipKey, ipLimit, 5 * 60 * 1000);
+  const accountAllowed = peekRateLimit(accountKey, accountLimit, accountWindowMs);
 
   if (!ipAllowed || !accountAllowed) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
@@ -607,6 +670,11 @@ export async function authorizeWithCredentials(
   }
 
   if (!valid || !user) {
+    // Record a hit on the account bucket ONLY now — i.e. on a genuine wrong
+    // password (or unknown account, which also reached the dummyVerify branch).
+    // Gating with peek above + recording here means the bucket counts real
+    // failed verifications, not mere email guesses.
+    recordFailure(accountKey, accountWindowMs);
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
     return null;
   }
@@ -650,9 +718,14 @@ export async function authorizeWithPlex(
     const cacheCutoff = new Date(Date.now() - CACHE_TTL_DAYS * 24 * 60 * 60 * 1000);
     const cached = await prisma.plexTokenCache.findUnique({ where: { tokenHash } });
 
-    // C-2: refuse Plex sign-in entirely when plexServerUrl is not set —
-    // otherwise the friend-list filter degrades to "anyone the admin has
-    // shared any server with" (see commit ff9eff0 / SECURITY-PASS-3).
+    // Refuse Plex sign-in entirely when plexServerUrl is not configured. The
+    // membership gate below allows a Plex account only if its email is in the set
+    // returned by getPlexFriendEmails(adminToken, plexServerUrl) — i.e. users with
+    // access to THIS specific server. If plexServerUrl is empty that scoping is
+    // lost and the friend-list filter degrades to "anyone the admin has shared ANY
+    // server (or library) with on their whole Plex account," which can be a far
+    // wider, attacker-influenceable population than the intended instance members.
+    // Fail closed rather than authenticate against an unscoped friend list.
     const [adminTokenRow, adminEmailRow, serverUrlRow] = await Promise.all([
       prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
       prisma.setting.findUnique({ where: { key: "plexAdminEmail" } }),
@@ -738,6 +811,8 @@ export async function authorizeWithPlex(
 
         if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+        } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
         } else {
           // notificationEmail is kept in lock-step with the Plex-verified email on every
           // sign-in so notifications always go to the user's current Plex address.
@@ -763,6 +838,34 @@ export async function authorizeWithPlex(
     return null;
   }
   return { ...plexResult };
+}
+
+// Jellyfin sign-in membership gate. Mirrors Plex's friend-list gate — a valid
+// Jellyfin credential alone is NOT sufficient to sign in. Without this gate, every
+// account on the configured Jellyfin server (which an admin may not fully control,
+// or which may have public/self-registration enabled) could authenticate into
+// Summonarr, request media, and consume the request/issue surfaces. The account
+// must instead be a known member of THIS Summonarr instance. The gate is
+// fail-closed by default (only an explicit `jellyfinRestrictSignIn = "false"`
+// setting disables it). Allowed when EITHER:
+//   • an active jellyfin MediaServerUser row exists for this sourceUserId
+//     (a synced member — the library sync populates this table), OR
+//   • a Summonarr User is already bound to this jellyfinUserId (a returning user,
+//     so an upgrade can't lock out anyone who has already signed in).
+// A brand-new, unknown Jellyfin account (no MediaServerUser, no bound User) is
+// refused until an admin syncs the library or allows them.
+async function isJellyfinSignInAllowed(jellyfinUserId: string): Promise<boolean> {
+  const restrictRow = await prisma.setting.findUnique({ where: { key: "jellyfinRestrictSignIn" } });
+  const restrict = (restrictRow?.value ?? "true").trim().toLowerCase() !== "false";
+  if (!restrict) return true;
+  const [member, existing] = await Promise.all([
+    prisma.mediaServerUser.findFirst({
+      where: { source: "jellyfin", sourceUserId: jellyfinUserId, active: true },
+      select: { id: true },
+    }),
+    prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true } }),
+  ]);
+  return Boolean(member || existing);
 }
 
 export async function authorizeWithJellyfin(
@@ -803,10 +906,21 @@ export async function authorizeWithJellyfin(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "invalid_credentials" } });
     return null;
   }
-  const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
-  if (jfDbUser === PROVIDER_REBIND_REQUIRED) {
+  // Fail-closed membership gate — the Jellyfin credentials are valid, but a valid
+  // server credential is not enough: the account must be a known member of this
+  // Summonarr instance (or the gate must be explicitly disabled). See
+  // isJellyfinSignInAllowed for the membership criteria.
+  if (!(await isJellyfinSignInAllowed(jfUser.id))) {
+    console.warn("[jellyfin auth] sign-in refused: user is not an authorized member of this instance.");
     await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "email_collision_needs_rebind" } });
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "not_authorized" } });
+    return null;
+  }
+  const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
+  if (jfDbUser === PROVIDER_REBIND_REQUIRED || jfDbUser === PROVIDER_SETUP_REQUIRED) {
+    await dummyVerify();
+    const reason = jfDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -822,6 +936,14 @@ export async function authorizeWithJellyfinQuickConnect(
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
   if (!checkRateLimit(`jellyfin-qc-ip:${ip}`, 10, 5 * 60 * 1000)) {
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
+    return null;
+  }
+  // Per-secret bucket so a QuickConnect secret can't be brute-redeemed from
+  // rotating IPs (mirrors the Plex per-token limit). Hash the secret so no raw
+  // secret material lands in a limiter key.
+  const qcKey = createHash("sha256").update(credentials.secret as string).digest("hex").slice(0, 16);
+  if (!checkRateLimit(`jellyfin-qc-secret:${qcKey}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }
@@ -843,9 +965,19 @@ export async function authorizeWithJellyfinQuickConnect(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "authentication_failed" } });
     return null;
   }
+  // Fail-closed membership gate (same as the standard Jellyfin path): a valid
+  // QuickConnect secret authenticates the account but does not by itself authorize
+  // sign-in — the account must be a known member of this instance.
+  if (!(await isJellyfinSignInAllowed(jfUser.id))) {
+    console.warn("[jellyfin quickconnect auth] sign-in refused: user is not an authorized member of this instance.");
+    await dummyVerify();
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "not_authorized" } });
+    return null;
+  }
   const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
-  if (qcDbUser === PROVIDER_REBIND_REQUIRED) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "email_collision_needs_rebind" } });
+  if (qcDbUser === PROVIDER_REBIND_REQUIRED || qcDbUser === PROVIDER_SETUP_REQUIRED) {
+    const reason = qcDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -893,8 +1025,11 @@ async function runFirstAdminPromotion(
   const allowOauthBootstrap = process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true";
   if (providerId !== "credentials" && !allowOauthBootstrap) return false;
   return prisma.$transaction(async (tx) => {
-    // Advisory lock prevents two concurrent first-time sign-ins both being promoted to ADMIN
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(1947888749)");
+    // Lock 43 is the SAME advisory lock /api/auth/register holds for its
+    // count→create-ADMIN→setup_completed_at sequence. Sharing it serializes the
+    // two first-admin paths so a concurrent register + OAuth bootstrap can't both
+    // observe "no admin yet" and each mint an ADMIN.
+    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
     const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
     if (setupRow) return false;
     const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
@@ -976,7 +1111,10 @@ export async function signInAndMintSession(params: {
     provider: providerId,
     details: {
       provider: providerId,
-      email: user.email,
+      // Store a hash, not the raw address — matches the AUTH_LOGIN_FAILED paths
+      // and minimizes cleartext PII held in the audit log (it would otherwise
+      // persist until the 90-day scrub).
+      emailHash: typeof user.email === "string" ? hashAuditEmail(user.email) : null,
       role: token.role,
       ip: (user as { _auditIp?: string })._auditIp,
       browser: ((user as { _auditUa?: string })._auditUa)?.slice(0, 100),

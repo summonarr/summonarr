@@ -8,11 +8,11 @@ import { LogOut, Bell, GitFork, type IconComponent } from "@/components/icons";
 
 async function signOutAndRedirect(callbackUrl: string) {
   try {
-    await fetch("/api/auth/sign-out", { method: "POST", credentials: "include" });
+    await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
     // ignore — best-effort
   }
-  window.location.href = callbackUrl;
+  window.location.href = withBasePath(callbackUrl);
 }
 import {
   userNavItems,
@@ -23,6 +23,7 @@ import {
 import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
+import { withBasePath } from "@/lib/base-path";
 import {
   Drawer,
   DrawerPortal,
@@ -210,7 +211,7 @@ export function MobileNavDrawer({
                 className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/tmdb-logo.svg" alt="TMDB" className="h-3 w-auto" />
+                <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
                 <span
                   className="ds-mono"
                   style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}

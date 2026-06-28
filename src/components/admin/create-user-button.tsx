@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Dialog, DialogBackdrop, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Loader2, Check, UserPlus, AlertTriangle } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 // Admin "Create user" — the only in-app path to a local username/password account
 // (public registration closes after the first user). Posts to POST /api/admin/users
@@ -38,7 +39,7 @@ export function CreateUserButton() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/admin/users", {
+      const res = await fetch(withBasePath("/api/admin/users"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: email.trim(), password, name: name.trim() || undefined, role }),

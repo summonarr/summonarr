@@ -559,10 +559,24 @@ async function handleComponent(interaction: any): Promise<void> {
         where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
       });
       if (existing) {
-        confirmEmbed.color = 0xfee75c;
-        confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
-        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
-        return;
+        if (existing.permanentlyDeclined) {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `(${selected.releaseYear}) — This request has been permanently denied.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
+        // An ordinary (non-permanent) decline is not terminal — parity with the web
+        // route: drop the stale DECLINED row and fall through to a fresh request.
+        // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
+        // double re-request instead of throwing.
+        if (existing.status === "DECLINED") {
+          await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+        } else {
+          confirmEmbed.color = 0xfee75c;
+          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
       }
 
       // Effective permissions (ADMIN superbit / unseeded → role preset). Drives
@@ -778,16 +792,24 @@ async function handleComponent(interaction: any): Promise<void> {
       const action = customId.substring(0, colonIdx);
       const requestId = customId.substring(colonIdx + 1);
 
+      // Match the web UI gate (/api/requests/[id] PATCH → withPermission(MANAGE_REQUESTS)):
+      // anyone holding the MANAGE_REQUESTS permission bit (ADMIN superbit, ISSUE_ADMIN+,
+      // or a custom mask) can approve/decline — not just role=ADMIN. Look up by discordId,
+      // then resolve the effective permission mask (ADMIN superbit / legacy-unseeded → role
+      // preset) before checking the bit.
       const adminUser = await prisma.user.findFirst({
-        where: { discordId: discordUserId, role: "ADMIN" },
-        select: { id: true, name: true, email: true },
+        where: { discordId: discordUserId },
+        select: { id: true, name: true, email: true, role: true, permissions: true },
       });
-      if (!adminUser) {
+      const adminPerms = adminUser
+        ? effectivePermissions(adminUser.role, adminUser.permissions)
+        : 0n;
+      if (!adminUser || !hasPermission(adminPerms, Permission.MANAGE_REQUESTS)) {
         await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
           allowedHosts: DISCORD_HOSTS,
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: "⛔ Only admins can use these buttons.", flags: 64 }),
+          body: JSON.stringify({ content: "⛔ You don't have permission to use these buttons.", flags: 64 }),
           timeoutMs: 15_000,
         });
         return;
@@ -945,7 +967,13 @@ export async function POST(req: NextRequest) {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const interaction: any = JSON.parse(body);
+  let interaction: any;
+  try {
+    interaction = JSON.parse(body);
+  } catch {
+    console.warn("[interactions] Malformed JSON body after signature verification");
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
 
   // type=1 is Discord's PING to verify the endpoint is reachable; respond with PONG immediately
   if (interaction.type === 1) {

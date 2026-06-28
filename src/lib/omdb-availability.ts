@@ -76,8 +76,10 @@ export async function attachRatingsUnified(
 
           const stillMissing = uncached.filter((m) => !found.has(m.id));
           if (stillMissing.length > 0) {
+            // Fall back to OMDB whenever MDBList can't serve the item (no key, genuine miss,
+            // or mid-batch quota trip), not only when the MDBList key is absent.
             const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate).catch(() => null);
-            if (probe && !probe.found && !probe.keyConfigured) {
+            if (!probe || !probe.found) {
               await mapLimit(stillMissing, OMDB_FALLBACK_CONCURRENCY, (item) =>
                 getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
             }
@@ -97,7 +99,13 @@ export async function attachRatingsUnified(
   // contaminate their ratings within a single batch.
   const fetched = new Map<string, { source: "mdblist"; data: MdblistRatings } | { source: "omdb"; data: OmdbRatings }>();
   for (const item of items) {
-    if (!warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item))) misses.push(item);
+    // A live _notFound sentinel (negativeKeys) is an authoritative "no ratings" — re-fetching it
+    // every call would burn MDBList/OMDB quota on titles known to be absent. Mirrors the
+    // non-blocking path's exclusion.
+    if (
+      !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item)) &&
+      !warm.negativeKeys.has(mdblistKey(item)) && !warm.negativeKeys.has(omdbKey(item))
+    ) misses.push(item);
   }
 
   if (misses.length > 0) {
@@ -116,10 +124,12 @@ export async function attachRatingsUnified(
 
       const mdbMisses = misses.filter((m) => !fetched.has(fetchedKey(m)));
       if (mdbMisses.length > 0) {
-        // Probe a single item to check whether MDBList is configured; if it isn't, fall back to OMDB
-        // for all remaining misses rather than checking every item individually.
+        // Probe a single item to see whether MDBList can serve these. Fall back to OMDB
+        // whenever MDBList can't supply the item — no key, a genuine miss, or a mid-batch
+        // quota trip — not only when the key is absent. A single source being unavailable
+        // must not leave the title with no ratings.
         const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate).catch(() => null);
-        const useFallback = probe && !probe.found && !probe.keyConfigured;
+        const useFallback = !probe || !probe.found;
         if (useFallback) {
           await mapLimit(mdbMisses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
             const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
@@ -189,10 +199,21 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
   return { byMdblist, byOmdb, negativeKeys };
 }
 
+// An MDBList batch row is cached as a real value even when every ratings field is
+// null (the item is in MDBList's index but carries no scores). Such a row must not
+// shadow a populated OMDB row, so treat it as "no data" when deciding which source wins.
+function hasAnyMdblistRating(d: MdblistRatings): boolean {
+  return Boolean(
+    d.imdbRating || d.rottenTomatoes || d.rtAudienceScore || d.metacritic ||
+    d.traktRating || d.letterboxdRating || d.mdblistScore || d.malRating || d.rogerEbertRating,
+  );
+}
+
 function mergeWarm(item: TmdbMedia, warm: WarmCache): TmdbMedia {
   const mdb  = warm.byMdblist.get(mdblistKey(item));
   const omdb = warm.byOmdb.get(omdbKey(item));
-  if (mdb)  return applyMdblist(item, mdb);
+  if (mdb && (hasAnyMdblistRating(mdb) || !omdb)) return applyMdblist(item, mdb);
   if (omdb) return applyOmdb(item, omdb);
+  if (mdb)  return applyMdblist(item, mdb);
   return item;
 }

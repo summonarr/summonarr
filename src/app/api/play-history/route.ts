@@ -2,10 +2,40 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { resolvePosterMap } from "@/lib/poster-cache";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withAdmin(async (request, _ctx, _session) => {
+// Escape LIKE/ILIKE wildcard metacharacters (`%`, `_`, and the escape char `\`
+// itself) so user-supplied search text is matched LITERALLY rather than as a
+// pattern. Without this, a query containing many `%`/`_` wildcards expands into an
+// unindexable full-table scan with pathological pattern matching — letting a search
+// box trigger an expensive query (a wildcard-scan denial-of-service). Each escaped
+// value must be paired with `ESCAPE '\'` on its ILIKE clause so Postgres treats the
+// backslash we inserted as the escape character and matches the metacharacters as
+// literal text.
+function escapeIlike(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+// The Prisma `contains` filter (used on the ungrouped path) emits an ILIKE with
+// NO `ESCAPE` clause, so any `%`/`_` in the search term remain wildcards and a
+// wildcard-laden string forces an unindexable pattern scan (a search-box DoS).
+// Unlike the grouped raw-SQL path we cannot attach an ESCAPE clause here, so we
+// strip the metacharacters (and the escape char) and bound the length, leaving a
+// literal substring match for normal text.
+const MAX_SEARCH_LEN = 100;
+function sanitizeContainsSearch(s: string): string {
+  return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
+}
+
+export const GET = withAdmin(async (request, _ctx, session) => {
+  // The grouped path runs two heavy window-function/aggregate raw queries over
+  // the full PlayHistory table per request; throttle per admin to bound abuse.
+  if (!checkRateLimit(`play-history:${session.user.id}:${getClientIp(request.headers)}`, 120, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — try again shortly" }, { status: 429 });
+  }
+
   const params = request.nextUrl.searchParams;
 
   const distinctMode = params.get("distinct");
@@ -107,13 +137,18 @@ function parseFilters(params: URLSearchParams): SqlFragment[] {
 
   const search = params.get("search")?.trim();
   if (search) {
-    // Username search requires a join in the grouped path; keep it inline here
-    // by emitting a subquery test so the filter composes cleanly.
-    const like = `%${search}%`;
+    // Username search needs the MediaServerUser table, which is a JOIN in the
+    // grouped path; keep this filter self-contained by emitting an EXISTS subquery
+    // test instead, so it composes cleanly with the other fragments.
+    // Escape `%`/`_`/`\` in the search term so it matches literally, and append
+    // `ESCAPE '\'` to every ILIKE clause so Postgres honors those escapes. This is
+    // what prevents a wildcard-laden search string from forcing an expensive,
+    // unindexable scan across title / ipAddress / username (a search-box DoS).
+    const like = `%${escapeIlike(search)}%`;
     fragments.push({
-      sql: `(h."title" ILIKE ? OR h."ipAddress" ILIKE ? OR EXISTS (
+      sql: `(h."title" ILIKE ? ESCAPE '\\' OR h."ipAddress" ILIKE ? ESCAPE '\\' OR EXISTS (
               SELECT 1 FROM "MediaServerUser" msu2
-              WHERE msu2.id = h."mediaServerUserId" AND msu2."username" ILIKE ?
+              WHERE msu2.id = h."mediaServerUserId" AND msu2."username" ILIKE ? ESCAPE '\\'
             ))`,
       binds: [like, like, like],
     });
@@ -192,7 +227,7 @@ async function ungroupedQuery(
     };
   }
 
-  const search = params.get("search")?.trim();
+  const search = sanitizeContainsSearch(params.get("search")?.trim() ?? "");
   if (search) {
     where.OR = [
       { title: { contains: search, mode: "insensitive" } },

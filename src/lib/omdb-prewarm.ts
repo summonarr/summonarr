@@ -15,12 +15,13 @@ interface DetailsCacheData {
 export async function prewarmOmdbCache(): Promise<{
   total: number;
   fetched: number;
+  notFound: number;
   skipped: number;
   failed: number;
 }> {
   const apiKey = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
   if (!apiKey?.value) {
-    return { total: 0, fetched: 0, skipped: 0, failed: 0 };
+    return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
   }
 
   const items = await collectAllLibraryItems(MAX_PREWARM_ITEMS);
@@ -28,7 +29,7 @@ export async function prewarmOmdbCache(): Promise<{
     console.warn(`[omdb-prewarm] Reached MAX_PREWARM_ITEMS (${MAX_PREWARM_ITEMS}) — library scan truncated`);
   }
   if (items.length === 0) {
-    return { total: 0, fetched: 0, skipped: 0, failed: 0 };
+    return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
   }
 
   const freshKeys = new Set<string>();
@@ -72,6 +73,7 @@ export async function prewarmOmdbCache(): Promise<{
   }
 
   let fetched = 0;
+  let notFound = 0;
   let failed = 0;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
@@ -84,13 +86,18 @@ export async function prewarmOmdbCache(): Promise<{
       })
     );
     for (const r of results) {
-      if (r.status === "fulfilled") fetched++;
-      else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
+      // A fulfilled promise can still be a {found:false} miss (no IMDb match /
+      // negative-cache). Count only an actual rating hit as fetched so the metric
+      // reflects work that produced data rather than every completed call.
+      if (r.status === "fulfilled") {
+        if (r.value.found) fetched++;
+        else notFound++;
+      } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
     }
     if (i + CONCURRENCY < toFetch.length) {
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }
 
-  return { total: items.length, fetched, skipped, failed };
+  return { total: items.length, fetched, notFound, skipped, failed };
 }

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Check, Loader2 } from "@/components/icons";
+import { Plus, Check, Loader2, Clock } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
 // Radarr/Sonarr instance is configured and the viewer holds REQUEST_4K. Posts to
@@ -14,6 +15,7 @@ export function Request4kButton({
   requestToken,
   requested,
   available,
+  pending,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -21,6 +23,9 @@ export function Request4kButton({
   requested?: boolean;
   // The 4K instance already has the file — show an "Available in 4K" state instead of a CTA.
   available?: boolean;
+  // The 4K instance is already downloading/queued for this title (e.g. someone
+  // else requested it) — show a "4K Queued" state instead of a CTA.
+  pending?: boolean;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
@@ -31,7 +36,7 @@ export function Request4kButton({
     setState("loading");
     setMsg("");
     try {
-      const res = await fetch("/api/requests", {
+      const res = await fetch(withBasePath("/api/requests"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tmdbId, mediaType, is4k: true, _token: requestToken }),
@@ -95,6 +100,23 @@ export function Request4kButton({
       >
         <Check style={{ width: 14, height: 14 }} />
         4K Requested
+      </span>
+    );
+  }
+
+  // The 4K copy is already in the download queue (regardless of who requested it).
+  if (pending) {
+    return (
+      <span
+        style={{
+          ...base,
+          background: "var(--ds-bg-2)",
+          color: "var(--ds-fg-muted)",
+          border: "1px solid var(--ds-border)",
+        }}
+      >
+        <Clock style={{ width: 14, height: 14 }} />
+        4K Queued
       </span>
     );
   }

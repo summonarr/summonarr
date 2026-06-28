@@ -5,6 +5,7 @@ import Image from "next/image";
 import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
+import { withBasePath } from "@/lib/base-path";
 
 interface TVSeasonsProps {
   tmdbId: number;
@@ -77,7 +78,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
         [seasonNumber]: { ...prev[seasonNumber], expanded: true, loadState: "loading" },
       }));
       try {
-        const res = await fetch(`/api/tv/${tmdbId}/season/${seasonNumber}`);
+        const res = await fetch(withBasePath(`/api/tv/${tmdbId}/season/${seasonNumber}`));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as { episodes: TmdbEpisode[]; owned: number[] };
         setState((prev) => ({

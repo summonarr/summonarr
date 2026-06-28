@@ -37,20 +37,23 @@ async function syncTvEpisodes() {
     try {
       const sections = await getPlexLibrarySections(serverUrl, token);
       const episodes = await getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections);
-      if (episodes.length > 0) {
-        await prisma.$transaction(
-          async (tx) => {
-            // Advisory lock 2002,1 serializes every wholesale Plex TVEpisodeCache rewrite — the
-            // orchestrator, this cron, the admin "Resync Plex" path, and sync/plex's recentOnly
-            // delete all share it. Without it, two concurrent runs can interleave delete/insert
-            // phases and leave the cache temporarily empty or with duplicate rows.
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
+      // Full replace: clear unconditionally then insert. getPlexTVEpisodes THROWS on a
+      // fetch failure (caught below → no clear), so an empty result here is a genuinely
+      // empty library and the stale episode ownership must be cleared rather than left.
+      await prisma.$transaction(
+        async (tx) => {
+          // Advisory lock 2002,1 serializes every wholesale Plex TVEpisodeCache rewrite — the
+          // orchestrator, this cron, the admin "Resync Plex" path, and sync/plex's recentOnly
+          // delete all share it. Without it, two concurrent runs can interleave delete/insert
+          // phases and leave the cache temporarily empty or with duplicate rows.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
+          await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
+          if (episodes.length > 0) {
             await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
-          },
-          { timeout: BATCH_TX_TIMEOUT },
-        );
-      }
+          }
+        },
+        { timeout: BATCH_TX_TIMEOUT },
+      );
       results.plex = episodes.length;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -68,20 +71,23 @@ async function syncTvEpisodes() {
 
     try {
       const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds);
-      if (episodes.length > 0) {
-        await prisma.$transaction(
-          async (tx) => {
-            // Advisory lock 2002,2 — Jellyfin counterpart to the Plex lock above.
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
+      // Full replace: clear unconditionally then insert (see the Plex block above).
+      // getJellyfinTVEpisodes throws on a fetch failure (caught below → no clear), so an
+      // empty result is a genuinely empty library and stale ownership must be cleared.
+      await prisma.$transaction(
+        async (tx) => {
+          // Advisory lock 2002,2 — Jellyfin counterpart to the Plex lock above.
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
+          await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
+          if (episodes.length > 0) {
             await batchCreateMany(
               tx.tVEpisodeCache,
               episodes.map((e) => ({ source: "jellyfin" as const, ...e })),
             );
-          },
-          { timeout: BATCH_TX_TIMEOUT },
-        );
-      }
+          }
+        },
+        { timeout: BATCH_TX_TIMEOUT },
+      );
       results.jellyfin = episodes.length;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

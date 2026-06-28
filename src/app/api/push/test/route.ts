@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
 import { sendApnsTestToUser } from "@/lib/push";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 type TestResult = {
   platform: "ios" | "web";
@@ -20,6 +21,10 @@ type TestResult = {
 // `feature.integration.push` flag and per-event preferences so the pipeline can
 // be verified before either is configured.
 export const POST = withAuth(async (_req, _ctx, session) => {
+  if (!checkRateLimit(`push-test:${session.user.id}`, 5, 60_000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const subs = await prisma.pushSubscription.findMany({
     where: { userId: session.user.id },
   });

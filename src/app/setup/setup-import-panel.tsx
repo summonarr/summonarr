@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
+import { withBasePath } from "@/lib/base-path";
 
 const ENCRYPTED_MAGIC = "RBKBKP01";
 
@@ -65,7 +66,7 @@ export function SetupImportPanel() {
 
     const outcome = await uploadInChunks({
       file,
-      endpoint: "/api/setup/import-chunk",
+      endpoint: withBasePath("/api/setup/import-chunk"),
       onProgress: setProgress,
     });
 
@@ -80,7 +81,7 @@ export function SetupImportPanel() {
     setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
     if (data.ok) {
       setTimeout(() => {
-        window.location.href = "/login";
+        window.location.href = withBasePath("/login");
       }, 1500);
     }
   }

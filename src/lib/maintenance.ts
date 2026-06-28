@@ -13,7 +13,9 @@ export async function getMaintenanceStatus(): Promise<{ enabled: boolean; messag
       message: cfg.maintenanceMessage ?? "",
     };
   } catch {
-    return { enabled: false, message: "" };
+    // A Settings read failure means we cannot prove maintenance is off; fail closed
+    // so writes don't slip through during a database incident.
+    return { enabled: true, message: "" };
   }
 }
 

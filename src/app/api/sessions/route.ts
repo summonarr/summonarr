@@ -36,7 +36,9 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
-  // Per-user cap: cookie/CSRF-replay attempts can't sweep all devices in a tight loop
+  // Per-user revoke rate cap (10 per minute). Bounds how fast a hijacked cookie or
+  // a CSRF-replay attempt can iterate over a user's sessions, so an attacker can't
+  // sweep every device off in a tight loop before the user notices or intervenes.
   if (!checkRateLimit(`sessions-delete:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json(
       { error: "rate_limit", message: "Too many revoke attempts. Try again in a minute." },
@@ -66,9 +68,15 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   let steppedUp = false;
 
   if (!isSelf) {
-    // H-9: revoking *other* devices is high-value and protected by step-up.
-    // Local users prove possession with bcrypt; SSO users (no passwordHash)
-    // must have signed in within the last 5 minutes.
+    // Revoking a session OTHER than the caller's own is a high-value action: a
+    // hijacked or CSRF-riding session could otherwise sign the legitimate user out
+    // of all their devices (denial of service) or kick a victim off so the attacker
+    // alone remains. Require a fresh proof of identity (step-up authentication)
+    // before allowing it. Self-revocation (signing out the current device) is benign
+    // and skips this. Local-credential users prove possession by re-entering their
+    // password (bcrypt-verified below); SSO users have no local passwordHash, so we
+    // instead require that the caller's own session was created within the last 5
+    // minutes (STEP_UP_MAX_AGE_MS) — i.e. they recently completed a full IdP sign-in.
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
       select: { passwordHash: true },
@@ -91,7 +99,9 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       }
       steppedUp = true;
     } else {
-      // SSO path: require a recently created caller AuthSession
+      // SSO path: with no local password to challenge, the step-up proof is
+      // recency of the caller's own sign-in. Require a caller AuthSession that was
+      // created within STEP_UP_MAX_AGE_MS, evidencing a recent full IdP login.
       const callerSessionId = session.sessionId;
       if (!callerSessionId) {
         return NextResponse.json(
@@ -116,9 +126,11 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   try {
     await revokeSessionById(sessionId);
   } catch (err) {
-    // revokeSessionById no longer swallows tx failures — surface a 500 rather
-    // than auditing a revocation that may not have committed (the row could
-    // still be live).
+    // revokeSessionById propagates its transaction failures rather than swallowing
+    // them. If the revocation DB write didn't commit, the targeted session is still
+    // live — so we must surface a 500 here and NOT fall through to writing an audit
+    // log that falsely records a successful revoke. Failing loudly lets the caller
+    // retry instead of trusting a revocation that never happened.
     console.error("[sessions] revoke failed:", err);
     return NextResponse.json({ error: "Failed to revoke session" }, { status: 500 });
   }

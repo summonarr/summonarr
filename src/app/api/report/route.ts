@@ -3,6 +3,9 @@ import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAuditOrFail, auditContext } from "@/lib/audit";
+import { sanitizeText } from "@/lib/sanitize";
+import { prisma } from "@/lib/prisma";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 // POST /api/report — a signed-in user flags user-generated content (an issue
 // message, a vote reason) for the instance admin to review. The report lands in
@@ -16,6 +19,9 @@ type ContentType = (typeof CONTENT_TYPES)[number];
 const MAX_REASON = 500;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   // 10 reports/hour/user — a spam guard, not a security boundary.
   if (!checkRateLimit(`report:${session.user.id}`, 10, 60 * 60 * 1000)) {
     return NextResponse.json(
@@ -38,8 +44,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!contentId || typeof contentId !== "string" || contentId.length > 200) {
     return NextResponse.json({ error: "contentId is required" }, { status: 400 });
   }
-  const context = typeof body.context === "string" ? body.context.slice(0, 200) : undefined;
-  const reason = typeof body.reason === "string" ? body.reason.slice(0, MAX_REASON) : undefined;
+
+  // Confirm the reported content actually exists before writing the audit row —
+  // otherwise an arbitrary/nonexistent contentId pollutes the admin Audit Log.
+  const exists =
+    contentType === "issue_message"
+      ? (await prisma.issueMessage.count({ where: { id: contentId } })) > 0
+      : contentType === "issue"
+        ? (await prisma.issue.count({ where: { id: contentId } })) > 0
+        : (await prisma.deletionVote.count({ where: { id: contentId } })) > 0;
+  if (!exists) {
+    return NextResponse.json({ error: "Reported content not found" }, { status: 404 });
+  }
+
+  const context = typeof body.context === "string" ? sanitizeText(body.context).slice(0, 200) : undefined;
+  const reason = typeof body.reason === "string" ? sanitizeText(body.reason).slice(0, MAX_REASON) : undefined;
 
   // The audit write IS the operation here (there is no prior mutation), so
   // logAuditOrFail is correct — a failed write must surface as an error, not a

@@ -57,6 +57,7 @@ const SETTINGS_SCHEMA = [
   ["jellyfinPathStripPrefix",       false],
   ["jellyfinMoviePathStripPrefix",  false],
   ["jellyfinTvPathStripPrefix",     false],
+  ["jellyfinRestrictSignIn",        false],
   ["donationPaypal",                false],
   ["donationVenmo",                 false],
   ["donationZelle",                 false],
@@ -119,6 +120,7 @@ const SETTINGS_SCHEMA = [
   ["playHistoryRetentionDays",       false],
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
+  ["apnsRelayUrl",                    false],
   ["trashGuidesEnabled",              false],
   ["trashSyncCustomFormats",          false],
   ["trashSyncCustomFormatGroups",     false],
@@ -189,6 +191,13 @@ const URL_KEYS = new Set<string>([
   "plexServerUrl",
   "jellyfinUrl",
   "discordInviteUrl",
+  "apnsRelayUrl",
+]);
+
+// URL_KEYS that must use https:// only (no plaintext http). The APNs relay
+// carries push payloads / device tokens, so the transport must be encrypted.
+const HTTPS_ONLY_URL_KEYS = new Set<string>([
+  "apnsRelayUrl",
 ]);
 
 function stripUrlUserinfo(value: string): string {
@@ -295,7 +304,14 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (URL_KEYS.has(key)) {
       try {
         const parsed = new URL(value);
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        if (HTTPS_ONLY_URL_KEYS.has(key)) {
+          if (parsed.protocol !== "https:") {
+            return NextResponse.json(
+              { error: `Setting "${key}" must be an https:// URL` },
+              { status: 400 },
+            );
+          }
+        } else if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
           return NextResponse.json(
             { error: `Setting "${key}" must be an http(s) URL` },
             { status: 400 },
@@ -364,6 +380,68 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         );
       }
     }
+
+    // Rate-limit caps must be a positive integer. "0" (or any non-integer)
+    // silently disables throttling in checkRateLimit, which treats a limit of
+    // 0 as "always allowed" — an admin must never be able to turn off a limiter
+    // by typo.
+    if (key.startsWith("rateLimit")) {
+      const n = parseInt(value, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 10_000) {
+        return NextResponse.json(
+          { error: `"${key}" must be an integer between 1 and 10000` },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Discord application/guild IDs are snowflakes: 17–20 digit decimal integers.
+    // Persist them validated so downstream consumers (command registration,
+    // notifications, link/merge flows) never receive a malformed identifier.
+    if (key === "discordClientId" || key === "discordGuildId") {
+      if (!/^\d{17,20}$/.test(value)) {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be a numeric Discord snowflake` },
+          { status: 400 },
+        );
+      }
+    }
+  }
+
+  // Never enable the machine-session API while its IP allowlist is empty. The
+  // machine-session route enforces the allowlist ONLY when it is non-empty (an empty
+  // allowlist is treated as "no IP restriction"), so turning the feature on with an
+  // empty allowlist means ANY caller in possession of CRON_SECRET could mint a fully
+  // privileged admin session cookie from ANY source IP — a privilege-escalation hole.
+  // Guard against that misconfiguration at write time: require the allowlist to be
+  // already persisted non-empty, OR to be set non-empty in this same PATCH, before
+  // flipping enableMachineSession on.
+  if (body.enableMachineSession === "true") {
+    const incomingAllowlist =
+      typeof body.machineSessionAllowedIps === "string"
+        ? body.machineSessionAllowedIps
+        : undefined;
+    let allowlistNonEmpty: boolean;
+    if (incomingAllowlist !== undefined) {
+      // Being set in this PATCH — empty string clears it.
+      allowlistNonEmpty = parseIpAllowlist(incomingAllowlist).length > 0;
+    } else {
+      const allowRow = await prisma.setting.findUnique({
+        where: { key: "machineSessionAllowedIps" },
+      });
+      allowlistNonEmpty = parseIpAllowlist(allowRow?.value).length > 0;
+    }
+    if (!allowlistNonEmpty) {
+      return NextResponse.json(
+        {
+          error:
+            "Cannot enable the machine-session API without a non-empty IP allowlist. " +
+            "Set machineSessionAllowedIps first (or in the same request) so any holder " +
+            "of CRON_SECRET cannot mint an admin session from any IP.",
+        },
+        { status: 400 },
+      );
+    }
   }
 
   // Keys that may be written empty to clear them. Most keys skip empty writes so
@@ -401,18 +479,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   const auditUa = req.headers.get("user-agent")?.slice(0, 512) ?? null;
   try {
     await prisma.$transaction(async (tx) => {
-      await Promise.all(
-        entries.map(([key, value]) =>
-          // Sensitive keys are encrypted at rest by the Prisma extension in src/lib/prisma.ts.
-          // Do NOT pre-encrypt here — that produced double-encrypted rows (enc:v1:<enc:v1:…>)
-          // which decrypted on read into the inner ciphertext, breaking Jellyfin/Radarr/etc auth.
-          tx.setting.upsert({
-            where: { key },
-            update: { value },
-            create: { key, value },
-          })
-        )
-      );
+      // Sequential, not Promise.all: an interactive tx runs on one pinned
+      // connection, so parallel statements serialize at best and can interleave
+      // or deadlock at worst. Entries are bounded by the settings allowlist.
+      for (const [key, value] of entries) {
+        // Sensitive keys are encrypted at rest by the Prisma extension in src/lib/prisma.ts.
+        // Do NOT pre-encrypt here — that produced double-encrypted rows (enc:v1:<enc:v1:…>)
+        // which decrypted on read into the inner ciphertext, breaking Jellyfin/Radarr/etc auth.
+        await tx.setting.upsert({
+          where: { key },
+          update: { value },
+          create: { key, value },
+        });
+      }
       await tx.auditLog.create({
         data: {
           userId: session.user.id,

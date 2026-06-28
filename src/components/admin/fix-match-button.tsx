@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
+import { withBasePath } from "@/lib/base-path";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
 
@@ -312,7 +313,7 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
     try {
       const params = new URLSearchParams({ server, tmdbId: String(tmdbId), mediaType, correctTmdbId: String(correctTmdbId) });
       if (arrTmdbId) params.set("arrTmdbId", String(arrTmdbId));
-      const res = await fetch(`/api/admin/fix-match/candidates?${params}`);
+      const res = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
       const json = await res.json() as CandidatesResponse & { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setCandidates(json);
@@ -327,7 +328,7 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
     setPhase("applying");
     setErrorMsg("");
     try {
-      const res = await fetch("/api/admin/fix-match", {
+      const res = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ server, tmdbId, mediaType, correctTmdbId, canonicalGuid }),

@@ -45,6 +45,41 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
   return true;
 }
 
+// Read-only counterpart of checkRateLimit: returns whether the key is still
+// under `limit` within the window WITHOUT pushing a hit. Use to GATE entry to a
+// flow when the hit should only be recorded on a real failure (e.g. the
+// account-level login bucket records a hit only on an actual failed password
+// verify — see authorizeWithCredentials). Pairs with recordFailure.
+export function peekRateLimit(key: string, limit: number, windowMs: number): boolean {
+  if (limit <= 0) return true;
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const entry = windows.get(key);
+  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
+  if (hits.length === 0) windows.delete(key);
+  return hits.length < limit;
+}
+
+// Pushes a single hit for `key` (the "record a failure" half of the
+// peek/record split). Same Map/window/LRU bookkeeping as checkRateLimit's
+// recording path, minus the over-limit short-circuit — callers gate with
+// peekRateLimit first. No-op when limit semantics are disabled at the callsite.
+export function recordFailure(key: string, windowMs: number): void {
+  const now = Date.now();
+  const cutoff = now - windowMs;
+  const entry = windows.get(key);
+  const hits = (entry?.hits ?? []).filter((t) => t > cutoff);
+
+  if (hits.length === 0 && windows.size >= MAX_KEYS) {
+    const oldestKey = windows.keys().next().value;
+    if (oldestKey !== undefined) windows.delete(oldestKey);
+  }
+  hits.push(now);
+  // Delete then re-insert to move the key to the end of Map insertion order (used by LRU eviction above)
+  windows.delete(key);
+  windows.set(key, { hits, expiresAt: now + windowMs });
+}
+
 import { isIP } from "node:net";
 import { createHash } from "node:crypto";
 
@@ -53,14 +88,31 @@ function isValidIp(addr: string): boolean {
 }
 
 // Number of trusted reverse proxies in front of the app. Used to pick the
-// correct X-Forwarded-For entry. Defaults to 1.
+// correct X-Forwarded-For entry. Defaults to 1. Capped at MAX_TRUSTED_HOPS: a
+// hop count larger than the real proxy chain selects an entry FURTHER LEFT in
+// X-Forwarded-For — i.e. a client-forgeable address — re-opening the IP-spoof
+// hole getClientIp exists to close. No realistic deployment fronts the app with
+// more than a handful of trusted proxies, so we clamp rather than trust an
+// oversized configured value.
+const MAX_TRUSTED_HOPS = 5;
 function parseTrustedHops(value: string | undefined): number {
   const n = parseInt(value ?? "", 10);
-  return Number.isNaN(n) || n < 1 ? 1 : n;
+  if (Number.isNaN(n) || n < 1) return 1;
+  return Math.min(n, MAX_TRUSTED_HOPS);
+}
+
+// Bucket key for clients whose IP can't be trusted (TRUST_PROXY off, or no
+// trustworthy forwarded address). Keyed on a UA hash so distinct clients land in
+// distinct buckets instead of every caller sharing one global "unknown" bucket —
+// the UA is still spoofable, so this is coarse abuse-isolation, not a real per-IP
+// limit, but it stops a single noisy client from exhausting everyone's quota.
+function untrustedBucket(headers: Headers): string {
+  const ua = headers.get("user-agent") ?? "";
+  return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
 }
 
 export function getClientIp(headers: Headers): string {
-  if (process.env.TRUST_PROXY !== "true") return "unknown";
+  if (process.env.TRUST_PROXY !== "true") return untrustedBucket(headers);
 
   // X-Forwarded-For is an APPEND chain: each proxy appends the address of the
   // peer that connected to *it*. Behind N trusted proxies the only trustworthy
@@ -86,9 +138,8 @@ export function getClientIp(headers: Headers): string {
   const realIp = headers.get("x-real-ip")?.trim();
   if (realIp && isValidIp(realIp)) return realIp;
 
-  // Fall back to a UA fingerprint so unauthenticated clients without a forwarded IP still share a bucket
-  const ua = headers.get("user-agent") ?? "";
-  return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
+  // No trustworthy forwarded address — fall back to the UA bucket.
+  return untrustedBucket(headers);
 }
 
 export function parseRateLimit(value: string | null | undefined, defaultLimit: number): number {
