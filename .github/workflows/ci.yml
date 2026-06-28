@@ -89,6 +89,14 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Security regression smoke test: exercises the SSRF policy, safe-fetch
+      # caps/timeouts/allowlist, and webhook replay protection at runtime.
+      # Blocking — a regression in these foundations is a security defect.
+      # Requires an alias-aware TS runner (the script imports src/lib/* via the
+      # @/* path alias), so it runs under `tsx` rather than bare `node`.
+      - name: Security smoke test
+        run: npm run smoke:security
+
       # Route auth audit: fails the build if any API route ships without a
       # recognized auth guard. CLAUDE.md guardrail 6a — every authenticated
       # route must wrap with withAuth/withAdmin/withIssueAdmin (or be listed
@@ -125,3 +133,33 @@ jobs:
       - name: Dependency audit
         run: npm run audit:deps
         continue-on-error: true
+
+  docker-build:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Build-only; nothing pushes back to the repo. (zizmor:artipacked)
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      # Exercise the full multi-stage Dockerfile (deps → prisma-gen → builder
+      # → migrate-deps → runner) on every PR so a Dockerfile-breaking change
+      # surfaces before merge instead of post-merge on docker-publish.yml.
+      # Build only (push: false), amd64 only to keep it fast; the real
+      # multi-arch build + push lives in docker-publish.yml. The GHA cache is
+      # shared with docker-publish.yml so this primes the publish build too.
+      - name: Build image (no push)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

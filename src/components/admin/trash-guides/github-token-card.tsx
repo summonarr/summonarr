@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, XCircle } from "@/components/icons";
 import type { ActionState } from "./types";
+import { withBasePath } from "@/lib/base-path";
 
 export function GithubTokenCard() {
   const [masked, setMasked] = useState<string>("");
@@ -14,7 +15,7 @@ export function GithubTokenCard() {
   useEffect(() => {
     void (async () => {
       try {
-        const res = await fetch(`/api/settings`);
+        const res = await fetch(withBasePath(`/api/settings`));
         if (!res.ok) return;
         const data = (await res.json()) as Record<string, string>;
         setMasked(data.trashGithubToken ?? "");
@@ -28,7 +29,7 @@ export function GithubTokenCard() {
     if (!value) return;
     setState("running");
     try {
-      const res = await fetch(`/api/settings`, {
+      const res = await fetch(withBasePath(`/api/settings`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ trashGithubToken: value }),

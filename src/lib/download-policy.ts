@@ -42,6 +42,9 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
       results.push(await syncJellyfinPolicies(jellyfinUrlRow.value, jellyfinKeyRow.value, autoDisableNew));
     } catch (err) {
       console.warn("[download-policy] Jellyfin sync task failed:", err instanceof Error ? err.message : String(err));
+      // Surface the task-level failure to the caller's error total so the cron
+      // run is recorded as not-ok instead of silently reporting green.
+      results.push({ source: "jellyfin", upserted: 0, enforced: 0, errors: 1 });
     }
   }
 
@@ -56,6 +59,9 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
     users = await getJellyfinAllUsers(baseUrl, apiKey);
   } catch (err) {
     console.warn("[download-policy] Jellyfin user fetch failed:", err instanceof Error ? err.message : String(err));
+    // Count the fetch failure so the cron run is recorded as not-ok rather than
+    // reporting zero errors on a sync that never actually ran.
+    result.errors++;
     return result;
   }
 

@@ -167,7 +167,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 
 | Variable                       | Constraints                      | Purpose                                                                                                                                                         |
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BASE_PATH`                    | starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`.                                                                                                                         |
+| `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
 | `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.13.8`.                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
@@ -269,11 +269,11 @@ Endpoints:
 | Sonarr  | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
 | Radarr  | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
 
-In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available* — and that flip is now verified against Radarr/Sonarr's own API before it applies, so a forged event can't mark a title available. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
+In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. Before applying the flip the handler cross-checks the title against Radarr/Sonarr's own API — but that check is fail-open: if Radarr/Sonarr is unreachable (or the HD/4K variant isn't configured) the flip proceeds optimistically, so the API check is a best-effort guard, not a hard barrier against a forged event. The `?token` secret is the real authentication. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
 
 ## Security hardening (operational)
 
-Code-level defenses (CSRF origin checks, SSRF pinning, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
+Code-level defenses (CSRF origin checks, SSRF protection via per-request DNS re-resolution, DB-checked session revocation, secrets encrypted at rest, per-IP/-user rate limiting) ship built in. The items below are **deployment-side** hardening that only you can do. None are required for the app to run, but each closes a real exposure on an internet-facing instance.
 
 ### Keep webhook tokens out of proxy logs
 
@@ -373,6 +373,8 @@ Summonarr ships a native OIDC client (`openid-client`) — Authorization Code fl
 
 All three are **optional**, configured in **Admin → Settings** (not via environment variables), stored in the database (secrets encrypted at rest), and each is governed by a default-on feature flag.
 
+> **What a feature flag actually disables.** Flags fall into three classes — `page` (a user-facing page or nav item), `integration` (an upstream service: Radarr/Sonarr/Discord/Plex/Jellyfin/push), and `admin`. Today a flag reliably hides the **page / UI surface** it names, but it does **not** uniformly gate the underlying mirror APIs or every integration code path: disabling a `page` flag removes the page and its nav entry while the corresponding `/api/*` endpoint may still respond, and an `integration` flag does not gate every notification/login/interaction path that touches that service. Treat flags as a UI/visibility control, not a hard security or access boundary — to fully cut off a surface, also remove its configuration (clear the relevant `Setting` keys) or block the route at your reverse proxy.
+
 - **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
 - **Email** — two backends selectable via `emailBackend`: **SMTP** (set `smtpHost`, optional `smtpPort` [default 587 STARTTLS; 465 = implicit TLS], `smtpUser`/`smtpPassword`, `smtpFrom`) or **Resend** (`resendApiKey`, `resendFrom`). Admin notifications send whenever email is configured; user-facing emails require toggling `enableUserEmails`.
 - **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push is relayed via a central/`apnsRelayUrl` APNs relay with end-to-end-encrypted payloads.
@@ -402,9 +404,9 @@ docker compose exec -T postgres psql -U summonarr -d summonarr < summonarr.sql
 
 ## Health, observability, troubleshooting
 
-- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target (10s interval, 30s start period).
+- **Health endpoint** — `GET /api/health` returns a lightweight JSON payload. It's the Docker `healthcheck` target (30s interval, 60s start period). Under a sub-path deployment the probe targets `${BASE_PATH}/api/health` (the image bakes `BASE_PATH` into both the probe and the cron loop), so prefix the path when probing manually:
   ```bash
-  docker compose exec summonarr wget -qO- http://localhost:3000/api/health
+  docker compose exec summonarr wget -qO- "http://localhost:3000${BASE_PATH}/api/health"
   ```
 - **Debug endpoint** — admin-only. `GET /api/admin/debug/arr-state?tmdbId=<id>&type=movie|tv` dumps cache rows, `attachArrPending` output, a live Radarr/Sonarr probe, the tvdb→tmdb mapping, wanted-table counts, and the most recent `LIBRARY_SYNC` audit row. **Start here** when a request is "stuck pending" or a badge looks wrong.
 - **Audit log** — **Admin → Audit Log** surfaces every sync run, webhook delivery, admin mutation, and webhook auth failure. PII is scrubbed on `SCRUB_AUDIT_PII_INTERVAL`.

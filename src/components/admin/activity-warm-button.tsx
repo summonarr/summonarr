@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Zap } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 export function ActivityWarmButton() {
   const [loading, setLoading] = useState(false);
@@ -14,7 +15,7 @@ export function ActivityWarmButton() {
     setMessage(null);
 
     try {
-      const res = await fetch("/api/admin/activity-warm", { method: "POST" });
+      const res = await fetch(withBasePath("/api/admin/activity-warm"), { method: "POST" });
       const data = await res.json();
 
       if (res.ok) {

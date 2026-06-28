@@ -47,6 +47,7 @@ export default async function UpcomingPage({
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const raw: TmdbMedia[] = [];
+  let loadFailed = false;
   try {
     const today = new Date().toISOString().slice(0, 10);
 
@@ -75,8 +76,9 @@ export default async function UpcomingPage({
       if (i < futureMovies.length) raw.push(futureMovies[i]);
       if (i < futureTV.length) raw.push(futureTV[i]);
     }
-  } catch {
-
+  } catch (err) {
+    loadFailed = true;
+    console.error("[upcoming] failed to load upcoming titles", err);
   }
 
   const show4k = await getShow4kVisibility(session);
@@ -100,7 +102,14 @@ export default async function UpcomingPage({
       />
 
       {items.length === 0 ? (
-        raw.length === 0 ? (
+        loadFailed ? (
+          <EmptyState
+            icon={AlertTriangle}
+            title="Couldn’t load upcoming titles"
+            description="TMDB is temporarily unavailable. Please try again shortly."
+            cta={{ href: "/upcoming", label: "Retry" }}
+          />
+        ) : raw.length === 0 ? (
           <EmptyState
             icon={AlertTriangle}
             title="TMDB token not configured"

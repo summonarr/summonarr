@@ -3,8 +3,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
-import { getClientIp } from "@/lib/rate-limit";
+import { logAudit, auditContext } from "@/lib/audit";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -61,14 +60,13 @@ export const DELETE = withAdmin(async (
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
       target:    `user:${id}`,
-      ipAddress: getClientIp(req.headers),
-      userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
       details:   {
         targetUser:  target.name ?? target.email,
         targetEmail: target.email,
         revokedAll:  true,
         adminAction: true,
       },
+      ...auditContext(req, session),
     });
 
     return NextResponse.json({ ok: true, revoked: "all" });
@@ -91,14 +89,13 @@ export const DELETE = withAdmin(async (
       userName:  session.user.name ?? session.user.email ?? "unknown",
       action:    "SESSION_REVOKE",
       target:    `session:${body.sessionId}`,
-      ipAddress: getClientIp(req.headers),
-      userAgent: req.headers.get("user-agent")?.slice(0, 512) ?? null,
       details:   {
         targetUser:   target.name ?? target.email,
         targetEmail:  target.email,
         deviceLabel:  record.deviceLabel,
         adminAction:  true,
       },
+      ...auditContext(req, session),
     });
 
     return NextResponse.json({ ok: true, revoked: body.sessionId });

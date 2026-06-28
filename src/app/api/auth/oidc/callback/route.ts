@@ -8,6 +8,7 @@ import {
   verifyOidcStateCookie,
 } from "@/lib/oidc";
 import { serializeSessionCookie } from "@/lib/session-cookie";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 function readStateCookie(req: NextRequest): string | null {
   const header = req.headers.get("cookie");
@@ -42,6 +43,12 @@ export async function GET(req: NextRequest) {
   const authUrl = process.env.AUTH_URL;
   if (!authUrl) {
     return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+  }
+
+  // Throttle the callback like /start — each hit triggers an outbound IdP token
+  // exchange and a DB user lookup/create even before the state cookie is checked.
+  if (!checkRateLimit(`oidc-callback:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
+    return loginErrorRedirect(req, "rate_limited");
   }
 
   if (!isOidcConfigured()) {

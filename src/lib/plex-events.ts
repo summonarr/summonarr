@@ -114,6 +114,9 @@ type TimelineEventData = {
 // /api/sync call rather than N. 30 s is long enough to absorb a normal
 // re-scan while still being responsive to one-off edits.
 const TIMELINE_RESYNC_DEBOUNCE_MS = 30_000;
+// Max cadence for broadcasting the full active-sessions snapshot to admin SSE clients.
+// Bounds scrub-driven fan-out without noticeably delaying the visible "now playing" UI.
+const SNAPSHOT_THROTTLE_MS = 2_000;
 
 // Reconnect backoff parameters. The poller already runs every 5s, so an SSE
 // outage degrades to 60s detection (stall fallback) rather than 30 min — no
@@ -195,6 +198,16 @@ class PlexEventStreamManager {
     this.running = false;
     this.abortController?.abort();
     this.abortController = null;
+    // Cancel any pending debounced resync so a stop() (token/URL change) doesn't
+    // still fire a full sync after the stream is torn down.
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+      this.resyncTimer = null;
+    }
+    if (this.snapshotThrottleTimer) {
+      clearTimeout(this.snapshotThrottleTimer);
+      this.snapshotThrottleTimer = null;
+    }
   }
 
   private async runLoop(): Promise<void> {
@@ -462,6 +475,34 @@ class PlexEventStreamManager {
     }
   }
 
+  // Throttle for the active-sessions SSE snapshot. emitActiveSessionsSnapshot reads
+  // every ActiveSession row and broadcasts the full payload to every admin client, so
+  // a scrubbing client (which changes progressMs on every event) would otherwise fan
+  // out one full snapshot per event. Leading-edge emit + trailing-edge coalesce bounds
+  // it to at most one snapshot per SNAPSHOT_THROTTLE_MS while still reflecting the final
+  // state. The progressMs/progressUpdatedAt DB writes are NOT throttled — only the emit.
+  private snapshotThrottleTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastSnapshotAt = 0;
+  private throttledEmitSessionsSnapshot(): void {
+    const now = Date.now();
+    const elapsed = now - this.lastSnapshotAt;
+    if (elapsed >= SNAPSHOT_THROTTLE_MS) {
+      this.lastSnapshotAt = now;
+      void emitActiveSessionsSnapshot().catch((err) =>
+        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
+      );
+      return;
+    }
+    if (this.snapshotThrottleTimer) return; // trailing emit already scheduled
+    this.snapshotThrottleTimer = setTimeout(() => {
+      this.snapshotThrottleTimer = null;
+      this.lastSnapshotAt = Date.now();
+      void emitActiveSessionsSnapshot().catch((err) =>
+        console.warn("[plex-events] sessions snapshot emit failed:", err instanceof Error ? err.message : err),
+      );
+    }, SNAPSHOT_THROTTLE_MS - elapsed);
+  }
+
   // Debounce + dispatch for the scanner-triggered library re-sync. Plex emits
   // a TimelineEntry per touched item; coalescing inside this window keeps a
   // full re-scan from N+1ing /api/sync. The trigger fires HTTP to the local
@@ -576,10 +617,11 @@ class PlexEventStreamManager {
           ...(transitionedToPlaying || playheadMoved ? { progressUpdatedAt: new Date() } : {}),
         },
       });
-      // Push a sessions snapshot only if the row actually changed — avoids
-      // SSE storms when Plex hammers "playing" notifications during scrubbing.
+      // Push a sessions snapshot only if the row actually changed, and throttle the
+      // broadcast so a scrubbing client (progressMs changes every event) can't fan a
+      // full multi-session snapshot out to every admin client on each event.
       if (result.count > 0) {
-        await emitActiveSessionsSnapshot();
+        this.throttledEmitSessionsSnapshot();
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

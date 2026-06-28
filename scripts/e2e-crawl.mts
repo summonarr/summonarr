@@ -50,6 +50,11 @@ const ROUTES = [
   "/admin/backup",
   "/admin/stats",
   "/admin/library",
+  "/admin/trash-guides",
+  "/admin/trash-guides/settings",
+  "/admin/trash-guides/quality-profiles",
+  "/admin/trash-guides/custom-formats",
+  "/admin/trash-guides/naming-sizes",
 ];
 
 interface PageResult {

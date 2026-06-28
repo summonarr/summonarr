@@ -4,15 +4,17 @@ import { useState } from "react";
 import { Loader2 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { withBasePath } from "@/lib/base-path";
 
 // Self-service account deletion (App Store Guideline 5.1.1(v) parity with the iOS
 // app). Calls DELETE /api/profile, which anonymizes + disables the account
 // (scrubs PII, revokes sessions) while keeping the user's requests/votes/issues
 // de-identified. The server already revoked the session, so — like the
 // change-password flow — we just bounce to /login.
-export function DeleteAccount() {
+export function DeleteAccount({ requiresPassword = false }: { requiresPassword?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
+  const [password, setPassword] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,14 +22,22 @@ export function DeleteAccount() {
     setError(null);
     setDeleting(true);
     try {
-      const res = await fetch("/api/profile", { method: "DELETE" });
+      const res = await fetch(withBasePath("/api/profile"), {
+        method: "DELETE",
+        ...(requiresPassword
+          ? {
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ password }),
+            }
+          : {}),
+      });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setError(data.error ?? "Failed to delete account");
         setDeleting(false);
         return;
       }
-      window.location.href = "/login";
+      window.location.href = withBasePath("/login");
     } catch {
       setError("Failed to delete account. Please try again.");
       setDeleting(false);
@@ -68,12 +78,23 @@ export function DeleteAccount() {
         aria-label="Type DELETE to confirm account deletion"
         className="bg-zinc-800 border-zinc-700"
       />
+      {requiresPassword && (
+        <Input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Current password"
+          autoComplete="current-password"
+          aria-label="Current password"
+          className="bg-zinc-800 border-zinc-700"
+        />
+      )}
       {error && <p className="text-sm text-red-400">{error}</p>}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           variant="destructive"
-          disabled={confirmText !== "DELETE" || deleting}
+          disabled={confirmText !== "DELETE" || (requiresPassword && password.length === 0) || deleting}
           onClick={handleDelete}
           className="w-full sm:w-auto"
         >
@@ -87,6 +108,7 @@ export function DeleteAccount() {
           onClick={() => {
             setConfirming(false);
             setConfirmText("");
+            setPassword("");
             setError(null);
           }}
           className="w-full sm:w-auto"

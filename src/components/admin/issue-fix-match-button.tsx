@@ -8,6 +8,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import type { FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
+import { withBasePath } from "@/lib/base-path";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
 
@@ -111,6 +112,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   const [jellyfinState, setJellyfinState] = useState<ServerState>({ status: "idle" });
   const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
   const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
+  const [fileInfoError, setFileInfoError] = useState(false);
   const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -127,6 +129,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     setJellyfinState({ status: "idle" });
     setPlexCandidates(null);
     setAddWrongState("idle");
+    setFileInfoError(false);
   }, [title]);
 
   const close = useCallback(() => {
@@ -137,12 +140,19 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    fetch(`/api/admin/fix-match/file-info?tmdbId=${tmdbId}&mediaType=${mediaType}`, {
+    setFileInfoError(false);
+    fetch(withBasePath(`/api/admin/fix-match/file-info?tmdbId=${tmdbId}&mediaType=${mediaType}`), {
       signal: controller.signal,
     })
       .then((r) => r.ok ? r.json() as Promise<FileInfoResponse> : null)
-      .then((data) => { if (data) setFileInfo(data); })
-      .catch(() => null);
+      .then((data) => {
+        if (data) setFileInfo(data);
+        else setFileInfoError(true);
+      })
+      .catch((err) => {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setFileInfoError(true);
+      });
     return () => controller.abort();
   }, [open, tmdbId, mediaType]);
 
@@ -165,7 +175,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
       setSearchError("");
       try {
         const type = mediaType === "MOVIE" ? "movie" : "tv";
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`, { signal: ac.signal });
+        const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(query.trim())}&type=${type}`), { signal: ac.signal });
         const json = await res.json() as TmdbMedia[] | { error: string };
         if (!res.ok || "error" in json) throw new Error("error" in json ? json.error : `HTTP ${res.status}`);
         setSearchResults(json as TmdbMedia[]);
@@ -200,7 +210,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
         mediaType,
         correctTmdbId: String(selected.id),
       });
-      const res  = await fetch(`/api/admin/fix-match/candidates?${params}`);
+      const res  = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
       const json = await res.json() as CandidatesResponse & { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setPlexCandidates(json);
@@ -212,7 +222,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   }
 
   async function resolveIssue(correctedTitle: string) {
-    await fetch(`/api/issues/${issueId}`, {
+    await fetch(withBasePath(`/api/issues/${issueId}`), {
       method:  "PATCH",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ status: "RESOLVED", resolution: `Match corrected to "${correctedTitle}"` }),
@@ -224,7 +234,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     setPlexState({ status: "applying" });
     setPhase("confirm");
     try {
-      const res  = await fetch("/api/admin/fix-match", {
+      const res  = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid }),
@@ -243,7 +253,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     if (!selected) return;
     setJellyfinState({ status: "applying" });
     try {
-      const res  = await fetch("/api/admin/fix-match", {
+      const res  = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id }),
@@ -266,10 +276,10 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
 
       let token = requestToken;
       if (!token) {
-        const tokenRes = await fetch(`/api/requests/token?tmdbId=${tmdbId}&mediaType=${mediaType}`);
+        const tokenRes = await fetch(withBasePath(`/api/requests/token?tmdbId=${tmdbId}&mediaType=${mediaType}`));
         if (tokenRes.ok) token = (await tokenRes.json()).token;
       }
-      const res = await fetch("/api/requests", {
+      const res = await fetch(withBasePath("/api/requests"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -338,6 +348,11 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                 <span className="text-sm text-zinc-400 truncate">{title}</span>
                 <span className="text-xs font-mono text-zinc-600 shrink-0">#{tmdbId}</span>
               </div>
+              {fileInfoError && (
+                <p className="text-xs text-orange-400/80">
+                  Couldn&apos;t load file details. Match info may be incomplete.
+                </p>
+              )}
               {fileInfo?.plexFilePath && (
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">Plex</span>

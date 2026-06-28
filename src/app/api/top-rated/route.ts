@@ -7,6 +7,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isFeatureEnabled } from "@/lib/features";
 
 // Native-client mirror of src/app/(app)/top/page.tsx — deduplicated top-rated
 // titles across TMDB + Trakt + MDBList, sorted by a chosen rating source. Keep
@@ -122,6 +123,9 @@ function applyFilters(
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!(await isFeatureEnabled("feature.page.top"))) {
+    return NextResponse.json({ error: "Top Rated is disabled" }, { status: 403 });
+  }
   if (!checkRateLimit(`top-rated:${session.user.id}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
@@ -131,28 +135,41 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const mediaType = sp.get("mediaType") || undefined; // "movies" | "tv" | undefined
   const minImdb = sp.get("minImdb") || undefined;
   const minVotes = sp.get("minVotes") || undefined;
-  const fromYear = sp.get("fromYear") || undefined;
-  const toYear = sp.get("toYear") || undefined;
+  // releaseYear is a 4-digit string compared lexicographically; only accept a
+  // 4-digit year so a junk value can't filter unexpectedly (an arbitrary string
+  // sorts in undefined positions against year strings). An invalid value is
+  // treated as "not set".
+  const isYear = (v: string | null): v is string => v != null && /^\d{4}$/.test(v);
+  const fromYear = isYear(sp.get("fromYear")) ? sp.get("fromYear")! : undefined;
+  const toYear = isYear(sp.get("toYear")) ? sp.get("toYear")! : undefined;
   const validSorts = new Set<SortBy>(["imdb", "letterboxd", "rt", "trakt", "mdblist"]);
   const sortParam = sp.get("sortBy");
   const sortBy: SortBy = validSorts.has(sortParam as SortBy) ? (sortParam as SortBy) : "imdb";
-  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const show4k = await getShow4kVisibility(session);
 
   const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
 
   try {
+    // A single down source degrades to an empty contribution rather than failing
+    // the whole page. Log each failure so a silently-missing source is diagnosable.
+    const fromSource = <T>(name: string, p: Promise<T[]>): Promise<T[]> =>
+      p.catch((err) => {
+        console.error(`[top-rated] source ${name} failed:`, err instanceof Error ? err.message : err);
+        return [] as T[];
+      });
+
     const [
       rawTmdbMovies, rawTmdbTV,
       rawTraktMovies, rawTraktTV,
       rawMdbMovies, rawMdbTV,
     ] = await Promise.all([
-      mediaType === "tv" ? [] : getTopRatedMovies().catch(() => [] as TmdbMedia[]),
-      mediaType === "movies" ? [] : getTopRatedTV().catch(() => [] as TmdbMedia[]),
-      mediaType === "tv" ? [] : getTraktPopularMovies().catch(() => [] as TmdbMedia[]),
-      mediaType === "movies" ? [] : getTraktPopularTV().catch(() => [] as TmdbMedia[]),
-      mediaType === "tv" ? [] : getMdblistTopRated("movie").catch(() => [] as TmdbMedia[]),
-      mediaType === "movies" ? [] : getMdblistTopRated("tv").catch(() => [] as TmdbMedia[]),
+      mediaType === "tv" ? [] : fromSource("tmdb-movies", getTopRatedMovies()),
+      mediaType === "movies" ? [] : fromSource("tmdb-tv", getTopRatedTV()),
+      mediaType === "tv" ? [] : fromSource("trakt-movies", getTraktPopularMovies()),
+      mediaType === "movies" ? [] : fromSource("trakt-tv", getTraktPopularTV()),
+      mediaType === "tv" ? [] : fromSource("mdblist-movies", getMdblistTopRated("movie")),
+      mediaType === "movies" ? [] : fromSource("mdblist-tv", getMdblistTopRated("tv")),
     ]);
 
     const allMovies = dedup([rawTmdbMovies, rawTraktMovies, rawMdbMovies]);

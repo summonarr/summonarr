@@ -5,16 +5,60 @@ import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
 import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
+import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
+import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { emitSSE } from "@/lib/sse-emitter";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
 
+interface EmailTarget {
+  requestedBy: string;
+  title: string;
+  mediaType: string;
+  posterPath?: string | null;
+  tmdbId?: number | null;
+}
+
+// Mirrors the single-request route's email channel (notifyRequestStatusChange):
+// resolve each owner's notification email + per-status opt-in pref, then fan out.
+// Fire-and-forget; per-row failures are swallowed by the email helpers.
+async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLINED", adminNote?: string | null): Promise<void> {
+  if (targets.length === 0) return;
+  try {
+    const userIds = [...new Set(targets.map((t) => t.requestedBy))];
+    const users = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true },
+    });
+    const userMap = new Map(users.map((u) => [u.id, u]));
+    for (const t of targets) {
+      const u = userMap.get(t.requestedBy);
+      if (!u) continue;
+      const to = resolveUserNotificationEmail(u);
+      if (!to) continue;
+      if (status === "APPROVED") {
+        if (!u.emailOnApproved) continue;
+        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined });
+      } else {
+        if (!u.emailOnDeclined) continue;
+        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath });
+      }
+    }
+  } catch (err) {
+    console.error("[requests/batch] email fan-out failed:", err instanceof Error ? err.message : err);
+  }
+}
+
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
   }
@@ -71,7 +115,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         status: typedStatus,
         pendingNotifyAt,
         ...(typedAdminNote !== undefined ? { adminNote: typedAdminNote } : {}),
-        ...(typedStatus === "DECLINED" ? { permanentlyDeclined: typedPermanent } : {}),
+        // Approving clears any prior decline; otherwise an APPROVED row keeps
+        // permanentlyDeclined=true and the owner's future re-requests stay blocked.
+        ...(typedStatus === "APPROVED" ? { permanentlyDeclined: false } : { permanentlyDeclined: typedPermanent }),
       },
     });
     if (res.count === 1) claimedIds.push(id);
@@ -121,6 +167,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     if (notifyTargets.length > 0) {
       notifyUsersRequestsApproved(notifyTargets).catch(() => {});
       notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
+      void fanOutEmails(notifyTargets, "APPROVED");
     }
   }
 
@@ -130,12 +177,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // were left untouched by updateMany and must not get a duplicate decline ping.
     const declined = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
-      select: { requestedBy: true, title: true, mediaType: true, tmdbId: true },
+      select: { requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true },
     });
     // Skip rows the acting admin owns — no self-notification for one's own request.
     const declineTargets = declined.filter((r) => r.requestedBy !== session.user.id);
     notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
     notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
+    void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
   }
 
   const batchRequests = await prisma.mediaRequest.findMany({

@@ -3,6 +3,9 @@ import { withAuth } from "@/lib/api-auth";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { readJsonCappedOr } from "@/lib/body-size";
+import { verifyPassword } from "@/lib/password-hash";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 // Thrown inside the deactivation transaction to roll it back when the caller is
 // the last active admin (guardrail 23: propagate out of the tx, don't swallow).
@@ -24,10 +27,33 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true, name: true, email: true, deactivatedAt: true },
+    select: { role: true, name: true, email: true, deactivatedAt: true, passwordHash: true },
   });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (target.deactivatedAt) return NextResponse.json({ ok: true }); // idempotent
+
+  // Step-up for local-credential accounts: deletion is irreversible, so require
+  // the current password in the body to confirm it's the account owner and not a
+  // ride-along on a hijacked/borrowed session. SSO-provisioned accounts have no
+  // local passwordHash to verify against; the session itself is their proof.
+  if (target.passwordHash !== null) {
+    if (!checkRateLimit(`profile-delete:${id}`, 5, 15 * 60 * 1000)) {
+      return NextResponse.json(
+        { error: "Too many attempts — please wait 15 minutes before trying again." },
+        { status: 429 },
+      );
+    }
+    const parsed = await readJsonCappedOr<{ password?: unknown }>(req, 16384, {});
+    if (parsed instanceof NextResponse) return parsed;
+    const password = parsed.password;
+    if (typeof password !== "string" || password.length === 0) {
+      return NextResponse.json({ error: "Password is required to delete your account" }, { status: 400 });
+    }
+    const ok = await verifyPassword(password, target.passwordHash);
+    if (!ok) {
+      return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+    }
+  }
 
   const now = new Date();
   // RFC-2606 reserved `.invalid` TLD — never routable, and `id` keeps it unique.

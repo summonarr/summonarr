@@ -56,14 +56,8 @@ const ALLOWLIST: Array<{ prefix: string; reason: string }> = [
  * needs a reason — adding here is a security decision.
  */
 const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
-  {
-    route: "/api/admin/fix-match/thumb",
-    reason: "binary image stream; inline DB-checked requireAuth({role:'ISSUE_ADMIN'}) (guardrail 6a)",
-  },
-  {
-    route: "/api/events",
-    reason: "SSE stream; inline DB-checked requireAuth() + per-role event filtering (guardrail 6a)",
-  },
+  // fix-match/thumb and /api/events both call requireAuth inline, so the token
+  // grep already passes them — they need no exception entry.
   {
     route: "/api/config/compat",
     reason: "intentionally public, coarse API-version descriptor (no secrets/DB) — native clients gate BEFORE sign-in; pre-auth via isPublicPath in proxy.ts",

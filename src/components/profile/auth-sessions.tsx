@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock, Check, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { withBasePath } from "@/lib/base-path";
 
 interface AuthSessionRow {
   id: string;
@@ -48,7 +49,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
     setRevoking(sessionId);
     setConfirmingRevoke(null);
     try {
-      await fetch("/api/sessions", {
+      await fetch(withBasePath("/api/sessions"), {
         method:  "DELETE",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ sessionId }),

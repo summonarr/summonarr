@@ -394,6 +394,18 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         );
       }
     }
+
+    // Discord application/guild IDs are snowflakes: 17–20 digit decimal integers.
+    // Persist them validated so downstream consumers (command registration,
+    // notifications, link/merge flows) never receive a malformed identifier.
+    if (key === "discordClientId" || key === "discordGuildId") {
+      if (!/^\d{17,20}$/.test(value)) {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be a numeric Discord snowflake` },
+          { status: 400 },
+        );
+      }
+    }
   }
 
   // Never enable the machine-session API while its IP allowlist is empty. The
@@ -467,18 +479,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   const auditUa = req.headers.get("user-agent")?.slice(0, 512) ?? null;
   try {
     await prisma.$transaction(async (tx) => {
-      await Promise.all(
-        entries.map(([key, value]) =>
-          // Sensitive keys are encrypted at rest by the Prisma extension in src/lib/prisma.ts.
-          // Do NOT pre-encrypt here — that produced double-encrypted rows (enc:v1:<enc:v1:…>)
-          // which decrypted on read into the inner ciphertext, breaking Jellyfin/Radarr/etc auth.
-          tx.setting.upsert({
-            where: { key },
-            update: { value },
-            create: { key, value },
-          })
-        )
-      );
+      // Sequential, not Promise.all: an interactive tx runs on one pinned
+      // connection, so parallel statements serialize at best and can interleave
+      // or deadlock at worst. Entries are bounded by the settings allowlist.
+      for (const [key, value] of entries) {
+        // Sensitive keys are encrypted at rest by the Prisma extension in src/lib/prisma.ts.
+        // Do NOT pre-encrypt here — that produced double-encrypted rows (enc:v1:<enc:v1:…>)
+        // which decrypted on read into the inner ciphertext, breaking Jellyfin/Radarr/etc auth.
+        await tx.setting.upsert({
+          where: { key },
+          update: { value },
+          create: { key, value },
+        });
+      }
       await tx.auditLog.create({
         data: {
           userId: session.user.id,

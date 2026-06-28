@@ -12,6 +12,7 @@ import { sanitizeText } from "@/lib/sanitize";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { isFeatureEnabled } from "@/lib/features";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -47,8 +48,15 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
+  const isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  if (!isIssueAdmin && issue.reportedBy !== session.user.id) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  // Match the issues POST gate: when issue reporting is disabled, ordinary users
+  // can't add to a thread. Issue admins stay able to respond / wind threads down.
+  if (!isIssueAdmin && !(await isFeatureEnabled("feature.page.issues"))) {
+    return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
   }
 
   const parsed = await readJsonCapped<{ body?: string }>(req, 65536);

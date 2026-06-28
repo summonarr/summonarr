@@ -19,8 +19,10 @@ const COMPLETION_BUCKETS = [
 
 export default async function MediaActivityPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ tmdbId: string }>;
+  searchParams: Promise<{ type?: string }>;
 }) {
   const session = await authActive();
   if (!session || session.user.role !== "ADMIN") redirect("/");
@@ -29,7 +31,12 @@ export default async function MediaActivityPage({
   const tmdbId = parseInt(tmdbIdStr, 10);
   if (!Number.isFinite(tmdbId)) notFound();
 
-  const stats = await getMediaPlayStats(tmdbId);
+  // TMDB ids are namespaced per type, so a movie and a show can share one id.
+  // When the linking surface passes ?type=, scope the stats to that media type.
+  const { type } = await searchParams;
+  const mediaType = type === "TV" || type === "tv" ? "TV" : type === "MOVIE" || type === "movie" ? "MOVIE" : undefined;
+
+  const stats = await getMediaPlayStats(tmdbId, mediaType);
 
   // Real TMDB poster art from the cache (same source the overview uses).
   const posterSrc = (await resolvePosterMap([{ tmdbId }]))[tmdbId] ?? null;

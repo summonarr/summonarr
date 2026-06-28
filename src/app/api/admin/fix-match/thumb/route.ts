@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
@@ -39,6 +40,11 @@ export async function GET(request: NextRequest) {
   // declines to advance it.
   const gate = await requireAuth({ role: "ISSUE_ADMIN" });
   if (gate instanceof NextResponse) return gate;
+  // Authoritative on the MANAGE_ISSUES bit (same gate as the sibling fix-match
+  // routes' withIssueAdmin), so clearing the bit revokes thumbnail access too.
+  if (!hasPermission(gate.user.permissions, Permission.MANAGE_ISSUES)) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
 
   const thumbPath = new URL(request.url).searchParams.get("path");
   if (!thumbPath) return new NextResponse("Missing path", { status: 400 });

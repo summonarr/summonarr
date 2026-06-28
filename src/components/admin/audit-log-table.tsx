@@ -8,6 +8,7 @@ import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe,
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { ACTION_LABELS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import type { AuditAction } from "@/generated/prisma";
+import { withBasePath } from "@/lib/base-path";
 
 interface AuditRow {
   id: string;
@@ -252,6 +253,7 @@ function AuditLogFilters({
 
           <ExportButton
             currentAction={currentAction}
+            currentGroup={currentGroup}
             currentDateFrom={currentDateFrom}
             currentDateTo={currentDateTo}
             currentUser={currentUser}
@@ -315,6 +317,7 @@ function AuditLogFilters({
 
 function ExportButton({
   currentAction,
+  currentGroup,
   currentDateFrom,
   currentDateTo,
   currentUser,
@@ -322,6 +325,7 @@ function ExportButton({
   currentHideCron,
 }: {
   currentAction: string;
+  currentGroup: string;
   currentDateFrom: string;
   currentDateTo: string;
   currentUser: string;
@@ -334,6 +338,7 @@ function ExportButton({
     const params = new URLSearchParams();
     params.set("format", format);
     if (currentAction) params.set("action", currentAction);
+    if (currentGroup) params.set("group", currentGroup);
     if (currentDateFrom) params.set("dateFrom", currentDateFrom);
     if (currentDateTo) params.set("dateTo", currentDateTo);
     if (currentUser) params.set("user", currentUser);
@@ -669,6 +674,7 @@ export function AuditLogView({
   const [nextCursor, setNextCursor] = useState(initialNextCursor);
   const [hasMore, setHasMore] = useState(initialHasMore);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [viewMode, setViewMode] = useState<"table" | "timeline">("table");
   const mounted = useHasMounted();
 
@@ -691,6 +697,7 @@ export function AuditLogView({
   async function loadMore() {
     if (!nextCursor || loading) return;
     setLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams();
       params.set("cursor", nextCursor);
@@ -702,12 +709,17 @@ export function AuditLogView({
       if (currentTarget) params.set("target", currentTarget);
       if (currentHideCron) params.set("hideCron", "1");
 
-      const res = await fetch(`/api/admin/audit-log?${params.toString()}`);
-      if (!res.ok) return;
+      const res = await fetch(withBasePath(`/api/admin/audit-log?${params.toString()}`));
+      if (!res.ok) {
+        setLoadError(true);
+        return;
+      }
       const data = (await res.json()) as { logs: AuditRow[]; nextCursor: string | null; hasMore: boolean };
       setLogs((prev) => [...prev, ...data.logs]);
       setNextCursor(data.nextCursor);
       setHasMore(data.hasMore);
+    } catch {
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -740,14 +752,17 @@ export function AuditLogView({
       )}
 
       {hasMore && (
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-2">
           <button
             onClick={loadMore}
             disabled={loading}
             className="px-4 py-2 rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? "Loading..." : "Load More"}
+            {loading ? "Loading..." : loadError ? "Retry" : "Load More"}
           </button>
+          {loadError && (
+            <span className="text-xs text-red-400">Could not load more entries</span>
+          )}
         </div>
       )}
 

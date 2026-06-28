@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface Props {
   tmdbId: number;
@@ -17,15 +18,15 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   const [reason, setReason] = useState("");
 
   async function handleVote() {
-
-    setState("voted");
+    setState("loading");
     try {
-      const res = await fetch("/api/votes", {
+      const res = await fetch(withBasePath("/api/votes"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tmdbId, mediaType, reason: reason.trim() || undefined, _token: requestToken }),
       });
       if (res.ok || res.status === 409) {
+        setState("voted");
         router.refresh();
       } else {
         setState("idle");
@@ -36,11 +37,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   }
 
   async function handleUnvote() {
-
-    setState("idle");
+    setState("loading");
     try {
-      const res = await fetch(`/api/votes/${tmdbId}?mediaType=${mediaType}`, { method: "DELETE" });
+      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) {
+        setState("idle");
         router.refresh();
       } else {
         setState("voted");

@@ -9,16 +9,17 @@
 //   - src/lib/safe-fetch.ts  (request timeout fires promptly, redirects and
 //                             response size caps are enforced, and non-
 //                             allowlisted hosts are blocked)
-//   - src/lib/webhook-replay.ts (a previously-seen webhook body is rejected
-//                             as a replay while distinct bodies/sources/
-//                             secrets are still accepted)
+//
+// These modules have no database dependency, so the runner stays
+// self-contained and runs in the lint/typecheck CI job (which has no
+// Postgres). Webhook replay protection is backed by the WebhookReplay table
+// and is exercised against a live database, not here.
 //
 // This is intentionally a small standalone runner — there is no test
 // framework in this project. Exits non-zero on the first failure.
 
 import { resolveToSafeUrl } from "../src/lib/ssrf";
 import { safeFetchTrusted, SafeFetchError } from "../src/lib/safe-fetch";
-import { checkAndRecordWebhook, __resetWebhookReplayCacheForTests } from "../src/lib/webhook-replay";
 
 let failures = 0;
 function ok(label: string) { console.log(`  ✓ ${label}`); }
@@ -81,16 +82,6 @@ async function main() {
       return elapsed < 5000;
     }
   });
-
-  console.log("\n[smoke] webhook-replay cache rejects duplicate webhook bodies");
-  __resetWebhookReplayCacheForTests();
-  await expect("first call accepted",                  async () => (await checkAndRecordWebhook("plex", "secret", "body-1")) === true);
-  await expect("identical replay rejected",            async () => (await checkAndRecordWebhook("plex", "secret", "body-1")) === false);
-  await expect("different body accepted",              async () => (await checkAndRecordWebhook("plex", "secret", "body-2")) === true);
-  await expect("different source accepted (sonarr)",   async () => (await checkAndRecordWebhook("sonarr", "secret", "body-1")) === true);
-  await expect("different secret accepted",            async () => (await checkAndRecordWebhook("plex", "other", "body-1")) === true);
-  await expect("Uint8Array body accepted",             async () => (await checkAndRecordWebhook("plex", "secret", new TextEncoder().encode("binary-1"))) === true);
-  await expect("Uint8Array replay rejected",           async () => (await checkAndRecordWebhook("plex", "secret", new TextEncoder().encode("binary-1"))) === false);
 
   console.log(`\n[smoke] Done. ${failures === 0 ? "✓ ALL PASS" : `✗ ${failures} FAILURE(S)`}`);
   process.exit(failures === 0 ? 0 : 1);

@@ -360,7 +360,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                     >
                       {m.tmdbId ? (
                         <Link
-                          href={`/admin/activity/media/${m.tmdbId}`}
+                          href={`/admin/activity/media/${m.tmdbId}${m.mediaType ? `?type=${m.mediaType}` : ""}`}
                           style={{
                             fontSize: 13,
                             color: "var(--ds-fg)",
@@ -567,7 +567,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                     <td style={{ padding: "9px 11px" }}>
                       {p.tmdbId ? (
                         <Link
-                          href={`/admin/activity/media/${p.tmdbId}`}
+                          href={`/admin/activity/media/${p.tmdbId}${p.mediaType ? `?type=${p.mediaType}` : ""}`}
                           style={{
                             color: "var(--ds-fg)",
                             fontSize: 12.5,

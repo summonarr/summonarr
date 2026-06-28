@@ -139,7 +139,7 @@ export default async function ProfilePage() {
             title="Delete Account"
             description="Permanently delete your account and personal data."
           >
-            <DeleteAccount />
+            <DeleteAccount requiresPassword={hasPassword} />
           </ProfileCard>
         </div>
 

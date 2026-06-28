@@ -4,9 +4,20 @@ import { prisma } from "@/lib/prisma";
 import { auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
-import { AUDIT_ACTIONS } from "@/lib/audit-actions";
+import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 
 const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
+
+// Coarse group filter — derived from the shared ACTION_GROUP so the schema enum
+// is the single source of truth, matching the audit-log list route.
+const GROUP_ACTIONS: Record<AuditGroup, AuditAction[]> = {
+  auth: [],
+  admin: [],
+  system: [],
+};
+for (const action of AUDIT_ACTIONS) {
+  GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
+}
 
 const CHUNK_SIZE = 1000;
 const MAX_EXPORT_RECORDS = 100_000;
@@ -32,6 +43,11 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
   const action = url.searchParams.get("action") as AuditAction | null;
+  const groupParam = url.searchParams.get("group");
+  const group: AuditGroup | null =
+    groupParam === "auth" || groupParam === "admin" || groupParam === "system"
+      ? groupParam
+      : null;
   const dateFrom = url.searchParams.get("dateFrom");
   const dateTo = url.searchParams.get("dateTo");
   const user = url.searchParams.get("user");
@@ -39,7 +55,12 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const hideCron = url.searchParams.get("hideCron") === "1";
 
   const where: Prisma.AuditLogWhereInput = {};
-  if (action && VALID_ACTIONS.includes(action)) where.action = action;
+  // Action is more specific than group — action wins if both are present
+  if (action && VALID_ACTIONS.includes(action)) {
+    where.action = action;
+  } else if (group) {
+    where.action = { in: GROUP_ACTIONS[group] };
+  }
   if (dateFrom || dateTo) {
     where.createdAt = {};
     // Validate dates up front. An Invalid Date would otherwise throw inside the ReadableStream's
@@ -74,6 +95,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const filters = {
     format,
     action: action ?? null,
+    group: group ?? null,
     dateFrom: dateFrom ?? null,
     dateTo: dateTo ?? null,
     user: user ?? null,

@@ -17,8 +17,13 @@ interface RawJellyfinUser {
   } | null;
 }
 
+// GET /Users requires RequiresElevation in Jellyfin. X-MediaBrowser-Token alone
+// does not satisfy the elevation check in 10.9+; the full Authorization:
+// MediaBrowser ... header is required. Mirrors the real /Users fetch so the
+// diagnose result reflects what library sync actually sees.
 function jellyfinHeaders(apiKey: string): Record<string, string> {
   return {
+    "Authorization": `MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0", Token="${apiKey}"`,
     "X-MediaBrowser-Token": apiKey,
     "Content-Type": "application/json",
     "User-Agent": "Summonarr/1.0 (Node.js)",

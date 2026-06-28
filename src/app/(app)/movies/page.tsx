@@ -8,6 +8,7 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { auth } from "@/lib/auth";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
+import { isFeatureEnabled } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
@@ -44,8 +45,12 @@ export default async function MoviesPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   const [sp, session] = await Promise.all([searchParams, auth()]);
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  const show4k = await getShow4kVisibility(session);
+  const [show4k, plexEnabled, jellyfinEnabled] = await Promise.all([
+    getShow4kVisibility(session, "movie"),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { resolvePosterMap } from "@/lib/poster-cache";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,24 @@ function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
-export const GET = withAdmin(async (request, _ctx, _session) => {
+// The Prisma `contains` filter (used on the ungrouped path) emits an ILIKE with
+// NO `ESCAPE` clause, so any `%`/`_` in the search term remain wildcards and a
+// wildcard-laden string forces an unindexable pattern scan (a search-box DoS).
+// Unlike the grouped raw-SQL path we cannot attach an ESCAPE clause here, so we
+// strip the metacharacters (and the escape char) and bound the length, leaving a
+// literal substring match for normal text.
+const MAX_SEARCH_LEN = 100;
+function sanitizeContainsSearch(s: string): string {
+  return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
+}
+
+export const GET = withAdmin(async (request, _ctx, session) => {
+  // The grouped path runs two heavy window-function/aggregate raw queries over
+  // the full PlayHistory table per request; throttle per admin to bound abuse.
+  if (!checkRateLimit(`play-history:${session.user.id}:${getClientIp(request.headers)}`, 120, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — try again shortly" }, { status: 429 });
+  }
+
   const params = request.nextUrl.searchParams;
 
   const distinctMode = params.get("distinct");
@@ -209,7 +227,7 @@ async function ungroupedQuery(
     };
   }
 
-  const search = params.get("search")?.trim();
+  const search = sanitizeContainsSearch(params.get("search")?.trim() ?? "");
   if (search) {
     where.OR = [
       { title: { contains: search, mode: "insensitive" } },

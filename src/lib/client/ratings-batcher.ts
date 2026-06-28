@@ -1,4 +1,5 @@
 "use client";
+import { withBasePath } from "@/lib/base-path";
 
 export interface RatingsPayload {
   imdbId: string | null;
@@ -46,7 +47,7 @@ async function flush() {
   if (queue.size > 0) scheduleFlush();
 
   try {
-    const res = await fetch("/api/ratings/batch", {
+    const res = await fetch(withBasePath("/api/ratings/batch"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

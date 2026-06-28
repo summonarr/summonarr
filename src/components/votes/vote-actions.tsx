@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface Props {
   tmdbId: number;
@@ -24,7 +25,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setLoading(true);
     setVoted(false);
     try {
-      const res = await fetch(`/api/votes/${tmdbId}?mediaType=${mediaType}`, { method: "DELETE" });
+      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) router.refresh();
       else setVoted(true);
     } catch {
@@ -40,7 +41,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setDismissed(true);
     setConfirmingDismiss(false);
     try {
-      const res = await fetch(`/api/votes/${tmdbId}?mediaType=${mediaType}`, { method: "PATCH" });
+      const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "PATCH" });
       if (res.ok) router.refresh();
       else setDismissed(false);
     } catch {

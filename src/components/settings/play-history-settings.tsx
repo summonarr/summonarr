@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -41,7 +42,7 @@ export function PlayHistorySettingsForm({
     e.preventDefault();
     setStatus("saving");
     try {
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

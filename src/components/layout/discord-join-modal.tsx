@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { X, ExternalLink } from "@/components/icons";
 
 interface DiscordJoinBannerProps {
@@ -16,9 +17,9 @@ export function DiscordJoinModal({ inviteUrl }: DiscordJoinBannerProps) {
     <div className="flex items-center gap-3 bg-indigo-600 px-4 py-2.5 text-sm text-white">
       <span className="flex-1">
         Join our Discord server to request media directly from Discord, then{" "}
-        <a href="/profile" className="underline underline-offset-2 font-medium hover:text-indigo-200">
+        <Link href="/profile" className="underline underline-offset-2 font-medium hover:text-indigo-200">
           link your account
-        </a>
+        </Link>
         .
       </span>
       <a

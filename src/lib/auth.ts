@@ -14,6 +14,7 @@ import type { SummonarrSession } from "@/lib/api-auth";
 import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
+import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -50,6 +51,20 @@ export type ProviderSetupRequired = typeof PROVIDER_SETUP_REQUIRED;
 
 export type AuthorizedDbUser = { id: string; email: string; name: string | null; role: string };
 
+// True when minting the very FIRST user through an OAuth provider would brick
+// first-admin bootstrap: OAuth bootstrap disabled, setup not yet completed, and no
+// ADMIN exists. Creating a plain USER row in that state trips /api/auth/register's
+// "registration closed" guard while runFirstAdminPromotion won't promote the row,
+// leaving the instance with no admin and no way to create one. The Plex/Jellyfin
+// create paths consult this before minting; OIDC inlines the same check.
+async function isPreSetupBootstrapBlocked(): Promise<boolean> {
+  if (process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true") return false;
+  const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
+  if (setupRow) return false;
+  const existingAdmin = await prisma.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
+  return !existingAdmin;
+}
+
 export async function findOrCreatePlexUser({
   plexUserId,
   email,
@@ -60,7 +75,7 @@ export async function findOrCreatePlexUser({
   email: string;
   name?: string | null;
   image?: string | null;
-}): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+}): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
   // the name can't carry markup into any downstream sink (email/Discord/push),
@@ -99,6 +114,12 @@ export async function findOrCreatePlexUser({
     return PROVIDER_REBIND_REQUIRED;
   }
 
+  // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
+  if (await isPreSetupBootstrapBlocked()) {
+    console.warn(`[auth] Refused pre-setup plex sign-in for ${normalized}: complete initial setup (create the first admin) first.`);
+    return PROVIDER_SETUP_REQUIRED;
+  }
+
   // 3) New user — create with provider sub populated.
   const created = await prisma.user.create({
     data: {
@@ -118,7 +139,7 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
-): Promise<AuthorizedDbUser | ProviderRebindRequired> {
+): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
   name = sanitizeText(name);
@@ -172,6 +193,12 @@ export async function findOrCreateJellyfinUser(
       console.warn(`[auth] Refused jellyfin sign-in: ${normalizedReal} matches an existing user with no jellyfinUserId. Manual rebind required.`);
       return PROVIDER_REBIND_REQUIRED;
     }
+  }
+
+  // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
+  if (await isPreSetupBootstrapBlocked()) {
+    console.warn(`[auth] Refused pre-setup jellyfin sign-in for ${jellyfinId}: complete initial setup (create the first admin) first.`);
+    return PROVIDER_SETUP_REQUIRED;
   }
 
   // 4) New user.
@@ -524,8 +551,22 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   const isMobile   = token.isMobile as boolean | undefined;
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
+  // The 1-year native-app TTL is reserved for a real native client, identified by
+  // the X-Summonarr-Client header it presents (a custom header a cross-origin web
+  // page cannot forge on a credentialed request — guardrail 6b). A spoofed mobile
+  // User-Agent alone (isMobile is UA-derived) must NOT grant it, or any browser
+  // could mint a 1-year remember-me ceiling by lying about its UA.
+  let isNativeClient = false;
+  try {
+    const { headers: getHeaders } = await import("next/headers");
+    const h = await getHeaders();
+    isNativeClient = hasNativeClientHeader(h.get(NATIVE_CLIENT_HEADER));
+  } catch {
+    // Invoked outside a request context — treat as non-native.
+  }
+
   let ttl: number;
-  if (rememberMe && isMobile) {
+  if (rememberMe && isMobile && isNativeClient) {
     // Native app (iOS Keychain bearer) — long-lived by default. See NATIVE_APP_SESSION_SECONDS.
     ttl = NATIVE_APP_SESSION_SECONDS;
   } else if (rememberMe) {
@@ -770,6 +811,8 @@ export async function authorizeWithPlex(
 
         if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
           void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+        } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
+          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
         } else {
           // notificationEmail is kept in lock-step with the Plex-verified email on every
           // sign-in so notifications always go to the user's current Plex address.
@@ -874,9 +917,10 @@ export async function authorizeWithJellyfin(
     return null;
   }
   const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
-  if (jfDbUser === PROVIDER_REBIND_REQUIRED) {
+  if (jfDbUser === PROVIDER_REBIND_REQUIRED || jfDbUser === PROVIDER_SETUP_REQUIRED) {
     await dummyVerify();
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "email_collision_needs_rebind" } });
+    const reason = jfDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -892,6 +936,14 @@ export async function authorizeWithJellyfinQuickConnect(
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
   if (!checkRateLimit(`jellyfin-qc-ip:${ip}`, 10, 5 * 60 * 1000)) {
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
+    return null;
+  }
+  // Per-secret bucket so a QuickConnect secret can't be brute-redeemed from
+  // rotating IPs (mirrors the Plex per-token limit). Hash the secret so no raw
+  // secret material lands in a limiter key.
+  const qcKey = createHash("sha256").update(credentials.secret as string).digest("hex").slice(0, 16);
+  if (!checkRateLimit(`jellyfin-qc-secret:${qcKey}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }
@@ -923,8 +975,9 @@ export async function authorizeWithJellyfinQuickConnect(
     return null;
   }
   const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
-  if (qcDbUser === PROVIDER_REBIND_REQUIRED) {
-    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "email_collision_needs_rebind" } });
+  if (qcDbUser === PROVIDER_REBIND_REQUIRED || qcDbUser === PROVIDER_SETUP_REQUIRED) {
+    const reason = qcDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason } });
     return null;
   }
   const device = buildDeviceMeta(headers);
@@ -972,8 +1025,11 @@ async function runFirstAdminPromotion(
   const allowOauthBootstrap = process.env.SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN === "true";
   if (providerId !== "credentials" && !allowOauthBootstrap) return false;
   return prisma.$transaction(async (tx) => {
-    // Advisory lock prevents two concurrent first-time sign-ins both being promoted to ADMIN
-    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(1947888749)");
+    // Lock 43 is the SAME advisory lock /api/auth/register holds for its
+    // count→create-ADMIN→setup_completed_at sequence. Sharing it serializes the
+    // two first-admin paths so a concurrent register + OAuth bootstrap can't both
+    // observe "no admin yet" and each mint an ADMIN.
+    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");
     const setupRow = await tx.setting.findUnique({ where: { key: "setup_completed_at" } });
     if (setupRow) return false;
     const existingAdmin = await tx.user.findFirst({ where: { role: "ADMIN" }, select: { id: true } });
@@ -1055,7 +1111,10 @@ export async function signInAndMintSession(params: {
     provider: providerId,
     details: {
       provider: providerId,
-      email: user.email,
+      // Store a hash, not the raw address — matches the AUTH_LOGIN_FAILED paths
+      // and minimizes cleartext PII held in the audit log (it would otherwise
+      // persist until the 90-day scrub).
+      emailHash: typeof user.email === "string" ? hashAuditEmail(user.email) : null,
       role: token.role,
       ip: (user as { _auditIp?: string })._auditIp,
       browser: ((user as { _auditUa?: string })._auditUa)?.slice(0, 100),

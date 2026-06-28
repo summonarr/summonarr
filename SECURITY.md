@@ -44,7 +44,7 @@ Before reporting, check whether the issue is already mitigated. We'd rather hear
 **Boot guards (production refuses to start without these):**
 
 - `NEXTAUTH_SECRET` — minimum 32 characters
-- `AUTH_URL` — fixes the public origin so NextAuth can't be tricked by a forged `Host` header
+- `AUTH_URL` — fixes the public origin so the CSRF `Origin`/`Referer` check can't be tricked by a forged `Host` header
 - `TRUST_PROXY=true` — required for **internet-facing** deployments: when `AUTH_URL` is a public host, production refuses to boot without it (the local-only Host guard is spoofable and can't protect a public instance). LAN/loopback deployments run in local-only mode without it.
 - `CRON_SECRET` — minimum 32 characters; protects `/api/sync*` and `/api/cron*`
 - `TOKEN_ENCRYPTION_KEY` — exactly 64 hex characters (`openssl rand -hex 32`)
@@ -57,7 +57,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **SSRF:** All outbound HTTP goes through one of three helpers in `src/lib/safe-fetch.ts`:
 
-- `safeFetch` — user-supplied URLs. Blocks RFC1918, loopback, link-local, CGNAT, multicast, and cloud-metadata addresses; resolves and pins the IP to defeat DNS rebinding.
+- `safeFetch` — user-supplied URLs. Blocks RFC1918, loopback, link-local, CGNAT, multicast, and cloud-metadata addresses; re-resolves the hostname per request and safety-checks every resolved address (the IP can't be pinned at the dispatcher layer) to defeat DNS rebinding.
 - `safeFetchAdminConfigured` — URLs persisted in the `Setting` table (Radarr/Sonarr/Plex/Jellyfin servers). Allows RFC1918/ULA/loopback for LAN deployments; still blocks `0.0.0.0` and link-local.
 - `safeFetchTrusted` — hardcoded hostname allowlist for fixed third-party APIs (TMDB, plex.tv, discord.com, etc).
 
@@ -67,7 +67,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **Backup encryption:** AES-256-GCM with PBKDF2-SHA256 / 600,000 iterations (NIST SP 800-132 recommends ≥210k). The password lives in the operator's environment, not the database — a compromised admin account can trigger a backup but cannot decrypt one.
 
-**Per-device sessions:** Each session is tracked in `AuthSession` with a UA fingerprint and per-device revocation. Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. Admin sessions cap at 90 days.
+**Per-device sessions:** Each session is tracked in `AuthSession` with a UA fingerprint and per-device revocation. Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. Admin sessions cap at 7 days (the general session ceiling is 90 days).
 
 **Audit log:** Sensitive `Setting` keys (Radarr/Sonarr/Plex/Jellyfin/Discord tokens, SMTP password) are redacted to `[redacted]` before being written to the audit log.
 
@@ -82,7 +82,7 @@ Reports we want — even if a defense above exists, a working bypass is worth kn
 - Sensitive data exposure (API keys, session tokens, user data) in responses, logs, or backups
 - XSS in user-rendered content (requests, issue messages, profile fields) that bypasses the CSP
 - CSRF bypass — including any way to forge a matching `Origin` / `Referer`
-- Open redirect via NextAuth callback URLs or `callbackUrl` parameters
+- Open redirect via post-login / OAuth/OIDC callback or redirect-target parameters
 - Rate-limiting bypass or abuse vectors
 - Webhook signature forgery or token-comparison timing leaks
 

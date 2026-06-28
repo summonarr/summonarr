@@ -105,12 +105,14 @@ export async function POST(req: NextRequest) {
   const nowSec = Math.floor(Date.now() / 1000);
   const expiresAt = nowSec + expiresIn;
 
-  // Bind the JWT to a stable fingerprint so a stolen cookie can't be replayed
-  // from a different caller. proxy.ts skips the browser-style fingerprint
-  // check for any value starting with "machine:" — replay defense relies on
-  // the short lifetime and CRON_SECRET to mint fresh tokens.
+  // Bind the JWT to a per-session fingerprint. proxy.ts skips the browser-style
+  // fingerprint check for any value starting with "machine:" — replay defense
+  // relies on the short lifetime and CRON_SECRET to mint fresh tokens — but
+  // deriving the value from the unique sessionId (rather than the static
+  // CRON_SECRET) means every minted token carries a distinct fingerprint, so a
+  // future enforcement path can distinguish individual machine sessions.
   const uaFingerprint =
-    "machine:" + createHash("sha256").update(cronSecret).digest("hex").slice(0, 12);
+    "machine:" + createHash("sha256").update(sessionId).digest("hex").slice(0, 12);
 
   await prisma.authSession.create({
     data: {
@@ -136,6 +138,11 @@ export async function POST(req: NextRequest) {
       isMobile: false,
       deviceLabel: "Machine (API)",
       expiresAt,
+      // Bind the mint-time allowlist into the signed claims so the auth guards
+      // re-check the caller's IP on every request, not just at mint. A leaked
+      // token is then useless from an off-allowlist address. Empty when no
+      // allowlist is configured (no per-request IP restriction).
+      ...(allowlist.length > 0 ? { machineAllowedIps: allowlist } : {}),
     },
     { expiresInSeconds: expiresIn },
   );

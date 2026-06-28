@@ -14,6 +14,8 @@ import {
 } from "@/lib/session-refresh";
 import type { SessionClaims } from "@/lib/session-jwt";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
+import { isIpAllowed } from "@/lib/ip-allowlist";
+import { getClientIp } from "@/lib/rate-limit";
 import {
   parsePermissions,
   effectivePermissions,
@@ -65,6 +67,18 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
   };
 }
 
+// Machine sessions carry a mint-time IP allowlist in their claims. The proxy
+// (Edge runtime, no per-request IP re-check for machine: sessions) lets them
+// through, so the IP binding is enforced here in the Node guards: a token minted
+// from an allowlisted address is rejected if replayed from a different one. The
+// allowlist is fail-closed — an indeterminate client IP ("unknown" when
+// TRUST_PROXY is off) never matches. Absent/empty claim ⇒ no restriction.
+function machineIpAllowed(claims: SessionClaims, headers: Headers): boolean {
+  const allowlist = claims.machineAllowedIps;
+  if (!Array.isArray(allowlist) || allowlist.length === 0) return true;
+  return isIpAllowed(getClientIp(headers), allowlist);
+}
+
 // Verifies the Summonarr session cookie, runs the refresh logic, and applies
 // the role check. Returns either the session, or a NextResponse the caller
 // must return.
@@ -97,6 +111,9 @@ export async function requireAuth(
   // authenticateRequest below. Bearer sessions skip it (app-secure storage,
   // not an ambiently-replayed cookie).
   if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, h.get("user-agent"))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!machineIpAllowed(result.claims, h as unknown as Headers)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {
@@ -138,6 +155,9 @@ async function authenticateRequest(
   // belt-and-suspenders with proxy.ts which the prefetch-header matcher exempts.
   // Bearer sessions skip it (app-secure storage, not an ambient browser cookie).
   if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (!machineIpAllowed(result.claims, req.headers)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   if (opts.role && !hasRole(result.claims.role, opts.role)) {

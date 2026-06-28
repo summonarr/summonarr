@@ -11,6 +11,7 @@ import {
   arrErrorMessage,
 } from "@/lib/arr";
 import { logAudit, auditContext } from "@/lib/audit";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -51,9 +52,18 @@ export const GET = withIssueAdmin(async (_req, { params }: RouteContext, _sessio
 });
 
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  // A RESOLVED issue is closed — don't fire an *arr grab (and the IssueGrab row)
+  // for it. The CAS below only prevents reopening; the upstream grab would still run.
+  if (issue.status === "RESOLVED") {
+    return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
+  }
 
   const parsed = await readJsonCapped<{ guid?: string; indexerId?: number }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;

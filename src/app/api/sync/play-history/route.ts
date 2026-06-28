@@ -53,6 +53,26 @@ const pendingDlnaSessions = new Set<string>();
 // clamps — SSE is the authoritative real-time source and always writes raw.
 const PROGRESS_JITTER_TOLERANCE_MS = 10_000;
 
+// The admin Plex user id (used only to flag MediaServerUser.isServerAdmin) effectively
+// never changes for a given token, yet the poller runs every 5s. Memoize it per-token
+// with a long TTL so a healthy poll doesn't hit plex.tv ~17k×/day. Best-effort: a failed
+// lookup returns null and is not cached, so the next poll retries.
+const PLEX_ADMIN_ID_TTL_MS = 60 * 60 * 1000;
+let plexAdminIdCache: { token: string; id: string; expiresAt: number } | null = null;
+async function getCachedPlexAdminId(token: string): Promise<string | null> {
+  const now = Date.now();
+  if (plexAdminIdCache && plexAdminIdCache.token === token && plexAdminIdCache.expiresAt > now) {
+    return plexAdminIdCache.id;
+  }
+  const id = await getPlexUser(token)
+    .then((u) => u.id)
+    .catch(() => null);
+  if (id != null) {
+    plexAdminIdCache = { token, id, expiresAt: now + PLEX_ADMIN_ID_TTL_MS };
+  }
+  return id;
+}
+
 async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
   // getPlexSessions is the authoritative local-reachability probe — it runs
   // every poll. Report the result so the UI's reachability badge reflects
@@ -95,9 +115,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   // MediaServerUser.isServerAdmin for the server-owner row (Plex sessions
   // don't carry an admin flag; the owner is whoever owns the admin token).
   // Best-effort: if the call fails, isServerAdmin stays unset on this run.
-  const plexAdminId = await getPlexUser(token)
-    .then((u) => u.id)
-    .catch(() => null);
+  const plexAdminId = await getCachedPlexAdminId(token);
 
   const seenSessionKeys = new Set<string>();
   for (const s of valid) seenSessionKeys.add(s.sessionKey);

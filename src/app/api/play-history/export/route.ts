@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import type { Prisma } from "@/generated/prisma";
 
@@ -8,6 +9,15 @@ export const dynamic = "force-dynamic";
 
 const MAX_EXPORT_ROWS = 10_000;
 const PAGE_SIZE = 1000;
+const MAX_SEARCH_LEN = 100;
+
+// Prisma's `contains` filter emits an ILIKE with no `ESCAPE` clause, so a search
+// term laden with `%`/`_` wildcards would force an unindexable pattern scan (a
+// search-box DoS). Strip the LIKE metacharacters (and the escape char) and bound
+// the length so the filter is a bounded literal substring match.
+function sanitizeContainsSearch(s: string): string {
+  return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
+}
 
 function escapeCSV(value: unknown): string {
   if (value == null) return "";
@@ -65,7 +75,7 @@ export async function GET(request: NextRequest) {
     };
   }
 
-  const search = params.get("search")?.trim();
+  const search = sanitizeContainsSearch(params.get("search")?.trim() ?? "");
   if (search) {
     where.OR = [
       { title: { contains: search, mode: "insensitive" } },
@@ -73,6 +83,37 @@ export async function GET(request: NextRequest) {
       { mediaServerUser: { username: { contains: search, mode: "insensitive" } } },
     ];
   }
+
+  // Play-history export streams up to MAX_EXPORT_ROWS of viewer PII (titles,
+  // usernames, devices, IP-correlated rows). Record a paper-trail row so the
+  // export is attributable — mirrors the audit-log export. The filters are
+  // logged (not the rows) so the trail captures scope without re-deriving PII.
+  const ctx = auditContext(request, { user: { provider: session.user.provider } });
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email ?? session.user.id,
+    action: "PLAY_HISTORY_EXPORT",
+    target: "play-history:export",
+    details: {
+      kind: "play-history",
+      format,
+      maxRows: MAX_EXPORT_ROWS,
+      filters: {
+        source: source ?? null,
+        mediaType: mediaType ?? null,
+        watched: watched ?? null,
+        userId: userId ?? null,
+        playMethod: where.playMethod ?? null,
+        platform: platform ?? null,
+        startDate: startDate ?? null,
+        endDate: endDate ?? null,
+        search: search || null,
+      },
+    },
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
+    provider: ctx.provider,
+  });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 

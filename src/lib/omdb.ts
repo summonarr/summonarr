@@ -10,6 +10,15 @@ const OMDB_FETCH_TIMEOUT_MS = 10_000;
 
 const OMDB_NEGATIVE_TTL = 24 * 60 * 60;
 
+// OMDB returns quota/auth failures as HTTP 200 with Response="False" and an Error
+// string rather than a 4xx/5xx. These are transient or operator-config problems, so
+// they must never be negative-cached as "title not found".
+function isOmdbTransientError(msg: string | undefined): boolean {
+  if (!msg) return false;
+  const m = msg.toLowerCase();
+  return m.includes("limit") || m.includes("quota") || m.includes("invalid api key");
+}
+
 // Sentinel stored in the cache to distinguish "item not in OMDB" from "never fetched" so we don't
 // re-query OMDB on every page load for titles it genuinely doesn't know about.
 const NOT_FOUND_SENTINEL = { _notFound: true } as const;
@@ -91,6 +100,13 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
     };
 
     if (data.Response !== "True") {
+      // OMDB signals quota exhaustion and bad keys as HTTP 200 with Response="False"
+      // and an Error string ("Request limit reached!", "Invalid API key!"). Those are
+      // transient/config conditions, not a genuine "no such title" — throw so the caller
+      // does NOT negative-cache them for 24h. Only a real not-found caches the sentinel.
+      if (isOmdbTransientError(data.Error)) {
+        throw new Error(`OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`);
+      }
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return null;
     }
@@ -136,7 +152,9 @@ export async function testOmdbConnection(): Promise<string> {
 
 export type OmdbResult =
   | { found: true; data: OmdbRatings }
-  | { found: false; keyConfigured: boolean };
+  // `transient` marks a failure that is NOT an authoritative "no ratings" (network/timeout,
+  // 5xx, quota/auth error) so callers must not pin a null/not-found into a long-lived cache.
+  | { found: false; keyConfigured: boolean; transient?: boolean };
 
 // OMDB only accepts IMDb IDs, not TMDB IDs — we must resolve via TMDB's external_ids endpoint first.
 // If TMDB returns no IMDb ID the item has no OMDB entry and is negative-cached immediately.
@@ -162,7 +180,7 @@ export async function fetchAndCacheOmdbForTmdb(
     });
     if (!extRes.ok) {
       console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
-      return { found: false, keyConfigured: true };
+      return { found: false, keyConfigured: true, transient: true };
     }
 
     const ext = await extRes.json() as { imdb_id?: string | null };
@@ -189,7 +207,9 @@ export async function fetchAndCacheOmdbForTmdb(
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);
     console.error(`[omdb] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(msg)}`);
-    return { found: false, keyConfigured: true };
+    // A transient OMDB/TMDB failure (5xx, network/timeout, quota/auth) reaches here as a
+    // throw — do NOT negative-cache it; the caller must avoid pinning a null result.
+    return { found: false, keyConfigured: true, transient: true };
   }
 }
 

@@ -76,6 +76,48 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
   return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
 };
 
+// Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge.
+// Prefer the previously stored mapping so ownership doesn't flip-flop on every sync.
+// Mirrors deduplicateByRatingKey in /api/sync/plex so the two writers agree on the row set.
+type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
+async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
+  rows: T[],
+  mediaType: "MOVIE" | "TV",
+): Promise<T[]> {
+  const ratingKeyCount = new Map<string, number>();
+  for (const r of rows) {
+    if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
+  }
+  const conflatedKeys = new Set([...ratingKeyCount.entries()].filter(([, n]) => n > 1).map(([k]) => k));
+  if (conflatedKeys.size === 0) return rows;
+
+  const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
+  const existing = await prisma.plexLibraryItem.findMany({
+    where: { mediaType, tmdbId: { in: conflatedTmdbIds } },
+    select: { tmdbId: true, plexRatingKey: true },
+  });
+  const fixedIdByRatingKey = new Map<string, number>();
+  for (const e of existing) {
+    if (e.plexRatingKey) fixedIdByRatingKey.set(e.plexRatingKey, e.tmdbId);
+  }
+
+  const seenRatingKeys = new Set<string>();
+  return rows.filter((r) => {
+    if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
+    const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
+    if (fixed !== undefined) {
+      if (r.tmdbId !== fixed) {
+        console.warn(`[sync] conflated ratingKey=${r.plexRatingKey}: dropping tmdb=${r.tmdbId}, keeping fixed tmdb=${fixed}`);
+        return false;
+      }
+    } else if (seenRatingKeys.has(r.plexRatingKey)) {
+      return false;
+    }
+    seenRatingKeys.add(r.plexRatingKey);
+    return true;
+  });
+}
+
 async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): Promise<NextResponse> {
   // signal is wired through so callers (e.g. arrFetch) can opt in later; currently unobserved.
   void signal;
@@ -121,14 +163,33 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     r.mediaType === "MOVIE" ? availableMovieSet.has(vkey(r.tmdbId, r.is4k)) : availableTvSet.has(vkey(r.tmdbId, r.is4k)),
   );
   if (nowAvailableApproved.length > 0) {
+    // ARR-available means "downloaded in Radarr/Sonarr", which is not the same as
+    // "scanned into the user's preferred Plex/Jellyfin library yet". Act ONLY on users
+    // with no mediaServer preference here. A preference-pinned user is left APPROVED so
+    // the library-marking pass below flips + notifies them once the item actually appears
+    // in their chosen server — avoiding a premature "now available" off an unreached lib.
+    const arrUserRows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(nowAvailableApproved.map((r) => r.requestedBy))] } },
+      select: { id: true, mediaServer: true },
+    });
+    const arrUserMediaServer = new Map(arrUserRows.map((u) => [u.id, u.mediaServer]));
+    const arrUnpinned = nowAvailableApproved.filter((r) => !(arrUserMediaServer.get(r.requestedBy) ?? null));
+
     // Atomic claim (UPDATE ... RETURNING) closes the snapshot→CAS TOCTOU: only the
     // rows this statement actually flipped (notifiedAvailable false→true) come
     // back, so a row a concurrent sync/webhook claimed between a read and the
     // update is never double-notified. Mirrors the per-source plex/jellyfin paths.
-    const winners = await claimAvailableNotificationWinners(nowAvailableApproved, { markAvailable: true });
+    const winners = arrUnpinned.length > 0
+      ? await claimAvailableNotificationWinners(arrUnpinned, { markAvailable: true })
+      : [];
     const winnerIds = new Set(winners.map((w) => w.id));
     for (const req of winners) {
       arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId });
+    }
+    // An ARR-driven re-add is an AVAILABLE transition: wipe stale deletion votes and the
+    // per-item notify gate so a fresh round can re-arm (mirrors the library-marking path).
+    if (winners.length > 0) {
+      void clearDeletionVotesForTmdbs(winners.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
     }
     if (winnerIds.size > 0) {
       // The helper sets status/availableAt/notifiedAvailable but not pendingNotifyAt.
@@ -137,17 +198,17 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         data: { pendingNotifyAt: null },
       });
     }
-    // Rows we didn't win were already notifiedAvailable elsewhere; still flip them
-    // AVAILABLE without re-notifying — but only when not already AVAILABLE, so a
+    // Rows we didn't win (unpinned, but already notifiedAvailable elsewhere); still flip
+    // them AVAILABLE without re-notifying — but only when not already AVAILABLE, so a
     // stable row's availableAt isn't rewritten on every tick.
-    const catchupIds = nowAvailableApproved.filter((r) => !winnerIds.has(r.id)).map((r) => r.id);
+    const catchupIds = arrUnpinned.filter((r) => !winnerIds.has(r.id)).map((r) => r.id);
     if (catchupIds.length > 0) {
       await prisma.mediaRequest.updateMany({
         where: { id: { in: catchupIds }, notifiedAvailable: true, status: { not: "AVAILABLE" } },
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
     }
-    marked = nowAvailableApproved.length;
+    marked = arrUnpinned.length;
   }
 
   const now = new Date();
@@ -192,8 +253,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     }
   });
 
-  notifyUsersRequestsAvailable(arrNotify).catch(() => {});
-  notifyUsersRequestsAvailablePush(arrNotify).catch(() => {});
+  notifyUsersRequestsAvailable(arrNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+  notifyUsersRequestsAvailablePush(arrNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
   void notifyUsersRequestsAvailableEmail(arrNotify, "sync");
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
@@ -285,6 +346,59 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       }
     } catch (err) {
       console.error("[sync] Sonarr wanted sync failed:", err);
+    }
+  }
+
+  // Second AVAILABLE-marking pass over the FRESHLY refreshed Radarr/Sonarr caches. The first
+  // pass (above) read the cache as it stood at run start; a request that became available in
+  // Radarr/Sonarr since the prior tick would otherwise wait a full SYNC_INTERVAL to be marked.
+  // Only the rows still APPROVED after the first pass are reconsidered, and only against a
+  // cache the current run successfully rewrote.
+  const stillApprovedForMark = approved.filter((r) => !arrNotify.find((n) => n.id === r.id));
+  const secondMovieTmdbIds = stillApprovedForMark.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
+  const secondTvTmdbIds    = stillApprovedForMark.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
+  if (secondMovieTmdbIds.length > 0 || secondTvTmdbIds.length > 0) {
+    const [freshMovieRows, freshTvRows] = await Promise.all([
+      secondMovieTmdbIds.length > 0
+        ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: secondMovieTmdbIds } } })
+        : Promise.resolve([]),
+      secondTvTmdbIds.length > 0
+        ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: secondTvTmdbIds } } })
+        : Promise.resolve([]),
+    ]);
+    const freshMovieSet = new Set(freshMovieRows.map((r) => vkey(r.tmdbId, r.is4k)));
+    const freshTvSet    = new Set(freshTvRows.map((r) => vkey(r.tmdbId, r.is4k)));
+    const nowAvailableSecond = stillApprovedForMark.filter((r) =>
+      r.mediaType === "MOVIE"
+        ? radarrEnabled && radarrSyncSucceeded && freshMovieSet.has(vkey(r.tmdbId, r.is4k))
+        : sonarrEnabled && sonarrSyncSucceeded && freshTvSet.has(vkey(r.tmdbId, r.is4k)),
+    );
+    if (nowAvailableSecond.length > 0) {
+      // Same mediaServer gating as the first ARR pass: act only on unpinned users here.
+      // Preference-pinned users stay APPROVED so the library-marking pass notifies them
+      // once the item appears in their chosen server.
+      const secondUserRows = await prisma.user.findMany({
+        where: { id: { in: [...new Set(nowAvailableSecond.map((r) => r.requestedBy))] } },
+        select: { id: true, mediaServer: true },
+      });
+      const secondMediaServer = new Map(secondUserRows.map((u) => [u.id, u.mediaServer]));
+      const secondUnpinned = nowAvailableSecond.filter((r) => !(secondMediaServer.get(r.requestedBy) ?? null));
+
+      const winners = secondUnpinned.length > 0
+        ? await claimAvailableNotificationWinners(secondUnpinned, { markAvailable: true })
+        : [];
+      if (winners.length > 0) {
+        await prisma.mediaRequest.updateMany({
+          where: { id: { in: winners.map((w) => w.id) } },
+          data: { pendingNotifyAt: null },
+        });
+        void clearDeletionVotesForTmdbs(winners.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
+        const secondNotify = winners.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId }));
+        notifyUsersRequestsAvailable(secondNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+        notifyUsersRequestsAvailablePush(secondNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
+        void notifyUsersRequestsAvailableEmail(secondNotify, "sync");
+        marked += winners.length;
+      }
     }
   }
 
@@ -402,7 +516,14 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   // Plex and Jellyfin library writes + download-policy enforcement run concurrently
   const syncResults = await Promise.allSettled([
-    syncDownloadPolicies(),
+    // Lock 2009 serializes against the standalone /api/cron/sync-download-policies run, whose
+    // read-then-reconcile prune would otherwise race this one. If that cron currently holds the
+    // lock, skip the redundant pass — it will reconcile on its own.
+    withAdvisoryLock(
+      2009,
+      () => syncDownloadPolicies(),
+      () => [],
+    ),
     (async () => {
       if (!plexEnabled) return;
       if (!plexUrlRow?.value || !plexTokenRow?.value) return;
@@ -422,12 +543,14 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         ]);
         const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
         const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+        const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE");
+        const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV");
         // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the same write.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
           await tx.plexLibraryItem.deleteMany();
-          if (movieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, movieRows);
-          if (tvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, tvRows);
+          if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
+          if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
         }, { timeout: BATCH_TX_TIMEOUT });
         plexSyncSucceeded = true;
         // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
@@ -614,8 +737,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
         if (winners.length > 0) {
           void clearDeletionVotesForTmdbs(winners);
-          notifyUsersRequestsAvailable(winners).catch(() => {});
-          notifyUsersRequestsAvailablePush(winners).catch(() => {});
+          notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+          notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
           void notifyUsersRequestsAvailableEmail(winners, "sync");
         }
       }
@@ -716,8 +839,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         // webhooks) should have wiped already, but a regression there is silent
         // until threshold notifications fire on stale votes — wipe again here.
         void clearDeletionVotesForTmdbs(winners);
-        notifyUsersRequestsAvailable(winners).catch(() => {});
-        notifyUsersRequestsAvailablePush(winners).catch(() => {});
+        notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+        notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
         void notifyUsersRequestsAvailableEmail(winners, "sync");
       }
     }

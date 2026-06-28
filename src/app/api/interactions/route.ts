@@ -559,10 +559,24 @@ async function handleComponent(interaction: any): Promise<void> {
         where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
       });
       if (existing) {
-        confirmEmbed.color = 0xfee75c;
-        confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
-        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
-        return;
+        if (existing.permanentlyDeclined) {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `(${selected.releaseYear}) — This request has been permanently denied.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
+        // An ordinary (non-permanent) decline is not terminal — parity with the web
+        // route: drop the stale DECLINED row and fall through to a fresh request.
+        // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
+        // double re-request instead of throwing.
+        if (existing.status === "DECLINED") {
+          await prisma.mediaRequest.deleteMany({ where: { id: existing.id } });
+        } else {
+          confirmEmbed.color = 0xfee75c;
+          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
       }
 
       // Effective permissions (ADMIN superbit / unseeded → role preset). Drives

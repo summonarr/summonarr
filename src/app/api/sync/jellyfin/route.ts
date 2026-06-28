@@ -72,7 +72,12 @@ async function syncJellyfin(request: NextRequest) {
   const tmdbIdsBeingReplaced = Array.from(seriesItemIdToTmdbId.values());
   getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, seriesItemIdToTmdbId)
     .then(async (episodes) => {
-      if (episodes.length === 0) return;
+      // recentOnly is insert-only within the window: an empty result means nothing new,
+      // so skip entirely (a delete here would violate guardrail 13). The full path,
+      // however, must clear on empty — getJellyfinTVEpisodes throws on a fetch failure
+      // (rejects → .catch), so an empty full result is a genuinely empty library whose
+      // stale episode ownership must be cleared.
+      if (episodeRecentOnly && episodes.length === 0) return;
       await prisma.$transaction(async (tx) => {
         // Advisory lock 2002,2 — Jellyfin TVEpisodeCache coordination. Shared with
         // /api/sync/route and /api/sync/tv-episodes so a recentOnly tmdbId-scoped delete can't
@@ -85,7 +90,9 @@ async function syncJellyfin(request: NextRequest) {
         } else {
           await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
         }
-        await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+        if (episodes.length > 0) {
+          await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+        }
       }, { timeout: BATCH_TX_TIMEOUT });
     })
     .catch((err) => console.error("[sync/jellyfin] Episode cache failed:", err));

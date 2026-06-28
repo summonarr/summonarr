@@ -21,6 +21,7 @@ import {
 } from "./types";
 import { ApplyLog } from "./apply-log";
 import { RefreshErrorBanner } from "./banners";
+import { withBasePath } from "@/lib/base-path";
 
 interface StarterPackCardProps {
   radarrConfigured: boolean;
@@ -45,7 +46,7 @@ export function StarterPackCard({
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`/api/admin/trash-guides/starter-pack`);
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/starter-pack`));
       const data = (await res.json()) as { items: StarterPackItem[] };
       setItems(data.items ?? []);
       setLoaded(true);
@@ -101,7 +102,7 @@ export function StarterPackCard({
     setApplyLog([]);
     setRefreshError(null);
     try {
-      const res = await fetch(`/api/admin/trash-guides/refresh`, {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/refresh`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -137,7 +138,7 @@ export function StarterPackCard({
     setApplyState("running");
     setApplyLog([]);
     try {
-      const res = await fetch(`/api/admin/trash-guides/apply`, {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ specIds: [...selected] }),

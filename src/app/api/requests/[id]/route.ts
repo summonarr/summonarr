@@ -14,6 +14,7 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { scheduleDelayed } from "@/lib/delayed-jobs";
 import { readJsonCapped } from "@/lib/body-size";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -23,6 +24,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   if (!checkRateLimit(`admin-req:${session.user.id}`, 60, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -336,6 +340,9 @@ export const DELETE = withAuth(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
+
   const { id } = await params;
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });

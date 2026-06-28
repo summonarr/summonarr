@@ -202,6 +202,19 @@ export async function register() {
       );
     }
 
+    // SUMMONARR_ALLOW_SETUP_RESTORE re-enables the pre-authentication first-run
+    // database restore (/api/setup/import*) on an internet-facing instance
+    // (TRUST_PROXY=true). That path authenticates only with BACKUP_DB_PASSWORD,
+    // so it is a database-takeover surface while no admin exists. Warn loudly so
+    // it isn't left enabled after the initial restore.
+    if (process.env.SUMMONARR_ALLOW_SETUP_RESTORE === "true" && process.env.TRUST_PROXY === "true") {
+      console.warn(
+        "[startup] SUMMONARR_ALLOW_SETUP_RESTORE=true — pre-authentication first-run database restore is " +
+          "ENABLED on this internet-facing instance. Anyone who knows BACKUP_DB_PASSWORD can replace the " +
+          "database while no admin account exists. Unset this immediately after completing a first-run restore."
+      );
+    }
+
     try {
       const { prewarmPublicKeyCache } = await import("@/app/api/interactions/route");
       await prewarmPublicKeyCache();

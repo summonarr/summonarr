@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Tv2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 interface SyncResult {
   plex?: number;
@@ -22,23 +23,23 @@ export function SyncTVEpisodesButton() {
     setStatus("loading");
     setResult(null);
     try {
-      const res = await fetch("/api/sync/tv-episodes", {
+      const res = await fetch(withBasePath("/api/sync/tv-episodes"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
-      const data = (await res.json()) as SyncResult & { error?: string };
+      const data = (await res.json().catch(() => null)) as (SyncResult & { error?: string }) | null;
 
-      if (data.error) {
+      if (!res.ok || data?.error) {
         setStatus("error");
-        setResult(data.error);
-      } else if (data.errors && data.errors.length > 0) {
+        setResult(data?.error ?? `Request failed (${res.status})`);
+      } else if (data?.errors && data.errors.length > 0) {
         setStatus("error");
         setResult(data.errors.join("; "));
       } else {
-        const total = (data.plex ?? 0) + (data.jellyfin ?? 0);
+        const total = (data?.plex ?? 0) + (data?.jellyfin ?? 0);
         const parts: string[] = [];
-        if ((data.plex ?? 0) > 0) parts.push(`Plex ${data.plex}`);
-        if ((data.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${data.jellyfin}`);
+        if ((data?.plex ?? 0) > 0) parts.push(`Plex ${data?.plex}`);
+        if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${data?.jellyfin}`);
         setStatus("done");
         setResult(parts.length > 0 ? `${total.toLocaleString("en-US")} episodes (${parts.join(", ")})` : "0 episodes");
         const search = searchParams.toString();

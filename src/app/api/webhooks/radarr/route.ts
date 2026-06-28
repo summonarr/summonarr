@@ -204,8 +204,10 @@ export async function POST(req: NextRequest) {
   after(async () => {
     await scheduleLibraryScan("movie", tmdbId, is4k ? "4k" : "hd");
 
+    // Scope by is4k to the variant that fired this webhook: an HD Download must not
+    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
     const pending = await prisma.mediaRequest.findMany({
-      where: { tmdbId, mediaType: "MOVIE", status: "AVAILABLE", notifiedAvailable: false },
+      where: { tmdbId, mediaType: "MOVIE", is4k, status: "AVAILABLE", notifiedAvailable: false },
       select: { id: true, requestedBy: true, title: true, mediaType: true, posterPath: true, tmdbId: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;

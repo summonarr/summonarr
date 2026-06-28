@@ -308,6 +308,31 @@ export async function processBackupImport(
   password: string,
   mode: BackupImportMode = "admin",
 ): Promise<BackupImportResult> {
+  // Pre-auth ("setup") restore runs before any admin account exists and
+  // authenticates solely with BACKUP_DB_PASSWORD, so on an internet-facing
+  // instance a leaked/weak password lets an attacker replace the database
+  // before the legitimate operator registers. Require an explicit opt-in to
+  // keep that path open when the instance is reachable from untrusted networks.
+  //
+  // The opt-in is only enforced when TRUST_PROXY=true (the deployment is behind
+  // a public-facing reverse proxy). A LAN/loopback deployment — the default —
+  // is already protected by the proxy's local-only Host guard, so its
+  // first-run restore keeps working with no extra configuration.
+  if (
+    mode === "setup" &&
+    process.env.TRUST_PROXY === "true" &&
+    process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true"
+  ) {
+    body.cancel().catch(() => {});
+    return {
+      ok: false,
+      status: 403,
+      error:
+        "Pre-authentication restore is disabled on this internet-facing instance. " +
+        "Set SUMMONARR_ALLOW_SETUP_RESTORE=true to enable a first-run restore, then unset it once the admin account exists.",
+    };
+  }
+
   const sourceReader = body.getReader();
   let head = Buffer.alloc(0);
   while (head.length < ENCRYPTED_MAGIC.length) {
@@ -582,11 +607,14 @@ export async function processBackupImport(
     }, { timeout: RESTORE_TX_TIMEOUT_MS, maxWait: 10_000 });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Log the underlying DB error server-side; do not echo it to the client.
+    // The raw message can disclose schema/column/constraint internals.
     console.error("[backup/import] import failed:", msg);
     return {
       ok: false,
       status: 500,
-      error: `Restore failed and was rolled back — database is unchanged. Database error: ${msg}`,
+      error:
+        "Restore failed and was rolled back — the database is unchanged. Check the server logs for details.",
     };
   }
 

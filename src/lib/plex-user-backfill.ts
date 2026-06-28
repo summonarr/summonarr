@@ -52,15 +52,29 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       return;
     }
 
+    // A plex.tv email is user-changeable and not guaranteed unique across the
+    // accounts an admin can see. If two distinct account ids normalize to the
+    // same email, binding by email could attach a local record to the wrong
+    // account, so such an email is marked ambiguous and skipped — those users
+    // fall into `unmatched` and an admin sets plexUserId explicitly instead.
     const idByEmail = new Map<string, string>();
+    const ambiguousEmails = new Set<string>();
     for (const a of accounts) {
-      if (a.email && a.id) idByEmail.set(normalizeEmail(a.email), a.id);
+      if (!a.email || !a.id) continue;
+      const norm = normalizeEmail(a.email);
+      const existing = idByEmail.get(norm);
+      if (existing !== undefined && existing !== a.id) {
+        ambiguousEmails.add(norm);
+        continue;
+      }
+      idByEmail.set(norm, a.id);
     }
 
     let bound = 0;
     const unmatched: { id: string; email: string }[] = [];
     for (const u of candidates) {
-      const plexId = idByEmail.get(normalizeEmail(u.email));
+      const norm = normalizeEmail(u.email);
+      const plexId = ambiguousEmails.has(norm) ? undefined : idByEmail.get(norm);
       if (!plexId) {
         unmatched.push({ id: u.id, email: u.email });
         continue;

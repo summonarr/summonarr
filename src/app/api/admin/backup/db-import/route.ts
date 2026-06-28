@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkBodySize } from "@/lib/body-size";
+import { checkRateLimit } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -12,6 +13,14 @@ export const dynamic = "force-dynamic";
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  // A full DB restore is a destructive TRUNCATE+INSERT and runs PBKDF2(600k) +
+  // a long transaction per call. Cap it per admin so a stolen/compromised admin
+  // cookie can't hammer the restore path (key-derivation CPU burn, repeated
+  // destructive replaces) while still covering legitimate operator use.
+  if (!checkRateLimit(`admin-db-import:${session.user.id}`, 5, 60 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many restore attempts — try again later." }, { status: 429 });
+  }
+
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(

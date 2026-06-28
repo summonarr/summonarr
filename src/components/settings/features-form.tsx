@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 import {
   type FeatureCategory,
   type FeatureDefinition,
@@ -90,7 +91,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
 
         let success = false;
         try {
-          const res = await fetch("/api/settings", {
+          const res = await fetch(withBasePath("/api/settings"), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ [key]: target ? "true" : "false" }),

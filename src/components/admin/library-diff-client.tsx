@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
+import { withBasePath } from "@/lib/base-path";
 
 interface RequestSummary {
   total: number;
@@ -505,7 +506,7 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
 
       const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
       try {
-        const res = await fetch("/api/admin/fix-match", {
+        const res = await fetch(withBasePath("/api/admin/fix-match"), {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({

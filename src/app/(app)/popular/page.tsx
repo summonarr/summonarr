@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 
-import { getMostPopularOnServer, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
+import { getMostPopularOnServer, isPlayHistoryEnabled, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { prisma } from "@/lib/prisma";
@@ -48,6 +48,22 @@ export default async function PopularOnServerPage({
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const show4k = await getShow4kVisibility(session);
+
+  // This page is built entirely from recorded play history. When tracking is
+  // off no new data accrues, so surface that explicitly rather than rendering a
+  // stale or empty grid with no explanation.
+  if (!(await isPlayHistoryEnabled())) {
+    return (
+      <div className="ds-page-enter">
+        <PageHeader title="Popular on Server" subtitle="Most played on your servers" />
+        <EmptyState
+          icon={TrendingUp}
+          title="Play history tracking is off"
+          description="Enable play history in Admin → Features to populate this page."
+        />
+      </div>
+    );
+  }
 
   const mediaTypeFilter = sp.mediaType || undefined;
   const validSorts = new Set<PopularSort>(["plays", "viewers", "trending"]);

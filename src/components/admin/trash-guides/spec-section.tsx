@@ -23,6 +23,7 @@ import {
   type TrashSpecKind,
 } from "./types";
 import { ApplyLog } from "./apply-log";
+import { withBasePath } from "@/lib/base-path";
 
 interface SpecSectionProps {
   title: string;
@@ -57,10 +58,11 @@ export function SpecSection({
   const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
   const [search, setSearch] = useState("");
   const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${is4k ? "4k" : "hd"}`);
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${is4k ? "4k" : "hd"}`));
       const data = (await res.json()) as { specs?: SpecStatus[] };
       setSpecs(data.specs ?? []);
       setLoaded(true);
@@ -119,7 +121,7 @@ export function SpecSection({
     setExpanded(nextExpanded);
     if (!details.has(spec.id)) {
       try {
-        const res = await fetch(`/api/admin/trash-guides/spec/${spec.id}?variant=${is4k ? "4k" : "hd"}`);
+        const res = await fetch(withBasePath(`/api/admin/trash-guides/spec/${spec.id}?variant=${is4k ? "4k" : "hd"}`));
         if (res.ok) {
           const detail = (await res.json()) as SpecDetail;
           setDetails((prev) => new Map(prev).set(spec.id, detail));
@@ -135,14 +137,15 @@ export function SpecSection({
     setApplyState("running");
     setApplyLog([]);
     try {
-      const res = await fetch(`/api/admin/trash-guides/apply`, {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ specIds: [...selected], variant: is4k ? "4k" : "hd" }),
       });
-      // 409 = lock contention with cron / another admin action — keep selection intact
-      // so the user can retry once the lock releases.
-      if (res.status === 409) {
+      // A non-OK response (409 lock contention, 429 rate limit, 400 validation,
+      // 5xx) returns an { error } body, not the success shape — keep the selection
+      // intact so the user can retry, and don't parse it as a results payload.
+      if (!res.ok) {
         setApplyState("error");
         setTimeout(() => setApplyState("idle"), 3000);
         return;
@@ -160,20 +163,40 @@ export function SpecSection({
   }
 
   async function toggleManagement(appId: string, enabled: boolean) {
-    await fetch(`/api/admin/trash-guides/applications/${appId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
+    setRowError(null);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/applications/${appId}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        setRowError(`Could not ${enabled ? "resume" : "pause"} management (${res.status})`);
+        return;
+      }
+    } catch {
+      setRowError("Network error — please try again");
+      return;
+    }
     await load();
     onChanged?.();
   }
 
   async function deleteApplication(appId: string) {
     setConfirmingForget(null);
-    await fetch(`/api/admin/trash-guides/applications/${appId}`, {
-      method: "DELETE",
-    });
+    setRowError(null);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/applications/${appId}`), {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        setRowError(`Could not forget this format (${res.status})`);
+        return;
+      }
+    } catch {
+      setRowError("Network error — please try again");
+      return;
+    }
     await load();
     onChanged?.();
   }
@@ -197,6 +220,10 @@ export function SpecSection({
             {erroredCount > 0 && <span className="text-red-400">{erroredCount} errored</span>}
           </div>
         </div>
+
+        {rowError && (
+          <p className="text-sm text-red-400 mb-3">{rowError}</p>
+        )}
 
         <div className="flex flex-wrap gap-2 mb-3">
           {(["all", "managed", "unmanaged", "errored"] as const).map((f) => (

@@ -19,6 +19,7 @@ import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";
 import { useState, useEffect, memo } from "react";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
+import { withBasePath } from "@/lib/base-path";
 
 type LiveRatings = RatingsPayload;
 
@@ -33,7 +34,7 @@ interface MediaCardProps {
   requestToken?: string;
 }
 
-type RequestState = "idle" | "confirm" | "loading" | "requested" | "error";
+type RequestState = "idle" | "confirm" | "loading" | "requested" | "available" | "error";
 
 function MediaCardImpl({
   media,
@@ -63,7 +64,7 @@ function MediaCardImpl({
   const isAvailable = !!(
     (showPlex && media.plexAvailable) ||
     (showJellyfin && media.jellyfinAvailable)
-  );
+  ) || reqState === "available";
   const isRequested =
     !!(media.requestedByMe || media.arrPending) || reqState === "requested";
 
@@ -87,16 +88,28 @@ function MediaCardImpl({
       let token = requestToken;
       if (!token) {
         const tokenRes = await fetch(
-          `/api/requests/token?tmdbId=${media.id}&mediaType=${mt}`,
+          withBasePath(`/api/requests/token?tmdbId=${media.id}&mediaType=${mt}`),
         );
         if (tokenRes.ok) token = (await tokenRes.json()).token;
       }
-      const res = await fetch("/api/requests", {
+      const res = await fetch(withBasePath("/api/requests"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tmdbId: media.id, mediaType: mt, _token: token }),
       });
-      setReqState(res.ok || res.status === 409 ? "requested" : "error");
+      if (res.ok) {
+        const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
+        if (body?.alreadyAvailable) {
+          // The item was already in a library — no request row was created.
+          // Reflect availability and let the server re-render the badges.
+          setReqState("available");
+          router.refresh();
+        } else {
+          setReqState("requested");
+        }
+      } else {
+        setReqState(res.status === 409 ? "requested" : "error");
+      }
     } catch {
       setReqState("error");
     }

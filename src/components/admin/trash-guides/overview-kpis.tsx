@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { KpiStrip } from "./kpi-strip";
 import type { SpecStatus, TrashService } from "./types";
+import { withBasePath } from "@/lib/base-path";
 
 interface OverviewKpisProps {
   service: TrashService;
@@ -17,7 +18,7 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`);
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`));
       const data = (await res.json()) as { specs?: SpecStatus[] };
       setSpecs(data.specs ?? []);
     } catch {

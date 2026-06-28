@@ -10,6 +10,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Loader2, X } from "@/components/icons";
 import type { HeatmapCellDetail } from "@/lib/play-history";
+import { withBasePath } from "@/lib/base-path";
 
 const POPOVER_WIDTH = 264;
 const MARGIN = 8;
@@ -48,7 +49,7 @@ export function HeatmapCellPopover({
     let cancelled = false;
     setDetail(null);
     setError(null);
-    fetch(`/api/admin/play-history/heatmap-cell?${queryString}`)
+    fetch(withBasePath(`/api/admin/play-history/heatmap-cell?${queryString}`))
       .then(async (res) => {
         if (!res.ok) {
           const d = (await res.json().catch(() => ({}))) as { error?: string };

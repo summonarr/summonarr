@@ -65,15 +65,18 @@ async function checkAndRecordDigest(key: string): Promise<boolean> {
     });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      const existing = await prisma.webhookReplay.findUnique({
-        where: { digest: key },
-        select: { expiresAt: true },
-      });
-      if (existing && existing.expiresAt > now) return false;
-      await prisma.webhookReplay.update({
-        where: { digest: key },
+      // The row already exists. Refreshing the TTL with a conditional CAS
+      // (WHERE expiresAt <= now) closes the expired-row TOCTOU: two concurrent
+      // deliveries arriving after expiry would both read expiresAt<=now and both
+      // proceed if the refresh were unconditional. With the guarded updateMany,
+      // exactly one delivery flips the expired row (count===1 ⇒ it owns this
+      // delivery); any other (still-live row, or the loser of the expired race)
+      // sees count===0 and is treated as a replay.
+      const refreshed = await prisma.webhookReplay.updateMany({
+        where: { digest: key, expiresAt: { lte: now } },
         data: { expiresAt: new Date(Date.now() + TTL_MS) },
-      }).catch(() => {});
+      });
+      if (refreshed.count === 0) return false;
     } else {
       throw e;
     }

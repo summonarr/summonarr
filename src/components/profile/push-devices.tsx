@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Smartphone, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { withBasePath } from "@/lib/base-path";
 
 interface PushDevice {
   id: string;
@@ -27,7 +28,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
     setRemoving(id);
     setConfirmingRemove(null);
     try {
-      await fetch("/api/push/subscribe", {
+      await fetch(withBasePath("/api/push/subscribe"), {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),

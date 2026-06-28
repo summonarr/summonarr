@@ -385,7 +385,7 @@ async function fixJellyfinMatch(
     return id === String(correctTmdbId);
   }) ?? searchResults[0];
 
-  const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${itemId}?replaceAllImages=false`, {
+  const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
     method: "POST",
     headers,
     body: JSON.stringify(target),
@@ -394,7 +394,7 @@ async function fixJellyfinMatch(
   if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
 
   await safeFetchAdminConfigured(
-    `${baseUrl}/Items/${itemId}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`,
+    `${baseUrl}/Items/${safeItemId}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`,
     { method: "POST", headers, timeoutMs: 30_000 },
   ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
 
@@ -491,6 +491,14 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
   }
 
+  // The remap is inherently two-phase: the remote library server must be
+  // rewritten first (to learn the new item id), then the local cache row is
+  // updated in a DB transaction. If the remote rewrite succeeds but the DB
+  // transaction then fails, the library server and the cache disagree. Track
+  // the moment the remote phase commits so the catch block can tell the
+  // operator the remap landed remotely and a re-sync will reconcile the cache,
+  // rather than implying nothing happened.
+  let remoteRemapped = false;
   try {
     if (server === "plex") {
       const item = await prisma.plexLibraryItem.findUnique({
@@ -501,6 +509,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
       }
       const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, canonicalGuid);
+      remoteRemapped = true;
 
       await prisma.$transaction(async (tx) => {
         // Take the same advisory locks the sync orchestrator uses (2001 library, 2002
@@ -549,6 +558,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
       const jellyfinResult = await fixJellyfinMatch(item.jellyfinItemId, correctTmdbId, mediaType, item.filePath);
       const resolvedItemId = jellyfinResult.newItemId;
+      remoteRemapped = true;
 
       await prisma.$transaction(async (tx) => {
         // Same locks as the sync orchestrator (2001 library, 2002 episode), 2001 before
@@ -588,6 +598,20 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     const serverLabel = server === "plex" ? "plex" : "jellyfin";
     const errClass = err instanceof Error ? err.constructor.name : "Error";
     console.error("[fix-match]", `${serverLabel} error (${errClass})`, err instanceof Error ? err.message : err);
+    // When the remote remap already committed, the failure is in the DB phase:
+    // the library server now points at the corrected TMDB id but the local cache
+    // still references the old one. Tell the operator so they can re-sync (which
+    // rebuilds the cache from the library) instead of assuming the op was a no-op.
+    if (remoteRemapped) {
+      const serverName = server === "plex" ? "Plex" : "Jellyfin";
+      console.warn("[fix-match]", `${serverLabel} remapped remotely but the DB update failed for tmdb:${tmdbId} → ${correctTmdbId}; cache is out of sync until a re-sync runs`);
+      return NextResponse.json(
+        {
+          error: `${serverName} was re-matched to TMDB #${correctTmdbId}, but updating the local library cache failed. Run a library re-sync to reconcile the cache with ${serverName}.`,
+        },
+        { status: 502 },
+      );
+    }
     return NextResponse.json({ error: "Fix-match operation failed" }, { status: 502 });
   }
 });

@@ -428,7 +428,7 @@ export function Leaderboards({
             {rewatched.map((m, i) => (
               <Link
                 key={`${m.tmdbId}-${i}`}
-                href={`/admin/activity/media/${m.tmdbId}`}
+                href={`/admin/activity/media/${m.tmdbId}?type=${m.mediaType}`}
                 className="lb-row"
                 style={{
                   display: "flex",

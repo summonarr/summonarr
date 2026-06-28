@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { ChevronDown, Globe, Loader2, MapPin, Network } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 type Lookup = {
   ip: string;
@@ -60,7 +61,7 @@ export function IpInfo({ ip, inline = false }: Props) {
     if (fetchedRef.current) return;
     fetchedRef.current = true;
     setLoading(true);
-    fetch(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`)
+    fetch(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`))
       .then(async (r) => {
         if (!r.ok) {
           cache.set(ip, "missing");

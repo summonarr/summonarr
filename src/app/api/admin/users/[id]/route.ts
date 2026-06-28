@@ -17,10 +17,7 @@ export const PATCH = withAdmin(async (
   session
 ) => {
   const { id } = await params;
-
-  if (id === session.user.id) {
-    return NextResponse.json({ error: "Cannot change your own role" }, { status: 400 });
-  }
+  const isSelf = id === session.user.id;
 
   type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
   const notifKeys: NotifKey[] = ["notifyOnApproved", "notifyOnAvailable", "notifyOnDeclined", "emailOnApproved", "emailOnAvailable", "emailOnDeclined", "pushOnApproved", "pushOnAvailable", "pushOnDeclined", "notifyOnIssue"];
@@ -145,6 +142,9 @@ export const PATCH = withAdmin(async (
   // role validator (which would return a misleading "role must be …").
   if (body.role === undefined) {
     return NextResponse.json({ error: "No recognized fields in PATCH body" }, { status: 400 });
+  }
+  if (isSelf) {
+    return NextResponse.json({ error: "Cannot change your own role" }, { status: 400 });
   }
   if (body.role !== "ADMIN" && body.role !== "USER" && body.role !== "ISSUE_ADMIN") {
     return NextResponse.json({ error: "role must be ADMIN, ISSUE_ADMIN, or USER" }, { status: 400 });

@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, Play, RefreshCw, XCircle } from "@/components/icons";
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
+import { withBasePath } from "@/lib/base-path";
 
 interface SyncSettingsCardProps {
   initialSettings: TrashSettings;
@@ -29,7 +30,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
     if (partial.syncQualitySizes !== undefined) body.trashSyncQualitySizes = String(partial.syncQualitySizes);
 
     try {
-      const res = await fetch(`/api/settings`, {
+      const res = await fetch(withBasePath(`/api/settings`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -46,7 +47,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   async function handleRefresh() {
     setRefreshState("running");
     try {
-      const res = await fetch(`/api/admin/trash-guides/refresh`, {
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/refresh`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
@@ -69,7 +70,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   async function handleSyncNow() {
     setSyncState("running");
     try {
-      const res = await fetch(`/api/cron/trash-sync`, { method: "POST" });
+      const res = await fetch(withBasePath(`/api/cron/trash-sync`), { method: "POST" });
       const data = (await res.json()) as { applied?: ApplyResult[] };
       setSyncState(res.ok ? "ok" : "error");
       onAfterAction?.(data.applied ?? []);

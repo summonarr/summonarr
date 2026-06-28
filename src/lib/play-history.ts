@@ -839,8 +839,19 @@ export async function getUserPlayStats(mediaServerUserId: string) {
   };
 }
 
-export async function getMediaPlayStats(tmdbId: number) {
+export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+
+  // TMDB namespaces movie and TV IDs separately, so the same numeric id can be
+  // both a film and a series. When the caller knows which one it wants, scope
+  // every aggregate to that mediaType so a movie+show id collision can't blend
+  // two unrelated titles' stats. The "$2 mediaType" predicate is a no-op clause
+  // when mediaType is undefined.
+  const mt = mediaType ?? null;
+  const mtClause = `($2::text IS NULL OR "mediaType" = $2)`;
+  const mtClauseP = `($2::text IS NULL OR p."mediaType" = $2)`;
+  const where = mediaType ? { tmdbId, mediaType } : { tmdbId };
+  const whereWatched = mediaType ? { tmdbId, mediaType, watched: true } : { tmdbId, watched: true };
 
   const [
     totalPlays,
@@ -853,29 +864,32 @@ export async function getMediaPlayStats(tmdbId: number) {
     transcodeRatioRaw,
     resolutionBreakdownRaw,
   ] = await Promise.all([
-    prisma.playHistory.count({ where: { tmdbId, watched: true } }),
+    prisma.playHistory.count({ where: whereWatched }),
     prisma.$queryRawUnsafe<{ count: bigint }[]>(
-      `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count FROM "PlayHistory" WHERE "tmdbId" = $1 AND "watched" = true`,
+      `SELECT COUNT(DISTINCT "mediaServerUserId")::bigint AS count FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause} AND "watched" = true`,
       tmdbId,
+      mt,
     ),
     prisma.$queryRawUnsafe<{ avg_pct: number | null }[]>(
       `SELECT AVG(
          CASE WHEN "duration" > 0 THEN ("playDuration"::float / "duration") * 100 ELSE 0 END
        )::float8 AS avg_pct
-       FROM "PlayHistory" WHERE "tmdbId" = $1`,
+       FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause}`,
       tmdbId,
+      mt,
     ),
     prisma.$queryRawUnsafe<{ id: string; username: string; source: string; count: bigint; hours: number }[]>(
       `SELECT m."id", m."username", m."source", COUNT(*)::bigint AS count,
               (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
-       WHERE p."tmdbId" = $1 AND p."watched" = true
+       WHERE p."tmdbId" = $1 AND ${mtClauseP} AND p."watched" = true
        GROUP BY m."id", m."username", m."source"
        ORDER BY count DESC LIMIT 20`,
       tmdbId,
+      mt,
     ),
     prisma.playHistory.findMany({
-      where: { tmdbId },
+      where,
       orderBy: { startedAt: "desc" },
       take: 50,
       include: {
@@ -885,7 +899,7 @@ export async function getMediaPlayStats(tmdbId: number) {
       },
     }),
     prisma.playHistory.findFirst({
-      where: { tmdbId },
+      where,
       orderBy: { startedAt: "desc" },
       select: { title: true, mediaType: true, year: true },
     }),
@@ -893,23 +907,26 @@ export async function getMediaPlayStats(tmdbId: number) {
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "tmdbId" = $1 AND "watched" = true AND "startedAt" >= $2
+       WHERE "tmdbId" = $1 AND ${mtClause} AND "watched" = true AND "startedAt" >= $3
        GROUP BY day ORDER BY day`,
       tmdbId,
+      mt,
       ninetyDaysAgo,
     ),
     prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(
       `SELECT "playMethod" AS method, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "tmdbId" = $1
+       FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause}
        GROUP BY "playMethod" ORDER BY count DESC`,
       tmdbId,
+      mt,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "tmdbId" = $1 AND "resolution" IS NOT NULL
+       WHERE "tmdbId" = $1 AND ${mtClause} AND "resolution" IS NOT NULL
        GROUP BY resolution ORDER BY count DESC`,
       tmdbId,
+      mt,
     ),
   ]);
 
@@ -919,9 +936,10 @@ export async function getMediaPlayStats(tmdbId: number) {
     year: mediaInfo?.year ?? null,
   };
   if (!mediaInfo) {
+    const libWhere = mediaType ? { tmdbId, mediaType } : { tmdbId };
     const [plexFallback, jellyfinFallback] = await Promise.all([
-      prisma.plexLibraryItem.findFirst({ where: { tmdbId }, select: { title: true, mediaType: true, year: true } }),
-      prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId }, select: { title: true, mediaType: true, year: true } }),
+      prisma.plexLibraryItem.findFirst({ where: libWhere, select: { title: true, mediaType: true, year: true } }),
+      prisma.jellyfinLibraryItem.findFirst({ where: libWhere, select: { title: true, mediaType: true, year: true } }),
     ]);
     const fallback = plexFallback ?? jellyfinFallback;
     if (fallback) resolvedMedia = fallback;

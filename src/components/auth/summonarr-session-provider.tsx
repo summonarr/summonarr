@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { withBasePath } from "@/lib/base-path";
 
 export interface SummonarrSession {
   user: {
@@ -54,7 +55,7 @@ export function SummonarrSessionProvider({
 
   const refresh = React.useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/me", { credentials: "include" });
+      const res = await fetch(withBasePath("/api/auth/me"), { credentials: "include" });
       if (res.ok) {
         const body = (await res.json()) as { session: SummonarrSession | null };
         setSession(body.session);

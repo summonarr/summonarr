@@ -34,14 +34,16 @@ type UnifiedRatings = {
 };
 
 // MDBList is tried first because it returns more ratings fields (Trakt, Letterboxd, RT Audience).
-// OMDB is only consulted when MDBList has no API key configured — not when MDBList simply lacks the item.
+// OMDB is consulted as a fallback whenever MDBList cannot serve the item — no key configured,
+// the item is genuinely absent, or MDBList is quota-locked — so a single source being unavailable
+// doesn't leave the title with no ratings at all.
 async function fetchUnifiedRatings(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
-): Promise<{ found: boolean; keyConfigured: boolean; data?: UnifiedRatings }> {
+): Promise<{ found: boolean; keyConfigured: boolean; transient?: boolean; data?: UnifiedRatings }> {
   const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
-    () => ({ found: false, keyConfigured: true } as const),
+    () => ({ found: false, keyConfigured: true, transient: true } as const),
   );
   if (mdb.found) {
     return {
@@ -59,10 +61,8 @@ async function fetchUnifiedRatings(
     };
   }
 
-  if (mdb.keyConfigured) return { found: false, keyConfigured: true };
-
   const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
-    () => ({ found: false, keyConfigured: true } as const),
+    () => ({ found: false, keyConfigured: true, transient: true } as const),
   );
   if (omdb.found) {
     return {
@@ -79,7 +79,10 @@ async function fetchUnifiedRatings(
       },
     };
   }
-  return { found: false, keyConfigured: omdb.keyConfigured };
+  // If either source failed transiently, the null is not authoritative — callers must
+  // not pin it into the long-lived details cache, so the next read retries.
+  const transient = Boolean(mdb.transient || omdb.transient);
+  return { found: false, keyConfigured: mdb.keyConfigured || omdb.keyConfigured, transient };
 }
 
 export type {
@@ -523,53 +526,77 @@ export async function searchMulti(query: string): Promise<TmdbMedia[]> {
   const q = query.trim();
   if (!q) return [];
   const key = `search:${q.toLowerCase()}`;
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached) return cached;
-  const data = await tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
-    "/search/multi", { query: q, include_adult: "false" }
-  );
-  const results = data.results
-    .filter((r) => r.media_type === "movie" || r.media_type === "tv")
-    .filter((r) => r.id != null && r.id > 0)
-    .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
-  await setCache(key, results, TTL.SEARCH);
-  return results;
+  return coalesce(key, async () => {
+    const cached = await getCache<TmdbMedia[]>(key);
+    if (cached?.length) return cached;
+    const data = await tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
+      "/search/multi", { query: q, include_adult: "false" }
+    );
+    const results = data.results
+      .filter((r) => r.media_type === "movie" || r.media_type === "tv")
+      .filter((r) => r.id != null && r.id > 0)
+      .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
+    // Don't negative-cache an empty result — a transiently-empty TMDB response would otherwise
+    // suppress real matches for the full SEARCH TTL.
+    if (results.length > 0) await setCache(key, results, TTL.SEARCH);
+    return results;
+  });
 }
 
 export async function getUpcomingMovies(): Promise<TmdbMedia[]> {
-  return coalesce("movies:upcoming", async () => {
+  const key = "movies:upcoming";
+  return coalesce(key, async () => {
+  const cached = await getCache<TmdbMedia[]>(key);
+  if (cached?.length) return cached;
+
   const pages = await settleLimit(
     Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
     LIST_PAGE_CONCURRENCY,
     (page) => tmdbFetch<PagedResponse<RawMovie>>("/movie/upcoming", { page: String(page) }, 86400),
   );
   const seen = new Set<number>();
-  return pages
+  const result = pages
     .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
     .filter((r) => r.id != null && r.id > 0)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeMovie);
+
+  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
+  return result;
   });
 }
 
 export async function getOnTheAirTV(): Promise<TmdbMedia[]> {
-  return coalesce("tv:on_the_air", async () => {
+  const key = "tv:on_the_air";
+  return coalesce(key, async () => {
+  const cached = await getCache<TmdbMedia[]>(key);
+  if (cached?.length) return cached;
+
   const pages = await settleLimit(
     Array.from({ length: UPCOMING_PAGES }, (_, i) => i + 1),
     LIST_PAGE_CONCURRENCY,
     (page) => tmdbFetch<PagedResponse<RawTV>>("/tv/on_the_air", { page: String(page) }, 86400),
   );
   const seen = new Set<number>();
-  return pages
+  const result = pages
     .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
     .filter((r) => r.id != null && r.id > 0)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
+
+  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
+  return result;
   });
 }
 
 export async function getUpcomingTV(): Promise<TmdbMedia[]> {
-  return coalesce("tv:upcoming", async () => {
+  const key = "tv:upcoming";
+  return coalesce(key, async () => {
+  const cached = await getCache<TmdbMedia[]>(key);
+  if (cached?.length) return cached;
+
   // /tv/on_the_air returns shows whose original first_air_date is often years past
   // (long-running shows currently airing new episodes). For "Upcoming" we want
   // shows premiering today or later, so we use /discover/tv with first_air_date.gte.
@@ -589,12 +616,16 @@ export async function getUpcomingTV(): Promise<TmdbMedia[]> {
     ),
   );
   const seen = new Set<number>();
-  return pages
+  const result = pages
     .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
     .filter((r) => r.id != null && r.id > 0)
     .filter((r) => r.first_air_date && r.first_air_date >= today)
     .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
     .map(normalizeTV);
+
+  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  syncTmdbMediaCore(result).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
+  return result;
   });
 }
 
@@ -625,7 +656,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
       if (r.found && r.data) {
         Object.assign(cached, r.data);
         needsWrite = true;
-      } else if (r.keyConfigured) {
+      } else if (r.keyConfigured && !r.transient) {
         cached.imdbRating = null;
         cached.rtAudienceScore = null;
         cached.traktRating = null;
@@ -652,7 +683,10 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   }
   if (ratings.found && ratings.data) {
     Object.assign(media, ratings.data);
-  } else if (ratings.keyConfigured) {
+  } else if (ratings.keyConfigured && !ratings.transient) {
+    // Only pin null when a configured source authoritatively has no ratings. A transient
+    // failure leaves the fields undefined so the next read re-fetches instead of serving
+    // null for the full 7-day TTL.
     media.imdbRating = null;
     media.rtAudienceScore = null;
     media.traktRating = null;
@@ -701,7 +735,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
         if (r.found && r.data) {
           Object.assign(cached, r.data);
           needsWrite = true;
-        } else if (r.keyConfigured) {
+        } else if (r.keyConfigured && !r.transient) {
           cached.imdbRating = null;
           cached.rtAudienceScore = null;
           cached.traktRating = null;
@@ -735,7 +769,10 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     }));
   if (ratings.found && ratings.data) {
     Object.assign(media, ratings.data);
-  } else if (ratings.keyConfigured) {
+  } else if (ratings.keyConfigured && !ratings.transient) {
+    // Only pin null when a configured source authoritatively has no ratings. A transient
+    // failure leaves the fields undefined so the next read re-fetches instead of serving
+    // null for the full 7-day TTL.
     media.imdbRating = null;
     media.rtAudienceScore = null;
     media.traktRating = null;
@@ -1073,10 +1110,47 @@ function allowedDiscoverSort(sortBy: string | undefined): string {
   return sortBy && ALLOWED_DISCOVER_SORT.has(sortBy) ? sortBy : "popularity.desc";
 }
 
+// Normalize the remaining free-text discover filters up front so junk values reach
+// neither TMDB nor the cache key (an unvalidated string baked into discoverKey() lets
+// an authenticated user manufacture arbitrary distinct TmdbCache rows). genreId is a
+// digit list joined by , or |; minVoteCount is a non-negative integer; watchRegion is a
+// 2-letter ISO country code.
+function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
+  const genreId = filters.genreId && /^[\d|,]+$/.test(filters.genreId) ? filters.genreId : undefined;
+  const keywordId = filters.keywordId && /^[\d|,]+$/.test(filters.keywordId) ? filters.keywordId : undefined;
+  const minVoteCount = filters.minVoteCount && /^\d+$/.test(filters.minVoteCount) ? filters.minVoteCount : undefined;
+  const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
+  const watchRegion = filters.watchRegion && /^[A-Za-z]{2}$/.test(filters.watchRegion) ? filters.watchRegion.toUpperCase() : undefined;
+  // Clamp minRating to its canonical numeric form here so distinct junk strings ("abc",
+  // "xyz") collapse to one cache key instead of minting a new TmdbCache row each.
+  let minRating: string | undefined;
+  if (filters.minRating) {
+    const n = parseFloat(filters.minRating);
+    minRating = isNaN(n) ? undefined : String(Math.min(10, Math.max(0, n)));
+  }
+  const normYear = (v: string | undefined): string | undefined => {
+    if (!v) return undefined;
+    const n = parseInt(v, 10);
+    return isNaN(n) || n < 1888 || n > 2100 ? undefined : String(n);
+  };
+  return {
+    ...filters,
+    sortBy: allowedDiscoverSort(filters.sortBy),
+    genreId,
+    keywordId,
+    minVoteCount,
+    watchProvider,
+    watchRegion,
+    minRating,
+    fromYear: normYear(filters.fromYear),
+    toYear: normYear(filters.toYear),
+  };
+}
+
 export async function discoverMoviesPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
   const p = Math.max(1, page);
-  // Sanitize sortBy up front so a junk value reaches neither TMDB nor the cache key.
-  filters = { ...filters, sortBy: allowedDiscoverSort(filters.sortBy) };
+  // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
+  filters = sanitizeDiscoverFilters(filters);
   const key = `${discoverKey("movie", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1117,8 +1191,8 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
 
 export async function discoverTVPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
   const p = Math.max(1, page);
-  // Sanitize sortBy up front so a junk value reaches neither TMDB nor the cache key.
-  filters = { ...filters, sortBy: allowedDiscoverSort(filters.sortBy) };
+  // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
+  filters = sanitizeDiscoverFilters(filters);
   const key = `${discoverKey("tv", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;

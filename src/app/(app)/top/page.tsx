@@ -259,8 +259,8 @@ export default async function TopRatedPage({
           <SectionHeader
             title="Movies"
             range={
-              allMovies.length > 0
-                ? `${offset + 1}–${Math.min(offset + movies.length, allMovies.length)} of ${allMovies.length}`
+              totalMovieCount > 0
+                ? `${offset + 1}–${Math.min(offset + movies.length, totalMovieCount)} of ${totalMovieCount}`
                 : undefined
             }
           />
@@ -303,8 +303,8 @@ export default async function TopRatedPage({
           <SectionHeader
             title="TV Shows"
             range={
-              allTV.length > 0
-                ? `${offset + 1}–${Math.min(offset + tv.length, allTV.length)} of ${allTV.length}`
+              totalTvCount > 0
+                ? `${offset + 1}–${Math.min(offset + tv.length, totalTvCount)} of ${totalTvCount}`
                 : undefined
             }
           />

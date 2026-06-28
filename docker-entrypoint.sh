@@ -8,6 +8,14 @@ if [ -f /run/secrets/cron_secret ]; then
   export CRON_SECRET
 fi
 
+# Require a non-empty POSTGRES_PASSWORD before composing the connection string.
+# Without this guard an unset value yields the literal "undefined" in the URL,
+# turning a misconfiguration into a confusing wrong-password connect failure.
+if [ -z "${POSTGRES_PASSWORD:-}" ]; then
+  echo "[entrypoint] ERROR: POSTGRES_PASSWORD is not set."
+  exit 1
+fi
+
 # URL-encode the password so special characters (/, +, =) from base64 don't break the URL
 ENCODED_PASSWORD=$(node -e "process.stdout.write(encodeURIComponent(process.env.POSTGRES_PASSWORD))")
 export DATABASE_URL="postgresql://summonarr:${ENCODED_PASSWORD}@postgres:5432/summonarr"
@@ -170,18 +178,38 @@ echo "Starting Summonarr..."
 # ── Background cron loop ───────────────────────────────────────────────────────
 # Runs sync jobs inside this container so a separate cron container isn't needed.
 # Uses Node's built-in fetch so the secret never appears in the process list.
+# Exits non-zero when the call did not succeed (non-2xx or fetch threw) so the
+# scheduler can hold the job for a short retry instead of waiting a full interval.
 _cron_sync() {
   SYNC_CALL_URL="$1" SYNC_CALL_LABEL="$2" SYNC_CALL_QUIET="${3:-}" \
     node --input-type=module <<'JSEOF'
 const { SYNC_CALL_URL: url, SYNC_CALL_LABEL: label, CRON_SECRET, SYNC_CALL_QUIET: quiet } = process.env;
 try {
   const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` } });
-  if (!r.ok) console.log(`[${label} failed: ${r.status}]`);
-  else if (!quiet) console.log(`[${label} ok]`);
+  if (!r.ok) {
+    console.log(`[${label} failed: ${r.status}]`);
+    process.exit(1);
+  }
+  if (!quiet) console.log(`[${label} ok]`);
 } catch (e) {
   console.log(`[${label} failed: ${e.message}]`);
+  process.exit(1);
 }
 JSEOF
+}
+
+# Compute the next-run timestamp for a job: full interval on success, a short
+# retry window on failure so a transient outage doesn't skip the job for an
+# entire (possibly 24h) interval.
+_cron_next() {
+  _exit="$1"; _now="$2"; _interval="$3"
+  if [ "$_exit" -eq 0 ]; then
+    echo $((_now + _interval))
+  else
+    _retry=${CRON_RETRY_INTERVAL:-300}
+    [ "$_retry" -gt "$_interval" ] && _retry="$_interval"
+    echo $((_now + _retry))
+  fi
 }
 
 _cron_loop() {
@@ -205,44 +233,44 @@ _cron_loop() {
     sleep 60
     NOW=$(date +%s)
     if [ "$NOW" -ge "$SYNC_NEXT" ]; then
-      _cron_sync "${SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync}" "sync"
-      SYNC_NEXT=$((NOW + ${SYNC_INTERVAL:-3600}))
+      _cron_sync "${SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync}" "sync" && rc=0 || rc=$?
+      SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${SYNC_INTERVAL:-3600}")
     fi
     if [ "$NOW" -ge "$UPCOMING_NEXT" ]; then
-      _cron_sync "${UPCOMING_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/upcoming}" "upcoming"
-      UPCOMING_NEXT=$((NOW + ${UPCOMING_SYNC_INTERVAL:-86400}))
+      _cron_sync "${UPCOMING_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/upcoming}" "upcoming" && rc=0 || rc=$?
+      UPCOMING_NEXT=$(_cron_next "$rc" "$NOW" "${UPCOMING_SYNC_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$RATINGS_NEXT" ]; then
-      _cron_sync "${RATINGS_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/ratings}" "ratings"
-      RATINGS_NEXT=$((NOW + ${RATINGS_SYNC_INTERVAL:-86400}))
+      _cron_sync "${RATINGS_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/ratings}" "ratings" && rc=0 || rc=$?
+      RATINGS_NEXT=$(_cron_next "$rc" "$NOW" "${RATINGS_SYNC_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
-      _cron_sync "${PURGE_SESSIONS_URL:-http://localhost:3000${BASE_PATH}/api/cron/purge-auth-sessions}" "purge-sessions"
-      PURGE_SESSIONS_NEXT=$((NOW + ${PURGE_SESSIONS_INTERVAL:-86400}))
+      _cron_sync "${PURGE_SESSIONS_URL:-http://localhost:3000${BASE_PATH}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
+      PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
-      _cron_sync "${LIST_CACHE_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-list-cache}" "warm-list-cache"
-      LIST_CACHE_NEXT=$((NOW + ${LIST_CACHE_SYNC_INTERVAL:-21600}))
+      _cron_sync "${LIST_CACHE_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
+      LIST_CACHE_NEXT=$(_cron_next "$rc" "$NOW" "${LIST_CACHE_SYNC_INTERVAL:-21600}")
     fi
     if [ "$NOW" -ge "$WARM_ACTIVITY_NEXT" ]; then
-      _cron_sync "${WARM_ACTIVITY_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-activity}" "warm-activity" quiet
-      WARM_ACTIVITY_NEXT=$((NOW + ${WARM_ACTIVITY_INTERVAL:-1800}))
+      _cron_sync "${WARM_ACTIVITY_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-activity}" "warm-activity" quiet && rc=0 || rc=$?
+      WARM_ACTIVITY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_ACTIVITY_INTERVAL:-1800}")
     fi
     if [ "$NOW" -ge "$WARM_MDBLIST_NEXT" ]; then
-      _cron_sync "${WARM_MDBLIST_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-mdblist}" "warm-mdblist"
-      WARM_MDBLIST_NEXT=$((NOW + ${WARM_MDBLIST_INTERVAL:-86400}))
+      _cron_sync "${WARM_MDBLIST_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-mdblist}" "warm-mdblist" && rc=0 || rc=$?
+      WARM_MDBLIST_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_MDBLIST_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
-      _cron_sync "${WARM_OMDB_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-omdb}" "warm-omdb"
-      WARM_OMDB_NEXT=$((NOW + ${WARM_OMDB_INTERVAL:-86400}))
+      _cron_sync "${WARM_OMDB_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
+      WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
-      _cron_sync "${SCRUB_AUDIT_PII_URL:-http://localhost:3000${BASE_PATH}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet
-      SCRUB_AUDIT_PII_NEXT=$((NOW + ${SCRUB_AUDIT_PII_INTERVAL:-86400}))
+      _cron_sync "${SCRUB_AUDIT_PII_URL:-http://localhost:3000${BASE_PATH}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?
+      SCRUB_AUDIT_PII_NEXT=$(_cron_next "$rc" "$NOW" "${SCRUB_AUDIT_PII_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
-      _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/trash-sync}" "trash-sync"
-      TRASH_SYNC_NEXT=$((NOW + ${TRASH_SYNC_INTERVAL:-86400}))
+      _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
+      TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}")
     fi
   done
 }

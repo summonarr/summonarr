@@ -11,7 +11,7 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
-import { isSeriesDownloadedInSonarr } from "@/lib/arr";
+import { isSeriesDownloadedInSonarr, resolveSingleTvdbToTmdb } from "@/lib/arr";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -200,6 +200,10 @@ export async function POST(req: NextRequest) {
   let effectiveVdbId: number | null = null;
   // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
   let tvdbPathTmdbId: number | null = null;
+  // True when the tvdb-path flipped a request but no MediaRequest carried the tvdbId,
+  // so the tmdbId-keyed wanted row couldn't be evicted inside the tx — resolve + evict
+  // it after the tx commits (best-effort; the next full sync rewrites it regardless).
+  let tvdbWantedEvictPending = false;
 
   // Try tmdbId first; fall back to tvdbId because Sonarr may not always send tmdbId
   if (safeMdbId) {
@@ -253,14 +257,26 @@ export async function POST(req: NextRequest) {
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, is4k } });
         tvdbPathTmdbId = req.tmdbId;
-      } else if (!req) {
-        console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: no MediaRequest found for tvdbId ${sanitizeForLog(safeVdbId)}`);
+      } else if (!req && updated.count > 0) {
+        // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
+        // defer the eviction to after the tx where we can resolve tvdb→tmdb.
+        tvdbWantedEvictPending = true;
       }
     }, { timeout: 30_000 });
     if (updated.count > 0) {
       effectiveVdbId = safeVdbId;
       if (tvdbPathTmdbId !== null) {
         void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
+      }
+      if (tvdbWantedEvictPending) {
+        void (async () => {
+          const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
+          if (resolved !== null) {
+            await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, is4k } });
+          } else {
+            console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
+          }
+        })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
       }
     }
   }
@@ -269,10 +285,12 @@ export async function POST(req: NextRequest) {
   after(async () => {
     await scheduleLibraryScan("tv", safeMdbId ?? undefined, is4k ? "4k" : "hd");
 
+    // Scope by is4k to the variant that fired this webhook: an HD Download must not
+    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
     const whereNotify = effectiveMdbId
-      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
       : effectiveVdbId
-      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
       : null;
     if (!whereNotify) return;
 

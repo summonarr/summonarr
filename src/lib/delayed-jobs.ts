@@ -47,8 +47,12 @@ export function scheduleDelayed(
   setTimeout(() => {
     pendingTimers--;
     if (runQueue.length >= MAX_QUEUE) {
-      console.warn(
-        `[delayed-jobs] dropping "${opts.name}": queue cap reached (${MAX_QUEUE})`
+      // A job accepted earlier (caller already got `true`) is being dropped at
+      // fire time under queue saturation. These follow-ups are best-effort and
+      // self-heal on the next sync tick, but the loss is a real degradation, so
+      // surface it at error level rather than as an informational warning.
+      console.error(
+        `[delayed-jobs] dropping "${opts.name}" at fire time: queue cap reached (${MAX_QUEUE})`
       );
       return;
     }

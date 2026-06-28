@@ -23,8 +23,21 @@ export async function POST(req: NextRequest) {
     hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
   if (!isNativeClient) {
     const origin = req.headers.get("origin") ?? "";
-    const allowedOrigin = (process.env.AUTH_URL ?? "").replace(/\/$/, "");
-    if (!allowedOrigin || !origin || origin !== allowedOrigin) {
+    // Mirror proxy.ts's trusted-origin set: AUTH_URL plus any comma-separated
+    // AUTH_TRUSTED_ORIGIN entries, normalized to bare origins. Reading only
+    // AUTH_URL here would 403 a legitimately-configured additional origin that
+    // the proxy already trusts.
+    const allowed = new Set<string>();
+    for (const raw of [process.env.AUTH_URL, ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(",")]) {
+      const trimmed = raw?.trim();
+      if (!trimmed) continue;
+      try { allowed.add(new URL(trimmed).origin); } catch { }
+    }
+    let originOk = false;
+    if (origin) {
+      try { originOk = allowed.has(new URL(origin).origin); } catch { }
+    }
+    if (allowed.size === 0 || !originOk) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
   }

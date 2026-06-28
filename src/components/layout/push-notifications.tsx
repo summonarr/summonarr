@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Bell, BellOff, Send, X } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { withBasePath } from "@/lib/base-path";
 
 type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";
 type TestState = "idle" | "sending" | "ok" | "error";
@@ -32,7 +33,7 @@ export function PushNotifications() {
     }
 
     navigator.serviceWorker
-      .register("/sw.js")
+      .register(withBasePath("/sw.js"), { scope: withBasePath("/") })
       .then((reg) => reg.pushManager.getSubscription())
       .then((sub) => setState(sub ? "subscribed" : "unsubscribed"))
       .catch(() => setState("unsubscribed"));
@@ -48,7 +49,7 @@ export function PushNotifications() {
   async function subscribe(label: string) {
     setBusy(true);
     try {
-      const res = await fetch("/api/push/vapid-key");
+      const res = await fetch(withBasePath("/api/push/vapid-key"));
       if (!res.ok) throw new Error("Could not fetch VAPID key");
       const { publicKey } = await res.json() as { publicKey: string };
 
@@ -59,7 +60,7 @@ export function PushNotifications() {
       });
 
       const json = sub.toJSON();
-      const subscribeRes = await fetch("/api/push/subscribe", {
+      const subscribeRes = await fetch(withBasePath("/api/push/subscribe"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, label: label.trim() || undefined }),
@@ -80,7 +81,7 @@ export function PushNotifications() {
   async function sendTest() {
     setTestState("sending");
     try {
-      const res = await fetch("/api/push/test", { method: "POST" });
+      const res = await fetch(withBasePath("/api/push/test"), { method: "POST" });
       const data = await res.json() as { results?: { ok: boolean; status?: number; message?: string; body?: string }[]; error?: string };
       if (!res.ok) {
         console.error("[push test] failed:", data);
@@ -108,7 +109,7 @@ export function PushNotifications() {
       const reg = await navigator.serviceWorker.ready;
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
-        await fetch("/api/push/subscribe", {
+        await fetch(withBasePath("/api/push/subscribe"), {
           method: "DELETE",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ endpoint: sub.endpoint }),

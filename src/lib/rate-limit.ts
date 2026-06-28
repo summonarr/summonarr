@@ -101,8 +101,18 @@ function parseTrustedHops(value: string | undefined): number {
   return Math.min(n, MAX_TRUSTED_HOPS);
 }
 
+// Bucket key for clients whose IP can't be trusted (TRUST_PROXY off, or no
+// trustworthy forwarded address). Keyed on a UA hash so distinct clients land in
+// distinct buckets instead of every caller sharing one global "unknown" bucket —
+// the UA is still spoofable, so this is coarse abuse-isolation, not a real per-IP
+// limit, but it stops a single noisy client from exhausting everyone's quota.
+function untrustedBucket(headers: Headers): string {
+  const ua = headers.get("user-agent") ?? "";
+  return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
+}
+
 export function getClientIp(headers: Headers): string {
-  if (process.env.TRUST_PROXY !== "true") return "unknown";
+  if (process.env.TRUST_PROXY !== "true") return untrustedBucket(headers);
 
   // X-Forwarded-For is an APPEND chain: each proxy appends the address of the
   // peer that connected to *it*. Behind N trusted proxies the only trustworthy
@@ -128,9 +138,8 @@ export function getClientIp(headers: Headers): string {
   const realIp = headers.get("x-real-ip")?.trim();
   if (realIp && isValidIp(realIp)) return realIp;
 
-  // Fall back to a UA fingerprint so unauthenticated clients without a forwarded IP still share a bucket
-  const ua = headers.get("user-agent") ?? "";
-  return "unknown:" + createHash("sha256").update(ua).digest("hex").slice(0, 12);
+  // No trustworthy forwarded address — fall back to the UA bucket.
+  return untrustedBucket(headers);
 }
 
 export function parseRateLimit(value: string | null | undefined, defaultLimit: number): number {

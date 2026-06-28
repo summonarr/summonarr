@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2 } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 export function DeletePlayButton({ id }: { id: string }) {
   const router = useRouter();
@@ -12,7 +13,7 @@ export function DeletePlayButton({ id }: { id: string }) {
   async function handleDelete() {
     setDeleting(true);
     try {
-      const res = await fetch(`/api/play-history/${id}`, { method: "DELETE" });
+      const res = await fetch(withBasePath(`/api/play-history/${id}`), { method: "DELETE" });
       if (res.ok) {
         router.push("/admin/activity?tab=history");
         router.refresh();

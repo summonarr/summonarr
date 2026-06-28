@@ -14,9 +14,16 @@ const TVDB_TO_TMDB_TTL_RESOLVED   = 365 * 24 * 60 * 60;
 const TVDB_TO_TMDB_TTL_UNRESOLVED =        24 * 60 * 60;
 type TvdbToTmdbCache = { tmdbId: number | null };
 
-async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>> {
+// `hadErrors` is true when a lookup could not be completed this run (TMDB auth missing,
+// or a TMDB request threw / returned non-2xx). It lets callers that wholesale-replace a
+// cache from the result distinguish "series genuinely has no tmdb mapping" (safe to omit)
+// from "we couldn't resolve it right now" (omitting it would wrongly evict a known series).
+async function resolveTvdbToTmdb(
+  tvdbIds: number[],
+): Promise<{ map: Map<number, number>; hadErrors: boolean }> {
   const result = new Map<number, number>();
-  if (tvdbIds.length === 0) return result;
+  let hadErrors = false;
+  if (tvdbIds.length === 0) return { map: result, hadErrors };
 
   const uncached: number[] = [];
   for (const tvdbId of tvdbIds) {
@@ -27,7 +34,7 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
       uncached.push(tvdbId);
     }
   }
-  if (uncached.length === 0) return result;
+  if (uncached.length === 0) return { map: result, hadErrors };
 
   const reqRows = await prisma.mediaRequest.findMany({
     where: { mediaType: "TV", tvdbId: { in: uncached } },
@@ -46,10 +53,14 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
       stillUnknown.push(tvdbId);
     }
   }
-  if (stillUnknown.length === 0) return result;
+  if (stillUnknown.length === 0) return { map: result, hadErrors };
 
   const auth = tmdbAuth();
-  if (!auth) return result;
+  if (!auth) {
+    // Can't resolve any of the still-unknown series this run — report it so the
+    // caller doesn't treat their absence as authoritative.
+    return { map: result, hadErrors: true };
+  }
 
   const CONCURRENCY = 5;
   for (let i = 0; i < stillUnknown.length; i += CONCURRENCY) {
@@ -66,6 +77,7 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
         });
         if (!res.ok) {
           console.warn(`[arr] tvdb-to-tmdb TMDB lookup returned ${res.status} for tvdbId ${tvdbId}`);
+          hadErrors = true;
           return;
         }
         const data = await res.json() as { tv_results?: { id: number }[] };
@@ -80,10 +92,23 @@ async function resolveTvdbToTmdb(tvdbIds: number[]): Promise<Map<number, number>
         // Don't swallow: a TMDB 429/401/outage here silently drops every
         // tvdbId-only series from wanted/available/arrPending with no evidence.
         console.warn(`[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId ${tvdbId}:`, err instanceof Error ? err.message : err);
+        hadErrors = true;
       }
     }));
   }
-  return result;
+  return { map: result, hadErrors };
+}
+
+/**
+ * Resolves a single tvdbId to its tmdbId (cache → MediaRequest → TMDB). Returns null
+ * when it can't be resolved. Used by the Sonarr webhook to evict the tmdbId-keyed
+ * wanted-cache row when a Download event carries only a tvdbId and no MediaRequest
+ * maps it.
+ */
+export async function resolveSingleTvdbToTmdb(tvdbId: number): Promise<number | null> {
+  if (!Number.isInteger(tvdbId) || tvdbId <= 0) return null;
+  const { map } = await resolveTvdbToTmdb([tvdbId]);
+  return map.get(tvdbId) ?? null;
 }
 
 export type ArrCfg = { url: string; apiKey: string };
@@ -412,7 +437,17 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = "hd"): Promis
     }
     const allNeedsResolve = [...new Set([...wantedNeedsResolve, ...availableNeedsResolve])];
     if (allNeedsResolve.length > 0) {
-      const map = await resolveTvdbToTmdb(allNeedsResolve);
+      const { map, hadErrors } = await resolveTvdbToTmdb(allNeedsResolve);
+      // A tvdb→tmdb resolution failure (TMDB unreachable / 429 / auth missing) would
+      // otherwise drop a still-present series from BOTH sets. Because the orchestrator
+      // wholesale-replaces the wanted/available caches from this result, that vanish
+      // could spuriously revert a previously-AVAILABLE TV request. Signal the caller
+      // (return null = "ARR fetch failed, leave the cache intact") rather than emit a
+      // partial set that under-reports the library.
+      if (hadErrors) {
+        console.warn("[arr] getSonarrWantedTmdbIds: tvdb→tmdb resolution incomplete; skipping cache update this run");
+        return null;
+      }
       for (const tvdbId of wantedNeedsResolve) {
         const tmdbId = map.get(tvdbId);
         if (tmdbId !== undefined) wanted.add(tmdbId);

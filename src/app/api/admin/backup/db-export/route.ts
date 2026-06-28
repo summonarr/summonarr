@@ -126,7 +126,17 @@ function buildSqlStream(
 
                 if (columns === null) {
                   columns = Object.keys(rows[0]);
-                  colList = columns.map((c) => `"${c}"`).join(", ");
+                  // Column names come from Prisma query-result keys (DB-owner
+                  // trusted), but validate and double-quote-escape them with the
+                  // same rule as the PK identifiers above so the INSERT column
+                  // list can't become an injection vector if that trust boundary
+                  // ever loosens.
+                  for (const c of columns) {
+                    if (!/^[A-Za-z0-9_]{1,63}$/.test(c)) {
+                      throw new Error(`[db-export] refusing unsafe column name: ${JSON.stringify(c)}`);
+                    }
+                  }
+                  colList = columns.map((c) => `"${c.replace(/"/g, '""')}"`).join(", ");
                 }
 
                 for (const row of rows) {

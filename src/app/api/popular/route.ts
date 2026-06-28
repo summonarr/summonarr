@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isFeatureEnabled } from "@/lib/features";
 
 // Native-client mirror of src/app/(app)/popular/page.tsx — most-played media on
 // the connected Plex/Jellyfin servers. Keep the resolve + enrich logic in sync
@@ -20,6 +21,9 @@ type EnrichedMedia = TmdbMedia & {
 };
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  if (!(await isFeatureEnabled("feature.page.popular"))) {
+    return NextResponse.json({ error: "Popular is disabled" }, { status: 403 });
+  }
   if (!checkRateLimit(`popular:${session.user.id}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
@@ -31,7 +35,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const sort: PopularSort = validSorts.has(sortParam as PopularSort)
     ? (sortParam as PopularSort)
     : "trending";
-  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const show4k = await getShow4kVisibility(session);
 
   try {
@@ -87,6 +91,15 @@ export const GET = withAuth(async (request, _ctx, session) => {
           };
         }),
       );
+      // A title whose live TMDB resolve rejected is dropped from the page, so the
+      // rendered count can be fewer than the reported totals. Log the rejection so
+      // a transient TMDB failure that makes a most-played title vanish is
+      // diagnosable rather than silent.
+      for (const r of results) {
+        if (r.status === "rejected") {
+          console.error(`[popular] ${type} detail resolve failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
+        }
+      }
       return results
         .filter((r): r is PromiseFulfilledResult<EnrichedMedia> => r.status === "fulfilled")
         .map((r) => r.value);

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { withBasePath } from "@/lib/base-path";
 
 interface Props {
   variant?: "setup" | "register";
@@ -31,7 +32,7 @@ export function SetupForm({ variant = "setup" }: Props) {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/auth/register", {
+      const res = await fetch(withBasePath("/api/auth/register"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: form.name, email: form.email, password: form.password }),
@@ -43,7 +44,7 @@ export function SetupForm({ variant = "setup" }: Props) {
         return;
       }
 
-      const result = await fetch("/api/auth/sign-in/credentials", {
+      const result = await fetch(withBasePath("/api/auth/sign-in/credentials"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -55,11 +56,11 @@ export function SetupForm({ variant = "setup" }: Props) {
 
       if (!result.ok) {
         setError("Account created — please sign in");
-        window.location.href = "/login";
+        window.location.href = withBasePath("/login");
         return;
       }
 
-      window.location.href = "/";
+      window.location.href = withBasePath("/");
     } catch {
       setError("Something went wrong, please try again");
     } finally {

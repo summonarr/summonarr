@@ -29,7 +29,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const downloadsEnabled = body.downloadsEnabled;
 
-  const where = { isServerAdmin: false, source: "jellyfin" };
+  const where = { isServerAdmin: false, source: "jellyfin", active: true };
 
   const updated = await prisma.mediaServerUser.updateMany({ where, data: { downloadsEnabled } });
 

@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { GitFork } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import {
   userNavItems,
   getVisibleAdminItems,
@@ -48,7 +49,9 @@ export function Sidebar({
       }}
     >
       {/* Brand */}
-      <div
+      <Link
+        href="/"
+        aria-label="Home"
         className="flex items-center gap-2.5"
         style={{
           padding: "16px 16px 14px",
@@ -83,7 +86,7 @@ export function Sidebar({
         >
           {siteTitle || "Summonarr"}
         </span>
-      </div>
+      </Link>
 
       {/* Nav */}
       <nav
@@ -144,7 +147,7 @@ export function Sidebar({
           className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/tmdb-logo.svg" alt="TMDB" className="h-3 w-auto" />
+          <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
           <span
             className="ds-mono"
             style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}

@@ -80,6 +80,20 @@ export const GET = withAuth(async (request, _ctx, session) => {
       getTopRatedTV(),
     ]);
 
+    // A rail whose source rejected degrades to an omitted rail (better than
+    // 500ing the whole feed). Log each rejection so the missing rail is
+    // diagnosable rather than silently absent.
+    const sourceNames = [
+      "trending", "popular-movies", "popular-tv",
+      "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv",
+    ];
+    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes]
+      .forEach((r, i) => {
+        if (r.status === "rejected") {
+          console.error(`[home] source ${sourceNames[i]} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
+        }
+      });
+
     const trending = settled(trendingRes);
     const popMovies = settled(popMoviesRes).slice(0, RAIL_OVERFETCH);
     const popTV = settled(popTVRes).slice(0, RAIL_OVERFETCH);

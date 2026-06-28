@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
+import { withBasePath } from "@/lib/base-path";
 
 function TokenLinkFlow() {
   const [token, setToken] = useState<string | null>(null);
@@ -22,7 +23,7 @@ function TokenLinkFlow() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/discord/generate-link", { method: "POST" });
+      const res = await fetch(withBasePath("/api/discord/generate-link"), { method: "POST" });
       const data = (await res.json()) as { token?: string; expiresAt?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "Failed to generate token");
       if (!data.token || !data.expiresAt) throw new Error("Malformed server response");
@@ -95,7 +96,7 @@ function WebMergeFlow() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/discord/initiate-merge", {
+      const res = await fetch(withBasePath("/api/discord/initiate-merge"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ discordId: discordId.trim() }),
@@ -114,7 +115,7 @@ function WebMergeFlow() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/discord/confirm-merge", {
+      const res = await fetch(withBasePath("/api/discord/confirm-merge"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: code.trim() }),
