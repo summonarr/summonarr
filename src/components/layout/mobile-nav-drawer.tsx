@@ -47,8 +47,9 @@ export function MobileNavDrawer({
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
+  const perms = session?.user?.permissions;
   const adminItems = filterNavByFeatures(
-    getVisibleAdminItems(role),
+    getVisibleAdminItems(perms ? { role, permissions: perms } : role),
     featureFlags,
   );
 

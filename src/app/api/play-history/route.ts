@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { resolvePosterMap } from "@/lib/poster-cache";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -29,7 +30,7 @@ function sanitizeContainsSearch(s: string): string {
   return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
 }
 
-export const GET = withAdmin(async (request, _ctx, session) => {
+export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, session) => {
   // The grouped path runs two heavy window-function/aggregate raw queries over
   // the full PlayHistory table per request; throttle per admin to bound abuse.
   if (!checkRateLimit(`play-history:${session.user.id}:${getClientIp(request.headers)}`, 120, 60_000)) {

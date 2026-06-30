@@ -1,13 +1,9 @@
 import type { SummonarrSession } from "@/lib/api-auth";
+import { hasPermission, Permission } from "@/lib/permissions";
 
-// Admins see both badges regardless of their own mediaServer preference; regular users only see
-// the badge for the server they authenticated with.  ISSUE_ADMIN is intentionally included here
-// because issue triage needs full availability context across both backends.
-//
-// `integrations` lets a caller suppress a backend's badges when its integration
-// flag is disabled (cached library rows can outlive a disabled integration).
-// Omitted/undefined flags default to enabled so callers that don't read the
-// flags keep their prior behaviour.
+// Admins (ADMIN bit) and issue managers see both badges regardless of their own
+// mediaServer preference; regular users only see the badge for the server they
+// authenticated with. Uses bits so granular MANAGE_ISSUES etc get full context.
 export function getBadgeVisibility(
   session: SummonarrSession | null,
   integrations?: { plex?: boolean; jellyfin?: boolean },
@@ -20,9 +16,9 @@ export function getBadgeVisibility(
   const plexIntegration = integrations?.plex ?? true;
   const jellyfinIntegration = integrations?.jellyfin ?? true;
 
-  const { role, mediaServer } = session.user;
+  const { mediaServer, permissions } = session.user;
 
-  if (role === "ADMIN" || role === "ISSUE_ADMIN") {
+  if (hasPermission(permissions, [Permission.ADMIN, Permission.MANAGE_ISSUES])) {
     return { showPlex: plexIntegration, showJellyfin: jellyfinIntegration };
   }
 

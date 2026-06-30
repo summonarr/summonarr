@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 
 const spec = {
   openapi: "3.0.3",
@@ -1571,7 +1572,7 @@ const spec = {
   },
 };
 
-export const GET = withAdmin(async (_req, _ctx, _session) => {
+export const GET = withPermission(Permission.ADMIN)(async (_req, _ctx, _session) => {
   return NextResponse.json(spec, {
     headers: { "Cache-Control": "no-store" },
   });

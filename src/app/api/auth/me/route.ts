@@ -12,6 +12,9 @@ interface PublicSession {
   user: {
     id: string;
     role: string;
+    // Decimal string for the effective permission bitmask. Client uses it for
+    // nav/visibility decisions so granular MANAGE_* users see the right UI.
+    permissions?: string;
     email?: string | null;
     name?: string | null;
     provider?: string;
@@ -28,6 +31,7 @@ function serialize(claims: SessionClaims): PublicSession {
     user: {
       id: claims.id,
       role: claims.role,
+      permissions: claims.permissions ?? undefined,
       email: claims.email ?? null,
       name: claims.name ?? null,
       provider: claims.provider,

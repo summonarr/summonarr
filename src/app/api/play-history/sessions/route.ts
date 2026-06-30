@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withAdmin(async (_req, _ctx, _session) => {
+export const GET = withPermission(Permission.ADMIN)(async (_req, _ctx, _session) => {
   const sessions = await prisma.activeSession.findMany({
     orderBy: { startedAt: "desc" },
   });

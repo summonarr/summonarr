@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlayHistoryStats } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
@@ -13,7 +14,7 @@ export default async function StatsPage({
   searchParams: Promise<{ days?: string; source?: string; mediaType?: string }>;
 }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam } =
     await searchParams;

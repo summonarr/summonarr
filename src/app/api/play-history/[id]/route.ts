@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withAdmin(async (
+export const GET = withPermission(Permission.ADMIN)(async (
   _request,
   { params }: { params: Promise<{ id: string }> },
   _session,
@@ -30,12 +32,15 @@ export const GET = withAdmin(async (
   return NextResponse.json(record);
 });
 
-export const DELETE = withAdmin(async (
+export const DELETE = withPermission(Permission.ADMIN)(async (
   request,
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
   const { id } = await params;
+  if (!checkRateLimit(`admin-play-history-delete:${session.user.id}`, 10, 60 * 1000)) {
+    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+  }
   if (!id || typeof id !== "string") {
     return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
   }

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { isFeatureEnabled } from "@/lib/features";
+import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
@@ -390,14 +391,17 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
         ? { id: { not: opts.excludeUserId } }
         : {};
 
-    const admins = await (await import("@/lib/prisma")).prisma.user.findMany({
+    const rows = await (await import("@/lib/prisma")).prisma.user.findMany({
       where: {
-        role: { in: ["ADMIN", "ISSUE_ADMIN"] },
         discordId: { not: null },
         notifyOnIssue: true,
         ...idFilter,
       },
-      select: { discordId: true },
+      select: { discordId: true, role: true, permissions: true },
+    });
+    const admins = rows.filter((u) => {
+      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
+      return hasPermission(perms, Permission.MANAGE_ISSUES);
     });
     if (!admins.length) return;
 

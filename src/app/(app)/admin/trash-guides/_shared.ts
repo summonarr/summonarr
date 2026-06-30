@@ -1,5 +1,6 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/components/admin/trash-guides/types";
@@ -37,8 +38,8 @@ export interface TrashPageContext {
 export async function loadTrashPageContext(
   searchParams: TrashPageSearchParams,
 ): Promise<TrashPageContext> {
-  const session = await auth();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  const session = await authActive();
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { service: rawService, variant: rawVariant } = await searchParams;
   const service: TrashService = rawService === "sonarr" ? "SONARR" : "RADARR";

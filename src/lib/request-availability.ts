@@ -21,15 +21,18 @@ export async function attachRequestedStatus(items: TmdbMedia[], userId?: string)
   const baseWhere = buildMediaTypeWhere(items);
   if (!baseWhere) return items;
 
+  // Scope to is4k:false (HD) so a 4K-only request does not mark the primary "requested"
+  // flag used for HD CTAs/grids, and vice-versa. (Detail pages query is4k explicitly;
+  // 4K variant uses its own requested/pending state.) Matches unique (tmdbId, mediaType, is4k).
   const [globalRows, mineRows] = await Promise.all([
     prisma.mediaRequest.findMany({
-      where: { status: { not: "DECLINED" }, ...baseWhere },
+      where: { status: { not: "DECLINED" }, is4k: false, ...baseWhere },
       select: { tmdbId: true, mediaType: true },
       distinct: ["tmdbId", "mediaType"],
     }),
     userId
       ? prisma.mediaRequest.findMany({
-          where: { status: { not: "DECLINED" }, requestedBy: userId, ...baseWhere },
+          where: { status: { not: "DECLINED" }, requestedBy: userId, is4k: false, ...baseWhere },
           select: { tmdbId: true, mediaType: true },
           distinct: ["tmdbId", "mediaType"],
         })

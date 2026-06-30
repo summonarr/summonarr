@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { ExternalLink, Heart } from "@/components/icons";
@@ -19,7 +19,7 @@ function safeUrl(v: string): string | null {
 
 export default async function DonatePage() {
   await requireFeature("feature.page.donate");
-  const session = await auth();
+  const session = await authActive();
   if (!session) redirect("/login");
 
   const rows = await prisma.setting.findMany({

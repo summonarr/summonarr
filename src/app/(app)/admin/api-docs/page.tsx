@@ -1,5 +1,6 @@
 import { authActive, isTokenExpired } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { OpenApiViewer } from "@/components/admin/openapi-viewer";
 import { PageHeader } from "@/components/ui/design";
 
@@ -7,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 export default async function ApiDocsPage() {
   const session = await authActive();
-  if (!session || isTokenExpired(session) || session.user.role !== "ADMIN") {
+  if (!session || isTokenExpired(session) || !hasPermission(session.user.permissions, Permission.ADMIN)) {
     redirect("/");
   }
 

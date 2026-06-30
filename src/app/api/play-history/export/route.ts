@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -33,7 +34,11 @@ function escapeCSV(value: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireAuth({ role: "ADMIN" });
+  const session = await requireAuth(); // permission checked inside
+  if (session instanceof NextResponse) return session;
+  if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`ph-export:${session.user.id}:${getClientIp(request.headers)}`, 5, 3_600_000)) {

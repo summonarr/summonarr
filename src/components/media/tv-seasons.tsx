@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import Image from "next/image";
 import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/components/icons";
 import { cn } from "@/lib/utils";
@@ -42,6 +43,7 @@ function formatRuntime(min: number | null): string | null {
 }
 
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
+  const mounted = useHasMounted();
   const [state, setState] = useState<Record<number, SeasonState>>(() => {
     const init: Record<number, SeasonState> = {};
     for (const s of seasons) {
@@ -212,7 +214,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         }}
                       >
                         <Calendar style={{ width: 10, height: 10 }} />
-                        {new Date(season.airDate).getUTCFullYear()}
+                        {mounted ? new Date(season.airDate).getUTCFullYear() : ""}
                       </span>
                     )}
                   </div>
@@ -317,7 +319,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         const owned = s.owned.has(ep.episodeNumber);
                         const still = stillUrl(ep.stillPath, "w300");
                         const runtime = formatRuntime(ep.runtime);
-                        const aired = formatAirDate(ep.airDate);
+                        const aired = mounted ? formatAirDate(ep.airDate) : null;
                         return (
                           <div
                             key={ep.episodeNumber}

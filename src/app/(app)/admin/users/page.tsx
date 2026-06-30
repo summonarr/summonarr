@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { UserTable } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
@@ -12,7 +13,7 @@ export const dynamic = "force-dynamic";
 
 export default async function UsersPage() {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
   const [users, localAuthRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
     prisma.user.findMany({

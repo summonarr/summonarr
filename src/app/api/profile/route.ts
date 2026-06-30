@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -23,6 +24,8 @@ class LastAdminError extends Error {}
 // "disable" that retained personal data would NOT satisfy 5.1.1(v); the PII scrub
 // is what makes this a deletion.
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
   const id = session.user.id;
 
   const target = await prisma.user.findUnique({

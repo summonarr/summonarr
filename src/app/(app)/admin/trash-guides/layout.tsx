@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { TrashGuidesNav } from "@/components/admin/trash-guides/trash-guides-nav";
@@ -23,7 +24,7 @@ const TRUNCATION_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export default async function TrashGuidesLayout({ children }: { children: React.ReactNode }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...LAYOUT_KEYS] } },

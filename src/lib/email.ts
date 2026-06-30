@@ -6,6 +6,7 @@ import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { isSafeAddrForAdmin } from "@/lib/ssrf";
 import { sendMail, type SmtpConfig } from "@/lib/smtp";
+import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
 //   - "resend" → Resend HTTP API (direct POST to api.resend.com via safeFetchTrusted)
@@ -158,20 +159,23 @@ function safeHeader(str: string): string {
 }
 
 async function getAdminEmails(excludeUserId?: string): Promise<string[]> {
-  const admins = await prisma.user.findMany({
-    where: {
-      role: "ADMIN",
-      ...(excludeUserId ? { id: { not: excludeUserId } } : {}),
-    },
-    select: { email: true, notificationEmail: true },
+  // Bitmask authoritative: any holder of MANAGE_REQUESTS (or ADMIN superbit).
+  // Includes custom-granted users; falls back correctly for legacy rows.
+  const rows = await prisma.user.findMany({
+    where: excludeUserId ? { id: { not: excludeUserId } } : {},
+    select: { email: true, notificationEmail: true, role: true, permissions: true },
   });
-  return admins
+  return rows
+    .filter((u) => {
+      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
+      return hasPermission(perms, Permission.MANAGE_REQUESTS);
+    })
     .map((a) => resolveUserNotificationEmail(a))
     .filter((e): e is string => Boolean(e));
 }
 
-// For issue-related admin emails: includes ISSUE_ADMIN and honors the
-// per-user notifyOnIssue toggle. Mirrors getIssueAdminSubscriptions in push.ts.
+// For issue-related admin emails: holders of MANAGE_ISSUES + notifyOnIssue.
+// Bitmask authoritative so clearing the bit stops notifications; ADMIN always passes.
 async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<string[]> {
   if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
   const idFilter = opts.restrictToUserId
@@ -179,15 +183,18 @@ async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUse
     : opts.excludeUserId
       ? { id: { not: opts.excludeUserId } }
       : {};
-  const admins = await prisma.user.findMany({
+  const rows = await prisma.user.findMany({
     where: {
-      role: { in: ["ADMIN", "ISSUE_ADMIN"] },
       notifyOnIssue: true,
       ...idFilter,
     },
-    select: { email: true, notificationEmail: true },
+    select: { email: true, notificationEmail: true, role: true, permissions: true },
   });
-  return admins
+  return rows
+    .filter((u) => {
+      const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
+      return hasPermission(perms, Permission.MANAGE_ISSUES);
+    })
     .map((a) => resolveUserNotificationEmail(a))
     .filter((e): e is string => Boolean(e));
 }

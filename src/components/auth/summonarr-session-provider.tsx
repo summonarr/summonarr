@@ -7,6 +7,9 @@ export interface SummonarrSession {
   user: {
     id: string;
     role: string;
+    // Decimal string (from session claim) for permission bitmask. Enables nav
+    // and UI to respect MANAGE_* grants without requiring ADMIN/ISSUE_ADMIN role.
+    permissions?: string;
     email?: string | null;
     name?: string | null;
     provider?: string;

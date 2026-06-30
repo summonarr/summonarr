@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 
@@ -19,7 +20,10 @@ for (const action of AUDIT_ACTIONS) {
   GROUP_ACTIONS[ACTION_GROUP[action]].push(action);
 }
 
-export const GET = withAdmin(async (req, _ctx, _session) => {
+export const GET = withAdmin(async (req, _ctx, session) => {
+  if (!checkRateLimit(`admin-audit-list:${session.user.id}`, 60, 60 * 1000)) {
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
   const url = req.nextUrl;
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));
   const cursor = url.searchParams.get("cursor") ?? undefined;

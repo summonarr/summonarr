@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
@@ -11,12 +12,15 @@ import { Permission, parseAndValidatePermissions, defaultPermissionsForRole } fr
 // the last active admin (guardrail 23: propagate out of the tx, don't swallow).
 class LastAdminError extends Error {}
 
-export const PATCH = withAdmin(async (
+export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
   const { id } = await params;
+  if (!checkRateLimit(`admin-user-edit:${session.user.id}`, 20, 60 * 1000)) {
+    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+  }
   const isSelf = id === session.user.id;
 
   type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
@@ -189,12 +193,15 @@ export const PATCH = withAdmin(async (
   return NextResponse.json({ id, role: body.role });
 });
 
-export const DELETE = withAdmin(async (
+export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   _req,
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
   const { id } = await params;
+  if (!checkRateLimit(`admin-user-delete:${session.user.id}`, 5, 60 * 1000)) {
+    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+  }
 
   if (id === session.user.id) {
     return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });

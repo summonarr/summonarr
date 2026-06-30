@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { getPlayHistoryStats } from "@/lib/play-history";
 
 export const dynamic = "force-dynamic";
 
-export const GET = withAdmin(async (request, _ctx, _session) => {
+export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
   // Clamp to match the stats page route (src/app/(app)/admin/activity/stats):
   // an unbounded/negative day window would scan or invert the whole table.

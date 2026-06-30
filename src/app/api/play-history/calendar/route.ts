@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { getActivityCalendar } from "@/lib/play-history";
 
 export const dynamic = "force-dynamic";
@@ -8,7 +9,7 @@ export const dynamic = "force-dynamic";
 // src/components/admin/activity-calendar.tsx). Returns one row per UTC day with
 // a watched-session count; the lib fn already buckets by UTC day and labels
 // each `day` as YYYY-MM-DD. Optional source/mediaType filters match the heatmap.
-export const GET = withAdmin(async (request, _ctx, _session) => {
+export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
   const source = params.get("source") ?? undefined;
   const mediaType = params.get("mediaType") ?? undefined;

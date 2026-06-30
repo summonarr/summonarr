@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import Image from "next/image";
 import { Card } from "@/components/ui/card";
@@ -85,7 +86,7 @@ export default async function PlayDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { id } = await params;
 

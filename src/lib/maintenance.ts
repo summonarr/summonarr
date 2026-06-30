@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authActive } from "./auth";
 import { prisma } from "./prisma";
+import { hasPermission, Permission } from "./permissions";
 
 export async function getMaintenanceStatus(): Promise<{ enabled: boolean; message: string }> {
   try {
@@ -24,7 +25,7 @@ export async function maintenanceGuard(): Promise<NextResponse | null> {
   // unexpired JWT can't bypass maintenance: the admin-bypass is an authz decision and
   // must see the current role, not a stale one.
   const session = await authActive();
-  if (session?.user?.role === "ADMIN") return null;
+  if (session && hasPermission(session.user.permissions, Permission.ADMIN)) return null;
   const { enabled, message } = await getMaintenanceStatus();
   if (!enabled) return null;
   return NextResponse.json(
