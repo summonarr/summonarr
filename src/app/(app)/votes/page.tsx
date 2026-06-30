@@ -11,6 +11,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { Chip, PageHeader } from "@/components/ui/design";
 
 const PAGE_SIZE = 40;
@@ -126,7 +127,7 @@ export default async function VotesPage({
     };
   });
 
-  const isAdmin = session?.user.role === "ADMIN";
+  const isAdmin = !!session && hasPermission(session.user.permissions, Permission.ADMIN);
   const hasFilters = mine || sort !== "votes" || q !== "";
 
   return (

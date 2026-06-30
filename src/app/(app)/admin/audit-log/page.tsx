@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
@@ -32,7 +33,7 @@ export default async function AuditLogPage({
 }) {
   await requireFeature("feature.admin.auditLog");
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { action: actionParam, group: groupParam, dateFrom, dateTo, user, target, hideCron: hideCronParam } = await searchParams;
   const action = VALID_ACTIONS.includes(actionParam as AuditAction)

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
@@ -94,6 +95,9 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 // new username/password account — e.g. an App Review demo account. Role seeds the
 // permission bitmask (defaultPermissionsForRole); tune later via PATCH.
 export const POST = withAdmin(async (req, _ctx, session) => {
+  if (!checkRateLimit(`admin-user-create:${session.user.id}`, 10, 60 * 1000)) {
+    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+  }
   const parsed = await readJsonCapped<{ email?: string; password?: string; name?: string | null; role?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;

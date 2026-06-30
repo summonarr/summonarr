@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 import { Card } from "@/components/ui/card";
 import { AlertTriangle, XCircle } from "@/components/icons";
 
@@ -45,6 +46,7 @@ export function RefreshErrorBanner({
 // `at` timestamp is rendered as plain text (no relative-time math) — staleness is gated server-side
 // in the layout, so the banner only appears when the truncation is recent enough to act on.
 export function TruncationBanner({ at }: { at: string }) {
+  const mounted = useHasMounted();
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;
   return (
@@ -55,7 +57,7 @@ export function TruncationBanner({ at }: { at: string }) {
           <p className="font-medium text-amber-200">GitHub tree response was truncated</p>
           <p className="mt-1 text-amber-100/90">
             The TRaSH-Guides repo exceeded GitHub&apos;s recursive-tree response cap on the last refresh
-            ({new Date(at).toUTCString()}). Some specs may have been silently skipped.
+            ({mounted ? new Date(at).toUTCString() : ""}). Some specs may have been silently skipped.
           </p>
           <p className="mt-2 text-xs text-amber-300/80">
             Configure a GitHub personal access token on the Settings tab to lift rate limits, then click

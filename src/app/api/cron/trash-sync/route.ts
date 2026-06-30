@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { auth, isTokenExpired } from "@/lib/auth";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { runTrashSync } from "@/lib/trash";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 
 async function getAuthContext(request: NextRequest): Promise<
   { userId: string; userName: string; trigger: "admin" | "cron" } | null
 > {
   if (!(await isCronAuthorized(request))) return null;
 
-  const session = await auth();
-  if (session?.user?.role === "ADMIN" && !isTokenExpired(session)) {
-    return { userId: session.user.id, userName: session.user.name ?? "admin", trigger: "admin" };
+  // Use the request-aware DB-checked reader (honors revocation/cutoffs) for attribution.
+  // Falls back to "cron" label if no active admin session (pure scheduled run).
+  const claims = await readActiveSummonarrSessionFromRequest(request);
+  if (claims?.role === "ADMIN") {
+    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
   }
   return { userId: "system", userName: "cron", trigger: "cron" };
 }

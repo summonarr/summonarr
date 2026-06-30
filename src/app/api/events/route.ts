@@ -55,7 +55,7 @@ export async function GET() {
   // Mutable so the periodic re-auth below can demote delivery scope live: a session
   // demoted from ADMIN / stripped of MANAGE_ISSUES stops receiving admin/issue events
   // on the next re-auth tick instead of at the next reconnect.
-  let isSystemAdmin = session.user.role === "ADMIN";
+  let isSystemAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   // Bitmask-authoritative (not role) so a demoted ISSUE_ADMIN with MANAGE_ISSUES
   // cleared stops receiving issue:* / issuemessage:* events. ADMIN still passes via
   // isSystemAdmin above, so this only governs the issue-event bypass.
@@ -156,7 +156,7 @@ export async function GET() {
               cleanup(controller);
               return;
             }
-            isSystemAdmin = fresh.user.role === "ADMIN";
+            isSystemAdmin = hasPermission(fresh.user.permissions, Permission.ADMIN);
             isIssueAdmin = hasPermission(fresh.user.permissions, Permission.MANAGE_ISSUES);
           })
           .catch(() => cleanup(controller));

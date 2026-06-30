@@ -5,6 +5,7 @@ import { posterUrl, getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { getCacheStale } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
@@ -31,7 +32,7 @@ export default async function AdminPage({
   searchParams: Promise<{ page?: string; status?: string; sort?: string; type?: string }>;
 }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)) redirect("/");
 
   const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam } = await searchParams;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);

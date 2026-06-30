@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { redirect } from "next/navigation";
@@ -14,7 +14,7 @@ import { PageHeader } from "@/components/ui/design";
 export const dynamic = "force-dynamic";
 
 export default async function ProfilePage() {
-  const session = await auth();
+  const session = await authActive();
   if (!session) redirect("/login");
 
   const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions] = await Promise.all([

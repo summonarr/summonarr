@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
@@ -90,7 +91,7 @@ export default async function UsersActivityPage({
   searchParams: Promise<{ search?: string; sort?: string; dir?: string }>;
 }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { search, sort: sortParam, dir: dirParam } = await searchParams;
 

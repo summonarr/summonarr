@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -210,11 +210,12 @@ async function syncJellyfin(request: NextRequest) {
     }
   }
 
-  const session = await auth();
-  if (session?.user) {
+  // Use DB-checked reader (bearer-first) for attribution label, consistent with orchestrator/plex sync.
+  const claims = await readActiveSummonarrSessionFromRequest(request);
+  if (claims) {
     void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.id,
+      userId: claims.id,
+      userName: claims.name ?? claims.id,
       action: "LIBRARY_SYNC",
       target: "sync:jellyfin",
       details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length, full: !recentOnly },

@@ -3,6 +3,7 @@ import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { parseCronLastRun } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
@@ -117,7 +118,7 @@ export default async function SettingsPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   const [sp, session] = await Promise.all([searchParams, authActive()]);
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const rawTab = sp.tab as TabId | undefined;
   const tab: TabId = rawTab && VALID_TABS.includes(rawTab) ? rawTab : "site";

@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
+import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
 import { PushNotifications } from "@/components/layout/push-notifications";
 
 async function signOutAndRedirect(callbackUrl: string) {
@@ -362,11 +363,13 @@ export function Header() {
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const provider = session?.user?.provider;
+  const permsStr = session?.user?.permissions;
+  const eff = permsStr ? parsePermissions(permsStr) : 0n;
+  const isAdminLike = role === "ADMIN" || hasPermission(eff, Permission.ADMIN) || role === "ISSUE_ADMIN" || hasPermission(eff, Permission.MANAGE_ISSUES);
   const showPlex =
-    role === "ADMIN" || role === "ISSUE_ADMIN" || provider === "plex";
+    isAdminLike || provider === "plex";
   const showJellyfin =
-    role === "ADMIN" ||
-    role === "ISSUE_ADMIN" ||
+    isAdminLike ||
     provider === "jellyfin" ||
     provider === "jellyfin-quickconnect";
   // `image` isn't part of SummonarrSession yet — claims are kept slim. Avatar

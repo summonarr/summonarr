@@ -10,6 +10,7 @@ import { MaintenanceBanner } from "@/components/layout/maintenance-banner";
 import { prisma } from "@/lib/prisma";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 
@@ -30,7 +31,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   // DB-checked, so revocation + role demotion are honored, not just JWT sig+expiry.
   const session = await authActive();
   if (!session) redirect("/login");
-  const isAdmin = session.user.role === "ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
 
   let motdBody  = "";
   let motdTitle = "";

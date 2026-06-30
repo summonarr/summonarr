@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { SyncSettingsCard } from "@/components/admin/trash-guides/sync-settings-card";
 import { GithubTokenCard } from "@/components/admin/trash-guides/github-token-card";
@@ -18,7 +19,7 @@ const SETTING_KEYS = [
 
 export default async function TrashGuidesSettingsPage() {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...SETTING_KEYS] } },

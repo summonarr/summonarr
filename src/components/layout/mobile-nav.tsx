@@ -23,6 +23,7 @@ import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { SearchBar } from "@/components/layout/header";
+import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
 
 type Tab = {
   href: string;
@@ -54,6 +55,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const tabs = buildTabs(
     role,
     filterNavByFeatures(userNavItems, featureFlags),
+    session?.user?.permissions,
   );
   const someTabActive = tabs.some((t) => t.match(pathname));
 
@@ -265,7 +267,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   );
 }
 
-function buildTabs(role: string | undefined, userItems: readonly { href: string }[]): Tab[] {
+function buildTabs(role: string | undefined, userItems: readonly { href: string }[], sessionPerms?: string): Tab[] {
   const has = (href: string) => userItems.some((i) => i.href === href);
 
   const browseHref = has("/movies")
@@ -301,7 +303,13 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
       p === "/requests" || p === "/issues" || p === "/votes",
   };
 
-  if (role === "ADMIN") {
+  const permsStr = sessionPerms;
+  const eff = permsStr ? parsePermissions(permsStr) : 0n;
+  const hasAdmin = hasPermission(eff, Permission.ADMIN);
+  const hasManageUsers = hasPermission(eff, Permission.MANAGE_USERS);
+  const hasManageReqs = hasPermission(eff, Permission.MANAGE_REQUESTS);
+  const hasManageIssues = hasPermission(eff, Permission.MANAGE_ISSUES);
+  if (role === "ADMIN" || hasAdmin || hasManageUsers || hasManageReqs) {
     const admin: Tab = {
       href: "/admin",
       label: "Admin",
@@ -311,7 +319,7 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
     return [discover, browse, requests, admin];
   }
 
-  if (role === "ISSUE_ADMIN") {
+  if (role === "ISSUE_ADMIN" || hasManageIssues) {
     const issues: Tab = {
       href: "/admin/issues",
       label: "Issues",

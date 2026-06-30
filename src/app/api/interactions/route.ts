@@ -17,7 +17,8 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
-import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
+import { runWithSerializableRetry } from "@/lib/serializable-retry";
 
 export const dynamic = "force-dynamic";
 
@@ -612,8 +613,11 @@ async function handleComponent(interaction: any): Promise<void> {
         prisma.setting.findUnique({ where: { key: "quotaLimit" } }),
         prisma.setting.findUnique({ where: { key: "quotaPeriod" } }),
       ]);
+      let rq: ResolvedQuota | null = null;
+      let quotaApplies = false;
       if (!hasPermission(effPerms, Permission.QUOTA_UNLIMITED)) {
-        const rq = resolveUserQuota(
+        quotaApplies = true;
+        rq = resolveUserQuota(
           mediaType,
           {
             movieQuotaLimit: dbUser.movieQuotaLimit ?? null,
@@ -624,7 +628,7 @@ async function handleComponent(interaction: any): Promise<void> {
           parseQuotaLimit(quotaLimitRow?.value),
           quotaPeriodRow?.value ?? "week",
         );
-        if (rq.limit > 0) {
+        if (rq && rq.limit > 0) {
           const count = await prisma.mediaRequest.count({
             where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
           });
@@ -679,7 +683,17 @@ async function handleComponent(interaction: any): Promise<void> {
         } else if (mayAutoApprove) {
           // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
           // scheduleDelayed job still yields a follow-up notification.
-          const request = await prisma.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
+          const request = await runWithSerializableRetry(async () =>
+            prisma.$transaction(async (tx) => {
+              if (quotaApplies && rq && rq.limit > 0) {
+                const count = await tx.mediaRequest.count({
+                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                });
+                if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
+              }
+              return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
+            })
+          );
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
@@ -774,7 +788,17 @@ async function handleComponent(interaction: any): Promise<void> {
             note = "Added — this title is already approved, so you'll be notified when it's ready.";
             confirmEmbed.color = 0x57f287;
           } else {
-            const pendingRequest = await prisma.mediaRequest.create({ data: baseData });
+            const pendingRequest = await runWithSerializableRetry(async () =>
+              prisma.$transaction(async (tx) => {
+                if (quotaApplies && rq && rq.limit > 0) {
+                  const count = await tx.mediaRequest.count({
+                    where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                  });
+                  if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
+                }
+                return tx.mediaRequest.create({ data: baseData });
+              })
+            );
             const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
             // Only the earliest PENDING request for a title alerts admins — a later duplicate
             // (different user requesting the same still-pending title) is nothing new to review.
@@ -808,6 +832,12 @@ async function handleComponent(interaction: any): Promise<void> {
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
+        if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `You have reached your request quota of ${rq?.limit ?? 0} per ${rq?.windowLabel ?? "period"}.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
         throw err;
       }
 
@@ -838,6 +868,29 @@ async function handleComponent(interaction: any): Promise<void> {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: "⛔ You don't have permission to use these buttons.", flags: 64 }),
+          timeoutMs: 15_000,
+        });
+        return;
+      }
+      const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
+      if (maintRow?.value === "true") {
+        if (adminUser.role !== "ADMIN") {
+          await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
+            allowedHosts: DISCORD_HOSTS,
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content: "Service unavailable during maintenance.", flags: 64 }),
+            timeoutMs: 15_000,
+          });
+          return;
+        }
+      }
+      if (!checkRateLimit(`discord-admin-action:${adminUser.id}`, 30, 60 * 1000)) {
+        await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
+          allowedHosts: DISCORD_HOSTS,
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: "Too many attempts — please wait.", flags: 64 }),
           timeoutMs: 15_000,
         });
         return;

@@ -195,13 +195,15 @@ export async function verifyAndRefreshSession(
     const cutoffSec = oldIatSec + 1;
     const cutoffMs = cutoffSec * 1000;
     const rotated = await prisma.$transaction(async (tx) => {
-      const row = await tx.authSession
-        .update({
-          where: { sessionId: claims.sessionId },
-          data: { sessionId: newSessionId },
-        })
-        .catch(() => null);
-      if (!row) return false;
+      const existingRow = await tx.authSession.findUnique({
+        where: { sessionId: claims.sessionId },
+        select: { id: true },
+      });
+      if (!existingRow) return false;
+      await tx.authSession.update({
+        where: { sessionId: claims.sessionId },
+        data: { sessionId: newSessionId },
+      });
       const userRow = await tx.user.findUnique({
         where: { id: claims.id },
         select: { sessionsRevokedAt: true },

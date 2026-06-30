@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { Lock, Download, Upload } from "@/components/icons";
 import { BackupUI } from "@/components/admin/backup-ui";
 import { requireFeature } from "@/lib/features";
@@ -10,7 +11,7 @@ export const dynamic = "force-dynamic";
 export default async function BackupPage() {
   await requireFeature("feature.admin.backup");
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   return (
     <div className="ds-page-enter">

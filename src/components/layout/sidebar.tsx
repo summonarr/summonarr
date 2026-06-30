@@ -24,10 +24,11 @@ export function Sidebar({
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
+  const perms = session?.user?.permissions;
 
   const visibleUserItems = filterNavByFeatures(userNavItems, featureFlags);
   const visibleAdminItems = filterNavByFeatures(
-    getVisibleAdminItems(role),
+    getVisibleAdminItems(perms ? { role, permissions: perms } : role),
     featureFlags,
   );
 

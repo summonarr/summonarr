@@ -272,10 +272,29 @@ export async function proxy(request: NextRequest) {
 
     const lowerPath = pathname.toLowerCase();
     if (lowerPath.startsWith("/admin") && role !== "ADMIN") {
-      if (
-        role !== "ISSUE_ADMIN" ||
-        !lowerPath.startsWith("/admin/issues")
-      ) {
+      const perms = effectivePermissions(
+        role ?? "USER",
+        parsePermissions(refreshResult.claims.permissions),
+      );
+      // Honor granular MANAGE_* bits for page access (proxy must not redirect
+      // before the server component's bit guard can run). ADMIN bit covers all.
+      const canIssues = hasPermission(perms, Permission.MANAGE_ISSUES);
+      const canUsers = hasPermission(perms, Permission.MANAGE_USERS);
+      const canRequests = hasPermission(perms, Permission.MANAGE_REQUESTS);
+      const isFullAdmin = hasPermission(perms, Permission.ADMIN);
+      let allowed = isFullAdmin;
+      if (!allowed) {
+        if (lowerPath.startsWith("/admin/issues")) {
+          allowed = canIssues;
+        } else if (lowerPath.startsWith("/admin/users")) {
+          allowed = canUsers;
+        } else if (lowerPath === "/admin" || lowerPath.startsWith("/admin/")) {
+          // Default admin surface (requests list) + catch-all for other admin pages
+          // that pages themselves can further restrict (activity etc).
+          allowed = canRequests || canUsers || canIssues;
+        }
+      }
+      if (!allowed) {
         const baseUrl =
           process.env.AUTH_URL ??
           request.nextUrl.origin;

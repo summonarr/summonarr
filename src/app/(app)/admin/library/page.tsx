@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { WarmCacheButton } from "@/components/admin/warm-cache-button";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
@@ -232,7 +233,7 @@ export default async function LibraryDiffPage({
   searchParams: Promise<{ type?: string; server?: string; tmdbId?: string; mediaType?: string }>;
 }) {
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { type, server: highlightServer, tmdbId: highlightTmdbIdStr, mediaType: highlightMediaType } = await searchParams;
   const activeType = type === "movie" ? "MOVIE" : type === "tv" ? "TV" : null;

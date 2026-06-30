@@ -4,6 +4,7 @@ import { decryptToken } from "@/lib/token-crypto";
 import { isFeatureEnabled } from "@/lib/features";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { encryptForDevice } from "@/lib/push-e2e";
+import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
@@ -235,11 +236,16 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
 }
 
 async function getAdminSubscriptions(excludeUserId?: string) {
-  return prisma.pushSubscription.findMany({
-    where: {
-      ...(excludeUserId ? { userId: { not: excludeUserId } } : {}),
-      user: { role: "ADMIN" },
-    },
+  // Bitmask: MANAGE_REQUESTS holders (new requests, deletion votes, manual arr interaction).
+  const subs = await prisma.pushSubscription.findMany({
+    where: excludeUserId ? { userId: { not: excludeUserId } } : {},
+    include: { user: { select: { role: true, permissions: true } } },
+  });
+  return subs.filter((s) => {
+    const p = s.user?.permissions ?? 0;
+    const r = s.user?.role ?? "USER";
+    const perms = effectivePermissions(r, parsePermissions(String(p)));
+    return hasPermission(perms, Permission.MANAGE_REQUESTS);
   });
 }
 
@@ -250,14 +256,18 @@ async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restri
     : opts.excludeUserId
       ? { userId: { not: opts.excludeUserId } }
       : {};
-  return prisma.pushSubscription.findMany({
+  const subs = await prisma.pushSubscription.findMany({
     where: {
       ...userIdFilter,
-      user: {
-        role: { in: ["ADMIN", "ISSUE_ADMIN"] },
-        notifyOnIssue: true,
-      },
+      user: { notifyOnIssue: true },
     },
+    include: { user: { select: { role: true, permissions: true } } },
+  });
+  return subs.filter((s) => {
+    const p = s.user?.permissions ?? 0;
+    const r = s.user?.role ?? "USER";
+    const perms = effectivePermissions(r, parsePermissions(String(p)));
+    return hasPermission(perms, Permission.MANAGE_ISSUES);
   });
 }
 

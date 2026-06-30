@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getArrDiskSpace } from "@/lib/arr-stats";
 import { StatsCharts } from "@/components/admin/stats-charts";
 import { requireFeature } from "@/lib/features";
@@ -11,7 +12,7 @@ export const dynamic = "force-dynamic";
 export default async function StatsPage() {
   await requireFeature("feature.admin.stats");
   const session = await authActive();
-  if (!session || session.user.role !== "ADMIN") redirect("/");
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const [
     statusCounts, mediaTypeCounts, issueStatusCounts,

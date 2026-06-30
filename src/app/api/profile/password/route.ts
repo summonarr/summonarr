@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
+import { invalidateUserSession } from "@/lib/auth";
 import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
     return NextResponse.json(
       { error: "Too many attempts — please wait 15 minutes before trying again." },
@@ -86,6 +90,8 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       where: { userId: session.user.id },
     }),
   ]);
+
+  invalidateUserSession(session.user.id);
 
   void logAudit({
     userId: session.user.id,
