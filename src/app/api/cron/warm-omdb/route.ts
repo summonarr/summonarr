@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, WARM_OMDB_LOCK_ID } from "@/lib/advisory-lock";
 import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
@@ -31,7 +31,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withAdvisoryLock(
-    2004,
+    WARM_OMDB_LOCK_ID,
     async () => {
       const startTime = Date.now();
       const result = await prewarmOmdbCache();

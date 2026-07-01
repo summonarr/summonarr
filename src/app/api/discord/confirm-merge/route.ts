@@ -51,7 +51,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     const { migrated } = await mergeDiscordIntoWebAccount(session.user.id, record.discordId);
     // Consume the code only AFTER the merge succeeds — deleting it first meant a
     // transient merge failure burned the code and the user couldn't retry.
-    await prisma.discordMergeCode.delete({ where: { userId: session.user.id } });
+    // deleteMany (not delete): a concurrent duplicate submit races both callers
+    // past the merge; the loser's bare delete would throw P2025 into the catch
+    // below and turn a SUCCEEDED link into a 409.
+    await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
 
     await assignDiscordRolesOnLink(
       record.discordId,

@@ -114,7 +114,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       data: {
         status: typedStatus,
         pendingNotifyAt,
-        ...(typedAdminNote !== undefined ? { adminNote: typedAdminNote } : {}),
+        // Guard on the RAW body field: sanitizeOptional never returns undefined
+        // (it maps undefined → null), so guarding on typedAdminNote would always
+        // be true and wipe the stored note on every batch transition.
+        ...(adminNote !== undefined ? { adminNote: typedAdminNote } : {}),
         // Approving clears any prior decline; otherwise an APPROVED row keeps
         // permanentlyDeclined=true and the owner's future re-requests stay blocked.
         ...(typedStatus === "APPROVED" ? { permanentlyDeclined: false } : { permanentlyDeclined: typedPermanent }),
@@ -186,12 +189,16 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
   }
 
+  // Emit only for rows THIS call actually transitioned (claimedIds) — an
+  // unclaimed id (already non-PENDING, or claimed by a concurrent batch) was
+  // left untouched, and announcing the batch target for it would push a status
+  // the row never entered.
   const batchRequests = await prisma.mediaRequest.findMany({
-    where: { id: { in: typedIds } },
+    where: { id: { in: claimedIds } },
     select: { id: true, requestedBy: true },
   });
   const ownerMap = new Map(batchRequests.map((r) => [r.id, r.requestedBy]));
-  for (const id of typedIds) {
+  for (const id of claimedIds) {
     const userId = ownerMap.get(id);
     if (!userId) continue;
     // A row whose ARR push failed was rolled back to PENDING — emit its TRUE

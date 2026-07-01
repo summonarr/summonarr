@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
+import { withAdvisoryLock, WARM_MDBLIST_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit } from "@/lib/audit";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
+
+function busyResponse() {
+  return NextResponse.json(
+    { ok: false, error: "MDBList warm already running", retryAfter: 30 },
+    { status: 409, headers: { "Retry-After": "30" } },
+  );
+}
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   const body = await readJsonCappedOr<{ force?: boolean }>(req, 8192, {});
@@ -47,17 +55,25 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  const startTime = Date.now();
-  const result = await prewarmMdblistCache({ force });
-  const durationMs = Date.now() - startTime;
+  // Same advisory lock as /api/cron/warm-mdblist — an admin click (force
+  // included) while the cron warm is running must not double-burn API quota.
+  return withAdvisoryLock(
+    WARM_MDBLIST_LOCK_ID,
+    async () => {
+      const startTime = Date.now();
+      const result = await prewarmMdblistCache({ force });
+      const durationMs = Date.now() - startTime;
 
-  await logAudit({
-    userId: session.user.id,
-    userName: session.user.name,
-    action: "CACHE_WARM",
-    target: "mdblist",
-    details: { ...result, durationMs, trigger: force ? "admin-force" : "admin" },
-  });
+      await logAudit({
+        userId: session.user.id,
+        userName: session.user.name,
+        action: "CACHE_WARM",
+        target: "mdblist",
+        details: { ...result, durationMs, trigger: force ? "admin-force" : "admin" },
+      });
 
-  return NextResponse.json(result);
+      return NextResponse.json(result);
+    },
+    busyResponse,
+  );
 });

@@ -73,6 +73,14 @@ export async function GET(request: NextRequest) {
 
   const startDate = params.get("startDate");
   const endDate = params.get("endDate");
+  // Reject unparseable dates with a 400 BEFORE the audit write below — an
+  // Invalid Date fed into the query throws an uncaught 500, and the paper-trail
+  // row must not record an export that never ran.
+  for (const [name, value] of [["startDate", startDate], ["endDate", endDate]] as const) {
+    if (value && isNaN(new Date(value).getTime())) {
+      return NextResponse.json({ error: `${name} must be a valid date` }, { status: 400 });
+    }
+  }
   if (startDate || endDate) {
     where.startedAt = {
       ...(startDate ? { gte: new Date(startDate) } : {}),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check } from "@/components/icons";
@@ -23,7 +23,11 @@ export function CastSection({ cast }: CastSectionProps) {
   const [selectedActor, setSelectedActor] = useState<CastMember | null>(null);
   const [personData, setPersonData] = useState<PersonDetails | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [reqStates, setReqStates] = useState<Map<string, CreditReqState>>(new Map());
+  // Tracks which actor's fetch is current so a late response for a previously
+  // opened (or closed) actor can't render under another actor's header.
+  const openActorIdRef = useRef<number | null>(null);
   const router = useRouter();
 
   function getReqState(credit: PersonCredit): CreditReqState {
@@ -82,20 +86,29 @@ export function CastSection({ cast }: CastSectionProps) {
   }
 
   const openActor = useCallback(async (member: CastMember) => {
+    openActorIdRef.current = member.id;
     setSelectedActor(member);
     setPersonData(null);
+    setLoadError(false);
     setLoading(true);
     try {
       const res = await fetch(withBasePath(`/api/person/${member.id}`));
-      if (res.ok) setPersonData(await res.json());
+      const data: PersonDetails | null = res.ok ? await res.json() : null;
+      if (openActorIdRef.current !== member.id) return; // stale — another actor opened or dialog closed
+      if (data) setPersonData(data);
+      else setLoadError(true);
+    } catch {
+      if (openActorIdRef.current === member.id) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (openActorIdRef.current === member.id) setLoading(false);
     }
   }, []);
 
   const close = useCallback(() => {
+    openActorIdRef.current = null;
     setSelectedActor(null);
     setPersonData(null);
+    setLoadError(false);
   }, []);
 
   useEffect(() => {
@@ -338,6 +351,15 @@ export function CastSection({ cast }: CastSectionProps) {
                     ))}
                   </div>
                 </div>
+              )}
+
+              {!loading && loadError && (
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 12, color: "var(--ds-danger)" }}
+                >
+                  Could not load filmography. Close and try again.
+                </p>
               )}
 
               {!loading && personData && personData.credits.length === 0 && (

@@ -4,6 +4,8 @@ import { Client } from "pg";
 
 // Lock IDs assigned to long-running cron / admin operations. The same id is reused across the cron
 // route and admin routes that mutate the same external state, so admin actions cannot race a cron run.
+export const WARM_OMDB_LOCK_ID = 2004;
+export const WARM_MDBLIST_LOCK_ID = 2005;
 export const TRASH_SYNC_LOCK_ID = 2010;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.

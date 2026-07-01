@@ -142,6 +142,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       role: true,
       permissions: true,
       discordId: true,
+      deactivatedAt: true,
       movieQuotaLimit: true,
       movieQuotaDays: true,
       tvQuotaLimit: true,
@@ -149,6 +150,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     },
   });
   if (!target) return NextResponse.json({ error: "Target user not found" }, { status: 404 });
+  // A deactivated account can't sign in and shouldn't accumulate requests via the
+  // on-behalf flow (the picker filters these out, but the id is client-supplied).
+  if (target.deactivatedAt != null) {
+    return NextResponse.json({ error: "Target user is deactivated" }, { status: 422 });
+  }
 
   const targetPerms = effectivePermissions(target.role, target.permissions);
 

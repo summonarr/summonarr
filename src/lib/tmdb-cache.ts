@@ -35,6 +35,33 @@ export async function getCache<T>(key: string): Promise<T | null> {
   }
 }
 
+// Batch variant of getCache — one findMany instead of N sequential point reads
+// (the tvdb→tmdb resolver hits this on every sync run). Same semantics as
+// getCache: expired rows are misses and are lazily deleted, malformed JSON is a miss.
+export async function getCacheMany<T>(keys: readonly string[]): Promise<Map<string, T>> {
+  const out = new Map<string, T>();
+  if (keys.length === 0) return out;
+  const rows = await prisma.tmdbCache.findMany({ where: { key: { in: [...keys] } } });
+  const now = new Date();
+  const expired: string[] = [];
+  for (const row of rows) {
+    if (now > row.expiresAt) {
+      expired.push(row.key);
+      continue;
+    }
+    try {
+      out.set(row.key, JSON.parse(row.data) as T);
+    } catch {
+      // malformed rows are misses, same as getCache
+    }
+  }
+  if (expired.length > 0) {
+    // expiresAt guard so a concurrent setCache upsert isn't clobbered by stale-read cleanup
+    prisma.tmdbCache.deleteMany({ where: { key: { in: expired }, expiresAt: { lt: new Date() } } }).catch(() => {});
+  }
+  return out;
+}
+
 // Returns expired entries with isStale=true so callers can serve the old value and revalidate async
 export async function getCacheStale<T>(key: string): Promise<{ value: T | null; isStale: boolean }> {
   const row = await prisma.tmdbCache.findUnique({ where: { key } });
@@ -44,6 +71,26 @@ export async function getCacheStale<T>(key: string): Promise<{ value: T | null; 
   } catch {
     return { value: null, isStale: false };
   }
+}
+
+// Batch variant of getCacheStale — one findMany instead of N point reads. Same
+// semantics: expired rows are served with isStale=true (never deleted);
+// missing/unparseable keys are absent from the map (the `{ value: null }` case).
+export async function getCacheStaleMany<T>(
+  keys: readonly string[],
+): Promise<Map<string, { value: T; isStale: boolean }>> {
+  const out = new Map<string, { value: T; isStale: boolean }>();
+  if (keys.length === 0) return out;
+  const rows = await prisma.tmdbCache.findMany({ where: { key: { in: [...keys] } } });
+  const now = new Date();
+  for (const row of rows) {
+    try {
+      out.set(row.key, { value: JSON.parse(row.data) as T, isStale: now > row.expiresAt });
+    } catch {
+      // malformed rows are misses, same as getCacheStale
+    }
+  }
+  return out;
 }
 
 export async function setCache<T>(key: string, data: T, ttlSeconds: number): Promise<void> {

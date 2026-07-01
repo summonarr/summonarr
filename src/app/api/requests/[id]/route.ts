@@ -92,7 +92,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       console.error("[arr] Search failed:", err);
       arrError = arrErrorMessage(err);
     }
-    return NextResponse.json({ ...existing, adminNote: sanitizedAdminNote ?? existing.adminNote, arrError });
+    return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
   }
 
   if (retry) {
@@ -129,7 +129,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       console.error("[arr] Retry push failed:", err);
       arrError = arrErrorMessage(err);
     }
-    return NextResponse.json({ ...existing, adminNote: sanitizedAdminNote ?? existing.adminNote, arrError });
+    return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
   }
 
   if (!status || !VALID_STATUSES.includes(status as ValidStatus)) {
@@ -164,7 +164,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         // Approving clears a prior decline; otherwise an APPROVED row keeps
         // permanentlyDeclined=true and re-requests stay blocked (route.ts:197).
         permanentlyDeclined: false,
-        ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
+        // Guard on the RAW body field: sanitizeOptional never returns undefined
+        // (it maps undefined → null), so guarding on sanitizedAdminNote would
+        // always be true and wipe the stored note on every status transition.
+        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
         // pendingNotifyAt triggers a 90s download-check notification if the item still isn't in the queue
         pendingNotifyAt: new Date(Date.now() + 90_000),
       },
@@ -179,7 +182,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       data: {
         status: "DECLINED",
         permanentlyDeclined: permanent === true,
-        ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
+        // Guard on the RAW body field: sanitizeOptional never returns undefined
+        // (it maps undefined → null), so guarding on sanitizedAdminNote would
+        // always be true and wipe the stored note on every status transition.
+        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
         pendingNotifyAt: null,
       },
     });
@@ -194,7 +200,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       where: { id, status: existing.status },
       data: {
         status: status as ValidStatus,
-        ...(sanitizedAdminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
+        // Guard on the RAW body field: sanitizeOptional never returns undefined
+        // (it maps undefined → null), so guarding on sanitizedAdminNote would
+        // always be true and wipe the stored note on every status transition.
+        ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
 
         ...(status === "AVAILABLE" || status === "DECLINED" ? { pendingNotifyAt: null } : {}),
 
@@ -369,7 +378,13 @@ export const DELETE = withAuth(async (
   }
 
   if (isAdmin) {
-    await prisma.mediaRequest.delete({ where: { id } });
+    // Guarded deleteMany (not delete): a concurrent delete between the stale read
+    // above and here would make a bare delete throw P2025 → 500. count=0 means
+    // the row is already gone — report 404, matching the pre-read above.
+    const { count } = await prisma.mediaRequest.deleteMany({ where: { id } });
+    if (count === 0) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
   } else {
     // Owner self-cancel: delete only if STILL pending. An admin may have approved
     // (and pushed to ARR) between the read above and here — a guarded deleteMany

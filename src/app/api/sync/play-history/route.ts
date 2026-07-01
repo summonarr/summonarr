@@ -823,5 +823,17 @@ async function syncPlayHistory(request: NextRequest) {
     return NextResponse.json({ error: "Sync failed" }, { status: 500 });
   }
 
-  return NextResponse.json(results);
+  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header
+  // (a failed source previously still recorded ok:true, hiding the outage from
+  // the admin System tab). Status stays 200 — this route runs every 5s from the
+  // entrypoint poller, and a non-2xx during a media-server outage would spam the
+  // docker logs with a failure line per tick.
+  const degraded = [
+    ...((results.plex as { error?: string } | undefined)?.error !== undefined ? ["plex"] : []),
+    ...((results.jellyfin as { error?: string } | undefined)?.error !== undefined ? ["jellyfin"] : []),
+  ];
+  return NextResponse.json(
+    results,
+    degraded.length > 0 ? { headers: { "X-Cron-Degraded": degraded.join(",") } } : undefined,
+  );
 }

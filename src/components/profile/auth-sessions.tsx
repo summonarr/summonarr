@@ -6,6 +6,7 @@ import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock, Check, X }
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
+import { formatRelativeTime } from "@/lib/relative-time";
 
 interface AuthSessionRow {
   id: string;
@@ -29,19 +30,11 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
   return                               <Monitor     className="w-4 h-4 shrink-0 text-zinc-400" />;
 }
 
-function timeAgo(date: Date): string {
-  const secs = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-  if (secs < 60)   return "just now";
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
-  return `${Math.floor(secs / 86400)}d ago`;
-}
-
 export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
-  // `timeAgo` and `toLocaleDateString` both diverge between SSR and CSR
+  // `formatRelativeTime` and `toLocaleDateString` both diverge between SSR and CSR
   // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
@@ -100,7 +93,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   </span>
                 )}
                 <span className="flex items-center gap-1 text-xs text-zinc-500">
-                  <Clock className="w-3 h-3" />Active {mounted ? timeAgo(s.lastSeenAt) : ""}
+                  <Clock className="w-3 h-3" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
                 </span>
               </div>
               <p className="text-xs text-zinc-600">

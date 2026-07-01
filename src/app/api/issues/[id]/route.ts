@@ -95,6 +95,14 @@ export const PATCH = withIssueAdmin(async (
     }
   }
   const sanitizedResolution = sanitizeOptional(resolution);
+  // A provided-but-empty resolution (empty/whitespace-only sanitizes to null)
+  // is silently DROPPED by the `!= null` guard below. Clearing a stored resolution
+  // is intentionally unsupported. Reject it loudly ONLY when it's the whole request
+  // (no status change) — so an empty resolution riding alongside a valid status
+  // transition never blocks that transition (a native client may send both fields).
+  if (resolution !== undefined && sanitizedResolution == null && !status) {
+    return NextResponse.json({ error: "resolution must not be empty" }, { status: 400 });
+  }
 
   const updateData: { status?: ValidStatus; resolution?: string } = {};
   if (status) updateData.status = status as ValidStatus;

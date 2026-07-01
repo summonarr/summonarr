@@ -1,11 +1,19 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { withAdvisoryLock, WARM_OMDB_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastOmdbWarmAt";
+
+function busyResponse() {
+  return NextResponse.json(
+    { ok: false, error: "OMDB warm already running", retryAfter: 30 },
+    { status: 409, headers: { "Retry-After": "30" } },
+  );
+}
 
 export const POST = withAdmin(async (_req, _ctx, session) => {
   const now = Date.now();
@@ -29,17 +37,25 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
     );
   }
 
-  const startTime = Date.now();
-  const result = await prewarmOmdbCache();
-  const durationMs = Date.now() - startTime;
+  // Same advisory lock as /api/cron/warm-omdb — an admin click while the cron
+  // warm is running must not double-burn the OMDB free-tier daily quota.
+  return withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    async () => {
+      const startTime = Date.now();
+      const result = await prewarmOmdbCache();
+      const durationMs = Date.now() - startTime;
 
-  await logAudit({
-    userId: session.user.id,
-    userName: session.user.name,
-    action: "CACHE_WARM",
-    target: "omdb",
-    details: { ...result, durationMs, trigger: "admin" },
-  });
+      await logAudit({
+        userId: session.user.id,
+        userName: session.user.name,
+        action: "CACHE_WARM",
+        target: "omdb",
+        details: { ...result, durationMs, trigger: "admin" },
+      });
 
-  return NextResponse.json(result);
+      return NextResponse.json(result);
+    },
+    busyResponse,
+  );
 });

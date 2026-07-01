@@ -191,6 +191,14 @@ class PlexEventStreamManager {
     this.backoffMs = INITIAL_BACKOFF_MS;
     this.loopPromise = this.runLoop().catch((err) => {
       console.warn("[plex-events] loop crashed:", err);
+      // Clear the state doReconcile checks so the next 5s reconcile restarts the
+      // stream — otherwise `running` stays true and every future reconcile
+      // early-returns, leaving SSE dead until process restart. Guard on the
+      // url/token this loop was started with: if the config changed, a newer
+      // loop owns the flag and must not be killed by a stale rejection.
+      if (this.currentUrl === url && this.currentToken === token) {
+        this.running = false;
+      }
     });
   }
 

@@ -104,6 +104,17 @@ export async function notifyUsersRequestsAvailableEmail(
 const ITEM_POLL_INTERVAL_MS = 30_000;
 const ITEM_POLL_MAX = 24;
 
+// One in-flight poll per identical pending set: a season import fires one Download
+// webhook per episode, and each used to spawn its own 12-minute 24×30s poll loop
+// against Plex + Jellyfin — hundreds of concurrent pollers hammering the media
+// servers during a mass import when the library scan lags. The pending rows stay
+// unnotified until a poll completes, so repeat webhooks fetch the same id set and
+// join the running poll (HD and 4K sets differ by is4k scoping, so they key apart).
+// A request row created AFTER a running poll snapshotted its set misses that
+// poll's notify — the sync orchestrator's AVAILABLE+unnotified fallback picks it
+// up on the next tick.
+const inFlightPolls = new Map<string, Promise<void>>();
+
 export async function pollAndNotifyAvailable(
   pending: PendingAvailableRequest[],
   checkPlex: (() => Promise<boolean>) | null,
@@ -114,32 +125,43 @@ export async function pollAndNotifyAvailable(
   const jellyfinConfigured = !!checkJellyfin;
 
   if (!plexConfigured && !jellyfinConfigured) {
+    // No polling happens on this branch — nothing to coalesce.
     await notifyAvailablePerServer(pending, false, false, false, false, logScope);
     return;
   }
 
-  let inPlex = false;
-  let inJellyfin = false;
+  const key = pending.map((r) => r.id).sort().join(",");
+  const running = inFlightPolls.get(key);
+  if (running) return running;
 
-  for (let attempt = 1; attempt <= ITEM_POLL_MAX; attempt++) {
-    await new Promise((r) => setTimeout(r, ITEM_POLL_INTERVAL_MS));
+  const poll = (async () => {
+    let inPlex = false;
+    let inJellyfin = false;
 
-    [inPlex, inJellyfin] = await Promise.all([
-      checkPlex && !inPlex ? checkPlex() : Promise.resolve(inPlex),
-      checkJellyfin && !inJellyfin ? checkJellyfin() : Promise.resolve(inJellyfin),
-    ]);
+    for (let attempt = 1; attempt <= ITEM_POLL_MAX; attempt++) {
+      await new Promise((r) => setTimeout(r, ITEM_POLL_INTERVAL_MS));
 
-    const allSatisfied = pending.every((req) => {
-      const ms = req.user?.mediaServer ?? null;
-      if (!ms) return inPlex || inJellyfin;
-      if (ms === "plex") return inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured));
-      if (ms === "jellyfin") return inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured));
-      return false;
-    });
-    if (allSatisfied) break;
-  }
+      [inPlex, inJellyfin] = await Promise.all([
+        checkPlex && !inPlex ? checkPlex() : Promise.resolve(inPlex),
+        checkJellyfin && !inJellyfin ? checkJellyfin() : Promise.resolve(inJellyfin),
+      ]);
 
-  await notifyAvailablePerServer(pending, inPlex, inJellyfin, plexConfigured, jellyfinConfigured, logScope);
+      const allSatisfied = pending.every((req) => {
+        const ms = req.user?.mediaServer ?? null;
+        if (!ms) return inPlex || inJellyfin;
+        if (ms === "plex") return inPlex || (!plexConfigured && (inJellyfin || !jellyfinConfigured));
+        if (ms === "jellyfin") return inJellyfin || (!jellyfinConfigured && (inPlex || !plexConfigured));
+        return false;
+      });
+      if (allSatisfied) break;
+    }
+
+    await notifyAvailablePerServer(pending, inPlex, inJellyfin, plexConfigured, jellyfinConfigured, logScope);
+  })().finally(() => {
+    inFlightPolls.delete(key);
+  });
+  inFlightPolls.set(key, poll);
+  return poll;
 }
 
 export function notifyRequestStatusChange(

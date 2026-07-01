@@ -106,13 +106,32 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
   return map;
 }
 
-/** Poster paths keyed by `${tmdbId}:${mediaType}` from the TMDB details cache. */
+/**
+ * Poster paths keyed by `${tmdbId}:${mediaType}`. TmdbMediaCore first — plain
+ * `posterPath` column, no `:details` blob transfer/parse. Core rows expire and
+ * get purged, so pairs missing from core fall back to the TMDB details cache.
+ */
 async function posterPathMap(
   items: { tmdbId: number; mediaType: "MOVIE" | "TV" }[],
 ): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   if (items.length === 0) return out;
-  const cacheKeys = items.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
+
+  const pairs = [...new Map(items.map((i) => [`${i.tmdbId}:${i.mediaType}`, i])).values()];
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: { OR: pairs.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType })) },
+    select: { tmdbId: true, mediaType: true, posterPath: true },
+  });
+  // Skip null-poster core rows so they fall through to the blob fallback below
+  // (consistent with poster-cache.ts — the blob may still carry a poster).
+  for (const r of coreRows) {
+    if (r.posterPath != null) out.set(`${r.tmdbId}:${r.mediaType}`, r.posterPath);
+  }
+
+  const misses = pairs.filter((p) => !out.has(`${p.tmdbId}:${p.mediaType}`));
+  if (misses.length === 0) return out;
+
+  const cacheKeys = misses.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
   const rows = await prisma.tmdbCache.findMany({
     where: { key: { in: cacheKeys } },
     select: { key: true, data: true },

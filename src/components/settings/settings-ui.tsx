@@ -37,13 +37,17 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
 
   async function handleSave() {
     setSaveStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ plexLibraries: Array.from(selected).join(",") }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setSaveStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plexLibraries: Array.from(selected).join(",") }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setSaveStatus("error");
+    }
     setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
@@ -136,13 +140,17 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
 
   async function handleSave() {
     setSaveStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jellyfinLibraries: Array.from(selected).join(",") }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setSaveStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jellyfinLibraries: Array.from(selected).join(",") }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setSaveStatus("error");
+    }
     setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
@@ -275,21 +283,26 @@ export function ArrForm({
     setStatus("saving");
     setMessage("");
 
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [urlKey]: url, [keyKey]: apiKey }),
-    });
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [urlKey]: url, [keyKey]: apiKey }),
+      });
 
-    const data: { ok: boolean; error?: string } & Record<string, string> = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string } & Record<string, string | undefined>;
 
-    if (data.ok) {
-      const version = data[versionKey];
-      setMessage(version ? `Connected · v${version}` : "Saved");
-      setStatus("ok");
-      fetchOptions();
-    } else {
-      setMessage(data.error ?? "Failed to save");
+      if (res.ok && data.ok) {
+        const version = data[versionKey];
+        setMessage(version ? `Connected · v${version}` : "Saved");
+        setStatus("ok");
+        fetchOptions();
+      } else {
+        setMessage(data.error ?? "Failed to save");
+        setStatus("error");
+      }
+    } catch {
+      setMessage("Failed to save");
       setStatus("error");
     }
   }
@@ -297,13 +310,17 @@ export function ArrForm({
   async function handleSaveOptions(e: React.FormEvent) {
     e.preventDefault();
     setOptionsSaveStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [folderKey]: rootFolder, [profileKey]: qualityProfileId }),
-    });
-    const data: { ok: boolean; error?: string } = await res.json();
-    setOptionsSaveStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [folderKey]: rootFolder, [profileKey]: qualityProfileId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      setOptionsSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setOptionsSaveStatus("error");
+    }
     setTimeout(() => setOptionsSaveStatus("idle"), 3000);
   }
 
@@ -500,13 +517,17 @@ function WebhookSecretField({
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [payloadKey]: secret }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [payloadKey]: secret }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -865,14 +886,18 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   async function handleDisconnect() {
     setStatus("saving");
     setError("");
-    const res = await fetch(withBasePath("/api/settings/plex"), { method: "DELETE" });
-    if (res.ok) {
-      setConnectedEmail("");
-      setStatus("idle");
-    } else {
-      setError("Failed to disconnect");
-      setStatus("error");
+    try {
+      const res = await fetch(withBasePath("/api/settings/plex"), { method: "DELETE" });
+      if (res.ok) {
+        setConnectedEmail("");
+        setStatus("idle");
+        return;
+      }
+    } catch {
+      // fall through to the shared error state below
     }
+    setError("Failed to disconnect");
+    setStatus("error");
   }
 
   async function handleSaveServerUrl(e: React.FormEvent) {
@@ -1300,20 +1325,24 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        donationPaypal:       paypal,
-        donationVenmo:        venmo,
-        donationZelle:        zelle,
-        donationAmazon:       amazon,
-        donationPatreon:      patreon,
-        donationBuyMeACoffee: buyMeACoffee,
-      }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          donationPaypal:       paypal,
+          donationVenmo:        venmo,
+          donationZelle:        zelle,
+          donationAmazon:       amazon,
+          donationPatreon:      patreon,
+          donationBuyMeACoffee: buyMeACoffee,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1407,18 +1436,22 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        rateLimitRegister: register,
-        rateLimitRequests: requests,
-        rateLimitIssues: issues,
-        maxPushSubscriptions,
-      }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rateLimitRegister: register,
+          rateLimitRequests: requests,
+          rateLimitIssues: issues,
+          maxPushSubscriptions,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1504,17 +1537,21 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionDefaultDuration: defaultDuration,
-        sessionMobileDuration:  mobileDuration,
-        sessionMaxDuration:     maxDuration,
-      }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionDefaultDuration: defaultDuration,
+          sessionMobileDuration:  mobileDuration,
+          sessionMaxDuration:     maxDuration,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1579,13 +1616,17 @@ export function SiteTitleForm({ initialTitle }: { initialTitle: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siteTitle: title }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteTitle: title }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1619,13 +1660,17 @@ export function SiteUrlForm({ initialUrl }: { initialUrl: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siteUrl: url }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ siteUrl: url }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1669,16 +1714,20 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        maintenanceEnabled: enabled ? "true" : "false",
-        maintenanceMessage: message,
-      }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          maintenanceEnabled: enabled ? "true" : "false",
+          maintenanceMessage: message,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -1733,13 +1782,17 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setMotdStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ motdEnabled: enabled ? "true" : "false", motdTitle: title, motdBody: body }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setMotdStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ motdEnabled: enabled ? "true" : "false", motdTitle: title, motdBody: body }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setMotdStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setMotdStatus("error");
+    }
     setTimeout(() => setMotdStatus("idle"), 3000);
   }
 
@@ -1842,19 +1895,24 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     setStatus("saving");
     setMessage("");
 
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ discordBotToken: botToken, discordClientId: clientId, discordGuildId: guildId, discordPublicKey: publicKey, discordAutoApproveRoles: autoApproveRoles, discordRequireLinkedAccount: requireLinkedAccount ? "true" : "false", discordRequireLinkedAccountSite: requireLinkedAccountSite ? "true" : "false", discordAdminRequestChannelId: adminRequestChannelId, discordWelcomeChannelId: welcomeChannelId, discordNotifyChannelId: notifyChannelId, discordInviteUrl: inviteUrl, discordLinkedRoleId: linkedRoleId, discordPlexRoleId: plexRoleId, discordJellyfinRoleId: jellyfinRoleId, discordAdminRoleId: adminRoleId, discordIssueAdminRoleId: issueAdminRoleId }),
-    });
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discordBotToken: botToken, discordClientId: clientId, discordGuildId: guildId, discordPublicKey: publicKey, discordAutoApproveRoles: autoApproveRoles, discordRequireLinkedAccount: requireLinkedAccount ? "true" : "false", discordRequireLinkedAccountSite: requireLinkedAccountSite ? "true" : "false", discordAdminRequestChannelId: adminRequestChannelId, discordWelcomeChannelId: welcomeChannelId, discordNotifyChannelId: notifyChannelId, discordInviteUrl: inviteUrl, discordLinkedRoleId: linkedRoleId, discordPlexRoleId: plexRoleId, discordJellyfinRoleId: jellyfinRoleId, discordAdminRoleId: adminRoleId, discordIssueAdminRoleId: issueAdminRoleId }),
+      });
 
-    const data: { ok: boolean; error?: string } = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
 
-    if (data.ok) {
-      setMessage("Saved · Restart the bot for changes to take effect");
-      setStatus("ok");
-    } else {
-      setMessage(data.error ?? "Failed to save");
+      if (res.ok && data.ok) {
+        setMessage("Saved · Restart the bot for changes to take effect");
+        setStatus("ok");
+      } else {
+        setMessage(data.error ?? "Failed to save");
+        setStatus("error");
+      }
+    } catch {
+      setMessage("Failed to save");
       setStatus("error");
     }
     setTimeout(() => setStatus("idle"), 5000);
@@ -2266,14 +2324,19 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             onClick={async () => {
               setRegStatus("loading");
               setRegMessage("");
-              const res = await fetch(withBasePath("/api/discord/register-commands"), { method: "POST" });
-              const data: { ok?: boolean; error?: string; message?: string } = await res.json();
-              if (data.ok) {
-                setRegStatus("ok");
-                setRegMessage(data.message ?? "Commands registered");
-              } else {
+              try {
+                const res = await fetch(withBasePath("/api/discord/register-commands"), { method: "POST" });
+                const data: { ok?: boolean; error?: string; message?: string } = await res.json().catch(() => ({}));
+                if (data.ok) {
+                  setRegStatus("ok");
+                  setRegMessage(data.message ?? "Commands registered");
+                } else {
+                  setRegStatus("error");
+                  setRegMessage(data.error ?? "Failed");
+                }
+              } catch {
                 setRegStatus("error");
-                setRegMessage(data.error ?? "Failed");
+                setRegMessage("Request failed");
               }
               setTimeout(() => setRegStatus("idle"), 6000);
             }}
@@ -2373,19 +2436,24 @@ export function EmailForm({
       body.resendFrom = resendFrom;
     }
 
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
 
-    const data: { ok: boolean; error?: string; smtpError?: string; smtpTested?: boolean } = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; smtpError?: string; smtpTested?: boolean };
 
-    if (data.ok) {
-      setMessage(data.smtpTested ? "Saved · Test email sent" : "Saved");
-      setStatus("ok");
-    } else {
-      setMessage(data.smtpError ?? data.error ?? "Failed to save");
+      if (res.ok && data.ok) {
+        setMessage(data.smtpTested ? "Saved · Test email sent" : "Saved");
+        setStatus("ok");
+      } else {
+        setMessage(data.smtpError ?? data.error ?? "Failed to save");
+        setStatus("error");
+      }
+    } catch {
+      setMessage("Failed to save");
       setStatus("error");
     }
   }
@@ -2901,25 +2969,34 @@ export function OmdbForm({ initialApiKey }: { initialApiKey: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ omdbApiKey: apiKey }),
-    });
-    setStatus(res.ok ? "saved" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ omdbApiKey: apiKey }),
+      });
+      setStatus(res.ok ? "saved" : "error");
+    } catch {
+      setStatus("error");
+    }
   }
 
   async function handleTest() {
     setTestStatus("testing");
     setTestMessage("");
-    const res = await fetch(withBasePath("/api/settings/test-ratings"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service: "omdb" }),
-    });
-    const data = await res.json() as { ok: boolean; message?: string; error?: string };
-    setTestStatus(data.ok ? "ok" : "error");
-    setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    try {
+      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: "omdb" }),
+      });
+      const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
+      setTestStatus(data.ok ? "ok" : "error");
+      setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    } catch {
+      setTestStatus("error");
+      setTestMessage("Test failed");
+    }
   }
 
   return (
@@ -2967,25 +3044,34 @@ export function MdblistForm({ initialApiKey }: { initialApiKey: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mdblistApiKey: apiKey }),
-    });
-    setStatus(res.ok ? "saved" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mdblistApiKey: apiKey }),
+      });
+      setStatus(res.ok ? "saved" : "error");
+    } catch {
+      setStatus("error");
+    }
   }
 
   async function handleTest() {
     setTestStatus("testing");
     setTestMessage("");
-    const res = await fetch(withBasePath("/api/settings/test-ratings"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service: "mdblist" }),
-    });
-    const data = await res.json() as { ok: boolean; message?: string; error?: string };
-    setTestStatus(data.ok ? "ok" : "error");
-    setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    try {
+      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: "mdblist" }),
+      });
+      const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
+      setTestStatus(data.ok ? "ok" : "error");
+      setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    } catch {
+      setTestStatus("error");
+      setTestMessage("Test failed");
+    }
   }
 
   return (
@@ -3034,25 +3120,34 @@ export function TraktForm({ initialApiKey }: { initialApiKey: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ traktClientId: apiKey }),
-    });
-    setStatus(res.ok ? "saved" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ traktClientId: apiKey }),
+      });
+      setStatus(res.ok ? "saved" : "error");
+    } catch {
+      setStatus("error");
+    }
   }
 
   async function handleTest() {
     setTestStatus("testing");
     setTestMessage("");
-    const res = await fetch(withBasePath("/api/settings/test-ratings"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service: "trakt" }),
-    });
-    const data = await res.json() as { ok: boolean; message?: string; error?: string };
-    setTestStatus(data.ok ? "ok" : "error");
-    setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    try {
+      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: "trakt" }),
+      });
+      const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
+      setTestStatus(data.ok ? "ok" : "error");
+      setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    } catch {
+      setTestStatus("error");
+      setTestMessage("Test failed");
+    }
   }
 
   return (
@@ -3101,25 +3196,34 @@ export function IpinfoForm({ initialApiKey }: { initialApiKey: string }) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ipinfoToken: apiKey }),
-    });
-    setStatus(res.ok ? "saved" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ipinfoToken: apiKey }),
+      });
+      setStatus(res.ok ? "saved" : "error");
+    } catch {
+      setStatus("error");
+    }
   }
 
   async function handleTest() {
     setTestStatus("testing");
     setTestMessage("");
-    const res = await fetch(withBasePath("/api/settings/test-ratings"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ service: "ipinfo" }),
-    });
-    const data = await res.json() as { ok: boolean; message?: string; error?: string };
-    setTestStatus(data.ok ? "ok" : "error");
-    setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    try {
+      const res = await fetch(withBasePath("/api/settings/test-ratings"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: "ipinfo" }),
+      });
+      const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
+      setTestStatus(data.ok ? "ok" : "error");
+      setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+    } catch {
+      setTestStatus("error");
+      setTestMessage("Test failed");
+    }
   }
 
   return (
@@ -3308,18 +3412,22 @@ export function LibraryMatchForm({
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setSaveStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method:  "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        plexMoviePathStripPrefix:     plexMoviePrefix,
-        plexTvPathStripPrefix:        plexTvPrefix,
-        jellyfinMoviePathStripPrefix: jellyfinMoviePrefix,
-        jellyfinTvPathStripPrefix:    jellyfinTvPrefix,
-      }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setSaveStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method:  "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          plexMoviePathStripPrefix:     plexMoviePrefix,
+          plexTvPathStripPrefix:        plexTvPrefix,
+          jellyfinMoviePathStripPrefix: jellyfinMoviePrefix,
+          jellyfinTvPathStripPrefix:    jellyfinTvPrefix,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setSaveStatus("error");
+    }
     setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
@@ -3387,13 +3495,17 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ quotaLimit: limit, quotaPeriod: period }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quotaLimit: limit, quotaPeriod: period }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -3444,15 +3556,26 @@ export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boo
 
   async function toggle() {
     const next = !enabled;
+    const prev = enabled;
     setEnabled(next);
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enableUserEmails: next ? "true" : "false" }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enableUserEmails: next ? "true" : "false" }),
+      });
+      const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
+      if (!data.ok) {
+        setEnabled(prev);
+        setStatus("error");
+      } else {
+        setStatus("ok");
+      }
+    } catch {
+      setEnabled(prev);
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -3489,13 +3612,17 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deletionVoteThreshold: threshold }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ deletionVoteThreshold: threshold }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+    } catch {
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -3645,15 +3772,26 @@ export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean
 
   async function toggle() {
     const next = !enabled;
+    const prev = enabled;
     setEnabled(next);
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ request4kAll: next ? "true" : "false" }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request4kAll: next ? "true" : "false" }),
+      });
+      const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
+      if (!data.ok) {
+        setEnabled(prev);
+        setStatus("error");
+      } else {
+        setStatus("ok");
+      }
+    } catch {
+      setEnabled(prev);
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
@@ -3702,33 +3840,49 @@ export function EnableMachineSessionToggle({
 
   async function toggle() {
     const next = !enabled;
+    const prev = enabled;
     setEnabled(next);
     setStatus("saving");
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enableMachineSession: next ? "true" : "false" }),
-    });
-    const data: { ok: boolean } = await res.json();
-    setStatus(data.ok ? "ok" : "error");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enableMachineSession: next ? "true" : "false" }),
+      });
+      const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
+      if (!data.ok) {
+        setEnabled(prev);
+        setStatus("error");
+      } else {
+        setStatus("ok");
+      }
+    } catch {
+      setEnabled(prev);
+      setStatus("error");
+    }
     setTimeout(() => setStatus("idle"), 3000);
   }
 
   async function saveAllowedIps() {
     setIpStatus("saving");
     setIpError(null);
-    const res = await fetch(withBasePath("/api/settings"), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ machineSessionAllowedIps: allowedIps.trim() }),
-    });
-    const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
-    if (res.ok && data.ok) {
-      setSavedAllowedIps(allowedIps.trim());
-      setIpStatus("ok");
-      setTimeout(() => setIpStatus("idle"), 3000);
-    } else {
-      setIpError(data.error ?? "Failed to save");
+    try {
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ machineSessionAllowedIps: allowedIps.trim() }),
+      });
+      const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setSavedAllowedIps(allowedIps.trim());
+        setIpStatus("ok");
+        setTimeout(() => setIpStatus("idle"), 3000);
+      } else {
+        setIpError(data.error ?? "Failed to save");
+        setIpStatus("error");
+      }
+    } catch {
+      setIpError("Failed to save");
       setIpStatus("error");
     }
   }

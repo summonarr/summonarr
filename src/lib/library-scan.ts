@@ -15,6 +15,10 @@ export type ScanMediaType = "movie" | "tv";
 // Debounce prevents redundant back-to-back scan triggers from rapid webhook bursts (e.g. season grab)
 const SCAN_DEBOUNCE_MS = 15_000;
 
+// Debounce deadline: a sustained import burst (webhooks < 15s apart) would otherwise
+// reset the timer forever and postpone the scan until the burst ends.
+const SCAN_MAX_WAIT_MS = 2 * 60_000;
+
 // After this many retries the scan fires anyway so a stalled Arr queue doesn't block library updates indefinitely
 const MAX_QUEUE_WAIT_RETRIES = 4;
 
@@ -23,6 +27,7 @@ interface PendingScan {
   promise: Promise<void>;
   resolve: () => void;
   retries: number;
+  firstScheduledAt: number;
 
   tmdbId?: number;
   // Which ARR instance's queue to gate on. A 4K-only grab lives in the 4K queue, so
@@ -44,8 +49,12 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
 
   const existing = pending.get(mediaType);
   if (existing) {
-    clearTimeout(existing.timer);
-    existing.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
+    // Reset the debounce only within the max-wait window; past it, leave the
+    // running timer so the scan fires despite a continuing webhook burst.
+    if (Date.now() - existing.firstScheduledAt < SCAN_MAX_WAIT_MS) {
+      clearTimeout(existing.timer);
+      existing.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
+    }
     // Queue-gate hint; last writer wins on coalesce (a best-effort timing optimisation).
     if (variant !== undefined) existing.variant = variant;
 
@@ -69,6 +78,7 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
     promise,
     resolve,
     retries: 0,
+    firstScheduledAt: Date.now(),
     tmdbId,
     variant,
   };

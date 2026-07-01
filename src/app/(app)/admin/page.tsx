@@ -2,7 +2,7 @@ import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { type RequestStatus, type MediaType, Prisma } from "@/generated/prisma";
 import { posterUrl, getMovieDetails, getTVDetails } from "@/lib/tmdb";
-import { getCacheStale } from "@/lib/tmdb-cache";
+import { getCacheStaleMany } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -54,10 +54,23 @@ export default async function AdminPage({
     : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
     : { _max: { createdAt: "desc" } };
 
-  const [statusCounts, userCount, allGroups, pagedGroups, userRequestCounts] = await Promise.all([
+  // Distinct-group count as a raw aggregate: the previous groupBy pulled every
+  // (tmdbId, mediaType) group row across the wire only to read `.length`.
+  const statusCond = statusFilter
+    ? Prisma.sql`AND "status" = ${statusFilter}::"RequestStatus"`
+    : Prisma.empty;
+  const typeCond = typeFilter
+    ? Prisma.sql`AND "mediaType" = ${typeFilter}::"MediaType"`
+    : Prisma.empty;
+
+  const [statusCounts, userCount, distinctGroups, pagedGroups, userRequestCounts] = await Promise.all([
     prisma.mediaRequest.groupBy({ by: ["status"], _count: { status: true } }),
     prisma.user.count(),
-    prisma.mediaRequest.groupBy({ by: ["tmdbId", "mediaType"], where }),
+    prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
+      SELECT COUNT(DISTINCT ("tmdbId", "mediaType")) AS count
+      FROM "MediaRequest"
+      WHERE TRUE ${statusCond} ${typeCond}
+    `),
     prisma.mediaRequest.groupBy({
       by: ["tmdbId", "mediaType"],
       where,
@@ -68,7 +81,7 @@ export default async function AdminPage({
     prisma.mediaRequest.groupBy({ by: ["requestedBy"], _count: { id: true } }),
   ]);
 
-  const total = allGroups.length;
+  const total = Number(distinctGroups[0]?.count ?? 0);
 
   const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
   const [requests, plexItems, jellyfinItems] = pairs.length
@@ -106,13 +119,12 @@ export default async function AdminPage({
     p.mediaType === "MOVIE" ? `movie:${p.tmdbId}:details` : `tv:${p.tmdbId}:details`;
 
   // 1. Database first: read the cached TMDB detail (with all rating sources)
-  //    straight from TmdbCache. No external calls; stale rows still serve.
-  const cached = pairs.length
-    ? await Promise.all(pairs.map((p) => getCacheStale<TmdbMedia>(cacheKey(p))))
-    : [];
+  //    straight from TmdbCache — one findMany over the page's keys, not a
+  //    point read per pair. No external calls; stale rows still serve.
+  const cached = await getCacheStaleMany<TmdbMedia>(pairs.map((p) => cacheKey(p)));
   const inDb = new Set<string>();
-  pairs.forEach((p, i) => {
-    const v = cached[i]?.value;
+  pairs.forEach((p) => {
+    const v = cached.get(cacheKey(p))?.value;
     if (!v) return;
     const key = `${p.tmdbId}:${p.mediaType}`;
     inDb.add(key);

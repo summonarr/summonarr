@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { sanitizeOptional } from "@/lib/sanitize";
-import { defaultPermissionsForRole } from "@/lib/permissions";
+import { Permission, defaultPermissionsForRole } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
@@ -80,7 +80,10 @@ function serializeUser(u: UserRow) {
 // User list for native admin clients. The web admin page reads this inline in a
 // server component; this exposes the same data as REST. Per-user edits go
 // through PATCH/DELETE /api/admin/users/[id].
-export const GET = withAdmin(async (_req, _ctx, _session) => {
+// MANAGE_USERS (not withAdmin) so the same capability bit that gates the [id]
+// PATCH/DELETE also gates listing/creating — a MANAGE_USERS holder could
+// otherwise edit and delete users it couldn't list.
+export const GET = withPermission(Permission.MANAGE_USERS)(async (_req, _ctx, _session) => {
   const users = await prisma.user.findMany({
     select: USER_SELECT,
     orderBy: [{ name: "asc" }, { email: "asc" }],
@@ -94,7 +97,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 // is otherwise closed after the first user, so this is the only in-app path to a
 // new username/password account — e.g. an App Review demo account. Role seeds the
 // permission bitmask (defaultPermissionsForRole); tune later via PATCH.
-export const POST = withAdmin(async (req, _ctx, session) => {
+export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, session) => {
   if (!checkRateLimit(`admin-user-create:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
   }

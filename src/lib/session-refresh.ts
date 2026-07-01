@@ -278,6 +278,12 @@ export async function verifyAndRefreshSession(
       isMobile: workingClaims.isMobile,
       deviceLabel: workingClaims.deviceLabel,
       expiresAt: workingClaims.expiresAt,
+      // Machine sessions carry their mint-time IP allowlist as a claim so
+      // machineIpAllowed (api-auth.ts) re-checks the caller IP on EVERY request.
+      // Dropping it here would strip the binding on the first re-sign — machine
+      // tokens are minted without dbCheckedAt, so their first request always
+      // re-signs — leaving the refreshed token usable from any IP.
+      ...(workingClaims.machineAllowedIps ? { machineAllowedIps: workingClaims.machineAllowedIps } : {}),
       // Threading dbCheckedAt through the SessionClaims-as-JWTPayload escape hatch:
       dbCheckedAt: now,
     } as SessionClaims,
