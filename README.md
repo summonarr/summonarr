@@ -169,10 +169,11 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 **Changed**
 
-- User management now honours the granular "manage users" permission for listing and creating accounts, consistent with editing and deleting.
+- User management honours the granular "manage users" permission for listing, creating, editing, and deleting non-admin users; creating, promoting to, or modifying an admin account still requires a full admin.
 
 **Fixed**
 
+- Security: creating, promoting to, deleting, or re-permissioning an admin account now requires a full admin — a holder of the delegated "manage users" permission alone can no longer escalate to admin.
 - Activity: the per-title play-stats page loads again (a database type error had made every media-detail page fail), and recently-added items now show both the Plex and Jellyfin tag when a title exists on both servers.
 - Requests: the per-user request quota is now enforced atomically on the Discord path as well as the web path, so rapid or concurrent requests can no longer exceed a limit; an admin note is preserved across later status changes instead of being cleared; and a request declined during a sync can no longer be flipped back to "available."
 - Discord: an admin approval only notifies the requester once the download is actually queued (not when the Radarr/Sonarr push failed and the request rolled back), and Discord-created requests and approvals now refresh the admin request list live. The bot also honours the Discord integration toggle.
