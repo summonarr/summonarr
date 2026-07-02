@@ -68,14 +68,16 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     setLoading("NOTE");
     setReplySaved(false);
     try {
-      const note = replyText.trim() || undefined;
+      // Note-only PATCH (no status): sending the current status alongside the
+      // note trips the same-status transition check (422). An empty string
+      // clears the stored note server-side.
       const targetIds = groupPendingIds && groupPendingIds.length > 1 ? groupPendingIds : [requestId];
       const results = await Promise.all(
         targetIds.map((id) =>
           fetch(withBasePath(`/api/requests/${id}`), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ status, adminNote: note }),
+            body: JSON.stringify({ adminNote: replyText.trim() }),
           }),
         ),
       );
