@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.9 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.13.10 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -164,6 +164,23 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.13.10
+
+**Changed**
+
+- User management now honours the granular "manage users" permission for listing and creating accounts, consistent with editing and deleting.
+
+**Fixed**
+
+- Activity: the per-title play-stats page loads again (a database type error had made every media-detail page fail), and recently-added items now show both the Plex and Jellyfin tag when a title exists on both servers.
+- Requests: the per-user request quota is now enforced atomically on the Discord path as well as the web path, so rapid or concurrent requests can no longer exceed a limit; an admin note is preserved across later status changes instead of being cleared; and a request declined during a sync can no longer be flipped back to "available."
+- Discord: an admin approval only notifies the requester once the download is actually queued (not when the Radarr/Sonarr push failed and the request rolled back), and Discord-created requests and approvals now refresh the admin request list live. The bot also honours the Discord integration toggle.
+- Sync: a run where a media server or Radarr/Sonarr instance is offline is now reported as degraded in the admin System tab instead of showing green — without increasing how often sync runs.
+- Notifications: a burst of download webhooks (for example a whole season at once) no longer spawns redundant availability pollers against Plex and Jellyfin.
+- Admin: the OMDB and MDBList "warm now" buttons no longer lock themselves out for five minutes when a scheduled warm is already running.
+- Settings: connector save and test actions now surface an error instead of hanging on "Saving…" when a request fails.
+- Hardening: user-controlled values are sanitized before logging; the machine-session IP allowlist is re-checked on every request rather than only the first; and additional rate limits, request-size caps, and bounded fan-outs were added across the admin, requests, and sync paths.
 
 ### v0.13.9
 
@@ -712,7 +729,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.9 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.13.10 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
