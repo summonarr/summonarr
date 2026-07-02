@@ -72,20 +72,52 @@ async function enrichItems(
     (requestsMap.get(key) ?? requestsMap.set(key, []).get(key)!).push(r.status);
   }
 
-  const cacheKeys = items.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
-  const cacheRows = await prisma.tmdbCache.findMany({
-    where: { key: { in: cacheKeys } },
-    select: { key: true, data: true },
-  });
+  // TmdbMediaCore first: poster/rating as plain columns instead of pulling and
+  // parsing one full `:details` blob (tens of KB) per item — on a divergent
+  // library that's thousands of blobs per render across the three enrichItems
+  // calls. Core rows expire and get purged, so pairs missing from core fall
+  // back to the TmdbCache blob. Same mediaType split as the requests query.
   const cacheMap = new Map<string, { posterPath?: string | null; voteAverage?: number }>();
-  for (const row of cacheRows) {
-    try {
-      const parsed = JSON.parse(row.data) as { posterPath?: string | null; voteAverage?: number };
-      const parts = row.key.split(":");
-      const mediaType = parts[0] === "movie" ? "MOVIE" : "TV";
-      const tmdbId = parseInt(parts[1], 10);
-      if (!isNaN(tmdbId)) cacheMap.set(`${tmdbId}:${mediaType}`, parsed);
-    } catch { }
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: {
+      OR: [
+        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+      ],
+    },
+    select: { tmdbId: true, mediaType: true, posterPath: true, voteAverage: true },
+  });
+  for (const r of coreRows) {
+    cacheMap.set(`${r.tmdbId}:${r.mediaType}`, { posterPath: r.posterPath, voteAverage: r.voteAverage });
+  }
+
+  // A core row with a null poster also falls back — the blob may still carry one
+  // (consistent with poster-cache.ts; only costs extra reads for poster-less titles).
+  const misses = items.filter((i) => cacheMap.get(`${i.tmdbId}:${i.mediaType}`)?.posterPath == null);
+  if (misses.length) {
+    const cacheKeys = misses.map((i) => `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`);
+    const cacheRows = await prisma.tmdbCache.findMany({
+      where: { key: { in: cacheKeys } },
+      select: { key: true, data: true },
+    });
+    for (const row of cacheRows) {
+      try {
+        const parsed = JSON.parse(row.data) as { posterPath?: string | null; voteAverage?: number };
+        const parts = row.key.split(":");
+        const mediaType = parts[0] === "movie" ? "MOVIE" : "TV";
+        const tmdbId = parseInt(parts[1], 10);
+        if (!isNaN(tmdbId)) {
+          // Merge (not replace): a null-poster core hit re-enters as a miss, and a
+          // blob without voteAverage must not wipe the core's value.
+          const key = `${tmdbId}:${mediaType}`;
+          const prior = cacheMap.get(key);
+          cacheMap.set(key, {
+            posterPath: parsed.posterPath ?? prior?.posterPath ?? null,
+            voteAverage: parsed.voteAverage ?? prior?.voteAverage,
+          });
+        }
+      } catch { }
+    }
   }
 
   return items.map((i) => {

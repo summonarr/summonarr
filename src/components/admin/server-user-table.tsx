@@ -64,6 +64,9 @@ function DownloadToggle({
       } else {
         router.refresh();
       }
+    } catch {
+      // Network failure — roll back the optimistic state too.
+      setOptimistic(optimistic);
     } finally {
       setLoading(false);
     }
@@ -215,6 +218,9 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
       });
       if (!res.ok) setOn(on);
       else router.refresh();
+    } catch {
+      // Network failure — roll back the optimistic state too.
+      setOn(on);
     } finally {
       setLoading(false);
     }

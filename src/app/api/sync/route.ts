@@ -762,10 +762,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }
       }
       if (toMarkOnly.length > 0) {
-        // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
-        // otherwise every cron tick rewrites availableAt for the same request.
+        // status IN (PENDING, APPROVED): only forward transitions. Gates availableAt
+        // rewrites on already-AVAILABLE rows AND refuses to resurrect a row an admin
+        // DECLINED after this run's snapshot (AVAILABLE is terminal — unfixable).
         const flipped = await prisma.mediaRequest.updateMany({
-          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
           data: { status: "AVAILABLE", availableAt: new Date() },
         });
         if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
@@ -773,10 +774,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     }
     const alreadyNotified = toMark.filter((r) => alreadyNotifiedIds.has(r.id));
     if (alreadyNotified.length > 0) {
-      // Gate availableAt: only stamp it on rows that aren't already AVAILABLE,
-      // otherwise every cron tick rewrites availableAt for the same request.
+      // status IN (PENDING, APPROVED): only forward transitions. Gates availableAt
+      // rewrites on already-AVAILABLE rows AND refuses to resurrect a row an admin
+      // DECLINED after this run's snapshot (AVAILABLE is terminal — unfixable).
       const flipped = await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
@@ -893,14 +895,37 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     });
   }
 
-  return NextResponse.json({
-    checked: { approved: approved.length, available: available.length },
-    marked,
-    reverted,
-    repushed,
-    plexMarked,
-    jellyfinMarked,
-    radarrWanted,
-    sonarrWanted,
-  });
+  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header:
+  // an enabled source that failed this run previously still recorded ok:true, so
+  // the admin System tab showed green even when nothing was refreshed. Status
+  // stays 200 (NOT 502) deliberately — the docker entrypoint reschedules non-2xx
+  // after CRON_RETRY_INTERVAL (300s), so a 502 during a sustained Radarr/Plex
+  // outage would run this full library replace every 5 minutes instead of hourly.
+  // The correctness guards above already gate on the *SyncSucceeded flags.
+  const failedSources = [
+    ...(radarrEnabled && !radarrSyncSucceeded ? ["radarr"] : []),
+    ...(sonarrEnabled && !sonarrSyncSucceeded ? ["sonarr"] : []),
+    ...(plexConfiguredEnabled && !plexSyncSucceeded ? ["plex"] : []),
+    ...(jellyfinConfiguredEnabled && !jellyfinSyncSucceeded ? ["jellyfin"] : []),
+  ];
+
+  return NextResponse.json(
+    {
+      checked: { approved: approved.length, available: available.length },
+      marked,
+      reverted,
+      repushed,
+      plexMarked,
+      jellyfinMarked,
+      radarrWanted,
+      sonarrWanted,
+      // `error` is what the admin SyncButton surfaces; failedSources is for logs.
+      ...(failedSources.length > 0
+        ? { failedSources, error: `Sync degraded — ${failedSources.join(", ")} failed to refresh` }
+        : {}),
+    },
+    failedSources.length > 0
+      ? { headers: { "X-Cron-Degraded": failedSources.join(",") } }
+      : undefined,
+  );
 }

@@ -7,6 +7,7 @@
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { formatRelativeTime } from "@/lib/relative-time";
 import { IpInfo } from "@/components/admin/ip-info";
 import {
   ActivityCard,
@@ -70,21 +71,10 @@ const STREAM_META: Record<string, { label: string; color: string }> = {
   Transcode: { label: "Transcode", color: "var(--ds-warning)" },
 };
 
-function relTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
-
 function absTime(iso: string): string {
   // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
   // text — prevents the React #418 hydration mismatch for plays near UTC
-  // midnight when the relTime() path is gated behind useHasMounted.
+  // midnight when the formatRelativeTime() path is gated behind useHasMounted.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -95,7 +85,7 @@ function absTime(iso: string): string {
 export function UserDetailView({ data: s }: { data: UserDetailData }) {
   const mounted = useHasMounted();
   const when = (iso: string | null) =>
-    !iso ? "—" : mounted ? relTime(iso) : absTime(iso);
+    !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
 
   // Postgres DOW 0=Sun..6=Sat → design heatmap rows are Mon-first.
   const heatmapMatrix: number[][] = Array.from({ length: 7 }, () =>

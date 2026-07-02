@@ -197,18 +197,28 @@ export type FeatureKey = (typeof FEATURE_DEFINITIONS)[number]["key"];
 
 export type FeatureFlags = Record<string, boolean>;
 
-/**
- * Read all feature flags in a single query. Missing rows fall back to the
- * registered default. Pass an already-loaded `cfg` map (from an existing
- * prisma.setting.findMany scan) to skip the query if the caller already has
- * the rows.
- */
-export async function getFeatureFlags(cfg?: Record<string, string>): Promise<FeatureFlags> {
-  let map = cfg;
-  if (!map) {
-    const rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
-    map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  }
+// Short-TTL memo + in-flight coalescing for the flag rows (the loadSettings()/
+// getApiKey() pattern — guardrail 31): isFeatureEnabled runs on every authenticated
+// page render and many route calls, and the sync orchestrator fires several
+// concurrent checks per tick — each was an identical findMany over the same tiny
+// table. /api/settings calls invalidateFeatureFlagCache() after its writes, so
+// admin toggles apply immediately (Summonarr is a single long-lived server); the
+// TTL only bounds staleness for out-of-band writes like a DB restore.
+const FLAG_CACHE_TTL_MS = 10_000;
+let flagCache: { flags: FeatureFlags; expiresAt: number } | null = null;
+let flagInflight: Promise<FeatureFlags> | null = null;
+// Generation counter: a read that was already in flight when invalidate ran holds
+// pre-write rows; without the gen check it would re-populate flagCache AFTER the
+// invalidation and serve the stale toggle for a full TTL.
+let flagGen = 0;
+
+export function invalidateFeatureFlagCache(): void {
+  flagGen++;
+  flagCache = null;
+  flagInflight = null;
+}
+
+function computeFlags(map: Record<string, string>): FeatureFlags {
   const out: FeatureFlags = {};
   for (const def of FEATURE_DEFINITIONS) {
     const raw = map[def.key];
@@ -217,6 +227,32 @@ export async function getFeatureFlags(cfg?: Record<string, string>): Promise<Fea
     else out[def.key] = def.defaultEnabled;
   }
   return out;
+}
+
+/**
+ * Read all feature flags (cached ~10s, one query per refresh). Missing rows fall
+ * back to the registered default. Pass an already-loaded `cfg` map (from an
+ * existing prisma.setting.findMany scan) to bypass the cache and query entirely.
+ */
+export async function getFeatureFlags(cfg?: Record<string, string>): Promise<FeatureFlags> {
+  if (cfg) return computeFlags(cfg);
+  if (flagCache && Date.now() < flagCache.expiresAt) return flagCache.flags;
+  if (flagInflight) return flagInflight;
+  const gen = flagGen;
+  const inflight = (async () => {
+    try {
+      const rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
+      const flags = computeFlags(Object.fromEntries(rows.map((r) => [r.key, r.value])));
+      // Only cache if no invalidation happened while this read was in flight.
+      if (gen === flagGen) flagCache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
+      return flags;
+    } finally {
+      // Clear only if a later invalidate/read hasn't already replaced the slot.
+      if (gen === flagGen) flagInflight = null;
+    }
+  })();
+  flagInflight = inflight;
+  return inflight;
 }
 
 /**

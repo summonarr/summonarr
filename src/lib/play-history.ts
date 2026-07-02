@@ -648,9 +648,12 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
   });
 }
 
-// In-memory once-guard. Resets on process restart — which is exactly when we
-// want to re-anchor again.
-let activeSessionsReanchored = false;
+// In-memory once-guard, memoized as a promise so CONCURRENT boot callers (the
+// SSE bootstrap and the 5s poller can race on the first tick) all await the
+// SAME updateMany instead of a boolean letting the second caller proceed
+// against un-re-anchored rows before the write commits. Resets on process
+// restart — which is exactly when we want to re-anchor again.
+let reanchorPromise: Promise<void> | null = null;
 
 // On the FIRST reconcile after this process started, bump lastSeenAt = now for
 // every ActiveSession row so the absence grace (SESSION_ABSENCE_GRACE_MS) and
@@ -671,16 +674,18 @@ let activeSessionsReanchored = false;
 // once it's been confirmed absent across real post-boot observations.
 //
 // Idempotent per process; safe to call from both the SSE bootstrap and the
-// poller (whichever runs first wins). On failure the guard is released so the
-// next caller retries rather than leaving sessions exposed to the stale-anchor
-// finalize.
+// poller (whichever runs first wins — the loser awaits the same in-flight
+// write). On failure the memo is released so the next caller retries rather
+// than leaving sessions exposed to the stale-anchor finalize.
 export async function reanchorActiveSessionsOnBoot(): Promise<void> {
-  if (activeSessionsReanchored) return;
-  activeSessionsReanchored = true;
+  const inFlight = (reanchorPromise ??= prisma.activeSession
+    .updateMany({ data: { lastSeenAt: new Date() } })
+    .then(() => undefined));
   try {
-    await prisma.activeSession.updateMany({ data: { lastSeenAt: new Date() } });
+    await inFlight;
   } catch (err) {
-    activeSessionsReanchored = false;
+    // Only clear our own promise — a later caller may have already memoized a retry.
+    if (reanchorPromise === inFlight) reanchorPromise = null;
     console.warn("[play-history] boot re-anchor of ActiveSession.lastSeenAt failed:", err);
   }
 }
@@ -852,8 +857,13 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   // two unrelated titles' stats. The "$2 mediaType" predicate is a no-op clause
   // when mediaType is undefined.
   const mt = mediaType ?? null;
-  const mtClause = `($2::text IS NULL OR "mediaType" = $2)`;
-  const mtClauseP = `($2::text IS NULL OR p."mediaType" = $2)`;
+  // The comparison side MUST cast $2 to the "MediaType" enum: the `$2::text IS
+  // NULL` null-check types the parameter as text, and Postgres has no
+  // enum = text operator (42883 on every call, even with a valid value). A NULL
+  // param casts to NULL::"MediaType" harmlessly; non-null values are always
+  // 'MOVIE'/'TV' (typed MediaType upstream), so the cast can't throw.
+  const mtClause = `($2::text IS NULL OR "mediaType" = $2::"MediaType")`;
+  const mtClauseP = `($2::text IS NULL OR p."mediaType" = $2::"MediaType")`;
   const where = mediaType ? { tmdbId, mediaType } : { tmdbId };
   const whereWatched = mediaType ? { tmdbId, mediaType, watched: true } : { tmdbId, watched: true };
 

@@ -33,6 +33,14 @@ export async function claimAvailableNotificationWinners<T extends { id: string }
   // requireStatusAvailable to keep that guard. markAvailable callers set status in
   // the same statement and don't need it.
   const statusGuard = opts.requireStatusAvailable ? Prisma.sql`AND "status" = 'AVAILABLE'` : Prisma.empty;
+  // The markAvailable candidate sets are snapshots of PENDING/APPROVED rows taken
+  // earlier in the sync run. An admin can DECLINE one of those rows before the
+  // claim executes (the decline CAS doesn't touch notifiedAvailable), and without
+  // a status predicate this UPDATE would resurrect the DECLINED row to AVAILABLE —
+  // a terminal state (VALID_TRANSITIONS has AVAILABLE: []) — and notify the
+  // requester of content the admin just declined. A row that turned AVAILABLE
+  // mid-run (webhook flip) is intentionally skipped here; the webhook's own
+  // poller and the orchestrator's requireStatusAvailable fallback pick it up.
   const updated = opts.markAvailable
     ? await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
         UPDATE "MediaRequest"
@@ -41,6 +49,7 @@ export async function claimAvailableNotificationWinners<T extends { id: string }
             "availableAt" = NOW()
         WHERE id IN (${Prisma.join(ids)})
           AND "notifiedAvailable" = false
+          AND "status" IN ('PENDING', 'APPROVED')
         RETURNING id
       `)
     : await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`

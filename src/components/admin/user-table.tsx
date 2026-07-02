@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { formatRelativeTime } from "@/lib/relative-time";
 import {
   MoreHorizontal,
   ShieldCheck,
@@ -540,14 +541,6 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
   return                              <Monitor     className="w-3.5 h-3.5 shrink-0 text-zinc-400" />;
 }
 
-function timeAgo(dateStr: string): string {
-  const secs = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
-  if (secs < 60)    return "just now";
-  if (secs < 3600)  return `${Math.floor(secs / 60)}m ago`;
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
-  return `${Math.floor(secs / 86400)}d ago`;
-}
-
 function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [sessions, setSessions]       = useState<AdminAuthSession[]>([]);
   const [loading, setLoading]         = useState(true);
@@ -555,7 +548,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [revokingAll, setRevokingAll] = useState(false);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
-  // Guardrail 16: timeAgo uses Date.now() and toLocaleDateString varies by locale
+  // Guardrail 16: formatRelativeTime uses Date.now() and toLocaleDateString varies by locale
   const mounted = useHasMounted();
   const titleId = `sessions-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -689,7 +682,7 @@ function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
                       </span>
                     )}
                     <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-                      <Clock className="w-2.5 h-2.5" />Active {mounted ? timeAgo(s.lastSeenAt) : ""}
+                      <Clock className="w-2.5 h-2.5" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
                     </span>
                   </div>
                   <p className="text-[10px] text-zinc-600">

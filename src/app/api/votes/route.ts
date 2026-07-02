@@ -72,7 +72,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
     }),
     // A few recent non-empty reasons from OTHER users per title, surfaced as
     // `reasons` on each item (the caller's own reason stays in `userReason`).
-    // Not distinct/grouped in SQL — we cap to 3 per group in JS below.
+    // Not distinct/grouped in SQL — we cap to 3 per group in JS below. The
+    // `take` bounds an otherwise unbounded fetch (every reasoned vote across the
+    // page's titles): newest-first, 6 rows of headroom per group covers the JS
+    // dedupe/3-cap for realistic data; a title buried past the bound merely
+    // shows fewer "other reasons" (cosmetic).
     prisma.deletionVote.findMany({
       where: {
         OR: pairsFilter,
@@ -81,6 +85,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
       },
       select: { tmdbId: true, mediaType: true, reason: true },
       orderBy: { createdAt: "desc" },
+      take: PAGE_SIZE * 6,
     }),
   ]);
 

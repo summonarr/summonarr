@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { IpInfo } from "@/components/admin/ip-info";
 import { withBasePath } from "@/lib/base-path";
+import { formatRelativeTime } from "@/lib/relative-time";
 import {
   ActivityCard,
   Avatar,
@@ -93,17 +94,6 @@ type SortField =
   | "duration"
   | "platform";
 type SortDir = "asc" | "desc";
-
-function relTime(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60_000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
 
 // Format a millisecond offset as m:ss / h:mm:ss for marker labels in the
 // session detail panel. Matches the formatter on the Now Playing card so the
@@ -1316,7 +1306,7 @@ export function ActivityHistoryTable({
                               color: "var(--ds-fg-disabled)",
                             }}
                           >
-                            {mounted ? relTime(r.startedAt) : ""}
+                            {mounted ? formatRelativeTime(r.startedAt) : ""}
                           </div>
                         </td>
                         <td

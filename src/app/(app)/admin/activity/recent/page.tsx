@@ -17,7 +17,9 @@ interface RecentItem {
   mediaType: "MOVIE" | "TV";
   year: string | null;
   addedAt: Date;
-  source: "plex" | "jellyfin";
+  // A title present in both libraries carries both tags — the merge below unions
+  // sources rather than letting the second loop overwrite the first.
+  sources: { plex: boolean; jellyfin: boolean };
   posterPath: string | null;
 }
 
@@ -61,21 +63,30 @@ export default async function RecentlyAddedPage() {
       mediaType: item.mediaType as "MOVIE" | "TV",
       year: item.year ?? null,
       addedAt: item.addedAt!,
-      source: "plex",
+      sources: { plex: true, jellyfin: false },
       posterPath: null,
     });
   }
   for (const item of jellyfinItems) {
     const key = `${item.mediaType}:${item.tmdbId}`;
     const existing = merged.get(key);
-    if (!existing || item.addedAt!.getTime() > existing.addedAt.getTime()) {
+    if (existing) {
+      // Already seen from Plex — union the Jellyfin tag and surface the most
+      // recent addedAt/title rather than dropping one source.
+      existing.sources.jellyfin = true;
+      if (item.addedAt!.getTime() > existing.addedAt.getTime()) {
+        existing.addedAt = item.addedAt!;
+        existing.title = item.title ?? existing.title;
+        existing.year = item.year ?? existing.year;
+      }
+    } else {
       merged.set(key, {
         tmdbId: item.tmdbId,
         title: item.title ?? "Unknown",
         mediaType: item.mediaType as "MOVIE" | "TV",
         year: item.year ?? null,
         addedAt: item.addedAt!,
-        source: "jellyfin",
+        sources: { plex: false, jellyfin: true },
         posterPath: null,
       });
     }
@@ -155,12 +166,17 @@ export default async function RecentlyAddedPage() {
                     </div>
                   )}
                   {}
-                  <div className="absolute top-1.5 right-1.5">
-                    <span className={`text-[9px] px-1.5 py-0.5 rounded font-semibold ${
-                      item.source === "plex" ? "bg-amber-500/90 text-black" : "bg-purple-500/90 text-white"
-                    }`}>
-                      {item.source === "plex" ? "Plex" : "JF"}
-                    </span>
+                  <div className="absolute top-1.5 right-1.5 flex gap-1">
+                    {item.sources.plex && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/90 text-black">
+                        Plex
+                      </span>
+                    )}
+                    {item.sources.jellyfin && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-500/90 text-white">
+                        JF
+                      </span>
+                    )}
                   </div>
                   {}
                 </div>

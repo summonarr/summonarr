@@ -190,8 +190,10 @@ async function syncJellyfin(request: NextRequest) {
         }
       }
       if (toMarkOnly.length > 0) {
+        // status IN (PENDING, APPROVED): only forward transitions — never resurrect
+        // a row an admin DECLINED after this run's snapshot (AVAILABLE is terminal).
         const flipped = await prisma.mediaRequest.updateMany({
-          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+          where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
           data: { status: "AVAILABLE", availableAt: new Date() },
         });
         if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
@@ -201,9 +203,10 @@ async function syncJellyfin(request: NextRequest) {
     const alreadyNotified = toMark.filter((r) => r.notifiedAvailable);
     if (alreadyNotified.length > 0) {
       // Stamp availableAt on the flip (matches the orchestrator's markLibraryRequests).
-      // The status guard keeps it from rewriting the timestamp on every sync tick.
+      // status IN (PENDING, APPROVED): gates timestamp rewrites on every sync tick
+      // AND refuses to resurrect a concurrently-DECLINED row (AVAILABLE is terminal).
       const flipped = await prisma.mediaRequest.updateMany({
-        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { not: "AVAILABLE" } },
+        where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "AVAILABLE", availableAt: new Date() },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);

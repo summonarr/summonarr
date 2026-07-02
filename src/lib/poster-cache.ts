@@ -1,14 +1,19 @@
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 
-// Resolve TMDB poster URLs for activity views from the `TmdbCache` `:details`
-// rows the sync layer already populates — the same source the overview's Now
-// Playing cards use. Returns a tmdbId→url map; url is absent when the title
-// is uncached/unmapped so callers fall back to the letter placeholder.
+// Resolve TMDB poster URLs for activity views. Returns a tmdbId→url map; url
+// is absent when the title is uncached/unmapped so callers fall back to the
+// letter placeholder.
 //
-// Both `movie:` and `tv:` keys are queried for every id because `mediaType`
-// can be null or mismatched on unmapped rows; the first poster found per id
-// wins.
+// TmdbMediaCore first: it carries `posterPath` as a plain column, so the
+// lookup avoids transferring and parsing the full `:details` JSON blob per id.
+// Core rows expire and get purged, so ids missing from core fall back to the
+// `TmdbCache` `:details` rows the sync layer already populates — the same
+// source the overview's Now Playing cards use.
+//
+// Both MOVIE and TV rows (and both `movie:`/`tv:` fallback keys) are queried
+// for every id because `mediaType` can be null or mismatched on unmapped rows;
+// the first poster found per id wins.
 export async function resolvePosterMap(
   items: { tmdbId: number | null }[],
 ): Promise<Record<number, string>> {
@@ -21,7 +26,22 @@ export async function resolvePosterMap(
   ];
   if (ids.length === 0) return {};
 
-  const keys = ids.flatMap((id) => [
+  const map: Record<number, string> = {};
+
+  const coreRows = await prisma.tmdbMediaCore.findMany({
+    where: { tmdbId: { in: ids } },
+    select: { tmdbId: true, posterPath: true },
+  });
+  for (const row of coreRows) {
+    if (map[row.tmdbId]) continue;
+    const url = row.posterPath ? posterUrl(row.posterPath, "w342") : null;
+    if (url) map[row.tmdbId] = url;
+  }
+
+  const missing = ids.filter((id) => !map[id]);
+  if (missing.length === 0) return map;
+
+  const keys = missing.flatMap((id) => [
     `movie:${id}:details`,
     `tv:${id}:details`,
   ]);
@@ -30,7 +50,6 @@ export async function resolvePosterMap(
     select: { key: true, data: true },
   });
 
-  const map: Record<number, string> = {};
   for (const row of rows) {
     const id = parseInt(row.key.split(":")[1] ?? "", 10);
     if (!Number.isFinite(id) || map[id]) continue;

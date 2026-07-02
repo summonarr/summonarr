@@ -1,7 +1,7 @@
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
-import { getCache, setCache, TTL } from "./tmdb-cache";
+import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
 
 const QUALITY_PROFILE_TTL_MS = 10 * 60 * 1000;
@@ -25,9 +25,13 @@ async function resolveTvdbToTmdb(
   let hadErrors = false;
   if (tvdbIds.length === 0) return { map: result, hadErrors };
 
+  // One batched read for the whole id set — the old per-id getCache loop issued
+  // hundreds of sequential round-trips per sync run on libraries where Sonarr
+  // doesn't supply a native tmdbId.
+  const cachedRows = await getCacheMany<TvdbToTmdbCache>(tvdbIds.map((id) => `tvdb-to-tmdb:${id}`));
   const uncached: number[] = [];
   for (const tvdbId of tvdbIds) {
-    const cached = await getCache<TvdbToTmdbCache>(`tvdb-to-tmdb:${tvdbId}`);
+    const cached = cachedRows.get(`tvdb-to-tmdb:${tvdbId}`);
     if (cached) {
       if (cached.tmdbId !== null) result.set(tvdbId, cached.tmdbId);
     } else {
@@ -76,7 +80,7 @@ async function resolveTvdbToTmdb(
           timeoutMs: 10_000,
         });
         if (!res.ok) {
-          console.warn(`[arr] tvdb-to-tmdb TMDB lookup returned ${res.status} for tvdbId ${tvdbId}`);
+          console.warn("[arr] tvdb-to-tmdb TMDB lookup returned %s for tvdbId %s", sanitizeForLog(res.status), sanitizeForLog(tvdbId));
           hadErrors = true;
           return;
         }
@@ -91,7 +95,7 @@ async function resolveTvdbToTmdb(
       } catch (err) {
         // Don't swallow: a TMDB 429/401/outage here silently drops every
         // tvdbId-only series from wanted/available/arrPending with no evidence.
-        console.warn(`[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId ${tvdbId}:`, err instanceof Error ? err.message : err);
+        console.warn("[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId %s:", sanitizeForLog(tvdbId), sanitizeForLog(err instanceof Error ? err.message : err));
         hadErrors = true;
       }
     }));

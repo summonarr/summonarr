@@ -58,6 +58,16 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   const limit = Math.min(200, Math.max(1, parseInt(params.get("limit") ?? "20", 10) || 20));
   const skip = (page - 1) * limit;
 
+  // Validate date params up front — both the grouped and ungrouped paths feed
+  // `new Date(param)` straight into a query, and an unparseable value yields an
+  // Invalid Date that throws mid-query (uncaught 500 instead of a 400).
+  for (const name of ["startDate", "endDate"] as const) {
+    const value = params.get(name);
+    if (value && isNaN(new Date(value).getTime())) {
+      return NextResponse.json({ error: `${name} must be a valid date` }, { status: 400 });
+    }
+  }
+
   // Default: collapse continued watches (PlayHistory.referenceId chains) into
   // one logical viewing per chain. The chain's *latest* segment is the
   // representative row (for title/poster/codec/etc) and the response includes

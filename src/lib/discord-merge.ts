@@ -66,6 +66,13 @@ export async function mergeDiscordIntoWebAccount(
         data: { triggeredById: webUserId },
       });
 
+      // No deletion-vote threshold re-evaluation is needed after this transfer:
+      // for any (tmdbId, mediaType) the merge either moves a vote from the shadow
+      // user to the web user (distinct-voter count unchanged) or deletes it as a
+      // conflict because the web user already voted (count decreases by one). The
+      // count can never INCREASE, so the threshold alert in /api/votes (the
+      // `deletionVoteNotified:` one-shot gate) can neither newly fire nor need
+      // re-arming here.
       const webVotes = await tx.deletionVote.findMany({
         where: { userId: webUserId },
         select: { tmdbId: true, mediaType: true },

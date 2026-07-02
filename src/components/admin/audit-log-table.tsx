@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { formatRelativeTime } from "@/lib/relative-time";
 import { ACTION_LABELS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import type { AuditAction } from "@/generated/prisma";
 import { withBasePath } from "@/lib/base-path";
@@ -70,17 +71,12 @@ function useAuditNav() {
   }, [router, searchParams]);
 }
 
+// Falls back to an absolute date past 7 days — audit rows are read long after
+// the fact, where "43d ago" is less useful than the date itself.
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return "just now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+  if (diff >= 7 * 86_400_000) return new Date(iso).toLocaleDateString();
+  return formatRelativeTime(iso);
 }
 
 function formatDateGroup(iso: string): string {

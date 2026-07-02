@@ -26,31 +26,39 @@ const { DATABASE_URL } = process.env;
 // Remove duplicate PlayHistory rows with the same (source, sourceSessionId),
 // keeping the highest id (latest write). Idempotent — safe to run every start.
 // Skips cleanly on a fresh DB where the table hasn't been created yet.
+//
+// Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
+// that renames a referenced column would otherwise crash-loop the container
+// (set -e) before db push can reconcile. Any failure logs a warning and boot
+// continues.
 const { default: { Client } } = await import('pg');
 const client = new Client({ connectionString: DATABASE_URL });
-await client.connect();
-const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
-if (exists.rows[0].t === null) {
-  await client.end();
-  process.exit(0);
+try {
+  await client.connect();
+  const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
+  if (exists.rows[0].t !== null) {
+    const res = await client.query(`
+      DELETE FROM "PlayHistory"
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY source, "sourceSessionId"
+                   ORDER BY id DESC
+                 ) AS rn
+          FROM "PlayHistory"
+          WHERE "sourceSessionId" IS NOT NULL
+        ) t
+        WHERE rn > 1
+      )
+    `);
+    if (res.rowCount > 0) console.log(`Removed ${res.rowCount} duplicate PlayHistory row(s).`);
+  }
+} catch (err) {
+  console.error(`[entrypoint] PlayHistory dedup failed — continuing boot: ${err?.message ?? err}`);
+} finally {
+  await client.end().catch(() => {});
 }
-const res = await client.query(`
-  DELETE FROM "PlayHistory"
-  WHERE id IN (
-    SELECT id FROM (
-      SELECT id,
-             ROW_NUMBER() OVER (
-               PARTITION BY source, "sourceSessionId"
-               ORDER BY id DESC
-             ) AS rn
-      FROM "PlayHistory"
-      WHERE "sourceSessionId" IS NOT NULL
-    ) t
-    WHERE rn > 1
-  )
-`);
-if (res.rowCount > 0) console.log(`Removed ${res.rowCount} duplicate PlayHistory row(s).`);
-await client.end();
 DEDUP_EOF
 
 echo "Backfilling PlayHistory.playDuration where playhead-as-playtime over-inflated rows..."
@@ -66,41 +74,49 @@ const { DATABASE_URL } = process.env;
 //
 // Idempotent — the WHERE filters out rows that don't need clamping, so re-runs are no-ops.
 // Skips cleanly on a fresh DB.
+//
+// Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
+// that renames a referenced column would otherwise crash-loop the container
+// (set -e) before db push can reconcile. Any failure logs a warning and boot
+// continues.
 const { default: { Client } } = await import('pg');
 const client = new Client({ connectionString: DATABASE_URL });
-await client.connect();
-const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
-if (exists.rows[0].t === null) {
-  await client.end();
-  process.exit(0);
-}
-let threshold = 80;
 try {
-  const t = await client.query(
-    `SELECT value FROM "Setting" WHERE key = 'playHistoryWatchedThreshold'`
-  );
-  const parsed = t.rows[0]?.value ? parseInt(t.rows[0].value, 10) : NaN;
-  if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) threshold = parsed;
-} catch { /* Setting table absent on fresh DB — fall back to 80 */ }
-const res = await client.query(
-  `UPDATE "PlayHistory" SET
-     "playDuration"   = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
-     "pausedDuration" = GREATEST(
-       0,
-       EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-         - LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)
-     ),
-     "watched" = CASE
-       WHEN duration > 0
-       THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
-       ELSE false
-     END
-   WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
-     AND "stoppedAt" > "startedAt"`,
-  [threshold],
-);
-if (res.rowCount > 0) console.log(`Clamped ${res.rowCount} PlayHistory row(s) at threshold=${threshold}.`);
-await client.end();
+  await client.connect();
+  const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
+  if (exists.rows[0].t !== null) {
+    let threshold = 80;
+    try {
+      const t = await client.query(
+        `SELECT value FROM "Setting" WHERE key = 'playHistoryWatchedThreshold'`
+      );
+      const parsed = t.rows[0]?.value ? parseInt(t.rows[0].value, 10) : NaN;
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) threshold = parsed;
+    } catch { /* Setting table absent on fresh DB — fall back to 80 */ }
+    const res = await client.query(
+      `UPDATE "PlayHistory" SET
+         "playDuration"   = LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int),
+         "pausedDuration" = GREATEST(
+           0,
+           EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
+             - LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)
+         ),
+         "watched" = CASE
+           WHEN duration > 0
+           THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
+           ELSE false
+         END
+       WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
+         AND "stoppedAt" > "startedAt"`,
+      [threshold],
+    );
+    if (res.rowCount > 0) console.log(`Clamped ${res.rowCount} PlayHistory row(s) at threshold=${threshold}.`);
+  }
+} catch (err) {
+  console.error(`[entrypoint] PlayHistory playDuration backfill failed — continuing boot: ${err?.message ?? err}`);
+} finally {
+  await client.end().catch(() => {});
+}
 BACKFILL_EOF
 
 echo "Syncing database schema..."

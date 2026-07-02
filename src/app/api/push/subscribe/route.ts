@@ -7,13 +7,17 @@ import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
+import { maintenanceGuard } from "@/lib/maintenance";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  // Personal mutation — blocked during maintenance like profile delete/password.
+  // DELETE (unsubscribe) intentionally stays open so users can always opt out.
+  const maint = await maintenanceGuard();
+  if (maint) return maint;
   // Don't accept new subscriptions while push is disabled: the send path already
-  // no-ops when off, so a registration stored here would never deliver. DELETE
-  // (unsubscribe) intentionally stays open so users can always opt out.
+  // no-ops when off, so a registration stored here would never deliver.
   if (!(await isFeatureEnabled("feature.integration.push"))) {
     return NextResponse.json({ error: "Push notifications are disabled" }, { status: 403 });
   }

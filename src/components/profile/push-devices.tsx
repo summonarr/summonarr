@@ -23,17 +23,25 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
   const mounted = useHasMounted();
   const [removing, setRemoving] = useState<string | null>(null);
   const [confirmingRemove, setConfirmingRemove] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   async function remove(id: string) {
     setRemoving(id);
     setConfirmingRemove(null);
+    setError(false);
     try {
-      await fetch(withBasePath("/api/push/subscribe"), {
+      const res = await fetch(withBasePath("/api/push/subscribe"), {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id }),
       });
+      if (!res.ok) {
+        setError(true);
+        return;
+      }
       router.refresh();
+    } catch {
+      setError(true);
     } finally {
       setRemoving(null);
     }
@@ -50,6 +58,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
   return (
     <div className="space-y-2">
       <p className="text-xs text-zinc-500 mb-3">{capLabel} device{devices.length !== 1 ? "s" : ""} registered</p>
+      {error && <p className="text-xs text-red-400 mb-2">Failed to remove device — try again.</p>}
       {devices.map((device, i) => {
         const deviceLabel = device.label || `Device ${i + 1}`;
         return (

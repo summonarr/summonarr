@@ -2,7 +2,6 @@ import { NextRequest } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { prisma } from "@/lib/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
@@ -74,14 +73,14 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   if (cronSecret) {
     const authHeader = request.headers.get("authorization") ?? "";
     if (authHeader.startsWith("Bearer ")) {
+      // Deliberately NO failure throttle here. CRON_SECRET is enforced ≥32 chars
+      // at boot and compared timing-safe, so online brute force is infeasible —
+      // and any pre-compare throttle must key on getClientIp, which for the
+      // internal loopback cron (no XFF, default TRUST_PROXY) resolves to a shared
+      // User-Agent bucket: a wrong-secret caller sharing that bucket could then
+      // deny the hourly sync and the 5s play-history poller. A valid Bearer must
+      // never be deniable by someone else's failures.
       if (safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
-      // Throttle failed CRON_SECRET guessing per source IP. A presented-but-wrong
-      // Bearer is a guess; bound it to 20 failures / 60s. When the bucket is
-      // exhausted, deny (return false) so brute-forcing the secret is bounded.
-      // The happy path above already returned, so this never touches a valid call.
-      if (!checkRateLimit(`cron-auth-fail:${getClientIp(request.headers)}`, 20, 60_000)) {
-        return false;
-      }
     }
   }
 
@@ -130,10 +129,14 @@ export async function recordCronRun(
 // the inner work; the wrapper just guarantees observability.
 //
 // ok is derived from: (a) whether the body threw → false, (b) response status
-// >= 400 → false, otherwise true. A status of 200 with a body indicating partial
-// failure (e.g. Promise.allSettled with rejections) should be handled by the
-// caller throwing or returning >=500, since the wrapper has no domain knowledge
-// of "skipped" vs "failed".
+// >= 400 → false, (c) an `X-Cron-Degraded` response header → false, otherwise
+// true. The header exists for routes whose caller retry semantics make a non-2xx
+// harmful: the docker entrypoint reschedules any non-2xx after CRON_RETRY_INTERVAL
+// (300s) instead of SYNC_INTERVAL (3600s), so the orchestrator returning 502 on a
+// sustained single-source outage would run a full library replace every 5 minutes
+// for the outage's duration. Degraded-but-completed runs return 200 + the header:
+// the ledger records ok:false (admin System tab shows the failure) while the cron
+// cadence stays at the normal interval. Hard failures should still throw / >=500.
 export async function withCronRunRecording<T extends Response>(
   target: string,
   fn: () => Promise<T>,
@@ -142,7 +145,7 @@ export async function withCronRunRecording<T extends Response>(
   let ok = true;
   try {
     const res = await fn();
-    if (res.status >= 400) ok = false;
+    if (res.status >= 400 || res.headers.get("x-cron-degraded") !== null) ok = false;
     return res;
   } catch (err) {
     ok = false;

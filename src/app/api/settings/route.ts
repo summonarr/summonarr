@@ -10,7 +10,7 @@ import { sendTestEmail } from "@/lib/email";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
-import { FEATURE_KEYS } from "@/lib/features";
+import { FEATURE_KEYS, invalidateFeatureFlagCache } from "@/lib/features";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
@@ -509,6 +509,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     console.error("[audit] Settings transaction failed:", err);
     return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
   }
+  // Feature flags are memoized (features.ts); drop the memo so a toggle in this
+  // write is visible on the very next check instead of after the TTL.
+  invalidateFeatureFlagCache();
 
   const writeTs = Date.now();
   for (const [key] of entries) {
@@ -699,6 +702,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       // Best-effort: surface the test failure even when rollback didn't apply
       // cleanly. The admin sees the 422 either way and can re-save manually.
     }
+    // The rollback rewrote Setting rows — drop the flag memo again.
+    invalidateFeatureFlagCache();
   }
 
   return NextResponse.json(

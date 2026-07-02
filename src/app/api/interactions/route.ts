@@ -19,6 +19,8 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
+import { emitSSE } from "@/lib/sse-emitter";
+import { isFeatureEnabled } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
@@ -455,7 +457,10 @@ async function handleCommand(interaction: any): Promise<void> {
         return;
       }
 
-      await prisma.discordLinkToken.delete({ where: { token: tokenValue } });
+      // deleteMany (not delete): a concurrent duplicate /link submit races both
+      // callers past the merge; the loser's bare delete would throw P2025 into the
+      // outer catch and report "unexpected error" for a link that SUCCEEDED.
+      await prisma.discordLinkToken.deleteMany({ where: { token: tokenValue } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
       const userName = row.user.name ?? row.user.email;
       await editOriginal(appId, token, { content: `Your Discord account is now linked to **${userName}**'s Summonarr account!${transferNote} (Tip: your link token is single-use and was valid for 10 minutes — keep it private.)` });
@@ -683,6 +688,10 @@ async function handleComponent(interaction: any): Promise<void> {
         } else if (mayAutoApprove) {
           // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
           // scheduleDelayed job still yields a follow-up notification.
+          // Serializable is load-bearing: at the default Read Committed two concurrent
+          // txs both read count < limit and both commit past the quota boundary, and
+          // runWithSerializableRetry's P2034 retry can never fire (parity with
+          // requests/route.ts and requests/bulk/route.ts).
           const request = await runWithSerializableRetry(async () =>
             prisma.$transaction(async (tx) => {
               if (quotaApplies && rq && rq.limit > 0) {
@@ -692,8 +701,10 @@ async function handleComponent(interaction: any): Promise<void> {
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
               return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
-            })
+            }, { isolationLevel: "Serializable" })
           );
+          // Keep the admin request list live (every other creation path emits).
+          emitSSE({ type: "request:new", requestId: request.id, userId: dbUser.id });
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
@@ -711,6 +722,11 @@ async function handleComponent(interaction: any): Promise<void> {
             arrFailed = true;
           }
           if (arrFailed) {
+            // Corrective SSE: request:new above announced this row as APPROVED, but
+            // the push failed and it rolled back to PENDING — emit the update so the
+            // admin request list doesn't stay stuck at APPROVED (parity with the web
+            // POST/PATCH rollback paths, which emit the same corrective event).
+            emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
             // The push failed and the request rolled back to PENDING — don't tell
             // the user it's "being downloaded"; surface that an admin will review it.
             note = "Your request was received, but couldn't be queued automatically — an admin will review it shortly.";
@@ -770,35 +786,47 @@ async function handleComponent(interaction: any): Promise<void> {
           // content is already greenlit — mirror that status so this user is tracked
           // for the "now available" notification, and skip the admin "new request"
           // alert (nothing to review). Discord requests are HD-only (is4k: false).
-          const alreadyGreenlit = await prisma.mediaRequest.findFirst({
-            where: { tmdbId: selected.id, mediaType, is4k: false, status: { in: ["APPROVED", "AVAILABLE"] } },
-            select: { status: true },
-          });
-          if (alreadyGreenlit) {
-            // Mirror availableAt when the greenlit status is AVAILABLE, matching the
-            // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
-            // availableAt and looks freshly approved.
-            await prisma.mediaRequest.create({
-              data: {
-                ...baseData,
-                status: alreadyGreenlit.status,
-                ...(alreadyGreenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
-              },
-            });
+          // One Serializable tx covers the quota recount, the greenlit check, and
+          // the mirror/pending create (parity with requests/route.ts) — mirror rows
+          // are APPROVED/AVAILABLE and count against the quota window, so a create
+          // outside the tx would let concurrent picks overshoot the boundary.
+          let mirrored = false;
+          const createdRequest = await runWithSerializableRetry(async () =>
+            prisma.$transaction(async (tx) => {
+              mirrored = false; // reset — the callback re-runs on a P2034 retry
+              if (quotaApplies && rq && rq.limit > 0) {
+                const count = await tx.mediaRequest.count({
+                  where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
+                });
+                if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
+              }
+              const alreadyGreenlit = await tx.mediaRequest.findFirst({
+                where: { tmdbId: selected.id, mediaType, is4k: false, status: { in: ["APPROVED", "AVAILABLE"] } },
+                select: { status: true },
+              });
+              if (alreadyGreenlit) {
+                mirrored = true;
+                // Mirror availableAt when the greenlit status is AVAILABLE, matching the
+                // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
+                // availableAt and looks freshly approved.
+                return tx.mediaRequest.create({
+                  data: {
+                    ...baseData,
+                    status: alreadyGreenlit.status,
+                    ...(alreadyGreenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+                  },
+                });
+              }
+              return tx.mediaRequest.create({ data: baseData });
+            }, { isolationLevel: "Serializable" })
+          );
+          // Keep the admin request list live (every other creation path emits).
+          emitSSE({ type: "request:new", requestId: createdRequest.id, userId: dbUser.id });
+          if (mirrored) {
             note = "Added — this title is already approved, so you'll be notified when it's ready.";
             confirmEmbed.color = 0x57f287;
           } else {
-            const pendingRequest = await runWithSerializableRetry(async () =>
-              prisma.$transaction(async (tx) => {
-                if (quotaApplies && rq && rq.limit > 0) {
-                  const count = await tx.mediaRequest.count({
-                    where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
-                  });
-                  if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
-                }
-                return tx.mediaRequest.create({ data: baseData });
-              })
-            );
+            const pendingRequest = createdRequest;
             const requestedBy = dbUser.name ?? dbUser.email ?? dbUser.id;
             // Only the earliest PENDING request for a title alerts admins — a later duplicate
             // (different user requesting the same still-pending title) is nothing new to review.
@@ -874,7 +902,9 @@ async function handleComponent(interaction: any): Promise<void> {
       }
       const maintRow = await prisma.setting.findUnique({ where: { key: "maintenanceEnabled" } });
       if (maintRow?.value === "true") {
-        if (adminUser.role !== "ADMIN") {
+        // ADMIN bit, not the role string — maintenance.ts's web bypass keys off the
+        // bit, and a bit-only granular admin shouldn't be blocked here either.
+        if (!hasPermission(adminPerms, Permission.ADMIN)) {
           await safeFetchTrusted(`${DISCORD_API}/webhooks/${appId}/${token}`, {
             allowedHosts: DISCORD_HOSTS,
             method: "POST",
@@ -956,9 +986,14 @@ async function handleComponent(interaction: any): Promise<void> {
           details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord", arrFailed },
           provider: "discord",
         });
+        // Keep the admin request list live (parity with the web PATCH path's emit).
+        emitSSE({ type: "request:updated", requestId: request.id, status: arrFailed ? "PENDING" : "APPROVED", userId: request.requestedBy });
         // Fan out push + email + Discord so a web/iOS requester without Discord linked
         // is still notified. Skip self-notify when the admin approved their own request.
-        if (request.requestedBy !== adminUser.id) {
+        // Gate on the arr push sticking: on failure the row rolled back to PENDING, and
+        // telling the requester "approved" would be a lie (the web PATCH path gates the
+        // same way via arrPushSucceeded).
+        if (!arrFailed && request.requestedBy !== adminUser.id) {
           notifyRequestStatusChange("APPROVED", request);
         }
         const embed: Record<string, unknown> = {
@@ -994,6 +1029,8 @@ async function handleComponent(interaction: any): Promise<void> {
           details: { tmdbId: request.tmdbId, mediaType: request.mediaType, title: request.title, via: "discord" },
           provider: "discord",
         });
+        // Keep the admin request list live (parity with the web PATCH path's emit).
+        emitSSE({ type: "request:updated", requestId: request.id, status: "DECLINED", userId: request.requestedBy });
         // Fan out push + email + Discord. Skip self-notify when the admin declined their own request.
         if (request.requestedBy !== adminUser.id) {
           notifyRequestStatusChange("DECLINED", request);
@@ -1045,7 +1082,7 @@ export async function POST(req: NextRequest) {
   // timestamp widens the replay window.
   const requestAge = Date.now() / 1000 - Number(timestamp);
   if (Number.isNaN(requestAge) || requestAge > 5 || requestAge < -2) {
-    console.warn(`[interactions] Stale or skewed timestamp rejected: age=${requestAge.toFixed(1)}s`);
+    console.warn(`[interactions] Stale or skewed timestamp rejected: age=${sanitizeForLog(requestAge.toFixed(1))}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
 
@@ -1061,6 +1098,14 @@ export async function POST(req: NextRequest) {
   // type=1 is Discord's PING to verify the endpoint is reachable; respond with PONG immediately
   if (interaction.type === 1) {
     return NextResponse.json({ type: 1 });
+  }
+
+  // Feature gate: the flag previously gated only the notify libs, so disabling the
+  // Discord integration still left slash commands and admin buttons fully live.
+  // PING stays exempt (above) so Discord's endpoint verification keeps passing while
+  // the feature is off; real interactions get an ephemeral explanation (type 4 + flags 64).
+  if (!(await isFeatureEnabled("feature.integration.discord"))) {
+    return NextResponse.json({ type: 4, data: { content: "The Discord integration is currently disabled.", flags: 64 } });
   }
 
   // Replay guard (defense-in-depth beyond the 5s timestamp window above): a captured,
