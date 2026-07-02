@@ -722,6 +722,11 @@ async function handleComponent(interaction: any): Promise<void> {
             arrFailed = true;
           }
           if (arrFailed) {
+            // Corrective SSE: request:new above announced this row as APPROVED, but
+            // the push failed and it rolled back to PENDING — emit the update so the
+            // admin request list doesn't stay stuck at APPROVED (parity with the web
+            // POST/PATCH rollback paths, which emit the same corrective event).
+            emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
             // The push failed and the request rolled back to PENDING — don't tell
             // the user it's "being downloaded"; surface that an admin will review it.
             note = "Your request was received, but couldn't be queued automatically — an admin will review it shortly.";
