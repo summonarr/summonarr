@@ -857,8 +857,13 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   // two unrelated titles' stats. The "$2 mediaType" predicate is a no-op clause
   // when mediaType is undefined.
   const mt = mediaType ?? null;
-  const mtClause = `($2::text IS NULL OR "mediaType" = $2)`;
-  const mtClauseP = `($2::text IS NULL OR p."mediaType" = $2)`;
+  // The comparison side MUST cast $2 to the "MediaType" enum: the `$2::text IS
+  // NULL` null-check types the parameter as text, and Postgres has no
+  // enum = text operator (42883 on every call, even with a valid value). A NULL
+  // param casts to NULL::"MediaType" harmlessly; non-null values are always
+  // 'MOVIE'/'TV' (typed MediaType upstream), so the cast can't throw.
+  const mtClause = `($2::text IS NULL OR "mediaType" = $2::"MediaType")`;
+  const mtClauseP = `($2::text IS NULL OR p."mediaType" = $2::"MediaType")`;
   const where = mediaType ? { tmdbId, mediaType } : { tmdbId };
   const whereWatched = mediaType ? { tmdbId, mediaType, watched: true } : { tmdbId, watched: true };
 
