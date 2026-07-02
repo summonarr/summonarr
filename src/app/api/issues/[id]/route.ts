@@ -10,6 +10,7 @@ import {
   resolveTvdbIdFromTmdbId,
 } from "@/lib/arr";
 import { notifyUserIssueResolved } from "@/lib/discord-notify";
+import { notifyUserIssueResolvedPush } from "@/lib/push";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
@@ -141,6 +142,12 @@ export const PATCH = withIssueAdmin(async (
 
   if (status === "RESOLVED" && issue.status !== "RESOLVED") {
     notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution).catch(() => {});
+    notifyUserIssueResolvedPush({
+      userId: issue.reportedBy,
+      title: issue.title,
+      resolution: sanitizedResolution ?? issue.resolution,
+      issueId: id,
+    }).catch(() => {});
   }
 
   return NextResponse.json(updated);

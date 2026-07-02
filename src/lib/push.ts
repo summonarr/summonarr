@@ -108,6 +108,7 @@ type ApnsCategory =
   | "declined"
   | "available"
   | "issue_reply"
+  | "issue_resolved"
   | "new_issue"
   | "grab_complete"
   | "manual_interaction"
@@ -125,6 +126,7 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
   declined: { title: "Request declined", body: "Open Summonarr to see details" },
   available: { title: "Now available", body: "Something you requested is ready to watch" },
   issue_reply: { title: "New reply", body: "There's new activity on an issue" },
+  issue_resolved: { title: "Issue resolved", body: "An issue you reported was resolved" },
   new_issue: { title: "New issue", body: "A new issue was reported" },
   grab_complete: { title: "Download complete", body: "A download has finished" },
   manual_interaction: { title: "Manual import needed", body: "A download needs your attention" },
@@ -368,6 +370,39 @@ export async function notifyUserIssueMessagePush(data: {
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
     console.error("[push] Failed to notify user (issue message):", err);
+  }
+}
+
+export async function notifyUserIssueResolvedPush(data: {
+  userId: string;
+  title: string;
+  resolution?: string | null;
+  issueId?: string;
+}) {
+  try {
+    const ctx = await pushContext();
+    if (!ctx) return;
+
+    const subs = await prisma.pushSubscription.findMany({
+      where: { userId: data.userId, user: { notifyOnIssue: true } },
+    });
+    if (!subs.length) return;
+
+    const resolution = data.resolution?.trim();
+    const payload: PushPayload = {
+      title: `Issue resolved: ${data.title}`,
+      body: resolution
+        ? resolution.length > 100
+          ? resolution.slice(0, 97) + "…"
+          : resolution
+        : "An admin marked your reported issue as resolved",
+      url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
+      category: "issue_resolved",
+    };
+
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+  } catch (err) {
+    console.error("[push] Failed to notify user (issue resolved):", err);
   }
 }
 
