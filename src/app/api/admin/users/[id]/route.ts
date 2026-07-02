@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
 
 // Thrown inside the anonymization transaction to roll it back when the target is
 // the last active admin (guardrail 23: propagate out of the tx, don't swallow).
@@ -39,6 +39,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if (parsedBody instanceof NextResponse) return parsedBody;
   const body = parsedBody;
 
+  // MANAGE_USERS delegates management of NON-admin users only. Conferring ADMIN,
+  // or touching an account that is already ADMIN, requires the caller to be a full
+  // admin — otherwise a MANAGE_USERS holder could self-escalate by promoting an
+  // accomplice (or themselves via a second account) to ADMIN. session.user.permissions
+  // is the effective mask (api-auth resolves it through effectivePermissions).
+  const callerIsAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
+
   if ("mediaServer" in body) {
     const ms = body.mediaServer;
     if (ms !== null && ms !== "plex" && ms !== "jellyfin") {
@@ -66,6 +73,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     }
     const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
     if (!targetUser) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    // A non-admin MANAGE_USERS holder must not edit an admin's permissions or grant
+    // the ADMIN superbit. The lockstep guards below stop role/bit desync; this stops
+    // the escalation at its source (caller authority).
+    if (!callerIsAdmin && (targetUser.role === "ADMIN" || (parsed & Permission.ADMIN) !== 0n)) {
+      return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+    }
 
     // Never let the editor strip the ADMIN bit from a role=ADMIN user — demote the
     // role first (which routes through the last-admin CAS below). Keeps the
@@ -157,6 +171,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  // Only a full admin may promote a user TO admin or change an account that is
+  // already admin (demotion, re-seed). Without this, a MANAGE_USERS holder could
+  // PATCH {role:"ADMIN"} on any account and self-escalate to full control.
+  if (!callerIsAdmin && (body.role === "ADMIN" || target.role === "ADMIN")) {
+    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+  }
+
   if ((body.role === "USER" || body.role === "ISSUE_ADMIN") && target.role === "ADMIN") {
     // Advisory lock 42 + atomic row count ensures we never demote the last admin, even under concurrent requests
     const now = new Date().toISOString();
@@ -209,6 +230,11 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true } });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
+  if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+    return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
+  }
 
   const [requestCount, issueCount, voteCount] = await Promise.all([
     prisma.mediaRequest.count({ where: { requestedBy: id } }),

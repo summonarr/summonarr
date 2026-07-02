@@ -7,7 +7,7 @@ import { Prisma } from "@/generated/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { sanitizeOptional } from "@/lib/sanitize";
-import { Permission, defaultPermissionsForRole } from "@/lib/permissions";
+import { Permission, hasPermission, defaultPermissionsForRole } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
@@ -108,6 +108,13 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   const role = body.role ?? "USER";
   if (role !== "USER" && role !== "ISSUE_ADMIN" && role !== "ADMIN") {
     return NextResponse.json({ error: "role must be USER, ISSUE_ADMIN, or ADMIN" }, { status: 400 });
+  }
+  // MANAGE_USERS delegates creation of NON-admin users only. Creating an ADMIN
+  // account requires the caller to be a full admin — otherwise a MANAGE_USERS
+  // holder could mint a fresh ADMIN with a password they control and self-escalate.
+  // session.user.permissions is the effective mask (api-auth resolves it).
+  if (role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+    return NextResponse.json({ error: "Only an admin can create an admin account" }, { status: 403 });
   }
 
   const email = body.email;

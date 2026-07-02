@@ -157,6 +157,11 @@ function reachesToken(
   if (tokens.some((t) => decl.text.includes(t))) return true;
   for (const [name, candidates] of byName) {
     if (visited.has(name)) continue;
+    // Never satisfy a handler's guard by hopping into a SIBLING HTTP-method
+    // handler's region: an unguarded `export async function POST` that merely
+    // references (or even mentions) a guarded `GET` must still fail the audit.
+    // Shared logic must live in a non-handler helper, which this hop still follows.
+    if (HTTP_METHODS.has(name)) continue;
     const ref = new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\b`);
     if (!ref.test(decl.text)) continue;
     visited.add(name);
