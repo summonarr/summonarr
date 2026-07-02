@@ -11,6 +11,7 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isMovieDownloadedInRadarr } from "@/lib/arr";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -171,7 +172,7 @@ export async function POST(req: NextRequest) {
   // without first breaking the operator's own Radarr connectivity.
   const downloaded = await isMovieDownloadedInRadarr(tmdbId, is4k ? "4k" : "hd");
   if (downloaded === false) {
-    console.warn(`[webhook/radarr] Download event for tmdbId=${tmdbId} not confirmed downloaded in Radarr; skipping status flip.`);
+    console.warn(`[webhook/radarr] Download event for tmdbId=${sanitizeForLog(tmdbId)} not confirmed downloaded in Radarr; skipping status flip.`);
     syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }

@@ -1082,7 +1082,7 @@ export async function POST(req: NextRequest) {
   // timestamp widens the replay window.
   const requestAge = Date.now() / 1000 - Number(timestamp);
   if (Number.isNaN(requestAge) || requestAge > 5 || requestAge < -2) {
-    console.warn(`[interactions] Stale or skewed timestamp rejected: age=${requestAge.toFixed(1)}s`);
+    console.warn(`[interactions] Stale or skewed timestamp rejected: age=${sanitizeForLog(requestAge.toFixed(1))}s`);
     return new NextResponse("Request timestamp too old", { status: 401 });
   }
 
