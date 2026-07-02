@@ -172,7 +172,7 @@ export async function POST(req: NextRequest) {
   // without first breaking the operator's own Radarr connectivity.
   const downloaded = await isMovieDownloadedInRadarr(tmdbId, is4k ? "4k" : "hd");
   if (downloaded === false) {
-    console.warn(`[webhook/radarr] Download event for tmdbId=${sanitizeForLog(tmdbId)} not confirmed downloaded in Radarr; skipping status flip.`);
+    console.warn("[webhook/radarr] Download event for tmdbId=%s not confirmed downloaded in Radarr; skipping status flip.", sanitizeForLog(tmdbId));
     syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }

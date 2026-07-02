@@ -186,7 +186,7 @@ export async function POST(req: NextRequest) {
     is4k ? "4k" : "hd",
   );
   if (seriesDownloaded === false) {
-    console.warn(`[webhook/sonarr] Download event for tvdbId=${sanitizeForLog(safeVdbId ?? "?")} tmdbId=${sanitizeForLog(safeMdbId ?? "?")} not confirmed downloaded in Sonarr; skipping status flip.`);
+    console.warn("[webhook/sonarr] Download event for tvdbId=%s tmdbId=%s not confirmed downloaded in Sonarr; skipping status flip.", sanitizeForLog(safeVdbId ?? "?"), sanitizeForLog(safeMdbId ?? "?"));
     syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }

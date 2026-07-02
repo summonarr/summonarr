@@ -162,7 +162,9 @@ function reachesToken(
     // references (or even mentions) a guarded `GET` must still fail the audit.
     // Shared logic must live in a non-handler helper, which this hop still follows.
     if (HTTP_METHODS.has(name)) continue;
-    const ref = new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\b`);
+    // Escape backslash AND $ before building the RegExp (js/incomplete-sanitization).
+    // Route decl names only ever contain [\w$], but escape defensively regardless.
+    const ref = new RegExp(`\\b${name.replace(/[\\$]/g, "\\$&")}\\b`);
     if (!ref.test(decl.text)) continue;
     visited.add(name);
     for (const candidate of candidates) {

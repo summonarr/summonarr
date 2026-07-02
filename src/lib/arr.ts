@@ -80,7 +80,7 @@ async function resolveTvdbToTmdb(
           timeoutMs: 10_000,
         });
         if (!res.ok) {
-          console.warn(`[arr] tvdb-to-tmdb TMDB lookup returned ${res.status} for tvdbId ${sanitizeForLog(tvdbId)}`);
+          console.warn("[arr] tvdb-to-tmdb TMDB lookup returned %s for tvdbId %s", sanitizeForLog(res.status), sanitizeForLog(tvdbId));
           hadErrors = true;
           return;
         }
@@ -95,7 +95,7 @@ async function resolveTvdbToTmdb(
       } catch (err) {
         // Don't swallow: a TMDB 429/401/outage here silently drops every
         // tvdbId-only series from wanted/available/arrPending with no evidence.
-        console.warn(`[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId ${sanitizeForLog(tvdbId)}:`, err instanceof Error ? err.message : err);
+        console.warn("[arr] tvdb-to-tmdb TMDB lookup failed for tvdbId %s:", sanitizeForLog(tvdbId), sanitizeForLog(err instanceof Error ? err.message : err));
         hadErrors = true;
       }
     }));
