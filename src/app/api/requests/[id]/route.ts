@@ -132,6 +132,33 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
   }
 
+  // Note-only edit: `adminNote` with no status/search/retry updates the admin
+  // reply in place (an empty note clears it — sanitizeOptional maps "" to null).
+  // Status transitions below stay strictly validated; the old client behavior of
+  // sending the CURRENT status alongside the note always 422'd on the
+  // same-status transition, so a standalone note edit needs its own path.
+  if (status === undefined && adminNote !== undefined) {
+    const r = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+    if (r.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
+      void logAudit({
+        userId: session.user.id,
+        userName: session.user.name ?? session.user.email ?? "unknown",
+        action: "SETTINGS_CHANGE",
+        target: `request:${id}:adminNote`,
+        details: { via: "note", from: existing.adminNote ?? null, to: sanitizedAdminNote ?? null },
+        ...auditContext(req, session),
+      });
+    }
+    const noted = await prisma.mediaRequest.findUnique({
+      where: { id },
+      include: { user: { select: { name: true, email: true } } },
+    });
+    if (!noted) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    emitSSE({ type: "request:updated", requestId: id, status: noted.status, userId: existing.requestedBy });
+    return NextResponse.json(noted);
+  }
+
   if (!status || !VALID_STATUSES.includes(status as ValidStatus)) {
     return NextResponse.json(
       { error: `status must be one of: ${VALID_STATUSES.join(", ")}` },
