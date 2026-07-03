@@ -57,7 +57,10 @@ export const GET = withAuth(async (
     return NextResponse.json({ error: "type must be movie or tv" }, { status: 400 });
   }
 
-  const show4k = await getShow4kVisibility(session);
+  // Scoped to this page's backend (web-page parity): a movie page must not
+  // surface 4K state when only the Sonarr 4K instance is configured, and
+  // vice-versa.
+  const show4k = await getShow4kVisibility(session, type);
 
   try {
     const [detail, cast, suggestions] = await Promise.all([
@@ -75,12 +78,29 @@ export const GET = withAuth(async (
     ]);
 
     // Whether this viewer has an open deletion vote on the title — lets the
-    // native detail screen show "Voted to delete" + offer to retract (web parity).
-    const votedByMe =
-      (await prisma.deletionVote.findFirst({
+    // native detail screen show "Voted to delete" + offer to retract — and,
+    // when they can see 4K at all, whether they already hold an open 4K
+    // request (drives the native "Request in 4K" button states, mirroring the
+    // per-viewer `requested4k` the web detail pages compute).
+    const [voteRow, my4kRequest] = await Promise.all([
+      prisma.deletionVote.findFirst({
         where: { tmdbId, mediaType: type === "tv" ? "TV" : "MOVIE", userId: session.user.id },
         select: { id: true },
-      })) !== null;
+      }),
+      show4k
+        ? prisma.mediaRequest.findFirst({
+            where: {
+              tmdbId,
+              mediaType: type === "tv" ? "TV" : "MOVIE",
+              requestedBy: session.user.id,
+              is4k: true,
+              status: { not: "DECLINED" },
+            },
+            select: { id: true },
+          })
+        : Promise.resolve(null),
+    ]);
+    const votedByMe = voteRow !== null;
 
     // Additive native-client enrichment derived from the detail payload (which
     // already carries keywords / watchProviders / homepage / collection ids via
@@ -133,6 +153,9 @@ export const GET = withAuth(async (
       homepage,
       collection,
       votedByMe,
+      // Present only when the viewer can see 4K state at all — same convention
+      // as the arr4k* fields attachAllAvailability emits.
+      requested4kByMe: show4k ? my4kRequest !== null : undefined,
     });
   } catch (err) {
     console.error("[media] detail fetch failed:", err);
