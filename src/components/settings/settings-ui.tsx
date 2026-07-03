@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2, Copy, Check, RefreshCw, Unlink, Download, RefreshCcw, ChevronDown, ExternalLink, Trash2, Database } from "@/components/icons";
+import { CheckCircle, XCircle, Loader2, Copy, Check, RefreshCw, Unlink, Download, RefreshCcw, ChevronDown, ExternalLink, Trash2, Database, AlertTriangle, Send } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
 interface PlexSection {
@@ -1519,6 +1519,214 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
         {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
       </div>
     </form>
+  );
+}
+
+interface IosPushRelayFormProps {
+  initialRelayUrl: string;
+  initialRelayKey: string; // masked placeholder when set, "" when not
+  initialRecommendedBuild: string;
+}
+
+export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialRecommendedBuild }: IosPushRelayFormProps) {
+  const [relayUrl, setRelayUrl] = useState(initialRelayUrl);
+  const [relayKey, setRelayKey] = useState(initialRelayKey);
+  const [recommendedBuild, setRecommendedBuild] = useState(initialRecommendedBuild);
+  const [status, setStatus] = useState<SaveStatus>("idle");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const keyIsSet = initialRelayKey.length > 0;
+
+  async function handleSave(e: React.FormEvent) {
+    e.preventDefault();
+    setStatus("saving");
+    setErrorMessage("");
+    try {
+      const body: Record<string, string> = {
+        // Masked placeholder is skipped server-side; "" clears the key (clearable).
+        apnsRelayKey: relayKey,
+        // "" clears the recommendation (clearable).
+        recommendedIosBuild: recommendedBuild.trim(),
+        // "" clears the override (clearable) — push falls back to the default
+        // relay, which keeps the "leave blank for the default" hint truthful.
+        apnsRelayUrl: relayUrl.trim(),
+      };
+      const res = await fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+      } else {
+        setStatus("error");
+        setErrorMessage(typeof data.error === "string" ? data.error : "");
+      }
+    } catch {
+      setStatus("error");
+    }
+    setTimeout(() => setStatus("idle"), 3000);
+  }
+
+  return (
+    <form onSubmit={handleSave} className="space-y-4">
+      <div className="space-y-1.5">
+        <Label htmlFor="apns-relay-url">Relay URL</Label>
+        <Input
+          id="apns-relay-url"
+          type="url"
+          value={relayUrl}
+          onChange={(e) => { setRelayUrl(e.target.value); setStatus("idle"); }}
+          placeholder="https://summonapns.gadgetusaf.com/push"
+          className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+        />
+        <p className="text-xs text-zinc-500">
+          Must be https://. Leave blank to use the default relay operated by the app publisher.
+        </p>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="apns-relay-key">Relay key <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <div className="flex items-center gap-2">
+          <Input
+            id="apns-relay-key"
+            type="password"
+            value={relayKey}
+            onChange={(e) => { setRelayKey(e.target.value); setStatus("idle"); }}
+            placeholder="••••••••"
+            className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+          />
+          {(keyIsSet || relayKey.length > 0) && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => { setRelayKey(""); setStatus("idle"); }}
+              className="border-zinc-700 text-zinc-400 hover:text-white shrink-0 gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Remove
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-zinc-500">
+          Sent as a Bearer token on every relay request when the relay requires auth (8–200 characters, no spaces).
+          {keyIsSet && " A key is currently set — click Remove and Save to clear it."}
+        </p>
+      </div>
+      <div className="space-y-1.5 max-w-[220px]">
+        <Label htmlFor="recommended-ios-build">Recommended iOS build <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <Input
+          id="recommended-ios-build"
+          type="number"
+          min="1"
+          max="1000000"
+          value={recommendedBuild}
+          onChange={(e) => { setRecommendedBuild(e.target.value); setStatus("idle"); }}
+          placeholder="e.g. 42"
+          className="bg-zinc-800 border-zinc-700 text-sm"
+        />
+        <p className="text-xs text-zinc-500">
+          iOS builds below this number show a dismissible update prompt after sign-in. Leave blank to disable.
+        </p>
+      </div>
+      <div className="flex items-center gap-3">
+        <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+        </Button>
+        {status === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
+        {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{errorMessage || "Failed to save"}</span>}
+      </div>
+    </form>
+  );
+}
+
+export function AnnounceUpdateButton() {
+  const [phase, setPhase] = useState<"idle" | "confirm" | "sending" | "done" | "error">("idle");
+  const [summary, setSummary] = useState<string | null>(null);
+
+  async function handleSend() {
+    setPhase("sending");
+    setSummary(null);
+    try {
+      const res = await fetch(withBasePath("/api/push/announce-update"), { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; sent?: number; failed?: number; error?: string };
+      if (res.ok && data.ok) {
+        setPhase("done");
+        const sent = data.sent ?? 0;
+        const failed = data.failed ?? 0;
+        setSummary(`Sent to ${sent} device${sent === 1 ? "" : "s"}${failed > 0 ? `, ${failed} failed` : ""}`);
+      } else {
+        setPhase("error");
+        setSummary(typeof data.error === "string" ? data.error : "Failed to send update notice");
+      }
+    } catch {
+      setPhase("error");
+      setSummary("Failed to send update notice");
+    }
+    setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
+  }
+
+  if (phase === "confirm") {
+    return (
+      <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+        <div className="flex items-start gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+          <div className="space-y-1.5">
+            <p className="text-sm font-medium text-zinc-100">
+              Send an &quot;Update Summonarr&quot; notification to every registered iOS device?
+            </p>
+            <p className="text-xs text-zinc-400">
+              This goes to all users&apos; iOS devices at once and cannot be recalled. Limited to 2 sends per hour.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={handleSend}
+            className="bg-amber-600 hover:bg-amber-500 h-7 px-4 text-xs"
+          >
+            Send to all devices
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setPhase("idle")}
+            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-3 flex-wrap">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setPhase("confirm")}
+          disabled={phase === "sending"}
+          className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        >
+          {phase === "sending" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+          {phase === "sending" ? "Sending…" : "Send update notice to all iOS devices"}
+        </Button>
+        {summary && (
+          <span className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
+            {summary}
+          </span>
+        )}
+      </div>
+      {phase === "idle" && (
+        <p className="text-xs text-zinc-600">
+          Pushes a generic &quot;a new version is available on the App Store&quot; alert to every iOS device registered on this server.
+        </p>
+      )}
+    </div>
   );
 }
 

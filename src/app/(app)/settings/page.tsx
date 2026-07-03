@@ -8,7 +8,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -42,6 +42,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   notifications: [
     { id: "email",            label: "Email",              group: "Notifications" },
     { id: "discord-bot",      label: "Discord Bot",        group: "Notifications" },
+    { id: "ios-push-relay",   label: "iOS Push Relay",     group: "Notifications" },
   ],
   integrations: [
     { id: "external-ratings", label: "External Ratings",   group: "Integrations" },
@@ -108,6 +109,7 @@ const ALL_KEYS = [
   "playHistoryPollingInterval", "playHistoryRetentionDays",
   "omdbApiKey", "mdblistApiKey", "traktClientId",
   "ipinfoToken",
+  "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
 ] as const;
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
@@ -720,6 +722,26 @@ export default async function SettingsPage({
                 initialAdminRoleId={cfg.discordAdminRoleId ?? ""}
                 initialIssueAdminRoleId={cfg.discordIssueAdminRoleId ?? ""}
               />
+            </div>
+
+            <div id="ios-push-relay" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>iOS Push Relay</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
+                  iOS push notifications are delivered through an APNs relay. Point at a self-hosted relay,
+                  add its bearer key if it requires auth, and optionally recommend a minimum app build.
+                </p>
+              </div>
+              <div className="space-y-6">
+                <IosPushRelayForm
+                  initialRelayUrl={cfg.apnsRelayUrl ?? ""}
+                  initialRelayKey={cfg.apnsRelayKey ? "••••••••" : ""}
+                  initialRecommendedBuild={cfg.recommendedIosBuild ?? ""}
+                />
+                <div className="border-t border-zinc-800 pt-5">
+                  <AnnounceUpdateButton />
+                </div>
+              </div>
             </div>
           </>
         )}

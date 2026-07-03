@@ -23,6 +23,9 @@ const PUBLIC_SETTING_KEYS = [
   "donationAmazon",
   "donationPatreon",
   "donationBuyMeACoffee",
+  // Soft-upgrade lever: the iOS app compares this to its own build number and
+  // shows a dismissible update sheet when behind. An integer, not a secret.
+  "recommendedIosBuild",
 ] as const;
 
 export const GET = withAuth(async () => {
@@ -32,7 +35,16 @@ export const GET = withAuth(async () => {
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   const features = await getFeatureFlags();
 
+  // Present ONLY when the setting is set to a valid positive integer — clients
+  // key "is there a recommendation?" off the field's presence.
+  const recommendedIosBuild = /^\d+$/.test(cfg.recommendedIosBuild ?? "")
+    ? parseInt(cfg.recommendedIosBuild, 10)
+    : null;
+
   return NextResponse.json({
+    ...(recommendedIosBuild !== null && recommendedIosBuild >= 1
+      ? { recommendedIosBuild }
+      : {}),
     siteTitle: cfg.siteTitle ?? null,
     motd: {
       enabled: cfg.motdEnabled === "true",
