@@ -4,11 +4,11 @@ import { useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "@/components/icons";
 
-interface DiscordJoinBannerProps {
+interface DiscordJoinModalProps {
   inviteUrl: string;
 }
 
-export function DiscordJoinModal({ inviteUrl }: DiscordJoinBannerProps) {
+export function DiscordJoinModal({ inviteUrl }: DiscordJoinModalProps) {
   const [dismissed, setDismissed] = useState(false);
 
   if (dismissed) return null;
