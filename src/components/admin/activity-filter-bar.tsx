@@ -81,7 +81,7 @@ export function ActivityFilterBar() {
 
   return (
     <div className="mb-6 space-y-3">
-      {}
+      {/* Sub-page nav */}
       <div className="flex items-center gap-1 border-b border-zinc-800 pb-3 overflow-x-auto">
         {SUB_PAGES.map((page) => {
           const active = isSubPageActive(page);
@@ -137,7 +137,7 @@ export function ActivityFilterBar() {
         })}
       </div>
 
-      {}
+      {/* Filters */}
       {showFilters && (
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-1">
