@@ -31,6 +31,20 @@ interface Embed {
   timestamp: string;
 }
 
+// Discord rejects the whole message with a 400 (silently dropping the
+// notification) when an embed title exceeds 256 chars or a description exceeds
+// 4096. User-controlled fields (issue titles, message bodies, admin notes) can
+// blow past these, so clamp every embed at the send boundary. Generic so it
+// accepts both the strict Embed and the richer Record<string, unknown> embeds
+// (with thumbnail/components) built inline elsewhere in this file.
+function clampEmbed<T extends { title?: unknown; description?: unknown }>(embed: T): T {
+  const clamp = (s: string, max: number): string => (s.length > max ? s.slice(0, max - 1) + "…" : s);
+  const out: Record<string, unknown> = { ...embed };
+  if (typeof embed.title === "string") out.title = clamp(embed.title, 256);
+  if (typeof embed.description === "string") out.description = clamp(embed.description, 4096);
+  return out as T;
+}
+
 async function getConfig(): Promise<{ botToken: string; channelId: string | null } | null> {
   if (!(await isFeatureEnabled("feature.integration.discord"))) return null;
   const rows = await prisma.setting.findMany({
@@ -127,7 +141,7 @@ export async function notifyAdminsNewRequestDiscord(data: {
       allowedHosts: DISCORD_HOSTS,
       method: "POST",
       headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [embed], components, allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({ embeds: [clampEmbed(embed)], components, allowed_mentions: { parse: [] } }),
       timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
     });
     if (!res.ok) {
@@ -189,7 +203,7 @@ export async function notifyAdminsNewIssueDiscord(data: {
       allowedHosts: DISCORD_HOSTS,
       method: "POST",
       headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
+      body: JSON.stringify({ embeds: [clampEmbed(embed)], allowed_mentions: { parse: [] } }),
       timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
     });
     if (!res.ok) {
@@ -211,7 +225,7 @@ async function postToChannel(botToken: string, channelId: string, discordId: str
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       content: `<@${discordId}>`,
-      embeds: [embed],
+      embeds: [clampEmbed(embed)],
       // parse:[] suppresses @everyone/@here; explicit users array allows the single target mention
       allowed_mentions: { parse: [], users: [discordId] },
     }),
@@ -279,7 +293,7 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
     allowedHosts: DISCORD_HOSTS,
     method: "POST",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ embeds: [embed] }),
+    body: JSON.stringify({ embeds: [clampEmbed(embed)] }),
     timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
   });
   if (!msgRes.ok) {

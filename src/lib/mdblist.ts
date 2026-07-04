@@ -3,6 +3,13 @@ import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl, TTL } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
+import { mapLimit } from "./concurrency";
+
+// Bounded concurrency for the per-page cache upserts. A full 200-item page used
+// to write its rows with a sequential await-in-loop (~200 serial Postgres
+// round-trips on the blocking ratings-attach path); flush them a few at a time
+// instead without saturating the small Prisma pool.
+const MDBLIST_CACHE_WRITE_CONCURRENCY = 8;
 
 const MDBLIST_REST_BASE  = "https://api.mdblist.com/";
 const MDBLIST_FETCH_TIMEOUT_MS = 10_000;
@@ -248,6 +255,10 @@ export async function fetchMdblistBatch(
 
       const arr = Array.isArray(data) ? (data as MdblistBatchRaw[]) : [];
 
+      // Collect the page's cache upserts and flush them with bounded concurrency
+      // below, rather than awaiting each one serially in-loop.
+      const cacheWrites: Array<() => Promise<unknown>> = [];
+
       for (let i = 0; i < arr.length; i++) {
         const raw = arr[i];
 
@@ -267,7 +278,8 @@ export async function fetchMdblistBatch(
         result.set(tmdbId, ratings);
 
         const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
-        await setCache(cacheKey, ratings, libraryDetailsTtl(pageItem.releaseDate));
+        const ttl = libraryDetailsTtl(pageItem.releaseDate);
+        cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
       }
 
       if (arr.length >= page.length) {
@@ -278,7 +290,7 @@ export async function fetchMdblistBatch(
         for (const item of page) {
           if (!result.has(item.id)) {
             const cacheKey = `mdblist:tmdb:${mediaType}:${item.id}`;
-            await setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL);
+            cacheWrites.push(() => setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL));
           }
         }
       } else if (arr.length === 0) {
@@ -288,6 +300,11 @@ export async function fetchMdblistBatch(
       } else {
         console.warn(`[mdblist] batch ${mediaType} returned partial response (${arr.length}/${page.length}) — skipping NOT_FOUND caching for omitted ids`);
       }
+
+      // Flush this page's cache writes a few at a time. A rejection propagates to
+      // the surrounding catch (same as the old serial await), which logs and
+      // moves on to the next page — caching is best-effort.
+      await mapLimit(cacheWrites, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) => w());
     } catch (err) {
       const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
       console.error(`[mdblist] batch error for ${mediaType}: ${reason}`);

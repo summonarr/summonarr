@@ -30,6 +30,10 @@ type Session = {
   receivedChunks: number;
   bytesWritten: number;
   expiresAt: number;
+  // Set once the assembled file is handed to the importer (getSessionStream). A
+  // slow restore can outlive the idle TTL; without this flag the expiry-cleanup
+  // in startSession would rm the tempDir out from under the in-flight read.
+  importing?: boolean;
 };
 
 let active: Session | null = null;
@@ -93,6 +97,15 @@ export async function startSession(
 
   try {
     if (active && !isExpired(active) && active.uploadId !== opts.uploadId) {
+      return { ok: false, error: { kind: "in-progress" } };
+    }
+
+    // A session whose file is being read by an in-flight import must never be
+    // reclaimed — even if the idle TTL lapsed (a large restore can take longer
+    // than the between-chunks window). Reclaiming it here would rm the tempDir
+    // mid-read and corrupt the restore. Treat it as still in-progress; the
+    // importer's finally always clearSession()s it when done.
+    if (active && active.importing && active.uploadId !== opts.uploadId) {
       return { ok: false, error: { kind: "in-progress" } };
     }
 
@@ -207,6 +220,10 @@ export async function appendChunk(
 
 export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> | null {
   if (!active || active.uploadId !== uploadId) return null;
+  // Mark the slot as importing so a concurrent startSession can't reclaim + rm
+  // its tempDir while this stream is being read. clearSession (always called in
+  // the importer's finally) frees the slot afterwards.
+  active.importing = true;
   const nodeStream = createReadStream(active.filePath);
   return Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
 }

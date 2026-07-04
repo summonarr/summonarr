@@ -46,6 +46,20 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // is the effective mask (api-auth resolves it through effectivePermissions).
   const callerIsAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
 
+  // A non-admin MANAGE_USERS delegate must not mutate ANY field of an account
+  // that is already ADMIN — not just role/permissions. The role and permissions
+  // branches below enforce this individually (and additionally block *granting*
+  // ADMIN); this single up-front gate covers the mediaServer, quota, and
+  // notification branches too, so a future branch can't silently re-open the
+  // hole by forgetting the per-branch check. A missing target falls through to
+  // each branch's own 404. Admins skip the extra read entirely.
+  if (!callerIsAdmin) {
+    const targetForAuth = await prisma.user.findUnique({ where: { id }, select: { role: true } });
+    if (targetForAuth?.role === "ADMIN") {
+      return NextResponse.json({ error: "Only an admin can modify an admin account" }, { status: 403 });
+    }
+  }
+
   if ("mediaServer" in body) {
     const ms = body.mediaServer;
     if (ms !== null && ms !== "plex" && ms !== "jellyfin") {
