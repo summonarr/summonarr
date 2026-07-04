@@ -28,6 +28,8 @@ function escapeSQL(value: unknown): string {
   return `'${str}'`;
 }
 
+// Streams the whole database as a re-runnable SQL dump (enum types + paginated
+// INSERTs) inside one REPEATABLE READ snapshot; `counts` is mutated in place.
 function buildSqlStream(
   exportedBy: string,
   counts: { tables: number; rows: number },

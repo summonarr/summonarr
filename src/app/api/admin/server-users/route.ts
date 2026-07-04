@@ -8,6 +8,10 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [users, autoDisableRow] = await Promise.all([
     prisma.mediaServerUser.findMany({
       where: { active: true }, // hide soft-deleted (departed) server users from active management
+      // Safety bound so a pathologically large media server can't return an
+      // unbounded row set to the admin client. Far above any realistic active
+      // user count; a deployment exceeding it needs real pagination.
+      take: 10_000,
       select: {
         id: true,
         source: true,

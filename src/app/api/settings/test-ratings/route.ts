@@ -6,6 +6,8 @@ import { testMdblistConnection } from "@/lib/mdblist";
 import { testTraktConnection } from "@/lib/trakt";
 import { testIpinfoConnection } from "@/lib/ip-lookup";
 
+// Admin connectivity test for the ratings/lookup providers: dispatches on the
+// requested service to the matching test helper (OMDB, MDBList, Trakt, ipinfo).
 export const POST = withAdmin(async (req, _ctx, _session) => {
   const parsed = await readJsonCapped<{ service?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;

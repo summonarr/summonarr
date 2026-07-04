@@ -12,6 +12,8 @@ interface DetailsCacheData {
   releaseDate?: string | null;
 }
 
+// Refreshes the OMDB ratings cache for every library item, skipping rows still
+// within 25% of their TTL and re-fetching the rest in throttled concurrent batches.
 export async function prewarmOmdbCache(): Promise<{
   total: number;
   fetched: number;

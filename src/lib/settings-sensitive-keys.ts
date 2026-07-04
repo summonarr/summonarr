@@ -31,6 +31,7 @@ export const SETTINGS_SENSITIVE_KEYS: readonly string[] = [
   "resendApiKey",
   "smtpPassword",
   "trashGithubToken",
+  "apnsRelayKey",
 ] as const;
 
 export const SETTINGS_SENSITIVE_KEYS_SET: ReadonlySet<string> = new Set(

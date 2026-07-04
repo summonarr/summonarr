@@ -83,6 +83,8 @@ const ghostStyle: React.CSSProperties = {
   border: "1px solid var(--ds-border)",
 };
 
+// Primary HD request CTA on movie/TV detail + cards: handles the confirm/note/
+// on-behalf flows and reflects availability, pending, and already-requested states.
 export function RequestButton({
   tmdbId,
   mediaType,

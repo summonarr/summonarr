@@ -4,6 +4,8 @@ import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
 import { checkRateLimit } from "@/lib/rate-limit";
 
+// GET /api/ratings?id=&type= — external ratings for a single title; tries
+// mdblist first, falls back to OMDB only when no mdblist key is configured.
 export const GET = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`ratings:${session.user.id}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });

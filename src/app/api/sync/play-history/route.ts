@@ -597,10 +597,10 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
           // hand-rolled version below used to gate on s.state — the new state — so a
           // session that was paused all interval and started playing in the final ms
-          // got the full wall-clock interval credited. Plex uses the helper at line 178;
-          // align Jellyfin to it for consistency and correctness.
+          // got the full wall-clock interval credited. Plex uses the helper in its
+          // branch above; align Jellyfin to it for consistency and correctness.
           const increment = computePlaytimeIncrement(existing, now);
-          // CAS on (id, lastSeenAt): mirrors the Plex branch (line 244). If the
+          // CAS on (id, lastSeenAt): mirrors the Plex branch's updateMany above. If the
           // row was deleted/rewritten between our prefetch and this write — an
           // overlapping tick (poll >5s), the same run's absence-finalize, or
           // cleanupStaleSessions — a plain `update` throws P2025 and rejects the

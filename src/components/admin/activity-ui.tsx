@@ -2,9 +2,9 @@
 
 // Shared presentational primitives for the refined Activity dashboard.
 // Ported from the Claude Design "Activity Page" handoff — DS-token styled.
-// Only ever consumed by the "use client" section components
-// (activity-sections / -now-playing / -recent-plays); page.tsx never imports
-// this module directly. Sparkline/AreaChart carry hover state, so this is a
+// Consumed only by the Activity dashboard's "use client" section components
+// (activity-sections, -now-playing, -recent-plays, and other activity-* views);
+// page.tsx never imports this module directly. Sparkline/AreaChart carry hover state, so this is a
 // client module. Tooltip date labels are precomputed server-side and passed
 // down as `labels` — never derived from Date here (CLAUDE.md guardrail 16).
 

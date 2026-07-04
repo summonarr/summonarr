@@ -8,9 +8,13 @@ import { readJsonCapped } from "@/lib/body-size";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
-// grow them, so accept a generous hex range and reject anything else.
-const DEVICE_TOKEN_RE = /^[0-9a-fA-F]{64,200}$/;
+// grow them, so accept a generous range — but whole bytes only (even-length
+// hex, 32–100 bytes). The relay validates even-length; an odd-length token
+// would register here but never deliver.
+const DEVICE_TOKEN_RE = /^(?:[0-9a-fA-F]{2}){32,100}$/;
 
+// POST /api/push/apns — registers (or updates) an iOS device's APNs token as a
+// push subscription for the caller, capped per-user with oldest-eviction.
 export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`push-apns:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });

@@ -100,6 +100,8 @@ export async function getArcGapDays(): Promise<number> {
   return Number.isFinite(parsed) && parsed >= 1 && parsed <= 365 ? parsed : 14;
 }
 
+// Map a source-native show key (Plex ratingKey / Jellyfin itemId) to its tmdbId
+// via the cached library tables. Returns null when unmapped or the key is empty.
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
@@ -144,6 +146,8 @@ function fnv1a32(s: string): number {
   return h >>> 0;
 }
 
+// Upsert the MediaServerUser for a (source, sourceUserId) and link it to a local
+// User by normalized email, serialized under an advisory lock. Returns the row id.
 export async function resolveMediaServerUser(params: {
   source: string;
   sourceUserId: string;
@@ -319,6 +323,10 @@ export function applyFinalTick(
   };
 }
 
+// Finalize a completed ActiveSession into a PlayHistory row (with full playback
+// metrics) and remove the ActiveSession. Idempotent across the concurrent
+// finalize paths (SSE stop, poller stall, cleanup) via the createMany dedupe and
+// lastSeenAt CAS. Short/excluded watches are dropped without a history row.
 export async function recordCompletedSession(
   session: ActiveSession,
   opts: { skipSSE?: boolean; stoppedAt?: Date } = {},
@@ -355,7 +363,7 @@ export async function recordCompletedSession(
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 
   // Both short-circuits use the same lastSeenAt CAS the post-transaction
-  // delete below uses (line 387). A blind delete here can stomp a row the
+  // delete below uses. A blind delete here can stomp a row the
   // sync just rewrote (same `id`, new `lastSeenAt`, new `startedAt`) for a
   // fresh playback, leaving the new watch with no ActiveSession — its
   // trailing time and finalize then never fire.
@@ -690,6 +698,9 @@ export async function reanchorActiveSessionsOnBoot(): Promise<void> {
   }
 }
 
+// Safety net beneath the absence grace: finalize any ActiveSession whose
+// lastSeenAt is older than maxAgeMinutes (no final tick — a stale row has no
+// signal it was still playing).
 export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void> {
   const cutoff = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
   const stale = await prisma.activeSession.findMany({
@@ -716,6 +727,8 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
   }
 }
 
+// Delete PlayHistory rows older than the configured retention window (no-op when
+// retention is unset/0). Returns the number of rows deleted.
 export async function purgeOldHistory(): Promise<number> {
   const val = (await loadSettings()).playHistoryRetentionDays;
   const days = val ? parseInt(val, 10) : 0;
@@ -728,6 +741,8 @@ export async function purgeOldHistory(): Promise<number> {
   return result.count;
 }
 
+// Aggregate the full per-user stats bundle (totals, recent plays, top media,
+// daily/heatmap series, codec/resolution/device breakdowns) for one MediaServerUser.
 export async function getUserPlayStats(mediaServerUserId: string) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
@@ -848,6 +863,8 @@ export async function getUserPlayStats(mediaServerUserId: string) {
   };
 }
 
+// Aggregate the per-title stats bundle (totals, unique/top viewers, completion,
+// recent plays, daily series, transcode/resolution breakdowns) for one tmdbId.
 export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
 
@@ -980,6 +997,8 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
   };
 }
 
+// One-row-per-MediaServerUser leaderboard for the admin users list: plays, watch
+// hours, last-active, favourite platform, and direct-play vs transcode split.
 export async function getAllUsersStats() {
   const rows = await prisma.$queryRaw<
     {
@@ -2240,7 +2259,25 @@ function getCached<T>(key: string): T | null {
   return entry.data as T;
 }
 
+// Bound the cache: heatmap-cell keys embed arbitrary userId/day/dow/hour combos,
+// so distinct keys are effectively unbounded and getCached only evicts a key when
+// it is re-accessed after expiry. Cap the map so a long-lived process can't grow it
+// without bound — sweep expired entries first, then evict oldest-inserted (Map keeps
+// insertion order) until under the cap.
+const ACTIVITY_CACHE_MAX = 500;
+
 function setCached<T>(key: string, data: T, ttlMs: number): void {
+  if (activityCache.size >= ACTIVITY_CACHE_MAX && !activityCache.has(key)) {
+    const now = Date.now();
+    for (const [k, v] of activityCache) {
+      if (v.expiresAt <= now) activityCache.delete(k);
+    }
+    while (activityCache.size >= ACTIVITY_CACHE_MAX) {
+      const oldest = activityCache.keys().next().value;
+      if (oldest === undefined) break;
+      activityCache.delete(oldest);
+    }
+  }
   activityCache.set(key, { data, expiresAt: Date.now() + ttlMs });
 }
 
@@ -2252,6 +2289,8 @@ export function clearActivityCache(): void {
   popularCache.clear();
 }
 
+// Pre-populate the activity stats/calendar/rewatched caches for the common time
+// windows so the first admin page load after a cache flush is warm. Cron-driven.
 export async function warmActivityCache(): Promise<{ warmed: number }> {
   let warmed = 0;
 

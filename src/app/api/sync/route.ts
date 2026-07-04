@@ -64,9 +64,6 @@ export async function POST(request: NextRequest) {
   ));
 }
 
-// Signal fires when withAdvisoryLock's hard timeout trips, before the lock is released.
-// Prisma 7's $transaction(fn, opts) does not accept an AbortSignal, so abortion is best-effort —
-// long-running outbound HTTP (Plex/Jellyfin/ARR fetches) can observe it; Prisma queries cannot.
 // Strips angle brackets and null bytes, caps length. Shared between the
 // orchestrator and the per-source /api/sync/{plex,jellyfin} routes so the
 // PlexLibraryItem / JellyfinLibraryItem content is identical regardless of
@@ -119,7 +116,9 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
 }
 
 async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): Promise<NextResponse> {
-  // signal is wired through so callers (e.g. arrFetch) can opt in later; currently unobserved.
+  // signal fires when withAdvisoryLock's hard timeout trips (before the lock is
+  // released). Wired through so callers (e.g. arrFetch) can opt in later, but
+  // currently unobserved — Prisma 7's $transaction(fn, opts) takes no AbortSignal.
   void signal;
   const startTime = Date.now();
 

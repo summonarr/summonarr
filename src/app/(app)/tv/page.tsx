@@ -13,6 +13,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
 
+// Keeps items whose external rating (encoded as "source:threshold", e.g. "imdb:7") clears the threshold.
 function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): TmdbMedia[] {
   const colon = ratingFilter.indexOf(":");
   if (colon === -1) return items;

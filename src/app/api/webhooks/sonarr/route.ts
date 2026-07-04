@@ -153,6 +153,21 @@ export async function POST(req: NextRequest) {
         notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
           .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),
       );
+      // Bound the one-shot marker table: a Setting row is inserted per distinct
+      // stuck series and never removed. Prune markers older than 30 days — ISO-8601
+      // values sort lexically = chronologically. A series still stuck past the
+      // window simply re-notifies, which is acceptable. Runs only on a fresh claim
+      // (when the table actually grew), so it stays naturally infrequent.
+      after(() =>
+        prisma.setting
+          .deleteMany({
+            where: {
+              key: { startsWith: "manualInteractionNotified:" },
+              value: { lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
+            },
+          })
+          .catch((err) => console.warn("[webhook/sonarr] manual-interaction marker prune failed:", err)),
+      );
     }
     syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });

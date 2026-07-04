@@ -10,6 +10,7 @@ interface Props {
   variant?: "setup" | "register";
 }
 
+// Account-creation form (first-run admin `setup` or self-`register`); registers then auto-signs in.
 export function SetupForm({ variant = "setup" }: Props) {
   const isSetup = variant === "setup";
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { generateRequestToken } from "@/lib/request-token";
 
+// Mints the short-lived HMAC token (scoped to tmdbId+mediaType+user) that
+// POST /api/requests requires — gates request creation to the actual UI flow.
 export const GET = withAuth(async (req, _ctx, session) => {
   const tmdbId = parseInt(req.nextUrl.searchParams.get("tmdbId") ?? "", 10);
   const mediaType = req.nextUrl.searchParams.get("mediaType");

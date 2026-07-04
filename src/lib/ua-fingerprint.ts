@@ -10,6 +10,7 @@ export interface UaFingerprint {
   device: "mobile" | "tablet" | "desktop";
 }
 
+// Classifies a raw UA string into browser family / OS / device class.
 export function extractUaFingerprint(ua: string): UaFingerprint {
 
   const isTablet =

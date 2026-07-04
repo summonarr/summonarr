@@ -5,6 +5,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { encryptForDevice } from "@/lib/push-e2e";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { settleLimit } from "@/lib/concurrency";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
@@ -113,6 +114,7 @@ type ApnsCategory =
   | "grab_complete"
   | "manual_interaction"
   | "deletion_votes"
+  | "app_update"
   | "test";
 
 // Generic, content-free alerts sent to iOS through the relay. They deliberately
@@ -131,6 +133,7 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
   grab_complete: { title: "Download complete", body: "A download has finished" },
   manual_interaction: { title: "Manual import needed", body: "A download needs your attention" },
   deletion_votes: { title: "Deletion votes", body: "A title reached the deletion-vote threshold" },
+  app_update: { title: "Update Summonarr", body: "A new version of the Summonarr app is available on the App Store" },
   test: { title: "Summonarr", body: "Test notification — push is working!" },
 };
 
@@ -138,9 +141,17 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
 // `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
 const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 
-async function getApnsRelayUrl(): Promise<string> {
-  const row = await prisma.setting.findUnique({ where: { key: "apnsRelayUrl" } });
-  return row?.value?.trim() || DEFAULT_APNS_RELAY_URL;
+async function getApnsRelayConfig(): Promise<{ url: string; key: string }> {
+  const rows = await prisma.setting.findMany({
+    where: { key: { in: ["apnsRelayUrl", "apnsRelayKey"] } },
+  });
+  const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return {
+    url: cfg.apnsRelayUrl?.trim() || DEFAULT_APNS_RELAY_URL,
+    // apnsRelayKey is decrypted on read by the Prisma extension; empty/absent
+    // means the relay runs unauthenticated and no Authorization header is sent.
+    key: cfg.apnsRelayKey?.trim() || "",
+  };
 }
 
 async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
@@ -173,18 +184,41 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
 
   try {
     const token = decryptToken(subscription.deviceToken, "PushSubscription.deviceToken");
-    const relayUrl = await getApnsRelayUrl();
-    const res = await safeFetchAdminConfigured(relayUrl, {
+    const relay = await getApnsRelayConfig();
+    const res = await safeFetchAdminConfigured(relay.url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        // Optional relay auth — only sent when an apnsRelayKey is configured.
+        ...(relay.key ? { authorization: `Bearer ${relay.key}` } : {}),
+      },
       // collapseId groups same-category alerts so a batch (e.g. several requests
       // flipping available at once) shows as one notification on the device.
       body: JSON.stringify({ deviceToken: token, payload: apnsPayload, collapseId: payload.category }),
       timeoutMs: 10_000,
     });
     if (!res.ok) {
-      // 5xx / timeouts are transient — keep the token, no prune.
-      console.error(`[push] APNs relay HTTP ${res.status}`);
+      // Non-200 is not retried and the token is kept (5xx / timeouts are
+      // transient; unregistered pruning happens on the 200 path below). Parse
+      // the relay's JSON error body when present so the log says WHY.
+      const errBody = (await res.json().catch(() => null)) as
+        | { error?: string; reason?: string; apnsReason?: string }
+        | null;
+      const detail = [errBody?.error, errBody?.reason, errBody?.apnsReason]
+        .filter((v): v is string => typeof v === "string" && v.length > 0)
+        .join("; ");
+      if (res.status === 401) {
+        console.error(
+          `[push] APNs relay rejected auth (401${detail ? `: ${detail}` : ""}) — set/verify the apnsRelayKey setting`,
+        );
+      } else if (res.status === 429) {
+        const retryAfter = res.headers.get("retry-after");
+        console.error(
+          `[push] APNs relay rate-limited (429${detail ? `: ${detail}` : ""})${retryAfter ? ` — retry after ${retryAfter}s` : ""}`,
+        );
+      } else {
+        console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      }
       return false;
     }
     const data = (await res.json().catch(() => null)) as { ok?: boolean; reason?: string } | null;
@@ -224,6 +258,34 @@ export async function sendApnsTestToUser(
       ok: await sendApns(s, payload),
     })),
   );
+}
+
+// Admin broadcast: "update the app" push to EVERY registered iOS device across
+// all users. The alert is generic (no user content); devices with an E2E key
+// get the same text through the encrypted rich path sendApns already runs per
+// subscription. Like the test push, this is a deliberate operator action, so it
+// bypasses the `feature.integration.push` flag and per-event preferences.
+// Returns per-fan-out counts for the admin UI.
+export async function sendAppUpdateNoticeToAllIos(): Promise<{ sent: number; failed: number }> {
+  const subs = await prisma.pushSubscription.findMany({
+    where: { platform: "ios" },
+  });
+  const payload: PushPayload = {
+    title: "Update Summonarr",
+    body: "A new version of the Summonarr app is available on the App Store",
+    url: "/",
+    category: "app_update",
+  };
+  // Bounded fan-out (guardrail 31): the device list scales with the user base,
+  // so cap in-flight relay POSTs instead of bursting them all at once.
+  const results = await settleLimit(subs, 8, (s) => sendApns(s, payload));
+  let sent = 0;
+  let failed = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value === true) sent++;
+    else failed++;
+  }
+  return { sent, failed };
 }
 
 // ── shared send path ─────────────────────────────────────────────────────────
@@ -438,15 +500,6 @@ export async function notifyAdminsIssueMessagePush(data: {
   }
 }
 
-// Returns true when the caller may consider the notification "delivered" (so the
-// IssueGrab CAS claim should be left in place). Returns false when delivery was
-// attempted but every push failed — caller should reset notifiedAt for retry.
-//
-// Distinct outcomes encoded as a boolean:
-// - true: keys missing OR no subscriptions (nothing to retry by sending more); or
-//   at least one push to a subscription succeeded.
-// - false: ≥1 subscription existed but every send failed (transient endpoint outage,
-//   401 from upstream, etc.) — retry on the next webhook tick may succeed.
 // Outcome of an admin push send attempt. Lets the webhook caller distinguish
 // "user has no subs / no VAPID configured" (don't retry, but the notification
 // channel was effectively a no-op — caller may want to backstop via email or

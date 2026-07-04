@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 
 const SAMPLE_COUNT = 6;
 
+// Longest shared directory prefix across paths (excludes the final filename
+// segment), used as the inferred library mount point to strip in the UI.
 function commonPathPrefix(paths: string[]): string {
   if (paths.length === 0) return "";
   const segmented = paths.map((p) => p.replace(/\\/g, "/").split("/").filter(Boolean));
@@ -25,6 +27,8 @@ function stripPrefix(filePath: string, mountPoint: string): string {
   return mountPoint && n.startsWith(mountPoint) ? n.slice(mountPoint.length) : n;
 }
 
+// Evenly-spaced sample of mount-relative paths (up to SAMPLE_COUNT) so the UI
+// shows a representative spread rather than just the first few.
 function pickSamples(paths: string[], mountPoint: string): string[] {
   const relative = paths.map((p) => stripPrefix(p, mountPoint)).filter(Boolean);
   if (relative.length <= SAMPLE_COUNT) return relative;
@@ -34,6 +38,8 @@ function pickSamples(paths: string[], mountPoint: string): string[] {
   return [...new Set(indices)].map((i) => relative[i]);
 }
 
+// Sample of distinct show folders (first path segment) rather than per-episode
+// paths, so the TV preview lists shows instead of many files from one show.
 function pickTvShowSamples(paths: string[], mountPoint: string): string[] {
   const seen = new Set<string>();
   const result: string[] = [];

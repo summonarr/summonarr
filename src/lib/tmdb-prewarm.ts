@@ -300,6 +300,9 @@ async function processPrewarmPage(
   }
 }
 
+// Walk the Plex + Jellyfin libraries (deduped), fetching each title's full TMDB
+// detail page into the cache so browse/detail views hit warm rows; fresh entries
+// are skipped and cache-only rows are backfilled into TmdbMediaCore without a live fetch.
 export async function prewarmLibraryCache(): Promise<{ total: number; fetched: number; backfilled: number; skipped: number; failed: number }> {
   if (!tmdbAuth()) {
     return { total: 0, fetched: 0, backfilled: 0, skipped: 0, failed: 0 };

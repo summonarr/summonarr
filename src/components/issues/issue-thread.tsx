@@ -20,6 +20,8 @@ interface IssueThreadProps {
   variant?: "inline" | "panel";
 }
 
+// Renders an issue's message thread and reply box; live-refreshes on the SSE
+// issuemessage:created event and polls once on mount.
 export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");

@@ -19,6 +19,8 @@ interface CastSectionProps {
   cast: CastMember[];
 }
 
+// Cast grid; tapping a member opens a modal that lazily fetches their
+// filmography and lets you request/view credits inline.
 export function CastSection({ cast }: CastSectionProps) {
   const [selectedActor, setSelectedActor] = useState<CastMember | null>(null);
   const [personData, setPersonData] = useState<PersonDetails | null>(null);

@@ -55,6 +55,7 @@ export async function logAuditOrFail(params: AuditParams): Promise<void> {
   });
 }
 
+// Builds the ip/userAgent/provider context for an audit entry from the request headers + session.
 export function auditContext(
   req: Request | { headers: Headers },
   session?: { user?: { provider?: string } } | null,

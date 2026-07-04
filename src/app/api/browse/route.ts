@@ -13,6 +13,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 const TMDB_PAGES_PER_VIRTUAL = 5;
 const PAGE_SIZE = 20;
 
+// Filters items by an external-rating threshold expressed as "source:value"
+// (imdb / rt / rta). Unparseable filters pass everything through unchanged.
 function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): TmdbMedia[] {
   const colon = ratingFilter.indexOf(":");
   if (colon === -1) return items;

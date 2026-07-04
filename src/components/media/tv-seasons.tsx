@@ -42,6 +42,7 @@ function formatRuntime(min: number | null): string | null {
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
+// Collapsible per-season list; expanding a season lazy-fetches its episodes and library-ownership marks.
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   const mounted = useHasMounted();
   const [state, setState] = useState<Record<number, SeasonState>>(() => {

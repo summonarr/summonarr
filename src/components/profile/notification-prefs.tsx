@@ -61,6 +61,8 @@ function ToggleRow({
   );
 }
 
+// Per-channel (Discord/email/push) notification toggles with debounced optimistic save +
+// rollback, plus the Jellyfin-only manual notification-email field.
 export function NotificationPrefs({
   discordLinked,
   isAdminRole,

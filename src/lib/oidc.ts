@@ -2,9 +2,9 @@ import * as client from "openid-client";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
-// Summonarr-native OIDC client. Runs in parallel with next-auth's OIDC
-// provider during the migration window — both can be enabled by the same
-// OIDC_* env vars and target the same IdP. PR 5 retires the next-auth path.
+// Summonarr-native OIDC client — the sole OIDC path (the parallel next-auth
+// provider it replaced has been removed). Configured by the OIDC_* env vars,
+// targeting a single IdP.
 //
 // State management: PKCE codeVerifier + state + nonce live in a short-lived
 // (5 min) signed JWT cookie between the /start and /callback requests, so

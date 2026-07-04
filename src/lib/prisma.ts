@@ -73,6 +73,15 @@ function safeDecryptSettingValue(key: string | undefined, value: string): string
   if (typeof key === "string" && !SENSITIVE_KEYS.has(key)) {
     return value;
   }
+  // Cleared sensitive keys (e.g. apnsRelayKey, which is CLEARABLE) persist as
+  // "" — the write side skips encryption for empty values, so there is nothing
+  // to decrypt and running decryptToken would emit a bogus legacy-plaintext warn.
+  // Clearing is also the recovery path for a corrupt row, so drop any recorded
+  // decrypt failure here — otherwise the settings banner outlives the value.
+  if (value === "") {
+    if (typeof key === "string") settingDecryptFailures.delete(key);
+    return value;
+  }
   const label = `Setting.${key ?? "?"}`;
   try {
     const result = decryptToken(value, label);

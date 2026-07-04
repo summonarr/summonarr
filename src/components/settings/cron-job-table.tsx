@@ -21,6 +21,7 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+// Admin table of internal cron jobs with last-run/status and a per-job manual Run trigger.
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   const [jobs, setJobs] = useState(initialJobs);
   const [running, setRunning] = useState<Set<string>>(new Set());

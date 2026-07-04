@@ -8,6 +8,8 @@ import { logAudit } from "@/lib/audit";
 import { invalidateUserSession } from "@/lib/auth";
 import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 
+// PATCH /api/profile/password — the signed-in user changes their own local
+// password; revokes all existing sessions on success.
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;

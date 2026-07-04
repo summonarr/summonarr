@@ -10,6 +10,8 @@ interface ChangePasswordProps {
   hasPassword: boolean;
 }
 
+// Set-or-change-password form; when hasPassword the current password is required, and a
+// server `requiresRelogin` response bounces to /login.
 export function ChangePassword({ hasPassword }: ChangePasswordProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");

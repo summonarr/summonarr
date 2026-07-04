@@ -21,6 +21,9 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("jellyfin-sync", () => syncJellyfin(request));
 }
 
+// Fetches the Jellyfin library (movies + TV), writes JellyfinLibraryItem rows
+// (recentOnly insert-only within the 2h window, or a full delete+replace), then
+// flips matching pending/approved requests to AVAILABLE and fires notifications.
 async function syncJellyfin(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;

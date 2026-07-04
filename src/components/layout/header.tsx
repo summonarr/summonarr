@@ -32,6 +32,8 @@ import { withBasePath } from "@/lib/base-path";
 
 type MediaFilter = "all" | "movie" | "tv";
 
+// Debounced media search combobox (⌘K); queries /api/search and routes to the
+// selected title's detail page.
 export function SearchBar({
   showPlex,
   showJellyfin,
@@ -357,6 +359,7 @@ export function SearchBar({
   );
 }
 
+// Desktop top bar: breadcrumb, search, push toggle, and the account dropdown.
 export function Header() {
   const pathname = usePathname();
   const router = useRouter();

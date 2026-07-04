@@ -48,6 +48,8 @@ function buildHeader(salt: Buffer, iv: Buffer): Buffer {
   return header;
 }
 
+// True when the buffer begins with the encrypted-backup magic bytes (used to
+// detect whether a restore upload is an encrypted backup before decrypting).
 export function hasEncryptedMagic(bytes: Uint8Array): boolean {
   if (bytes.length < MAGIC.length) return false;
   for (let i = 0; i < MAGIC.length; i++) {
@@ -56,6 +58,8 @@ export function hasEncryptedMagic(bytes: Uint8Array): boolean {
   return true;
 }
 
+// Wraps a plaintext stream as a password-encrypted backup stream: emits the
+// header (magic + version + salt + iv), then AES-256-GCM ciphertext, then the tag.
 export function wrapEncryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,
@@ -103,6 +107,9 @@ export function wrapEncryptStream(
   });
 }
 
+// Inverse of wrapEncryptStream: parses the header, then streams AES-256-GCM
+// decryption, verifying the trailing auth tag (throws BackupCryptoError on
+// truncation, bad magic/version, or a wrong password).
 export function wrapDecryptStream(
   source: ReadableStream<Uint8Array>,
   password: string,

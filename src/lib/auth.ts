@@ -360,6 +360,8 @@ export function invalidateSessionDurationsCache(): void {
   sessionDurationsCache = null;
 }
 
+// Reads the admin-configurable desktop/mobile/max session TTLs (5-min cached),
+// each capped at MAX_ALLOWED_SESSION_SECONDS, falling back to the DEFAULT_* consts.
 export async function getSessionDurations(): Promise<SessionDurations> {
   const now = Date.now();
   if (sessionDurationsCache && sessionDurationsCache.expiresAt > now) {
@@ -514,6 +516,8 @@ export interface DeviceMeta {
   _auditUa: string;
 }
 
+// Derives the per-device session metadata (fresh sessionId, UA fingerprint,
+// mobile flag, device label, audit IP/UA) from the request headers at sign-in.
 export function buildDeviceMeta(headers: Headers): DeviceMeta {
   const ua           = headers.get("user-agent") ?? "";
   const ip           = getClientIp(headers);
@@ -530,6 +534,9 @@ export function buildDeviceMeta(headers: Headers): DeviceMeta {
 
 type JwtToken = Record<string, unknown>;
 
+// Mutates `token` in place at sign-in: fills sessionId, computes the TTL →
+// expiresAt/maxExpiresAt, resolves mediaServer when not provider-pinned, and
+// upserts the backing AuthSession row.
 export async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
   if (!token.sessionId) {
     // Credentials provider supplies _sessionId via DeviceMeta; OIDC/OAuth do not

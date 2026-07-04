@@ -13,6 +13,8 @@ interface DetailsCacheData {
   releaseDate?: string | null;
 }
 
+// Refreshes MDBList ratings cache for every library item, purging stale/NOT_FOUND
+// rows and re-fetching in interleaved movie/TV batch pages, stopping early on quota.
 export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promise<{
   total: number;
   fetched: number;

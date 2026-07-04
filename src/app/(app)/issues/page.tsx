@@ -43,6 +43,7 @@ const ISSUE_TYPE_LABELS: Record<string, string> = {
 
 const PAGE_SIZE = 20;
 
+// Formats an issue's scope into a short label (SxxEyy for episodes, "Season N" for seasons); null for whole-title scope.
 function scopeLabelFor(issue: { scope: string; seasonNumber: number | null; episodeNumber: number | null }): string | null {
   if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
     return `S${String(issue.seasonNumber).padStart(2, "0")}E${String(issue.episodeNumber).padStart(2, "0")}`;

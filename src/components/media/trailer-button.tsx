@@ -8,6 +8,8 @@ interface TrailerButtonProps {
   trailerUrl?: string | null;
 }
 
+// "Watch Trailer" link — prefers a YouTube key, else falls back to a
+// sanitized external URL; renders nothing when neither is present.
 export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
   const href = trailerKey
     ? `https://www.youtube.com/watch?v=${trailerKey}`

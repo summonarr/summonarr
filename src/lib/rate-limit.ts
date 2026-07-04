@@ -25,6 +25,8 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+// Sliding-window rate limiter: records a hit for `key` and returns false once
+// `limit` hits fall within `windowMs`. Bounded by MAX_KEYS via LRU eviction.
 export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
   if (limit <= 0) return true;
   const now = Date.now();

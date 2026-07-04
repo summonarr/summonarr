@@ -98,7 +98,7 @@ function rowToLookup(row: {
   };
 }
 
-function parseIpinfo(ip: string, data: IpinfoResponse): {
+function parseIpinfo(data: IpinfoResponse): {
   hostname: string | null;
   city: string | null;
   region: string | null;
@@ -191,7 +191,7 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
       return rowToLookup(row);
     }
 
-    const parsed = parseIpinfo(ip, data);
+    const parsed = parseIpinfo(data);
     const row = await prisma.ipLookupCache.upsert({
       where: { ip },
       create: { ip, ...parsed, notFound: false },

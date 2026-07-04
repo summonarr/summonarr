@@ -34,7 +34,7 @@ const Ctx = React.createContext<ContextValue | null>(null);
 // initialSession is populated server-side from the Summonarr session cookie
 // (see src/lib/session-server.ts) so consumers don't see a loading flash on
 // first paint. When it's null we still hit /api/auth/me on mount to backfill
-// the cookie from a legacy next-auth session during the migration window.
+// the session in case one exists that the server-side read didn't surface.
 export function SummonarrSessionProvider({
   initialSession,
   children,

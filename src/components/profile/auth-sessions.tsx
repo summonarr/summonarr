@@ -30,6 +30,7 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
   return                               <Monitor     className="w-4 h-4 shrink-0 text-zinc-400" />;
 }
 
+// Lists the user's active auth sessions with per-device revoke (confirm-then-delete).
 export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);

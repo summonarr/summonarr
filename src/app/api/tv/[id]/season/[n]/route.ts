@@ -48,6 +48,9 @@ export const GET = withAuth(async (
     select: { episodeNumber: true, source: true },
   });
 
+  // Fire-and-forget cache warm: backfill owned episodes' cached metadata from the
+  // fresh TMDB fetch. Unawaited by design — it's not part of the response, and a
+  // failed update self-heals on the next fetch. Errors swallowed intentionally.
   if (ownedRows.length > 0 && episodes.length > 0) {
     const metaMap = new Map(episodes.map((e) => [e.episodeNumber, e]));
     Promise.all(

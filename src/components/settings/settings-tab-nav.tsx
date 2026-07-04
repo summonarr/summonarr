@@ -13,6 +13,7 @@ const TABS = [
 
 export type TabId = typeof TABS[number]["id"];
 
+// Top-level settings tab bar; each tab links to /settings?tab=<id>.
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
   return (
     // `flex-wrap gap-1` (not `overflow-x-auto`, which cut off "System" with no

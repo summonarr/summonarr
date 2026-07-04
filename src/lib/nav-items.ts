@@ -101,6 +101,8 @@ export const adminNavItems: NavItem[] = [
   { href: "/settings", label: "Settings", icon: Settings, section: "admin" },
 ];
 
+// Resolves the admin nav items visible for a role or permission set: full nav for
+// ADMIN (or granular users+requests), issues-only for MANAGE_ISSUES, else none.
 export function getVisibleAdminItems(roleOrPerms?: string | { role?: string; permissions?: bigint | string }): NavItem[] {
   let role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
   let perms: bigint | undefined;

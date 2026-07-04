@@ -121,6 +121,13 @@ const SETTINGS_SCHEMA = [
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
   ["apnsRelayUrl",                    false],
+  // Optional bearer key for the APNs relay. Sent as "Authorization: Bearer <key>"
+  // on every relay POST when set; clearable so relay auth can be turned off.
+  ["apnsRelayKey",                    true ],
+  // Soft-upgrade lever: iOS build number the operator recommends. Exposed via
+  // /api/config/public so the app can show a dismissible update sheet. NOT the
+  // hard 426 gate (that's MIN_CLIENT in src/lib/api-version.ts).
+  ["recommendedIosBuild",             false],
   ["trashGuidesEnabled",              false],
   ["trashSyncCustomFormats",          false],
   ["trashSyncCustomFormatGroups",     false],
@@ -395,6 +402,38 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
+    // Relay bearer key: forwarded verbatim in an Authorization header, so it
+    // must be a single printable-ASCII token (no whitespace, no control chars)
+    // and long enough to not be a typo'd fragment. Commas are excluded because
+    // the relay reads its keys from a comma-separated env list — a key
+    // containing "," could never match on the relay side.
+    if (key === "apnsRelayKey") {
+      if (value.length < 8 || value.length > 200 || !/^[\x21-\x7e]+$/.test(value) || value.includes(",")) {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be 8–200 printable ASCII characters with no whitespace or commas` },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Recommended iOS build is compared numerically against the app's build
+    // number — persist only a plain positive integer.
+    if (key === "recommendedIosBuild") {
+      if (!/^\d+$/.test(value)) {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be an integer between 1 and 1000000` },
+          { status: 400 },
+        );
+      }
+      const n = parseInt(value, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 1_000_000) {
+        return NextResponse.json(
+          { error: `Setting "${key}" must be an integer between 1 and 1000000` },
+          { status: 400 },
+        );
+      }
+    }
+
     // Discord application/guild IDs are snowflakes: 17–20 digit decimal integers.
     // Persist them validated so downstream consumers (command registration,
     // notifications, link/merge flows) never receive a malformed identifier.
@@ -446,8 +485,16 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
   // Keys that may be written empty to clear them. Most keys skip empty writes so
   // the client can echo back unchanged/masked values without wiping them; the IP
-  // allowlist must be clearable to lift the restriction.
-  const CLEARABLE_KEYS = new Set<string>(["machineSessionAllowedIps"]);
+  // allowlist must be clearable to lift the restriction, the relay key to turn
+  // relay auth off, the recommended build to retract the update prompt, and the
+  // relay URL to restore the publisher-default relay (push.ts falls back to
+  // DEFAULT_APNS_RELAY_URL when the stored value is empty).
+  const CLEARABLE_KEYS = new Set<string>([
+    "machineSessionAllowedIps",
+    "apnsRelayKey",
+    "recommendedIosBuild",
+    "apnsRelayUrl",
+  ]);
 
   const entries = Object.entries(body)
     .filter(([k, v]) => {

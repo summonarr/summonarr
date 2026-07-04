@@ -21,6 +21,8 @@ const DEFAULT_DIR: Record<SortField, SortDir> = {
   lastActive: "desc",
 };
 
+// Renders a Date as a compact "just now / Nm / Nh / Nd" label, falling back to
+// an absolute date past 30 days; "Never" for null.
 function formatRelativeTime(date: Date | null): string {
   if (!date) return "Never";
   const diff = Date.now() - date.getTime();

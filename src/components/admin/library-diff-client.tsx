@@ -667,6 +667,7 @@ function DiffColumn({
   );
 }
 
+// Client view for the admin library-diff page: searchable/filterable Plex-only, Jellyfin-only, and suspected-bad-match lists with inline fix-match actions.
 export function LibraryDiffClient({
   onlyPlex,
   onlyJellyfin,

@@ -25,6 +25,7 @@ import { PageHeader } from "@/components/ui/design";
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
 
+// Flattens multiple rails into one list, keeping first occurrence per media key.
 function dedupeUnion(lists: TmdbMedia[][]): TmdbMedia[] {
   const seen = new Set<string>();
   const out: TmdbMedia[] = [];
@@ -39,6 +40,8 @@ function dedupeUnion(lists: TmdbMedia[][]): TmdbMedia[] {
   return out;
 }
 
+// Maps raw items to their enriched versions, dropping available titles when
+// hideAvailable is set, capped at limit.
 function project(
   raw: TmdbMedia[],
   enriched: Map<string, TmdbMedia>,

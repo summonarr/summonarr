@@ -3,8 +3,13 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
+import { settleLimit } from "@/lib/concurrency";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
+
+// Cap concurrent Jellyfin policy pushes so a large server-user list doesn't
+// saturate the Prisma pool / burst the Jellyfin admin API in one shot.
+const POLICY_PUSH_CONCURRENCY = 8;
 
 export const POST = withAdmin(async (req, _ctx, session) => {
   // Bulk policy push fans out to N Jellyfin admin calls per invocation; cap to 5/min per admin
@@ -22,8 +27,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (source !== "jellyfin") {
     return NextResponse.json({ error: "source must be 'jellyfin'" }, { status: 400 });
   }
-  // Validate at runtime (req.json() is untyped): a non-boolean would reach Prisma's
-  // Boolean? column and the Jellyfin policy push as a 500. Mirrors [id]/route.ts.
+  // Validate at runtime (the parsed body's generic type isn't runtime-checked): a
+  // non-boolean would reach Prisma's Boolean? column and the Jellyfin policy push
+  // as a 500. Mirrors [id]/route.ts.
   if (typeof body.downloadsEnabled !== "boolean") {
     return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
   }
@@ -47,17 +53,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   let errors = 0;
 
   if (jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
-    await Promise.allSettled(
-      targets.map(async (u) => {
-        try {
-          await setJellyfinDownloadPolicy(jellyfinUrlRow.value, jellyfinKeyRow.value, u.sourceUserId, downloadsEnabled);
-          pushed++;
-        } catch (err) {
-          console.warn(`[server-users/bulk] Failed to push policy for jellyfin/${u.username}:`, err instanceof Error ? err.message : String(err));
-          errors++;
-        }
-      }),
-    );
+    await settleLimit(targets, POLICY_PUSH_CONCURRENCY, async (u) => {
+      try {
+        await setJellyfinDownloadPolicy(jellyfinUrlRow.value, jellyfinKeyRow.value, u.sourceUserId, downloadsEnabled);
+        pushed++;
+      } catch (err) {
+        console.warn(`[server-users/bulk] Failed to push policy for jellyfin/${u.username}:`, err instanceof Error ? err.message : String(err));
+        errors++;
+      }
+    });
   }
 
   void logAudit({

@@ -31,6 +31,8 @@ interface TrashGuidesNavProps {
   sonarr4kConfigured: boolean;
 }
 
+// Sub-page tabs plus service (Radarr/Sonarr) and instance (HD/4K) toggles for
+// the trash-guides admin section; toggles drive the ?service= / ?variant= params.
 export function TrashGuidesNav({
   radarrConfigured,
   sonarrConfigured,

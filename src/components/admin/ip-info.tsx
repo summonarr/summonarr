@@ -19,7 +19,19 @@ type Lookup = {
   bogon: boolean;
 };
 
+// Module-level cache shared across all IpInfo instances. Bounded so it can't grow
+// without limit as an admin scrolls activity surfaces with many distinct IPs —
+// evict the oldest-inserted entry once at capacity (Map preserves insertion order).
+const CACHE_MAX = 200;
 const cache = new Map<string, Lookup | "missing">();
+
+function cacheSet(ip: string, value: Lookup | "missing"): void {
+  if (cache.size >= CACHE_MAX && !cache.has(ip)) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+  }
+  cache.set(ip, value);
+}
 
 interface Props {
   ip: string;
@@ -64,16 +76,16 @@ export function IpInfo({ ip, inline = false }: Props) {
     fetch(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`))
       .then(async (r) => {
         if (!r.ok) {
-          cache.set(ip, "missing");
+          cacheSet(ip, "missing");
           setError("Not available");
           return;
         }
         const json = (await r.json()) as Lookup;
-        cache.set(ip, json);
+        cacheSet(ip, json);
         setData(json);
       })
       .catch(() => {
-        cache.set(ip, "missing");
+        cacheSet(ip, "missing");
         setError("Lookup failed");
       })
       .finally(() => setLoading(false));

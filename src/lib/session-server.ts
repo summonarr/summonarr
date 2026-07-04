@@ -10,8 +10,8 @@ import { verifyAndRefreshSession } from "./session-refresh";
 // throws.
 //
 // Used by the root layout to seed the initial value of the client-side
-// SummonarrSessionProvider, and (in a later PR) by proxy.ts so the middleware
-// doesn't have to round-trip through next-auth.
+// SummonarrSessionProvider, and by auth() (the JWT-only session read) in
+// src/lib/auth.ts.
 export async function readSummonarrSession(): Promise<SessionClaims | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(getSessionCookieName())?.value;

@@ -267,6 +267,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   );
 }
 
+// Builds the bottom tab bar list; the 4th slot is role/permission-gated (admin / issues / profile).
 function buildTabs(role: string | undefined, userItems: readonly { href: string }[], sessionPerms?: string): Tab[] {
   const has = (href: string) => userItems.some((i) => i.href === href);
 

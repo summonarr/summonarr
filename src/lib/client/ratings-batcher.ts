@@ -68,6 +68,8 @@ async function flush() {
   }
 }
 
+// Public entry point: enqueue a ratings lookup that resolves once the next
+// debounced batch POST returns. Coalesces duplicate requests for the same item.
 export function requestRatings(
   id: number,
   type: MediaType,

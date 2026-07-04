@@ -7,7 +7,12 @@ import { prisma } from "@/lib/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { settleLimit } from "@/lib/concurrency";
 import { isFeatureEnabled } from "@/lib/features";
+
+// Cap cold-cache TMDB detail fetches per page — a cold page can otherwise fan out
+// dozens of concurrent /movie & /tv lookups. Matches the TMDB list-page discipline.
+const DETAIL_CONCURRENCY = 5;
 
 // Native-client mirror of src/app/(app)/popular/page.tsx — most-played media on
 // the connected Plex/Jellyfin servers. Keep the resolve + enrich logic in sync
@@ -62,8 +67,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       });
       const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
 
-      const results = await Promise.allSettled(
-        items.map(async (item) => {
+      const results = await settleLimit(items, DETAIL_CONCURRENCY, async (item) => {
           const core = coreMap.get(item.tmdbId);
           const details: TmdbMedia = core
             ? {
@@ -89,8 +93,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
             episodes: item.episodes,
             totalHours: item.totalHours,
           };
-        }),
-      );
+      });
       // A title whose live TMDB resolve rejected is dropped from the page, so the
       // rendered count can be fewer than the reported totals. Log the rejection so
       // a transient TMDB failure that makes a most-played title vanish is
