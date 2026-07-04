@@ -268,13 +268,17 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
     const variant = updated.is4k ? "4k" : "hd";
+    // The admin's one-time picker choice (qualityProfileId) wins; otherwise fall
+    // back to the profile the requester chose at request time (REQUEST_ADVANCED),
+    // else the instance default (undefined).
+    const effectiveProfileId = qualityProfileId ?? updated.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant, qualityProfileId);
+        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, qualityProfileId);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;

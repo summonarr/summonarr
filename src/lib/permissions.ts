@@ -52,6 +52,12 @@ export const Permission = {
   AUTO_APPROVE_4K: 1n << 15n,
   AUTO_APPROVE_4K_MOVIE: 1n << 16n,
   AUTO_APPROVE_4K_TV: 1n << 17n,
+
+  // ─── Advanced request options ─────────────────────────────────────────────
+  // Choose a Radarr/Sonarr quality profile at request time. Power-user grant;
+  // without it a request silently uses the target instance's configured default.
+  // ADMIN always passes via the superbit.
+  REQUEST_ADVANCED: 1n << 18n,
 } as const;
 
 export type PermissionValue = (typeof Permission)[keyof typeof Permission];

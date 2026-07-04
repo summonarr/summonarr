@@ -236,6 +236,11 @@ model MediaRequest {
   // both an HD and a 4K request for the same title.
   is4k Boolean @default(false)
 
+  // Optional per-request quality profile chosen by a REQUEST_ADVANCED user (or an
+  // admin at approve time). null ⇒ use the target instance's configured default.
+  // Flows to addMovieToRadarr/addSeriesToSonarr as the qualityProfileIdOverride.
+  qualityProfileId Int?
+
   lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires

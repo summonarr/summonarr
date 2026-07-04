@@ -67,6 +67,7 @@ export default async function MovieDetailPage({
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
+  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
 
   const [suggestions, collectionItems] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
@@ -251,6 +252,7 @@ export default async function MovieDetailPage({
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
+                canChooseProfile={canChooseProfile}
               />
               {has4k && canRequest4k && (
                 <Request4kButton

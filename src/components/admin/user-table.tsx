@@ -278,6 +278,7 @@ const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; 
     bits: [
       { key: "REQUEST_ON_BEHALF", label: "Request on behalf of others" },
       { key: "QUOTA_UNLIMITED", label: "Exempt from request quotas" },
+      { key: "REQUEST_ADVANCED", label: "Choose quality profile at request" },
     ],
   },
 ];

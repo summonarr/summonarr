@@ -91,6 +91,7 @@ export default async function TVDetailPage({
   const requested         = !!userRequest;
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
+  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
   const [has4k, userRequest4k, request4kAllRow, sonarr4kAvailable, sonarr4kWanted] = await Promise.all([
     isArrConfigured("sonarr", "4k"),
     session
@@ -290,6 +291,7 @@ export default async function TVDetailPage({
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
+                canChooseProfile={canChooseProfile}
               />
               {has4k && canRequest4k && (
                 <Request4kButton

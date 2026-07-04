@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured, listQualityProfiles } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -128,6 +128,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     note?: string;
     _token?: string;
     is4k?: boolean;
+    qualityProfileId?: number;
   }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -159,6 +160,26 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (is4k && !(await isArrConfigured(mediaType === "MOVIE" ? "radarr" : "sonarr", "4k"))) {
     return NextResponse.json({ error: "4K requests aren't available — no 4K instance is configured" }, { status: 400 });
+  }
+
+  // Advanced request option: an explicit quality profile is honored only for
+  // REQUEST_ADVANCED holders (ADMIN passes via the superbit) and is validated
+  // against the target instance's profiles, so a client can't smuggle an arbitrary
+  // id into the ARR add. Absent ⇒ the instance's configured default is used.
+  let chosenQualityProfileId: number | undefined;
+  if (body.qualityProfileId !== undefined) {
+    if (!Number.isInteger(body.qualityProfileId) || body.qualityProfileId <= 0) {
+      return NextResponse.json({ error: "qualityProfileId must be a positive integer" }, { status: 400 });
+    }
+    if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
+      return NextResponse.json({ error: "You don't have permission to choose a quality profile" }, { status: 403 });
+    }
+    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+    const profileList = await listQualityProfiles(service, is4k ? "4k" : "hd");
+    if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
+      return NextResponse.json({ error: "Invalid quality profile for this request" }, { status: 400 });
+    }
+    chosenQualityProfileId = body.qualityProfileId;
   }
 
   // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
@@ -257,7 +278,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // (skip on 4K, same as Plex: an HD copy must not block a 4K request).
   const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
 
-  const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+  const baseData = { tmdbId, mediaType, is4k, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
   let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
@@ -361,9 +382,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd");
+        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId);
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd");
+        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId);
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {
