@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Copy, Check, RefreshCw, Unlink, Download, RefreshCcw, ChevronDown, ExternalLink, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useHasMounted } from "@/hooks/use-has-mounted";
 
 interface PlexSection {
   key: string;
@@ -1889,6 +1890,14 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   const [syncRolesStatus,  setSyncRolesStatus]  = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [syncRolesMessage, setSyncRolesMessage] = useState("");
   const [tab, setTab] = useState<"core" | "channels" | "roles">("core");
+  const mounted = useHasMounted();
+
+  // The app's Discord interactions handler lives at /api/interactions (respecting BASE_PATH).
+  // Show the running instance's own origin so admins can paste it straight into the Developer Portal;
+  // fall back to a placeholder pre-mount (window is unavailable during SSR — guardrail 16).
+  const interactionsEndpoint = mounted
+    ? `${window.location.origin}${withBasePath("/api/interactions")}`
+    : "https://<your-domain>/api/interactions";
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -1993,7 +2002,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 Set the <span className="text-zinc-300">Interactions Endpoint URL</span> to:
               </p>
               <code className="block bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-300 mt-1">
-                https:
+                {interactionsEndpoint}
               </code>
               <p className="text-zinc-500 text-xs mt-1">
                 Discord will send a verification ping — your app must respond with a valid PONG for the URL to be accepted. Make sure the Public Key is saved first (step 3). Click <strong className="text-zinc-400">Save Changes</strong>.
