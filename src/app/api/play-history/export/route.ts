@@ -39,7 +39,6 @@ export async function GET(request: NextRequest) {
   if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  if (session instanceof NextResponse) return session;
 
   if (!checkRateLimit(`ph-export:${session.user.id}:${getClientIp(request.headers)}`, 5, 3_600_000)) {
     return NextResponse.json({ error: "Too many export requests — try again later" }, { status: 429 });
