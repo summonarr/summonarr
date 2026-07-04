@@ -426,6 +426,7 @@ function MediaCardImpl({
           <RatingsBar
             imdbRating={liveRatings?.imdbRating ?? media.imdbRating}
             imdbId={liveRatings?.imdbId ?? media.imdbId}
+            imdbVotes={liveRatings?.imdbVotes ?? media.imdbVotes}
             rottenTomatoes={liveRatings?.rottenTomatoes ?? media.rottenTomatoes}
             rtAudienceScore={liveRatings?.rtAudienceScore ?? media.rtAudienceScore}
             metacritic={liveRatings?.metacritic ?? media.metacritic}
