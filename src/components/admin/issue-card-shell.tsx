@@ -20,7 +20,7 @@ export function IssueCardShell({ issueId, messageCount, children }: IssueCardShe
           {children}
         </div>
 
-        {}
+        {/* Mobile-only thread toggle (hidden ≥xl, where the thread shows inline) */}
         <button
           onClick={() => setThreadOpen((v) => !v)}
           className={`xl:hidden shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors border ${
@@ -36,7 +36,7 @@ export function IssueCardShell({ issueId, messageCount, children }: IssueCardShe
         </button>
       </div>
 
-      {}
+      {/* Mobile-only expandable thread panel */}
       {threadOpen && (
         <div className="xl:hidden">
           <IssueThread issueId={issueId} />
