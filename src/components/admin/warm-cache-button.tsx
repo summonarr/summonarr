@@ -10,6 +10,8 @@ interface WarmCacheButtonProps {
   uncachedCount: number;
 }
 
+// Admin control that POSTs to /api/admin/library-warm to fetch TMDB metadata
+// for uncached library items; shows "Cache warm" when nothing is uncached.
 export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
   const router = useRouter();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");

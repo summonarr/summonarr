@@ -8,6 +8,7 @@ import { withBasePath } from "@/lib/base-path";
 
 const ENCRYPTED_MAGIC = "RBKBKP01";
 
+// True when the file's leading bytes match the encrypted-backup magic header.
 async function isEncryptedFile(file: File): Promise<boolean> {
   if (file.size < ENCRYPTED_MAGIC.length) return false;
   const head = await file.slice(0, ENCRYPTED_MAGIC.length).arrayBuffer();
@@ -28,6 +29,7 @@ type ImportResult =
     }
   | null;
 
+// First-run restore panel: validates + chunk-uploads an encrypted backup, then redirects to /login.
 export function SetupImportPanel() {
   const [file, setFile] = useState<File | null>(null);
   const [encrypted, setEncrypted] = useState<boolean | null>(null);

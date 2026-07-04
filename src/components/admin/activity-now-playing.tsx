@@ -595,6 +595,8 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   );
 }
 
+// Live "Now playing" grid: seeds from server-rendered sessions, then updates
+// from activity:sessions / plex:reachability SSE pushes.
 export function ActivityNowPlaying({
   initialSessions,
   source,

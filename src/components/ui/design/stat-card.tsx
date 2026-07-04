@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 
+// Metric tile: label + value, with an optional delta tinted green/red by its leading +/- and an optional hint line.
 export function StatCard({
   label,
   value,

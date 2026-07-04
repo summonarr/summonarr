@@ -13,6 +13,8 @@ const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // would register here but never deliver.
 const DEVICE_TOKEN_RE = /^(?:[0-9a-fA-F]{2}){32,100}$/;
 
+// POST /api/push/apns — registers (or updates) an iOS device's APNs token as a
+// push subscription for the caller, capped per-user with oldest-eviction.
 export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`push-apns:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });

@@ -413,6 +413,8 @@ function normalizeTV(r: RawTV): TmdbMedia {
   return media;
 }
 
+// Confirms a user-supplied tmdbId/type actually exists on TMDB (returns null if not),
+// yielding minimal metadata before minting a vote/issue/request row for it.
 export async function verifyTmdbMedia(
   tmdbId: number,
   mediaType: "movie" | "tv",

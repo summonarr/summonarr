@@ -8,6 +8,8 @@ export interface NavItem {
   group: string;
 }
 
+// Scroll-spy sidebar nav: highlights the section nearest the top of <main>
+// and smooth-scrolls to a section on click.
 export function SettingsNav({ items }: { items: NavItem[] }) {
   const [activeId, setActiveId] = useState<string>(items[0]?.id ?? "");
 

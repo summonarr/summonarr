@@ -3474,6 +3474,7 @@ export function IpinfoForm({ initialApiKey }: { initialApiKey: string }) {
 type MediaSampleData = { mountPoint: string; samples: string[] };
 type ServerSamples   = { movie: MediaSampleData; tv: MediaSampleData };
 
+// Strips a leading prefix (trailing slash tolerated) from a path — client-side preview of the server's path-strip logic.
 function applyPrefix(path: string, prefix: string): string {
   if (!prefix) return path;
   const p = prefix.endsWith("/") ? prefix : prefix + "/";

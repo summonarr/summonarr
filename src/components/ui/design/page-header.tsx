@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 
+// Shared page title row: title + optional subtitle, kbd hint, and right-aligned actions.
 export function PageHeader({
   title,
   subtitle,

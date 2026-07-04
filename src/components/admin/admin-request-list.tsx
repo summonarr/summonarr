@@ -99,6 +99,8 @@ function formatUserLabel(r: Requester) {
   return r.userName ?? r.userEmail;
 }
 
+// Admin request queue: groups requests by title, drives per-group + batch
+// approve/decline, and paginates. Live-refreshes on request:* SSE events.
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();

@@ -65,6 +65,7 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
   return p;
 }
 
+// Cache-first OMDB ratings lookup by IMDb ID; negative-caches genuine not-found, throws on transient failures.
 export async function getOmdbRatings(imdbId: string, releaseDate?: string | null): Promise<OmdbRatings | null> {
   const cacheKey = `omdb:${imdbId}`;
   const cached = await getCache<OmdbRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
@@ -220,6 +221,8 @@ export async function fetchAndCacheOmdbForTmdb(
 // a stampede when many pages load simultaneously.
 const inflightCold = new Map<string, Promise<OmdbResult>>();
 
+// Public entry: cache-first (stale-while-revalidate) OMDB ratings lookup keyed by TMDB id,
+// coalescing concurrent cold misses into one upstream fetch.
 export async function getOmdbRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",

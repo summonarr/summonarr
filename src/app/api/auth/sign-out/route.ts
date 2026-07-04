@@ -11,8 +11,7 @@ import { logAudit } from "@/lib/audit";
 // Summonarr-native sign-out. Fully revokes the session server-side (deletes the
 // AuthSession row AND bumps the user's sessionsRevokedAt cutoff so a captured
 // copy of the JWT can't ride the fast-path cache window) and clears both
-// Summonarr session cookie variants. Dead in prod until PR 5 swaps the client's
-// signOut() call.
+// Summonarr session cookie variants.
 export async function POST(req: NextRequest) {
   // Bearer (native clients) preferred over the cookie (browsers) so a native
   // sign-out revokes the session server-side, not just client-side.

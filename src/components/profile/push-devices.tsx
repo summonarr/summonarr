@@ -18,6 +18,7 @@ interface PushDevicesProps {
   cap: number;
 }
 
+// Lists registered web-push devices with per-device confirm-then-remove; shows count against cap.
 export function PushDevices({ devices, cap }: PushDevicesProps) {
   const router = useRouter();
   const mounted = useHasMounted();

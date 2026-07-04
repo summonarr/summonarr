@@ -13,6 +13,8 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
 
+// Filters items by an external-rating threshold encoded as "source:threshold"
+// (e.g. "imdb:7.5"), since TMDB discover can't filter on IMDb/RT scores.
 function applyExternalRatingFilter(items: TmdbMedia[], ratingFilter: string): TmdbMedia[] {
   const colon = ratingFilter.indexOf(":");
   if (colon === -1) return items;

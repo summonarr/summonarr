@@ -93,6 +93,7 @@ export async function getCacheStaleMany<T>(
   return out;
 }
 
+// Upsert a JSON-serialised value under `key`, valid for `ttlSeconds`.
 export async function setCache<T>(key: string, data: T, ttlSeconds: number): Promise<void> {
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
   const serialised = JSON.stringify(data);

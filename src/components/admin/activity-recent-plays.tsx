@@ -145,6 +145,8 @@ function DetailRow({ play }: { play: RecentPlay }) {
   );
 }
 
+// Recent-plays table with expandable per-session detail rows and cursor-style
+// "Load more" pagination against /api/play-history.
 export function ActivityRecentPlays({
   plays: initialPlays,
   source,

@@ -7,6 +7,7 @@ import { UserPlus, Upload } from "@/components/icons";
 
 type Tab = "create" | "restore";
 
+// First-run shell: create-account only, or create/restore tabs when a backup password is configured.
 export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
   const [tab, setTab] = useState<Tab>("create");
 

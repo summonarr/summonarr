@@ -13,6 +13,7 @@ import {
 } from "./trash-validators";
 import type { TrashService, TrashSpecKind } from "@/generated/prisma";
 
+// Maps a raw DB error to an actionable "run prisma db push" hint when trash tables/enum values are missing; null otherwise.
 export function describeSchemaError(err: unknown): string | null {
   if (!(err instanceof Error)) return null;
   const message = err.message;
@@ -220,6 +221,7 @@ export interface RefreshResult {
 // the existing { fetched, updated, unchanged } return shape consumers depend on.
 interface ValidationCounter { count: number }
 
+// Pulls the TRaSH-Guides tree from GitHub and upserts every spec kind (CFs, CF-groups, naming, profiles, sizes) for one service into TrashSpec.
 export async function refreshCatalog(service: TrashService): Promise<RefreshResult> {
   const errors: string[] = [];
   const validationCounter: ValidationCounter = { count: 0 };
@@ -720,6 +722,7 @@ function formatArrError(err: unknown): string {
   return String(err);
 }
 
+// Coerces each spec's `fields` into the array shape Arr expects (TRaSH payloads sometimes key them as an object).
 function normalizeSpecFields(specifications: unknown[]): unknown[] {
   return specifications.map((s) => {
     if (!s || typeof s !== "object") return s;
@@ -856,6 +859,7 @@ async function recordApply(
   };
 }
 
+// Pushes the given CUSTOM_FORMAT specs to the Radarr/Sonarr instance for `variant` (PUT existing / POST new), recording each outcome.
 export async function applyCustomFormats(
   service: TrashService,
   specIds: string[],
@@ -923,6 +927,7 @@ export async function applyCustomFormats(
   return results;
 }
 
+// Applies CF-Group specs by cascading their member CFs through applyCustomFormats, then rolls up per-group ok/fail on required members.
 export async function applyCustomFormatGroups(
   service: TrashService,
   specIds: string[],
@@ -989,6 +994,7 @@ export async function applyCustomFormatGroups(
   return results;
 }
 
+// Translates a TRaSH naming payload into the subset of Arr /config/naming fields to override (movie vs series/season/episode formats).
 function buildNamingPatch(
   service: TrashService,
   payload: Record<string, unknown>,
@@ -1042,6 +1048,7 @@ function buildNamingPatch(
   return patch;
 }
 
+// Merges NAMING specs into the instance's full /config/naming (Arr requires all fields on PUT) and writes it back.
 export async function applyNaming(
   service: TrashService,
   specIds: string[],
@@ -1079,6 +1086,7 @@ export async function applyNaming(
   }
 }
 
+// Overrides the instance's quality-definition min/preferred/max sizes with the given QUALITY_SIZE specs (last writer wins per quality name).
 export async function applyQualitySizes(
   service: TrashService,
   specIds: string[],
@@ -1296,6 +1304,7 @@ async function buildProfileBody(
   return body;
 }
 
+// Builds each QUALITY_PROFILE body (resolving CF remoteIds + scores for the variant) and PUT/POSTs it to the instance.
 export async function applyQualityProfiles(
   service: TrashService,
   specIds: string[],
@@ -1354,6 +1363,7 @@ export async function applyQualityProfiles(
   return results;
 }
 
+// Applies a mixed set of specs by kind in dependency order (groups → CFs → profiles → naming → sizes), deduping CFs already cascaded by a group.
 export async function applySpecs(specIds: string[], variant: ArrVariant = "hd"): Promise<ApplyResult[]> {
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds } },
@@ -1433,6 +1443,7 @@ export interface TrashSyncResult {
 // bypasses this — it's an explicit user action that should always hit GitHub.
 const REFRESH_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
+// Cron entry point: refreshes the catalog from GitHub (gated to hourly) when enabled, then applies all enabled specs for both HD and 4K instances.
 export async function runTrashSync(): Promise<TrashSyncResult> {
   const settings = await prisma.setting.findMany({
     where: {
@@ -1534,6 +1545,7 @@ export interface SpecStatus {
   } | null;
 }
 
+// Lists all specs for a service with their per-variant application status, for the admin trash-guides UI.
 export async function listSpecs(service: TrashService, variant: ArrVariant = "hd"): Promise<SpecStatus[]> {
   const rows = await prisma.trashSpec.findMany({
     where: { service },
@@ -1571,6 +1583,7 @@ export interface SpecDetail extends SpecStatus {
   payload: unknown;
 }
 
+// Returns one spec including its full upstream payload + per-variant application status, for the spec detail view.
 export async function getSpecDetail(id: string, variant: ArrVariant = "hd"): Promise<SpecDetail | null> {
   const row = await prisma.trashSpec.findUnique({
     where: { id },

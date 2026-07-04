@@ -9,6 +9,8 @@ import { withBasePath } from "@/lib/base-path";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
+// Admin settings form for play-history tracking: toggles, thresholds, and
+// retention, PATCHed to /api/settings on submit.
 export function PlayHistorySettingsForm({
   initialEnabled,
   initialPlexEnabled,

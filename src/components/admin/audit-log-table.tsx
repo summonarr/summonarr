@@ -640,6 +640,8 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
   );
 }
 
+// Audit-log viewer: filters + table/timeline toggle over cursor-paginated
+// audit rows, with client-side "load more" appending to the initial SSR page.
 export function AuditLogView({
   initialLogs,
   initialNextCursor,

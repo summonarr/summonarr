@@ -1,3 +1,4 @@
+// Inline SVG trend line: scales `data` to a fixed 160-wide viewBox, optional area fill. Renders null for <2 points.
 export function Sparkline({
   data,
   color,

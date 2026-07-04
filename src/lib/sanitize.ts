@@ -1,4 +1,6 @@
 
+// Strip HTML-injection (`<>`), NUL, control chars, and Unicode bidi-overrides
+// from user-supplied text before it's stored or displayed.
 export function sanitizeText(input: string): string {
   return input
     .replace(/[<>]/g, "")
@@ -15,6 +17,8 @@ export function sanitizeOptional(input: string | undefined | null): string | nul
   return cleaned || null;
 }
 
+// Collapse CR/LF to spaces so an interpolated value can't forge extra log lines
+// (log-injection defence).
 export function sanitizeForLog(value: unknown): string {
   return String(value).replace(/[\r\n]/g, " ");
 }

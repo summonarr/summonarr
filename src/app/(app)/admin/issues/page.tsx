@@ -45,6 +45,8 @@ const SCOPE_LABELS: Record<string, string> = {
 const VALID_FILTERS = ["ALL", "OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type FilterValue = (typeof VALID_FILTERS)[number];
 
+// Collapses duplicate reports (same tmdbId+type+scope+season+episode) into one
+// group, keeping the newest as representative; ordered by report count desc.
 function groupIssues<T extends {
   id: string;
   tmdbId: number;

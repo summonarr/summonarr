@@ -88,6 +88,8 @@ function teardownEventSource() {
   singleton = null;
 }
 
+// Subscribes onEvent to the shared SSE stream, opening the single connection on
+// first subscriber and tearing it down when the last one unmounts.
 export function useLiveEvents(onEvent: (event: LiveEvent) => void) {
   // Ref keeps the callback stable so the effect doesn't re-run when the parent re-renders
   const onEventRef = useRef(onEvent);

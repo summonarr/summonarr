@@ -8,6 +8,8 @@ export type VariantProps<F> = F extends (props?: infer P) => string
   ? Omit<NonNullable<P>, "className">
   : never;
 
+// Hand-written class-variance-authority equivalent (the npm package is not installed):
+// returns a builder that joins the base class with the class for each selected variant.
 export function cva<C extends VariantsConfig>(
   base: string,
   config: { variants: C; defaultVariants?: VariantPropsFor<C> },

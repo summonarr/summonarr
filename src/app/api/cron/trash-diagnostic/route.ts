@@ -4,6 +4,9 @@ import { prisma } from "@/lib/prisma";
 import { describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 
+// Read-only Trash Guides diagnostic: reports schema presence, catalog counts,
+// starter-pack resolution, config, and recent errors. Each probe is independently
+// try/caught so one failure still yields a partial report.
 async function handle(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });

@@ -31,6 +31,8 @@ const SUB_PAGES = [
   { label: "Recently Added", href: "/admin/activity/recent" },
 ];
 
+// Sub-page nav tabs plus period/source/type filters for the admin activity
+// pages; filters are driven entirely through URL search params.
 export function ActivityFilterBar() {
   const router = useRouter();
   const pathname = usePathname();

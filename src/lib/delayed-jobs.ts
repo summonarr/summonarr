@@ -31,6 +31,8 @@ function pump(): void {
   }
 }
 
+// Schedules a best-effort job to run after delayMs, then through a bounded worker
+// pool. Returns false (dropped) when the pending-timer cap is already reached.
 export function scheduleDelayed(
   delayMs: number,
   fn: () => Promise<void>,

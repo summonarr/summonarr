@@ -1,8 +1,8 @@
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 
-// Claim shape mirrors what next-auth's JWT callback in auth.config.ts builds
-// today. Kept structurally compatible so a future cut-over can read either
-// token shape during the rollout window without re-mapping fields.
+// Claim shape mirrors the token shape next-auth's jwt callback (the now-removed
+// auth.config.ts) would build. Kept structurally compatible when the project
+// migrated off next-auth so no field had to be re-mapped.
 //
 // `expiresAt` is the per-device session deadline tracked alongside the
 // AuthSession DB row — distinct from the JWT `exp` claim, which jose enforces

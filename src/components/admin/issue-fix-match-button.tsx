@@ -95,6 +95,7 @@ function PlexCandidateRow({
   );
 }
 
+// Multi-phase dialog (search → confirm → Plex candidates) for re-matching a mismatched library item to the correct TMDB ID and resolving the issue.
 export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex, onJellyfin, isAdmin, userProvider, requestToken }: Props) {
   const showPlex     = onPlex     && (isAdmin || userProvider === "plex");
   const showJellyfin = onJellyfin && (isAdmin || userProvider === "jellyfin" || userProvider === "jellyfin-quickconnect");

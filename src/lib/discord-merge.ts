@@ -4,6 +4,8 @@ export interface MergeResult {
   migrated: number;
 }
 
+// Links a Discord account to a web user, migrating a bot-created shadow account's
+// requests/issues/votes onto the web user (deduping conflicts) before deleting it.
 export async function mergeDiscordIntoWebAccount(
   webUserId: string,
   discordUserId: string

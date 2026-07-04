@@ -7,6 +7,7 @@ interface SimilarRowProps {
   showJellyfin?: boolean;
 }
 
+// "More Like This" grid of recommended/similar titles on a detail page.
 export function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
   if (items.length === 0) return null;
   return (

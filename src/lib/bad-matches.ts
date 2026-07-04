@@ -28,6 +28,8 @@ export interface BadMatchItem {
   arrVerdict: "plex" | "jellyfin" | null;
 }
 
+// Longest shared directory prefix across a set of file paths — the inferred
+// mount point that stripMountPoint peels off so paths compare across servers.
 function commonPathPrefix(paths: (string | null)[]): string {
   const valid = paths.filter((p): p is string => p !== null && p.length > 0);
   if (valid.length === 0) return "";

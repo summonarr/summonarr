@@ -17,6 +17,7 @@ const PER_PAGE = 36;
 
 type SortBy = "imdb" | "letterboxd" | "rt" | "trakt" | "mdblist";
 
+// Sort by the chosen rating source, pushing titles with no parseable rating last.
 function sortByRating(items: TmdbMedia[], sortBy: SortBy): TmdbMedia[] {
   return [...items].sort((a, b) => {
     let av: number, bv: number;
@@ -48,6 +49,7 @@ function sortByRating(items: TmdbMedia[], sortBy: SortBy): TmdbMedia[] {
   });
 }
 
+// Merge the per-source arrays, keeping the first occurrence of each mediaType:id.
 function dedup(sources: TmdbMedia[][]): TmdbMedia[] {
   const seen = new Set<string>();
   const result: TmdbMedia[] = [];
@@ -63,6 +65,7 @@ function dedup(sources: TmdbMedia[][]): TmdbMedia[] {
   return result;
 }
 
+// Fill posterless items (Trakt/MDBList entries lacking TMDB fields) from the TmdbMediaCore cache.
 async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
   const missing = items.filter((i) => !i.posterPath);
   if (missing.length === 0) return items;
@@ -91,6 +94,7 @@ async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
   });
 }
 
+// Apply the availability / rating / vote-count / year filters from the query string.
 function applyFilters(
   items: TmdbMedia[],
   opts: { hideAvailable: boolean; showPlex: boolean; showJellyfin: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },

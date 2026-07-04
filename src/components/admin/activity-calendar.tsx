@@ -19,6 +19,8 @@ interface CalendarData {
   count: number;
 }
 
+// Maps a day's play count to an oklch indigo wash whose opacity scales with
+// intensity (count/max); count 0 renders the near-transparent empty-cell fill.
 function cellBg(count: number, max: number): string {
   if (count === 0) return "oklch(1 0 0 / 0.025)";
   const intensity = max > 0 ? count / max : 0;

@@ -500,15 +500,6 @@ export async function notifyAdminsIssueMessagePush(data: {
   }
 }
 
-// Returns true when the caller may consider the notification "delivered" (so the
-// IssueGrab CAS claim should be left in place). Returns false when delivery was
-// attempted but every push failed — caller should reset notifiedAt for retry.
-//
-// Distinct outcomes encoded as a boolean:
-// - true: keys missing OR no subscriptions (nothing to retry by sending more); or
-//   at least one push to a subscription succeeded.
-// - false: ≥1 subscription existed but every send failed (transient endpoint outage,
-//   401 from upstream, etc.) — retry on the next webhook tick may succeed.
 // Outcome of an admin push send attempt. Lets the webhook caller distinguish
 // "user has no subs / no VAPID configured" (don't retry, but the notification
 // channel was effectively a no-op — caller may want to backstop via email or

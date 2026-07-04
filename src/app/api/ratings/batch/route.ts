@@ -9,6 +9,9 @@ const MAX_BATCH = 200;
 
 type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
 
+// POST /api/ratings/batch — resolves external ratings (IMDb/RT/Metacritic/etc.)
+// for up to MAX_BATCH deduped tmdbId+type items in one blocking pass; used to
+// hydrate ratings across a grid of cards.
 export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`ratings-batch:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });

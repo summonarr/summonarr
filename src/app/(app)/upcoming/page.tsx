@@ -14,6 +14,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle, Calendar } from "@/components/icons";
 
+// Reads still-fresh (within 49h) not-yet-released titles from the UpcomingCacheItem table.
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
   const today = new Date().toISOString().slice(0, 10);
   const rows = await prisma.upcomingCacheItem.findMany({

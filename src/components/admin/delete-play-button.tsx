@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
+// Confirm-then-DELETE control for a single play-history record; on success
+// navigates back to the activity history tab.
 export function DeletePlayButton({ id }: { id: string }) {
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);

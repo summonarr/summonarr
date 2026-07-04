@@ -293,6 +293,8 @@ function CandidateRow({
   );
 }
 
+// Admin control to correct a wrong library→TMDB match. Plex opens a candidate
+// picker (fetch → select → apply); Jellyfin applies directly with no picker.
 export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label, arrTmdbId = null }: Props) {
   const router = useRouter();
   const [phase, setPhase]       = useState<Phase>("idle");

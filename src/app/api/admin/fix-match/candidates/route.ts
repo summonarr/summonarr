@@ -49,6 +49,7 @@ export type CandidatesResponse = {
   jellyfinFilePath:    string | null;
 };
 
+// 0-100 similarity of two titles via normalized Levenshtein edit distance.
 function titleSimilarity(a: string, b: string): number {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
   const na = norm(a), nb = norm(b);
@@ -98,6 +99,8 @@ async function fetchTmdbDetails(
   return res.json() as Promise<TmdbDetails>;
 }
 
+// Classifies a Plex match candidate against the target (exact/strong/…/wrong)
+// from provider-id agreement plus a weighted title/year/runtime/genre score.
 function assessCandidate(
   candidate: { tmdbId: string | null; imdbId: string | null; name: string; year: number | null;
                tmdbTitle: string | null; tmdbRuntime: number | null; tmdbGenres: string[]; radarrConfirmed: boolean },

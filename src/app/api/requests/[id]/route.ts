@@ -189,7 +189,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       data: {
         status: "APPROVED",
         // Approving clears a prior decline; otherwise an APPROVED row keeps
-        // permanentlyDeclined=true and re-requests stay blocked (route.ts:197).
+        // permanentlyDeclined=true and re-requests stay blocked (see the
+        // permanentlyDeclined gate in requests/route.ts).
         permanentlyDeclined: false,
         // Guard on the RAW body field: sanitizeOptional never returns undefined
         // (it maps undefined → null), so guarding on sanitizedAdminNote would

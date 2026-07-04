@@ -29,6 +29,10 @@ interface PlexSearchResult {
   Guid?:  Array<{ id: string }>;
 }
 
+// Remaps a Plex library item to the correct TMDB id: unmatch, re-match (via a
+// GUID search across imdb/tmdb agents, else a raw tmdb:// fallback), then poll
+// until Plex confirms — throws if it never confirms. Returns conflated=true when
+// Plex has permanently merged two TMDB ids into one hash but IMDB confirms the film.
 async function fixPlexMatch(
   ratingKey: string,
   correctTmdbId: number,
@@ -336,6 +340,9 @@ async function fixPlexMatch(
   );
 }
 
+// Remaps a Jellyfin library item to the correct TMDB id: remote-search for a
+// candidate carrying correctTmdbId, apply it, refresh, then poll until Jellyfin
+// confirms — throws if it never confirms. Returns the (possibly new) item id.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
