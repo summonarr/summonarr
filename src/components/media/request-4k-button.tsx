@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Check, Loader2, Clock } from "@/components/icons";
+import { Plus, Check, Loader2, Clock, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
@@ -16,6 +16,7 @@ export function Request4kButton({
   requested,
   available,
   pending,
+  blacklisted,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -26,6 +27,8 @@ export function Request4kButton({
   // The 4K instance is already downloading/queued for this title (e.g. someone
   // else requested it) — show a "4K Queued" state instead of a CTA.
   pending?: boolean;
+  // The title is admin-blacklisted — no 4K request either (the request POST 403s).
+  blacklisted?: boolean;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
@@ -117,6 +120,23 @@ export function Request4kButton({
       >
         <Clock style={{ width: 14, height: 14 }} />
         4K Queued
+      </span>
+    );
+  }
+
+  // Blacklisted blocks all requests (per tmdbId+mediaType, both tiers).
+  if (blacklisted) {
+    return (
+      <span
+        style={{
+          ...base,
+          background: "var(--ds-bg-2)",
+          color: "var(--ds-fg-muted)",
+          border: "1px solid var(--ds-border)",
+        }}
+      >
+        <Ban style={{ width: 14, height: 14 }} />
+        Not available to request
       </span>
     );
   }

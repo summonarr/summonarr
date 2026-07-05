@@ -303,6 +303,7 @@ export default async function TVDetailPage({
                   requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                   requested={requested4k}
                   available={arr4kAvailable}
+                  blacklisted={blacklisted}
                   pending={arr4kPending}
                 />
               )}

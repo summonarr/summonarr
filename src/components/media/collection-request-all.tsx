@@ -21,7 +21,7 @@ export function CollectionRequestAllButton({
   const [msg, setMsg] = useState("");
 
   const missing = items.filter(
-    (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.arrPending && !m.requested,
+    (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.arrPending && !m.requested && !m.blacklisted,
   );
 
   if (!canRequest || missing.length === 0) return null;

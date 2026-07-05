@@ -264,6 +264,7 @@ export default async function MovieDetailPage({
                   requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                   requested={requested4k}
                   available={arr4kAvailable}
+                  blacklisted={blacklisted}
                 />
               )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (

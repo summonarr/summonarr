@@ -119,6 +119,7 @@ export interface PersonCredit {
   arrPending?: boolean;
   requested?: boolean;
   requestedByMe?: boolean;
+  blacklisted?: boolean;
   imdbRating?: string | null;
   rottenTomatoes?: string | null;
   rtAudienceScore?: string | null;

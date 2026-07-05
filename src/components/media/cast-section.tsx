@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check } from "@/components/icons";
+import { X, User, Film, Tv2, PlayCircle, MonitorPlay, Clock, CheckCircle, Plus, Loader2, Check, Ban } from "@/components/icons";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { cn } from "@/lib/utils";
 import type { CastMember, PersonDetails, PersonCredit } from "@/lib/tmdb-types";
@@ -70,6 +70,10 @@ export function CastSection({ cast }: CastSectionProps) {
     const isRequested = !!(credit.requestedByMe || credit.arrPending) || rs === "requested";
 
     if (isAvailable) {
+      close();
+      router.push(credit.mediaType === "movie" ? `/movie/${credit.id}` : `/tv/${credit.id}`);
+    } else if (credit.blacklisted) {
+      // Admin-blocked — no request; open the detail page (shows the same state).
       close();
       router.push(credit.mediaType === "movie" ? `/movie/${credit.id}` : `/tv/${credit.id}`);
     } else if (credit.arrPending || isRequested) {
@@ -399,6 +403,8 @@ export function CastSection({ cast }: CastSectionProps) {
                         ? "Pending"
                         : isRequested
                         ? "View Request"
+                        : credit.blacklisted
+                        ? "Blocked"
                         : rs === "loading"
                         ? null
                         : "Request";
@@ -474,6 +480,8 @@ export function CastSection({ cast }: CastSectionProps) {
                                     ? <Loader2 className="w-3 h-3 animate-spin" />
                                     : overlayLabel === "Request"
                                     ? <><Plus className="w-2.5 h-2.5" />{overlayLabel}</>
+                                    : overlayLabel === "Blocked"
+                                    ? <><Ban className="w-2.5 h-2.5" />Blocked</>
                                     : overlayLabel}
                                 </button>
                               )}
@@ -500,6 +508,12 @@ export function CastSection({ cast }: CastSectionProps) {
                             {!isAvailable && (credit.requested || rs === "requested") && (
                               <div className="absolute bottom-1.5 left-1.5 flex items-center gap-0.5 bg-indigo-600/90 rounded-full px-1.5 py-0.5 text-[9px] text-white font-semibold">
                                 <CheckCircle className="w-2.5 h-2.5" />Requested
+                              </div>
+                            )}
+
+                            {!isAvailable && !credit.requested && rs !== "requested" && credit.blacklisted && (
+                              <div className="absolute bottom-1.5 left-1.5 flex items-center gap-0.5 bg-zinc-700/90 rounded-full px-1.5 py-0.5 text-[9px] text-white font-semibold">
+                                <Ban className="w-2.5 h-2.5" />Blocked
                               </div>
                             )}
                           </div>

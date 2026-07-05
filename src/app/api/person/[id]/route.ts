@@ -6,6 +6,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
+import { getBlacklistSet, blacklistKey } from "@/lib/blacklist";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const GET = withAuth(async (
@@ -75,6 +76,7 @@ export const GET = withAuth(async (
     const mineSet      = new Set(mineRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
     const radarrSet    = new Set(radarrRows.map((r) => r.tmdbId));
     const sonarrSet    = new Set(sonarrRows.map((r) => r.tmdbId));
+    const blSet        = await getBlacklistSet();
 
     const enrichedCredits = person.credits.map((c) => {
       const dbType = c.mediaType === "movie" ? "MOVIE" : "TV";
@@ -87,6 +89,7 @@ export const GET = withAuth(async (
         requested:         requestedSet.has(key),
         requestedByMe:     mineSet.has(key),
         arrPending:        c.mediaType === "movie" ? radarrSet.has(c.id) : sonarrSet.has(c.id),
+        blacklisted:       blSet.size > 0 && blSet.has(blacklistKey(c.id, c.mediaType)),
         imdbId:            rated?.imdbId ?? null,
         imdbRating:        rated?.imdbRating ?? null,
         imdbVotes:         rated?.imdbVotes ?? null,
