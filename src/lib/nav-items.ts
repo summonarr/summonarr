@@ -21,6 +21,7 @@ import {
   Trash2,
   Activity,
   Sparkles,
+  Ban,
 } from "@/components/icons";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
@@ -93,6 +94,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/issues", label: "Issues", icon: AlertTriangle, section: "admin" },
   { href: "/admin/users", label: "Users", icon: Users, section: "admin" },
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin" },
+  { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },
   { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin" },
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },

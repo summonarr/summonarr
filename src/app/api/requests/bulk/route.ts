@@ -8,6 +8,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { resolveMediaMeta } from "@/lib/request-meta";
+import { getBlacklistSet } from "@/lib/blacklist";
 import {
   canRequest,
   canAutoApprove,
@@ -41,6 +42,7 @@ type ItemResult =
   | "already-requested"
   | "skipped-declined"
   | "no-permission"
+  | "blacklisted"
   | "error";
 
 interface CreateOutcome {
@@ -207,8 +209,13 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Ids of stale, non-permanent DECLINED rows to drop so a fresh request can be
   // created (the @@unique constraint would otherwise make createMany skip them).
   const staleDeclinedIds: string[] = [];
+  const blacklistSet = await getBlacklistSet();
   for (const it of items) {
     const k = keyOf(it.tmdbId, it.mediaType);
+    if (blacklistSet.has(k)) {
+      skipped.push({ ...it, result: "blacklisted" });
+      continue;
+    }
     if (!canRequest(targetPerms, it.mediaType, false)) {
       skipped.push({ ...it, result: "no-permission" });
       continue;

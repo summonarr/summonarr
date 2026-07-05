@@ -596,6 +596,23 @@ model AuditLog {
   @@index([action, createdAt(sort: Desc)])
 }
 
+// ─── Request Blacklist ─────────────────────────────────────────────────────────
+// Admin-maintained titles that are hidden from discovery AND blocked at the
+// request chokepoint. Keyed by (tmdbId, mediaType) — the app's canonical media
+// identity (matches PlexLibraryItem / TmdbMediaCore).
+
+model BlacklistItem {
+  tmdbId    Int
+  mediaType MediaType
+  title     String?  @db.VarChar(500) // denormalized so the admin list needn't re-fetch TMDB
+  reason    String?  @db.VarChar(500)
+  addedBy   String?  // admin User id; nullable + no FK so user-anonymize can't cascade-delete entries
+  createdAt DateTime @default(now())
+
+  @@id([tmdbId, mediaType])
+  @@index([createdAt])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -631,6 +648,7 @@ enum AuditAction {
   SERVER_USERS_BULK
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
+  BLACKLIST_CHANGE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

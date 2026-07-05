@@ -73,7 +73,9 @@ export const GET = withAuth(async (
     // Ratings are skipped for the related rail — native tiles show no rating
     // chips, only the poster + availability mark.
     const [[withAvailability], similarWithAvailability] = await Promise.all([
-      attachAllAvailability([detail], session.user.id, { show4k }),
+      // Primary detail item is view-only for a blacklisted title (direct URL still
+      // resolves); only the suggestions rail is hidden.
+      attachAllAvailability([detail], session.user.id, { show4k, keepBlacklisted: true }),
       attachAllAvailability(suggestions.slice(0, 12), session.user.id, { skipRatings: true }),
     ]);
 

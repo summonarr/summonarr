@@ -15,6 +15,7 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
+import { isBlacklisted } from "@/lib/blacklist";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 
@@ -227,6 +228,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
+  }
+
+  // Blacklist gate — an admin-blocked title can never be requested. This is the
+  // authoritative block (discovery hiding is best-effort UX) and must run before
+  // any request row is created.
+  if (await isBlacklisted(tmdbId, mediaType)) {
+    return NextResponse.json({ error: "This title has been blocked by an administrator" }, { status: 403 });
   }
 
   const existing = await prisma.mediaRequest.findFirst({
