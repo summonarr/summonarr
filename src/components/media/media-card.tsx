@@ -13,6 +13,7 @@ import {
   Plus,
   Check,
   X,
+  Ban,
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -67,6 +68,7 @@ function MediaCardImpl({
   ) || reqState === "available";
   const isRequested =
     !!(media.requestedByMe || media.arrPending) || reqState === "requested";
+  const blacklisted = !!media.blacklisted;
 
   const detailPath =
     media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
@@ -121,7 +123,7 @@ function MediaCardImpl({
       onClick(media);
       return;
     }
-    if (isAvailable || media.arrPending || isRequested) {
+    if (isAvailable || media.arrPending || isRequested || blacklisted) {
       router.push(detailPath);
     } else if (reqState === "idle" || reqState === "error") {
       setReqState("confirm");
@@ -139,6 +141,13 @@ function MediaCardImpl({
     if (isAvailable) return <span>View</span>;
     if (media.arrPending) return <span>View</span>;
     if (isRequested) return <span>View</span>;
+    if (blacklisted)
+      return (
+        <span className="flex items-center gap-1">
+          <Ban className="w-3.5 h-3.5" />
+          Blocked
+        </span>
+      );
     if (reqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
     if (reqState === "error") return <span>Retry</span>;
     return (
@@ -273,15 +282,15 @@ function MediaCardImpl({
                 padding: "5px 12px",
                 borderRadius: 999,
                 background:
-                  isAvailable || isRequested
+                  isAvailable || isRequested || blacklisted
                     ? "rgba(255,255,255,0.14)"
                     : "var(--ds-accent)",
                 color:
-                  isAvailable || isRequested
+                  isAvailable || isRequested || blacklisted
                     ? "#fff"
                     : "var(--ds-accent-fg)",
                 border:
-                  isAvailable || isRequested
+                  isAvailable || isRequested || blacklisted
                     ? "1px solid rgba(255,255,255,0.28)"
                     : "0",
                 fontSize: 12,
@@ -356,6 +365,23 @@ function MediaCardImpl({
           >
             <CheckCircle style={{ width: 9, height: 9 }} />
             Requested
+          </span>
+        )}
+
+        {/* Bottom-left: admin-blacklisted indicator (shown but unrequestable) */}
+        {!isAvailable && !isRequested && blacklisted && (
+          <span
+            className="ds-chip absolute bottom-1.5 left-1.5"
+            style={{
+              paddingLeft: 5,
+              paddingRight: 6,
+              background: "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
+              color: "var(--ds-fg-muted)",
+              border: "1px solid var(--ds-border)",
+            }}
+          >
+            <Ban style={{ width: 9, height: 9 }} />
+            Blocked
           </span>
         )}
 

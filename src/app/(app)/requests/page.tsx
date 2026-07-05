@@ -107,8 +107,7 @@ export default async function RequestsPage({
   const enriched = await attachAllAvailability(
     availabilityStubs,
     session.user.id,
-    // The user's own request rows must never be hidden by a later blacklist.
-    { skipRatings: true, keepBlacklisted: true },
+    { skipRatings: true },
   );
   const availabilityByKey = new Map(
     enriched.map((e) => [`${e.id}:${e.mediaType}`, e]),

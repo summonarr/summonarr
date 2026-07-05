@@ -4,7 +4,7 @@ import { attachJellyfinAvailability } from "./jellyfin-availability";
 import { attachArrPending } from "./arr-availability";
 import { attachRequestedStatus } from "./request-availability";
 import { attachRatingsUnified } from "./omdb-availability";
-import { filterBlacklisted } from "./blacklist";
+import { getBlacklistSet, blacklistKey } from "./blacklist";
 import type { TmdbMedia } from "./tmdb-types";
 
 // All five enrichment passes run in parallel against the same input slice; results are merged by
@@ -12,18 +12,14 @@ import type { TmdbMedia } from "./tmdb-types";
 export async function attachAllAvailability(
   items: TmdbMedia[],
   userId?: string,
-  options?: { blockRatings?: boolean; skipRatings?: boolean; show4k?: boolean; keepBlacklisted?: boolean },
+  options?: { blockRatings?: boolean; skipRatings?: boolean; show4k?: boolean },
 ): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
 
-  // Hide admin-blacklisted titles from every discovery surface by default — this is
-  // the single chokepoint all list routes/pages funnel through. Callers that must
-  // NOT drop (the user's own requests list, the media-detail primary item) pass
-  // keepBlacklisted. The request POST remains the authoritative block.
-  if (!options?.keepBlacklisted) {
-    items = await filterBlacklisted(items);
-    if (items.length === 0) return items;
-  }
+  // Admin-blacklisted titles stay VISIBLE in discovery but are marked so the UI can
+  // show an "unavailable to request" state — the request POST is the authoritative
+  // block. This is the single chokepoint all list routes/pages funnel through.
+  const blSet = await getBlacklistSet();
 
   const [withPlex, withJellyfin, withArr, withRequests, withRatings] = await Promise.all([
     attachPlexAvailability(items),
@@ -54,6 +50,7 @@ export async function attachAllAvailability(
       arr4kAvailable:    arr?.arr4kAvailable,
       requested:         reqMap.get(k)?.requested     ?? false,
       requestedByMe:     reqMap.get(k)?.requestedByMe ?? false,
+      ...(blSet.size > 0 && blSet.has(blacklistKey(item.id, item.mediaType)) ? { blacklisted: true } : {}),
     };
   });
 }

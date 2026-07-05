@@ -24,6 +24,9 @@ export interface TmdbMedia {
   arr4kAvailable?: boolean;
   requested?: boolean;
   requestedByMe?: boolean;
+  // Admin-blacklisted: the title is shown but cannot be requested (the request POST
+  // 403s). Set by attachAllAvailability; absent ⇒ requestable.
+  blacklisted?: boolean;
   imdbId?: string | null;
   imdbRating?: string | null;
   imdbVotes?: string | null;

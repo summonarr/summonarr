@@ -12,6 +12,7 @@ import {
   X,
   ExternalLink,
   AlertCircle,
+  Ban,
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
@@ -49,6 +50,10 @@ interface RequestButtonProps {
   // When true, offer a request-time quality-profile picker (REQUEST_ADVANCED holders).
   // The chosen id rides the POST body; the API re-checks the permission + validates it.
   canChooseProfile?: boolean;
+
+  // When true, the title is admin-blacklisted: show an "unavailable to request"
+  // state instead of the request CTA. The request POST 403s regardless.
+  blacklisted?: boolean;
 }
 
 const btnBase: React.CSSProperties = {
@@ -102,6 +107,7 @@ export function RequestButton({
   requestToken,
   canRequestOnBehalf = false,
   canChooseProfile = false,
+  blacklisted = false,
 }: RequestButtonProps) {
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
@@ -273,7 +279,26 @@ export function RequestButton({
         </Link>
       )}
 
-      {!isAvailable && !showViewRequest && (
+      {!isAvailable && !showViewRequest && blacklisted && (
+        <div
+          className="flex items-center"
+          style={{
+            gap: 6,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--ds-border)",
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg-muted)",
+            fontSize: 13,
+            width: "fit-content",
+          }}
+        >
+          <Ban style={{ width: 14, height: 14 }} />
+          Not available to request
+        </div>
+      )}
+
+      {!isAvailable && !showViewRequest && !blacklisted && (
         <>
           {state === "confirm" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">

@@ -22,6 +22,7 @@ import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { isBlacklisted } from "@/lib/blacklist";
 import { isFeatureEnabled } from "@/lib/features";
 
 export default async function TVDetailPage({
@@ -92,6 +93,7 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
   const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
+  const blacklisted = await isBlacklisted(media.id, "TV");
   const [has4k, userRequest4k, request4kAllRow, sonarr4kAvailable, sonarr4kWanted] = await Promise.all([
     isArrConfigured("sonarr", "4k"),
     session
@@ -292,6 +294,7 @@ export default async function TVDetailPage({
                 requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
                 canChooseProfile={canChooseProfile}
+                blacklisted={blacklisted}
               />
               {has4k && canRequest4k && (
                 <Request4kButton

@@ -3,8 +3,9 @@ import { prisma } from "./prisma";
 import type { MediaType } from "@/generated/prisma";
 
 // The blacklist is a small admin-maintained table that changes only when an admin
-// adds/removes a title. Discovery routes filter against it on every list render,
-// so cache the resolved key set for a short window and coalesce concurrent cold
+// adds/removes a title. Discovery marks against it on every list render (the title
+// stays visible but is flagged unrequestable), so cache the resolved key set for a
+// short window and coalesce concurrent cold
 // reads into one query (mirrors getApiKey in omdb.ts). invalidateBlacklistCache()
 // is called by the admin add/remove routes so a change propagates immediately;
 // the TTL is only a backstop against a missed invalidation on another replica.
@@ -14,8 +15,8 @@ let inflight: Promise<Set<string>> | null = null;
 
 // Canonical key: "{tmdbId}:{MOVIE|TV}". Accepts either the Prisma enum casing
 // (MOVIE/TV) or the TMDB-layer casing (movie/tv) so both the request chokepoint
-// and the discovery filter can share one keyspace.
-function key(tmdbId: number, mediaType: string): string {
+// and the discovery marking share one keyspace.
+export function blacklistKey(tmdbId: number, mediaType: string): string {
   const mt = mediaType === "movie" ? "MOVIE" : mediaType === "tv" ? "TV" : mediaType;
   return `${tmdbId}:${mt}`;
 }
@@ -44,17 +45,4 @@ export function invalidateBlacklistCache(): void {
 export async function isBlacklisted(tmdbId: number, mediaType: MediaType): Promise<boolean> {
   const set = await getBlacklistSet();
   return set.has(`${tmdbId}:${mediaType}`);
-}
-
-// Best-effort discovery hide: drops blacklisted items from a TMDB list. Items
-// expose `{ id: number; mediaType: "movie" | "tv" }` (the TmdbMedia shape). The
-// request POST is the authoritative block — this is UX only, so anything we can't
-// key (missing id/mediaType) is kept rather than dropped.
-export async function filterBlacklisted<T extends { id: number; mediaType: "movie" | "tv" }>(
-  items: T[],
-): Promise<T[]> {
-  if (items.length === 0) return items;
-  const set = await getBlacklistSet();
-  if (set.size === 0) return items;
-  return items.filter((it) => !set.has(key(it.id, it.mediaType)));
 }

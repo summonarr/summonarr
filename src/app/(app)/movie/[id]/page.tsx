@@ -22,6 +22,7 @@ import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { isBlacklisted } from "@/lib/blacklist";
 
 export default async function MovieDetailPage({
   params,
@@ -68,6 +69,7 @@ export default async function MovieDetailPage({
   const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
   const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
+  const blacklisted = await isBlacklisted(media.id, "MOVIE");
 
   const [suggestions, collectionItems] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
@@ -253,6 +255,7 @@ export default async function MovieDetailPage({
                 requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
                 canChooseProfile={canChooseProfile}
+                blacklisted={blacklisted}
               />
               {has4k && canRequest4k && (
                 <Request4kButton
