@@ -16,6 +16,8 @@ import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/per
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
+import { exceedsCap } from "@/lib/content-rating";
+import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 
@@ -106,6 +108,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         movieQuotaDays: true,
         tvQuotaLimit: true,
         tvQuotaDays: true,
+        maxContentRating: true,
       },
     }),
   ]);
@@ -235,6 +238,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // any request row is created.
   if (await isBlacklisted(tmdbId, mediaType)) {
     return NextResponse.json({ error: "This title has been blocked by an administrator" }, { status: 403 });
+  }
+
+  // Parental control — block a request whose US certification exceeds the user's
+  // cap. Only capped, non-admin users pay the (cached) certification fetch;
+  // unknown/unrated titles are allowed (see content-rating.ts).
+  if (userRecord?.maxContentRating && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+    let cert: string | undefined;
+    try {
+      const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
+      cert = detail.certification;
+    } catch {
+      cert = undefined;
+    }
+    if (exceedsCap(cert, userRecord.maxContentRating)) {
+      return NextResponse.json({ error: "This title's rating exceeds your account's limit" }, { status: 403 });
+    }
   }
 
   const existing = await prisma.mediaRequest.findFirst({

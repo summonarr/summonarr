@@ -20,6 +20,7 @@ const USER_SELECT = {
   role: true,
   createdAt: true,
   mediaServer: true,
+  maxContentRating: true,
   passwordHash: true, // not serialized — only to derive `source` (local vs OAuth)
   movieQuotaLimit: true,
   movieQuotaDays: true,
@@ -49,6 +50,7 @@ function serializeUser(u: UserRow) {
     role: u.role,
     createdAt: u.createdAt,
     mediaServer: u.mediaServer,
+    maxContentRating: u.maxContentRating,
     // Derive auth source (mirrors the web admin page): a passwordHash means a
     // local-credentials account; the @jellyfin.local synthetic email marks a
     // Jellyfin user; everything else is Plex. The native client gates the

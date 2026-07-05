@@ -56,6 +56,12 @@ model User {
   tvQuotaLimit    Int?
   tvQuotaDays     Int?
 
+  // Parental control: the maximum US content rating this user may request. null ⇒
+  // no cap. Enforced at the request chokepoint (src/lib/content-rating.ts); ADMIN
+  // bypasses. Stored as an MPAA cap ("G".."NC-17") that governs BOTH movies and TV
+  // via a unified maturity rank.
+  maxContentRating String?
+
   // For local/OIDC users: which media server's availability badges to show ("plex" | "jellyfin" | null)
   // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
   mediaServer   String?

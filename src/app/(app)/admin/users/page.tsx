@@ -30,6 +30,7 @@ export default async function UsersPage() {
         tvQuotaLimit: true,
         tvQuotaDays: true,
         mediaServer: true,
+        maxContentRating: true,
         notifyOnApproved: true,
         notifyOnAvailable: true,
         notifyOnDeclined: true,
@@ -117,6 +118,7 @@ export default async function UsersPage() {
             pushOnDeclined: u.pushOnDeclined,
             notifyOnIssue: u.notifyOnIssue,
             mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
+            maxContentRating: u.maxContentRating,
             source: localAuthIds.has(u.id)
               ? "local"
               : u.email.endsWith("@jellyfin.local")

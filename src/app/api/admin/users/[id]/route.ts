@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
+import { isValidContentRatingCap } from "@/lib/content-rating";
 
 // Thrown inside the anonymization transaction to roll it back when the target is
 // the last active admin (guardrail 23: propagate out of the tx, don't swallow).
@@ -34,6 +35,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     tvQuotaLimit?: number | null;
     tvQuotaDays?: number | null;
     mediaServer?: string | null;
+    maxContentRating?: string | null;
   } & Partial<Record<NotifKey, boolean>>;
   const parsedBody = await readJsonCapped<UpdateBody>(req, 32768);
   if (parsedBody instanceof NextResponse) return parsedBody;
@@ -78,6 +80,27 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: "mediaServer", before: prevMediaServer.mediaServer, after: ms }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, mediaServer: ms });
+  }
+
+  if ("maxContentRating" in body) {
+    const raw = body.maxContentRating;
+    const mcr = raw == null || raw === "" ? null : raw; // empty select ⇒ clear the cap
+    if (mcr !== null && !isValidContentRatingCap(mcr)) {
+      return NextResponse.json({ error: "maxContentRating must be a valid rating cap or null" }, { status: 400 });
+    }
+    const prev = await prisma.user.findUnique({ where: { id }, select: { maxContentRating: true } });
+    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    try {
+      await prisma.user.update({ where: { id }, data: { maxContentRating: mcr } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+      throw err;
+    }
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "SETTINGS_CHANGE", target: `user:${id}`, details: { field: "maxContentRating", before: prev.maxContentRating, after: mcr }, ...auditContext(req, session) });
+    invalidateUserSession(id);
+    return NextResponse.json({ id, maxContentRating: mcr });
   }
 
   if (body.permissions !== undefined) {

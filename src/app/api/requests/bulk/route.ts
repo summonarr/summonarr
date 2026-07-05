@@ -3,6 +3,8 @@ import { withPermission } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
+import { exceedsCap } from "@/lib/content-rating";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
@@ -43,6 +45,7 @@ type ItemResult =
   | "skipped-declined"
   | "no-permission"
   | "blacklisted"
+  | "rating-blocked"
   | "error";
 
 interface CreateOutcome {
@@ -149,6 +152,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       movieQuotaDays: true,
       tvQuotaLimit: true,
       tvQuotaDays: true,
+      maxContentRating: true,
     },
   });
   if (!target) return NextResponse.json({ error: "Target user not found" }, { status: 404 });
@@ -268,7 +272,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       return { it, meta: null };
     }
   });
-  const prepared = resolved.flatMap((r) =>
+  let prepared = resolved.flatMap((r) =>
     r.meta
       ? [{
           tmdbId: r.it.tmdbId,
@@ -283,6 +287,29 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   const metaFailed = resolved
     .filter((r) => !r.meta)
     .map((r): CreateOutcome => ({ tmdbId: r.it.tmdbId, mediaType: r.it.mediaType, result: "error" }));
+
+  // Parental control — drop any prepared item whose US certification exceeds the
+  // TARGET user's cap (covers on-behalf-of-a-kid AND a capped user's own collection
+  // "Request all"). Only capped, non-admin targets pay the per-item certification
+  // fetch; unknown/unrated titles are allowed (see content-rating.ts).
+  let ratingBlocked: CreateOutcome[] = [];
+  if (target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN)) {
+    const cap = target.maxContentRating;
+    const checked = await mapLimit(prepared, ARR_CONCURRENCY, async (p) => {
+      let cert: string | undefined;
+      try {
+        const d = p.mediaType === "MOVIE" ? await getMovieDetails(p.tmdbId) : await getTVDetails(p.tmdbId);
+        cert = d.certification;
+      } catch {
+        cert = undefined;
+      }
+      return { p, blocked: exceedsCap(cert, cap) };
+    });
+    prepared = checked.filter((c) => !c.blocked).map((c) => c.p);
+    ratingBlocked = checked
+      .filter((c) => c.blocked)
+      .map((c): CreateOutcome => ({ tmdbId: c.p.tmdbId, mediaType: c.p.mediaType, result: "rating-blocked" }));
+  }
 
   // Phase 2 — quota re-check + insert, atomic under Serializable. This closes the
   // TOCTOU: a concurrent batch (or a single POST /api/requests) for the same target
@@ -444,7 +471,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
   });
 
-  const results = [...skipped, ...metaFailed, ...outcomes];
+  const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;
   const requesterName = target.name ?? target.email;
 
