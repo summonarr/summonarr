@@ -304,7 +304,6 @@ export default async function TVDetailPage({
                   requested={requested4k}
                   available={arr4kAvailable}
                   blacklisted={blacklisted}
-                  pending={arr4kPending}
                 />
               )}
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (

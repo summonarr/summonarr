@@ -67,7 +67,10 @@ export function CastSection({ cast }: CastSectionProps) {
     const isAvailable = !!(credit.plexAvailable || credit.jellyfinAvailable);
     const rs = getReqState(credit);
 
-    const isRequested = !!(credit.requestedByMe || credit.arrPending) || rs === "requested";
+    // Only the viewer's OWN request blocks re-requesting — a title queued by
+    // someone else (arrPending) stays requestable (the server mirrors the
+    // approved status so this user gets the "now available" notification).
+    const isRequested = !!credit.requestedByMe || rs === "requested";
 
     if (isAvailable) {
       close();
@@ -76,7 +79,7 @@ export function CastSection({ cast }: CastSectionProps) {
       // Admin-blocked — no request; open the detail page (shows the same state).
       close();
       router.push(credit.mediaType === "movie" ? `/movie/${credit.id}` : `/tv/${credit.id}`);
-    } else if (credit.arrPending || isRequested) {
+    } else if (isRequested) {
       close();
       router.push("/requests");
     } else if (rs === "idle" || rs === "error") {
@@ -395,12 +398,10 @@ export function CastSection({ cast }: CastSectionProps) {
                       const isAvailable = !!(credit.plexAvailable || credit.jellyfinAvailable);
                       const rs = getReqState(credit);
 
-                      const isRequested = !!(credit.requestedByMe || credit.arrPending) || rs === "requested";
+                      const isRequested = !!credit.requestedByMe || rs === "requested";
 
                       const overlayLabel = isAvailable
                         ? "View"
-                        : credit.arrPending && !isAvailable
-                        ? "Pending"
                         : isRequested
                         ? "View Request"
                         : credit.blacklisted

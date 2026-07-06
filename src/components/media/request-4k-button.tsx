@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Check, Loader2, Clock, Ban } from "@/components/icons";
+import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
@@ -15,7 +15,6 @@ export function Request4kButton({
   requestToken,
   requested,
   available,
-  pending,
   blacklisted,
 }: {
   tmdbId: number;
@@ -24,9 +23,6 @@ export function Request4kButton({
   requested?: boolean;
   // The 4K instance already has the file — show an "Available in 4K" state instead of a CTA.
   available?: boolean;
-  // The 4K instance is already downloading/queued for this title (e.g. someone
-  // else requested it) — show a "4K Queued" state instead of a CTA.
-  pending?: boolean;
   // The title is admin-blacklisted — no 4K request either (the request POST 403s).
   blacklisted?: boolean;
 }) {
@@ -107,22 +103,9 @@ export function Request4kButton({
     );
   }
 
-  // The 4K copy is already in the download queue (regardless of who requested it).
-  if (pending) {
-    return (
-      <span
-        style={{
-          ...base,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg-muted)",
-          border: "1px solid var(--ds-border)",
-        }}
-      >
-        <Clock style={{ width: 14, height: 14 }} />
-        4K Queued
-      </span>
-    );
-  }
+  // A 4K copy queued by someone else does NOT block the CTA: the server mirrors
+  // the approved 4K request so this user gets the availability notification. The
+  // queue state is communicated by the "4K Queued" chip in the badges row.
 
   // Blacklisted blocks all requests (per tmdbId+mediaType, both tiers).
   if (blacklisted) {

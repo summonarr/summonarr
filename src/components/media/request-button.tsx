@@ -202,7 +202,11 @@ export function RequestButton({
   const isAvailable =
     (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable);
   const isDone = state === "requested" || state === "duplicate";
-  const showViewRequest = isDone || arrPending;
+  // Only the viewer's OWN request replaces the CTA. A title queued by someone
+  // else (arrPending) stays requestable: the server mirrors the approved status
+  // so this user is tracked for the "now available" notification. The queue
+  // state is still shown by the "Approved — In Queue" indicator above.
+  const showViewRequest = isDone;
   const label = mediaType === "MOVIE" ? "Movie" : "TV Show";
 
   // Reused in the confirm and note panels. Same element in two spots is fine — it

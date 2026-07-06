@@ -66,8 +66,10 @@ function MediaCardImpl({
     (showPlex && media.plexAvailable) ||
     (showJellyfin && media.jellyfinAvailable)
   ) || reqState === "available";
-  const isRequested =
-    !!(media.requestedByMe || media.arrPending) || reqState === "requested";
+  // Only the viewer's OWN request blocks re-requesting. A title queued by
+  // someone else (arrPending) stays requestable — the server mirrors the
+  // approved status so this user gets the "now available" notification.
+  const isRequested = !!media.requestedByMe || reqState === "requested";
   const blacklisted = !!media.blacklisted;
 
   const detailPath =
@@ -123,7 +125,7 @@ function MediaCardImpl({
       onClick(media);
       return;
     }
-    if (isAvailable || media.arrPending || isRequested || blacklisted) {
+    if (isAvailable || isRequested || blacklisted) {
       router.push(detailPath);
     } else if (reqState === "idle" || reqState === "error") {
       setReqState("confirm");
@@ -139,7 +141,6 @@ function MediaCardImpl({
 
   const bubbleContent = () => {
     if (isAvailable) return <span>View</span>;
-    if (media.arrPending) return <span>View</span>;
     if (isRequested) return <span>View</span>;
     if (blacklisted)
       return (

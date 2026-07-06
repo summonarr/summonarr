@@ -20,8 +20,12 @@ export function CollectionRequestAllButton({
   const [state, setState] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
 
+  // Excludes only library items, the CALLER's own requests, and blacklisted
+  // titles. Items queued/requested by other users are included on purpose: the
+  // bulk route mirrors their approved status so this user is tracked for the
+  // "now available" notification.
   const missing = items.filter(
-    (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.arrPending && !m.requested && !m.blacklisted,
+    (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.requestedByMe && !m.blacklisted,
   );
 
   if (!canRequest || missing.length === 0) return null;
