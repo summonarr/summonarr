@@ -17,6 +17,9 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
+import { isBlacklisted } from "@/lib/blacklist";
+import { exceedsCap } from "@/lib/content-rating";
+import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -612,6 +615,36 @@ async function handleComponent(interaction: any): Promise<void> {
         confirmEmbed.description = `(${selected.releaseYear}) — You don't have permission to request this.`;
         await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
         return;
+      }
+
+      // Blacklist gate (parity with the web chokepoints, which 403 on this):
+      // an admin-blocked title must be rejected before any request row is
+      // created, or Discord becomes a bypass around the blacklist.
+      if (await isBlacklisted(selected.id, mediaType)) {
+        confirmEmbed.color = 0xed4245;
+        confirmEmbed.description = `(${selected.releaseYear}) — This title has been blocked by an administrator.`;
+        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+        return;
+      }
+
+      // Parental control (parity with the web chokepoints): block a request whose
+      // US certification exceeds the user's cap. Only capped, non-admin users pay
+      // the (cached) certification fetch; unknown/unrated titles and TMDB failures
+      // are allowed — fail-open, same as requests/route.ts.
+      if (dbUser.maxContentRating && !hasPermission(effPerms, Permission.ADMIN)) {
+        let cert: string | undefined;
+        try {
+          const detail = mediaType === "MOVIE" ? await getMovieDetails(selected.id) : await getTVDetails(selected.id);
+          cert = detail.certification;
+        } catch {
+          cert = undefined;
+        }
+        if (exceedsCap(cert, dbUser.maxContentRating)) {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `(${selected.releaseYear}) — This title's rating exceeds your account's limit.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
       }
 
       const [quotaLimitRow, quotaPeriodRow] = await Promise.all([
