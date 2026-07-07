@@ -13,6 +13,9 @@ import { hasPermission, Permission, effectivePermissions, parsePermissions } fro
 //   - "smtp"   → SMTP via the in-tree client in [src/lib/smtp.ts](src/lib/smtp.ts) (default when unset)
 // Resend sender falls back to smtpFrom so users sharing one from-address
 // don't have to enter it twice. siteUrl is read so CTAs can link to the app.
+// `enableUserEmails` is the "Send notification emails" master switch: while it is
+// off, getEmailConfig() returns null so EVERY notifier (user- and admin-facing
+// alike) is muted — only the explicit admin test email bypasses it.
 const EMAIL_KEYS = [
   "emailBackend",
   "smtpHost",
@@ -23,6 +26,7 @@ const EMAIL_KEYS = [
   "resendApiKey",
   "resendFrom",
   "siteUrl",
+  "enableUserEmails",
 ] as const;
 
 type EmailBackend = "smtp" | "resend";
@@ -39,10 +43,11 @@ interface EmailConfig {
   siteUrl?: string;
 }
 
-async function getEmailConfig(): Promise<EmailConfig | null> {
+async function getEmailConfig(opts: { ignoreSendToggle?: boolean } = {}): Promise<EmailConfig | null> {
   if (!(await isFeatureEnabled("feature.integration.email"))) return null;
   const rows = await prisma.setting.findMany({ where: { key: { in: [...EMAIL_KEYS] } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value])) as Record<string, string | undefined>;
+  if (!opts.ignoreSendToggle && map.enableUserEmails !== "true") return null;
   const backend: EmailBackend = map.emailBackend === "resend" ? "resend" : "smtp";
   return {
     backend,
@@ -61,6 +66,15 @@ async function getEmailConfig(): Promise<EmailConfig | null> {
 function isBackendConfigured(cfg: EmailConfig): boolean {
   if (cfg.backend === "resend") return Boolean(cfg.resendApiKey);
   return Boolean(cfg.smtpHost);
+}
+
+// Whether notification emails can currently go out: feature flag on, the
+// "Send notification emails" master switch on, and a transport configured.
+// Mirrors the exact gate every notifier runs, so UI that keys off this
+// (the profile email-preference section) can't drift from send behavior.
+export async function isNotificationEmailEnabled(): Promise<boolean> {
+  const cfg = await getEmailConfig();
+  return cfg !== null && isBackendConfigured(cfg);
 }
 
 function resolveFromAddress(cfg: EmailConfig): string {
@@ -516,7 +530,6 @@ export async function notifyUserIssueMessageEmail(data: {
   body: string;
 }): Promise<void> {
   try {
-    if (!(await isUserEmailsEnabled())) return;
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
@@ -541,11 +554,6 @@ export async function notifyUserIssueMessageEmail(data: {
   }
 }
 
-async function isUserEmailsEnabled(): Promise<boolean> {
-  const row = await prisma.setting.findUnique({ where: { key: "enableUserEmails" } });
-  return row?.value === "true";
-}
-
 export async function notifyUserRequestApprovedEmail(data: {
   toEmail: string;
   title: string;
@@ -554,7 +562,6 @@ export async function notifyUserRequestApprovedEmail(data: {
   tmdbId?: number;
 }): Promise<void> {
   try {
-    if (!(await isUserEmailsEnabled())) return;
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const mediaLabel = mediaLabelOf(data.mediaType);
@@ -583,7 +590,6 @@ export async function notifyUserRequestDeclinedEmail(data: {
   posterPath?: string | null;
 }): Promise<void> {
   try {
-    if (!(await isUserEmailsEnabled())) return;
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const mediaLabel = mediaLabelOf(data.mediaType);
@@ -613,7 +619,6 @@ export async function notifyUserRequestAvailableEmail(data: {
   tmdbId?: number;
 }): Promise<void> {
   try {
-    if (!(await isUserEmailsEnabled())) return;
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const mediaLabel = mediaLabelOf(data.mediaType);
@@ -675,7 +680,9 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
 }
 
 export async function sendTestEmail(to: string): Promise<void> {
-  const cfg = await getEmailConfig();
+  // Bypass the send toggle (but not the feature flag) so admins can verify the
+  // SMTP/Resend transport before switching notification emails on.
+  const cfg = await getEmailConfig({ ignoreSendToggle: true });
   if (!cfg) throw new Error("Email integration is disabled");
   if (!isBackendConfigured(cfg)) {
     throw new Error(cfg.backend === "resend" ? "Resend API key not configured" : "SMTP not configured");
