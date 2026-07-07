@@ -422,7 +422,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       status: "APPROVED",
       OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
     },
-    select: { id: true, tmdbId: true, mediaType: true, is4k: true, qualityProfileId: true },
+    select: { id: true, tmdbId: true, mediaType: true, is4k: true, qualityProfileId: true, requestedBy: true },
   });
   const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
   const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
@@ -456,10 +456,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     try {
       const variant = req.is4k ? "4k" : "hd";
       if (req.mediaType === "MOVIE") {
-        await addMovieToRadarr(req.tmdbId, variant, req.qualityProfileId ?? undefined);
+        await addMovieToRadarr(req.tmdbId, variant, req.qualityProfileId ?? undefined, req.requestedBy);
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { lastArrPushAt: pushedAt } });
       } else {
-        const tvdbId = await addSeriesToSonarr(req.tmdbId, variant, req.qualityProfileId ?? undefined);
+        const tvdbId = await addSeriesToSonarr(req.tmdbId, variant, req.qualityProfileId ?? undefined, req.requestedBy);
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { tvdbId, lastArrPushAt: pushedAt } });
       }
       repushed++;

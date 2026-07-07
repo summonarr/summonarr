@@ -451,9 +451,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
     try {
       if (p.mediaType === "MOVIE") {
-        await addMovieToRadarr(p.tmdbId);
+        await addMovieToRadarr(p.tmdbId, "hd", undefined, targetUserId);
       } else {
-        const tvdbId = await addSeriesToSonarr(p.tmdbId);
+        const tvdbId = await addSeriesToSonarr(p.tmdbId, "hd", undefined, targetUserId);
         await prisma.mediaRequest.update({ where: { id: row.id }, data: { tvdbId } });
       }
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };

@@ -741,9 +741,9 @@ async function handleComponent(interaction: any): Promise<void> {
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
-              await addMovieToRadarr(selected.id);
+              await addMovieToRadarr(selected.id, "hd", undefined, dbUser.id);
             } else {
-              const tvdbId = await addSeriesToSonarr(selected.id);
+              const tvdbId = await addSeriesToSonarr(selected.id, "hd", undefined, dbUser.id);
               await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
             }
           } catch (err) {
@@ -997,9 +997,9 @@ async function handleComponent(interaction: any): Promise<void> {
         let arrFailed = false;
         try {
           if (request.mediaType === "MOVIE") {
-            await addMovieToRadarr(request.tmdbId);
+            await addMovieToRadarr(request.tmdbId, "hd", undefined, request.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(request.tmdbId);
+            const tvdbId = await addSeriesToSonarr(request.tmdbId, "hd", undefined, request.requestedBy);
             await prisma.mediaRequest.update({ where: { id: requestId }, data: { tvdbId } });
           }
         } catch (err) {

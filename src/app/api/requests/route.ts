@@ -409,9 +409,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId);
+        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId);
+        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {

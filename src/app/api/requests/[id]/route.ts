@@ -120,9 +120,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId, variant);
+        await addMovieToRadarr(existing.tmdbId, variant, undefined, existing.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant);
+        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant, undefined, existing.requestedBy);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
     } catch (err) {
@@ -276,9 +276,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId);
+        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;

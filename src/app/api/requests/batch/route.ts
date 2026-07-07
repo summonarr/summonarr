@@ -143,9 +143,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         try {
           const variant = r.is4k ? "4k" : "hd";
           if (r.mediaType === "MOVIE") {
-            await addMovieToRadarr(r.tmdbId, variant);
+            await addMovieToRadarr(r.tmdbId, variant, undefined, r.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(r.tmdbId, variant);
+            const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, undefined, r.requestedBy);
             await prisma.mediaRequest.update({ where: { id: r.id }, data: { tvdbId } });
           }
         } catch (err) {
