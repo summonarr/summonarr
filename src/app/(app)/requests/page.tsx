@@ -108,7 +108,9 @@ export default async function RequestsPage({
   const enriched = await attachAllAvailability(
     availabilityStubs,
     session.user.id,
-    { skipRatings: true },
+    // includeHidden: a user's own requests must stay visible even if they've since
+    // hidden the title from discovery.
+    { skipRatings: true, includeHidden: true },
   );
   const availabilityByKey = new Map(
     enriched.map((e) => [`${e.id}:${e.mediaType}`, e]),

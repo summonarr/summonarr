@@ -120,6 +120,7 @@ model User {
   mediaServerUsers  MediaServerUser[]
   authSessions      AuthSession[]
   watchlist         WatchlistItem[]
+  hidden            HiddenItem[]
 }
 
 model PushSubscription {
@@ -976,6 +977,27 @@ model WatchlistItem {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tmdbId, mediaType]) // one watchlist entry per user per item
+  @@index([userId, createdAt])
+}
+
+// Per-user "not interested" / hide list. Distinct from the admin-global
+// BlacklistItem: HiddenItem is per-user and REMOVES a title from that user's
+// discovery (attachAllAvailability filters it out), whereas the admin blacklist
+// keeps a title visible-but-unrequestable for everyone. Title/posterPath are
+// denormalized so the "Hidden" management page renders without a TMDB fetch.
+model HiddenItem {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  tmdbId     Int
+  mediaType  MediaType
+  title      String  @db.VarChar(500)
+  posterPath String? @db.VarChar(500)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType]) // one hide entry per user per item
   @@index([userId, createdAt])
 }
 

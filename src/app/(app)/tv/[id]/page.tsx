@@ -3,6 +3,7 @@ import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
 import { WatchlistButton } from "@/components/media/watchlist-button";
+import { HideButton } from "@/components/media/hide-button";
 import { isArrConfigured } from "@/lib/arr";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -123,12 +124,16 @@ export default async function TVDetailPage({
   ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
-  const onWatchlist = session
-    ? !!(await prisma.watchlistItem.findUnique({
-        where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } },
-        select: { id: true },
-      }))
-    : false;
+  const [onWatchlist, onHidden] = session
+    ? await Promise.all([
+        prisma.watchlistItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+          .then((r) => !!r),
+        prisma.hiddenItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+          .then((r) => !!r),
+      ])
+    : [false, false];
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -316,6 +321,15 @@ export default async function TVDetailPage({
               )}
               {session && (
                 <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
+              )}
+              {session && (
+                <HideButton
+                  tmdbId={media.id}
+                  mediaType="TV"
+                  title={media.title}
+                  posterPath={media.posterPath}
+                  initialHidden={onHidden}
+                />
               )}
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton

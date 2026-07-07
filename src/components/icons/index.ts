@@ -38,6 +38,7 @@ export { Copy } from "./copy";
 export { Database } from "./database";
 export { Download } from "./download";
 export { ExternalLink } from "./external-link";
+export { EyeOff } from "./eye-off";
 export { FileCheck } from "./file-check";
 export { FileText } from "./file-text";
 export { FileX } from "./file-x";

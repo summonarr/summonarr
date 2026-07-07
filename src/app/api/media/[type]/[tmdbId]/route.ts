@@ -73,7 +73,9 @@ export const GET = withAuth(async (
     // Ratings are skipped for the related rail — native tiles show no rating
     // chips, only the poster + availability mark.
     const [[withAvailability], similarWithAvailability] = await Promise.all([
-      attachAllAvailability([detail], session.user.id, { show4k }),
+      // includeHidden: never filter out the very item the viewer opened, even if
+      // they've hidden it. The related rail below is left to filter normally.
+      attachAllAvailability([detail], session.user.id, { show4k, includeHidden: true }),
       attachAllAvailability(suggestions.slice(0, 12), session.user.id, { skipRatings: true }),
     ]);
 
