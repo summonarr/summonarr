@@ -119,6 +119,7 @@ model User {
   discordMergeCode  DiscordMergeCode?
   mediaServerUsers  MediaServerUser[]
   authSessions      AuthSession[]
+  watchlist         WatchlistItem[]
 }
 
 model PushSubscription {
@@ -665,8 +666,12 @@ model MediaServerUser {
   source           String // "plex" | "jellyfin"
   sourceUserId     String // Plex accountID or Jellyfin userId UUID
   // Server machineIdentifier (Plex) or System/Info Id (Jellyfin) the row was first
-  // observed on. Webhook handlers verify the inbound payload's server identifier
-  // matches this column before attributing playback or recording sessions.
+  // observed on. Currently DORMANT scaffolding: the only writer is the trusted
+  // play-history poller, which does not pass a machineId, so this stays null in
+  // practice. The verification branch in resolveMediaServerUser
+  // (MediaServerMismatchError) only fires if a future *untrusted* ingestion path
+  // passes one. The Plex/Jellyfin webhook handlers this comment once referenced
+  // were removed — do not treat this as an active security control.
   serverMachineId  String?
   username         String
   email            String?
@@ -952,6 +957,26 @@ enum Role {
   USER
   ISSUE_ADMIN
   ADMIN
+}
+
+// Personal "save for later" list. Unlike DeletionVote it is NOT gated on the
+// item being in a library — the whole point is to bookmark things that are not
+// yet available. Title/posterPath are denormalized (like DeletionVote) so the
+// watchlist page renders without a TMDB round-trip per row.
+model WatchlistItem {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  tmdbId     Int
+  mediaType  MediaType
+  title      String  @db.VarChar(500)
+  posterPath String? @db.VarChar(500)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType]) // one watchlist entry per user per item
+  @@index([userId, createdAt])
 }
 
 enum MediaType {

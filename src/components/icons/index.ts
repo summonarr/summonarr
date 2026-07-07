@@ -16,6 +16,8 @@ export { Ban } from "./ban";
 export { BarChart3 } from "./bar-chart3";
 export { Bell } from "./bell";
 export { BellOff } from "./bell-off";
+export { Bookmark } from "./bookmark";
+export { BookmarkCheck } from "./bookmark-check";
 export { Bot } from "./bot";
 export { Calendar } from "./calendar";
 export { CalendarDays } from "./calendar-days";

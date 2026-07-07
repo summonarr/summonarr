@@ -2,6 +2,7 @@ import { getTVDetails, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl,
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
+import { WatchlistButton } from "@/components/media/watchlist-button";
 import { isArrConfigured } from "@/lib/arr";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -121,6 +122,13 @@ export default async function TVDetailPage({
     isFeatureEnabled("feature.integration.jellyfin"),
   ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
+
+  const onWatchlist = session
+    ? !!(await prisma.watchlistItem.findUnique({
+        where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } },
+        select: { id: true },
+      }))
+    : false;
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -305,6 +313,9 @@ export default async function TVDetailPage({
                   available={arr4kAvailable}
                   blacklisted={blacklisted}
                 />
+              )}
+              {session && (
+                <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
               )}
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton

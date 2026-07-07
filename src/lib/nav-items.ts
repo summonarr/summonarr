@@ -22,6 +22,7 @@ import {
   Activity,
   Sparkles,
   Ban,
+  Bookmark,
 } from "@/components/icons";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
@@ -83,6 +84,7 @@ export const userNavItems: NavItem[] = [
   { href: "/popular", label: "Popular on Server", icon: Flame, section: "browse" },
   { href: "/upcoming", label: "Upcoming", icon: CalendarDays, section: "browse" },
   { href: "/requests", label: "Requests", icon: ClipboardList, mobileBottomBar: true, section: "personal" },
+  { href: "/watchlist", label: "Watchlist", icon: Bookmark, section: "personal" },
   { href: "/issues", label: "My Issues", icon: MessageSquare, section: "personal" },
   { href: "/votes", label: "Vote to Delete", icon: Trash2, section: "personal" },
   { href: "/donate", label: "Donate", icon: Heart, section: "personal" },

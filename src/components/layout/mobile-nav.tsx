@@ -301,7 +301,7 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
     label: "Requests",
     icon: ClipboardList,
     match: (p) =>
-      p === "/requests" || p === "/issues" || p === "/votes",
+      p === "/requests" || p === "/issues" || p === "/votes" || p === "/watchlist",
   };
 
   const permsStr = sessionPerms;
