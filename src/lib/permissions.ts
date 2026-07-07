@@ -43,9 +43,10 @@ export const Permission = {
   // Exempt from request quotas (== legacy quotaExempt).
   QUOTA_UNLIMITED: 1n << 11n,
 
-  // ─── 4K block (reserved now; gated/used in Phase 3) ───────────────────────
-  // Bit numbers are fixed up-front so stored masks and the migration never need
-  // to renumber when Phase 3 starts using them.
+  // ─── 4K block ─────────────────────────────────────────────────────────────
+  // Live: 4K requests + auto-approve are wired end-to-end (request-4k-button →
+  // /api/requests is4k → addMovieToRadarr/addSeriesToSonarr "4k" variant). Bit
+  // numbers are fixed so stored masks never need renumbering.
   REQUEST_4K: 1n << 12n,
   REQUEST_4K_MOVIE: 1n << 13n,
   REQUEST_4K_TV: 1n << 14n,
@@ -125,7 +126,7 @@ export function hasPermission(
 
 // Can this permission set request the given media type at the given resolution?
 // Encodes the umbrella-OR-specific rule once; the 4K bits are AND-ed on top for
-// 4K requests. The is4k path is dormant until Phase 3 wires `is4k` into requests.
+// 4K requests. The is4k path gates live 4K requests (see /api/requests).
 export function canRequest(
   userPerms: bigint,
   mediaType: "MOVIE" | "TV",

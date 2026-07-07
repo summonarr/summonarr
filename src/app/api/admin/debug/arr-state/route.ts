@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
-import { arrFetch, getArrCfg, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
+import { arrFetch, getArrCfg, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
 import { getCache } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
@@ -32,10 +32,19 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     voteAverage: 0,
   };
 
-  // Debug endpoint is HD-only for now (4K variant deferred — see Phase 3 notes).
-  const wantedRow = type === "movie"
-    ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } })
-    : await prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } });
+  // Fetch both the HD and 4K wanted-cache rows so the diagnostic can explain a
+  // missing badge on either instance. The 4K row is only meaningful when a 4K
+  // instance is configured (checked below), but the cache lookup is harmless.
+  const service = type === "movie" ? "radarr" : "sonarr";
+  const [wantedRow, wanted4kRow, has4kInstance] = await Promise.all([
+    type === "movie"
+      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } })
+      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } }),
+    type === "movie"
+      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: true } } })
+      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: true } } }),
+    isArrConfigured(service, "4k"),
+  ]);
 
   const mediaRequests = await prisma.mediaRequest.findMany({
     where: { tmdbId, mediaType: dbType },
@@ -57,6 +66,21 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     // upstream body) to the client — log it server-side, return a generic flag.
     console.error("[arr-state] live Arr check failed:", err instanceof Error ? err.message : err);
     liveCheck = { result: false, error: "live Arr check failed" };
+  }
+
+  // Same live check against the 4K instance, when one is configured. Lets the
+  // diagnostic explain a missing 4K badge without a second endpoint.
+  let liveCheck4k: { result: boolean; error?: string } | null = null;
+  if (has4kInstance) {
+    try {
+      const result = type === "movie"
+        ? await isMovieWantedInRadarr(tmdbId, "4k")
+        : await isSeriesWantedInSonarr(tmdbId, "4k");
+      liveCheck4k = { result };
+    } catch (err) {
+      console.error("[arr-state] live Arr 4K check failed:", err instanceof Error ? err.message : err);
+      liveCheck4k = { result: false, error: "live Arr 4K check failed" };
+    }
   }
 
   let tvdbInfo: {
@@ -110,6 +134,12 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       tableName: type === "movie" ? "radarrWantedItem" : "sonarrWantedItem",
       row: wantedRow,
       hasEntry: !!wantedRow,
+    },
+    fourK: {
+      instanceConfigured: has4kInstance,
+      cacheRow: wanted4kRow,
+      hasEntry: !!wanted4kRow,
+      liveArrApi: liveCheck4k,
     },
     attachArrPendingReturns: arrPendingResult,
     liveArrApi: liveCheck,

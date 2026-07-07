@@ -285,8 +285,10 @@ const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; 
   },
 ];
 
-// 4K group — rendered only when a configured 4K instance exists (Phase 3 passes
-// show4k). The bits are defined now so the editor is ready.
+// 4K group — rendered only when a configured 4K instance exists (the page passes
+// show4k). Exposes every 4K bit defined in the permission model, including the
+// per-type auto-approve bits so an admin can grant "auto-approve 4K movies" (or
+// TV) without the blanket AUTO_APPROVE_4K.
 const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission; label: string }[] } = {
   title: "4K",
   bits: [
@@ -294,6 +296,8 @@ const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission
     { key: "REQUEST_4K_MOVIE", label: "Request 4K movies" },
     { key: "REQUEST_4K_TV", label: "Request 4K TV" },
     { key: "AUTO_APPROVE_4K", label: "Auto-approve 4K (all)" },
+    { key: "AUTO_APPROVE_4K_MOVIE", label: "Auto-approve 4K movies" },
+    { key: "AUTO_APPROVE_4K_TV", label: "Auto-approve 4K TV" },
   ],
 };
 

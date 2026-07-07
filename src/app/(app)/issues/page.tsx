@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
+import { EmptyState } from "@/components/ui/empty-state";
 import { IssueThread } from "@/components/issues/issue-thread";
 import {
   IssueDetailMobileDrawer,
@@ -205,21 +206,11 @@ export default async function IssuesPage({
       )}
 
       {total === 0 ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
+        <EmptyState>
           {hasFilters
             ? "No issues match these filters."
             : "No issues reported yet. Use the Report Issue button on any movie or TV show page."}
-        </div>
+        </EmptyState>
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">

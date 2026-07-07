@@ -506,8 +506,8 @@ export async function getSeriesFirstAired(tmdbId: number): Promise<string | null
   } catch { return null; }
 }
 
-export async function isMovieWantedInRadarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
+export async function isMovieWantedInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("radarr", variant);
   if (!cfg) return false;
   try {
     const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
@@ -519,8 +519,8 @@ export async function isMovieWantedInRadarr(tmdbId: number): Promise<boolean> {
   }
 }
 
-export async function isSeriesWantedInSonarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
+export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
     const lookup = await arrFetch<{ tvdbId: number }[]>(

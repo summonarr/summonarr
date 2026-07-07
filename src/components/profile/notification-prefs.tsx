@@ -190,6 +190,17 @@ export function NotificationPrefs({
 
   return (
     <div className="space-y-6">
+      {!discordLinked && !emailEnabled && (
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-400 flex items-start gap-2">
+          <Bell className="w-4 h-4 shrink-0 text-zinc-500 mt-0.5" />
+          <span>
+            Browser/device push is the only notification channel available to you right now —
+            enable it from the bell in the top bar. Link your Discord account to add another
+            channel, or ask an admin to configure email delivery.
+          </span>
+        </div>
+      )}
+
       {discordLinked && (
         <div>
           <div className="flex items-center gap-2 mb-1">
