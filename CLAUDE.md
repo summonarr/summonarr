@@ -23,10 +23,11 @@ npm run dev         # next dev
 npm run build       # next build
 npm run start       # next start (production)
 npm run lint        # eslint
+npm run test        # node:test unit suite (tests/*.test.mts)
 npm run audit:deps  # custom TypeScript dep audit
 ```
 
-There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There is **no** unit test suite (no vitest/jest, no `*.test.ts`) — do not claim "unit tests pass." CI does run a headless E2E route crawl ([.github/workflows/e2e.yml](.github/workflows/e2e.yml) → [scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)): it builds the app against a throwaway Postgres, seeds an admin via [scripts/e2e-seed.mts](scripts/e2e-seed.mts), signs in, and fails on any uncaught client error (React #418 hydration mismatches in particular — guardrail 16). It cannot run locally without the full stack; it has no Plex/Jellyfin/ARR/TMDB backends, so it gates hydration/runtime correctness only, not data-dependent behaviour.
+There is **no** `typecheck` script — run `npx tsc --noEmit` when you need it. There **is** a small unit suite under [tests/](tests/) using Node's built-in runner (`node:test` — no vitest/jest dependency; run with `npm test`). It covers the pure, safety-critical leaf modules only (permission bitmask, request quotas, native version gate, parental-rating cap) — so you may claim "unit tests pass" **only** for that surface; it does NOT cover sync/webhook/DB logic. New tests colocate in `tests/*.test.mts` and import source with an explicit `.ts` extension (`allowImportingTsExtensions` is enabled). CI also runs a headless E2E route crawl ([.github/workflows/e2e.yml](.github/workflows/e2e.yml) → [scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)): it builds the app against a throwaway Postgres, seeds an admin via [scripts/e2e-seed.mts](scripts/e2e-seed.mts), signs in, and fails on any uncaught client error (React #418 hydration mismatches in particular — guardrail 16). It cannot run locally without the full stack; it has no Plex/Jellyfin/ARR/TMDB backends, so it gates hydration/runtime correctness only, not data-dependent behaviour.
 
 ## Directory map
 
@@ -185,7 +186,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
 7a. **NEVER call `encryptToken` at the call site for `Setting.value` or `Account.{access_token,refresh_token,id_token}`.** The Prisma extension in [src/lib/prisma.ts](src/lib/prisma.ts) handles encryption on every write to those fields and decryption on every read. Pre-encrypting at the route, sign-in/OIDC, or library layer produces double-encrypted rows of the form `enc:v1:<enc:v1:…>` — on read the extension decrypts once and hands callers the inner ciphertext, which then gets sent as an API key/token to upstream services and fails auth. This bug shipped in `bc81802` (a route-level pre-encryption in `/api/settings` and an `encryptingAdapter` wrapper in `auth.ts`); both were removed afterward. The remaining legitimate `encryptToken` callers are: `PushSubscription` writes ([src/app/api/push/subscribe/route.ts](src/app/api/push/subscribe/route.ts), the extension does not cover that table) and the one-shot migration scripts under [scripts/](scripts/). Do not add a third.
 
-8. **No tests, no typecheck script.** Do not fabricate either. If you need verification, run `npm run lint` and `npx tsc --noEmit` explicitly and say what you ran.
+8. **Minimal tests, no typecheck script.** A small `node:test` suite exists (`npm test`) covering pure leaf modules only — do not fabricate coverage beyond what [tests/](tests/) actually exercises, and do not claim broader test coverage than that. For verification run `npm run lint`, `npx tsc --noEmit`, and `npm test`, and say what you ran.
 
 9. **Keep state management minimal.** Don't introduce Zustand/Jotai/Redux/TanStack Query to "clean up" components. URL search params + `useState` is the house style.
 
@@ -523,4 +524,4 @@ Before handing back to the user:
 5. If a new convention emerged, update this file (guardrails or principles) in the same change.
 6. No stray `console.log` success messages (guardrail 7).
 
-There is no test suite. Do not claim "tests pass."
+The `npm test` suite covers only pure leaf modules (permissions, quota, api-version, content-rating). Run it, but do not claim broader "tests pass" than tests/ actually exercises — there is no coverage of sync/webhook/DB/UI behaviour.

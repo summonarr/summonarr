@@ -12,6 +12,10 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // Lets the node:test suites under tests/ import source modules with an
+    // explicit `.ts` extension (required by Node's ESM/type-stripping runtime).
+    // Safe with noEmit — permits the syntax without changing app behaviour.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [
