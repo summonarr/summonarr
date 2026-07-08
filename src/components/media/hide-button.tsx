@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { EyeOff, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 // "Not interested" toggle on movie/TV detail pages. Hidden titles are removed from
 // the user's discovery lists (attachAllAvailability filters them). Optimistic with
@@ -20,6 +21,7 @@ export function HideButton({
   posterPath?: string | null;
   initialHidden: boolean;
 }) {
+  const { toast } = useToast();
   const [hidden, setHidden] = useState(initialHidden);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -45,6 +47,8 @@ export function HideButton({
         const data = await res.json().catch(() => ({}));
         setHidden(!next); // rollback
         setMsg(data.error ?? "Something went wrong");
+      } else {
+        toast({ title: next ? "Hidden from discovery" : "Un-hidden", variant: "success" });
       }
     } catch {
       setHidden(!next); // rollback

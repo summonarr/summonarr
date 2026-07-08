@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
 // Radarr/Sonarr instance is configured and the viewer holds REQUEST_4K. Posts to
@@ -26,6 +27,7 @@ export function Request4kButton({
   // The title is admin-blacklisted — no 4K request either (the request POST 403s).
   blacklisted?: boolean;
 }) {
+  const { toast } = useToast();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
@@ -51,6 +53,7 @@ export function Request4kButton({
         return;
       }
       setState("requested");
+      toast({ title: "Requested in 4K", variant: "success" });
     } catch {
       setMsg("Network error — please try again");
       setState("error");

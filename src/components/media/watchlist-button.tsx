@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Bookmark, BookmarkCheck, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 // "Add to Watchlist" toggle for movie/TV detail pages. Personal save-for-later,
 // independent of availability or request permissions. Optimistic with rollback
@@ -16,6 +17,7 @@ export function WatchlistButton({
   mediaType: "MOVIE" | "TV";
   initialOnWatchlist: boolean;
 }) {
+  const { toast } = useToast();
   const [on, setOn] = useState(initialOnWatchlist);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -41,6 +43,8 @@ export function WatchlistButton({
         const data = await res.json().catch(() => ({}));
         setOn(!next); // rollback
         setMsg(data.error ?? "Something went wrong");
+      } else {
+        toast({ title: next ? "Added to watchlist" : "Removed from watchlist", variant: "success" });
       }
     } catch {
       setOn(!next); // rollback
