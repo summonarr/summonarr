@@ -210,6 +210,15 @@ export function NotificationBell() {
               })
             )}
           </div>
+          <Link
+            href="/notifications"
+            onClick={() => setOpen(false)}
+            role="menuitem"
+            className="block text-center transition-colors"
+            style={{ padding: "9px 12px", borderTop: "1px solid var(--ds-border)", fontSize: 12, fontWeight: 500, color: "var(--ds-accent)" }}
+          >
+            View all
+          </Link>
         </div>
       )}
     </div>

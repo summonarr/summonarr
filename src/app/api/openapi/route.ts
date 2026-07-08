@@ -1579,6 +1579,15 @@ const spec = {
         },
         responses: { "200": { description: "{ ok, unreadCount }" } },
       },
+      delete: {
+        tags: ["Notifications"],
+        summary: "Delete notifications (specific ids, or all when omitted)",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        },
+        responses: { "200": { description: "{ ok, unreadCount }" } },
+      },
     },
     "/watchlist": {
       get: {
