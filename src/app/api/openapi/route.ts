@@ -112,6 +112,7 @@ const spec = {
     { name: "Issues", description: "Content issue reporting" },
     { name: "Votes", description: "Deletion voting" },
     { name: "Lists", description: "Personal watchlist and hidden (\"not interested\") titles" },
+    { name: "Notifications", description: "In-app notification inbox" },
     { name: "Ratings", description: "External ratings (MDBList / OMDB)" },
     { name: "Play History", description: "Watch history and sessions" },
     { name: "Sessions", description: "Active playback sessions" },
@@ -1558,6 +1559,27 @@ const spec = {
       },
     },
 
+    "/notifications": {
+      get: {
+        tags: ["Notifications"],
+        summary: "List the caller's in-app notifications + unread count",
+        responses: {
+          "200": {
+            description: "Recent notifications and unread count",
+            content: { "application/json": { schema: { type: "object", properties: { items: { type: "array", items: { type: "object" } }, unreadCount: { type: "integer" } } } } },
+          },
+        },
+      },
+      post: {
+        tags: ["Notifications"],
+        summary: "Mark notifications read (specific ids, or all unread when omitted)",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        },
+        responses: { "200": { description: "{ ok, unreadCount }" } },
+      },
+    },
     "/watchlist": {
       get: {
         tags: ["Lists"],

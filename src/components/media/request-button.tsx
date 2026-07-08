@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useToast } from "@/components/ui/toast";
 import {
   Plus,
   Check,
@@ -109,6 +110,7 @@ export function RequestButton({
   canChooseProfile = false,
   blacklisted = false,
 }: RequestButtonProps) {
+  const { toast } = useToast();
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -157,6 +159,7 @@ export function RequestButton({
         return;
       }
       setState("requested");
+      toast({ title: `Requested “${title}”`, variant: "success" });
     } catch {
       setErrorMsg("Network error — please try again");
       setState("error");

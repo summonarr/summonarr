@@ -121,6 +121,7 @@ model User {
   authSessions      AuthSession[]
   watchlist         WatchlistItem[]
   hidden            HiddenItem[]
+  notifications     Notification[]
 }
 
 model PushSubscription {
@@ -998,6 +999,29 @@ model HiddenItem {
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tmdbId, mediaType]) // one hide entry per user per item
+  @@index([userId, createdAt])
+}
+
+// In-app notification inbox (the header bell). One row per user-facing event
+// (request approved / available / declined). Written alongside the email/push/
+// Discord fan-out in request-notifications.ts — UNCONDITIONALLY (unlike the
+// delivered channels, the inbox is a passive record the user pulls, not a
+// channel to opt out of). readAt=null ⇒ unread.
+model Notification {
+  id         String     @id @default(cuid(2))
+  createdAt  DateTime   @default(now())
+
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type       String // REQUEST_APPROVED | REQUEST_AVAILABLE | REQUEST_DECLINED
+  title      String     @db.VarChar(500)
+  body       String     @db.VarChar(1000)
+  tmdbId     Int?
+  mediaType  MediaType?
+  posterPath String?    @db.VarChar(500)
+  readAt     DateTime?
+
   @@index([userId, createdAt])
 }
 

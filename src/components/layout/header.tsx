@@ -15,6 +15,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
 import { PushNotifications } from "@/components/layout/push-notifications";
+import { NotificationBell } from "@/components/layout/notification-bell";
 
 async function signOutAndRedirect(callbackUrl: string) {
   try {
@@ -449,6 +450,7 @@ export function Header() {
 
       {/* Actions */}
       <div className="flex items-center gap-1.5">
+        {session && <NotificationBell />}
         {session && <PushNotifications />}
 
         <DropdownMenu>

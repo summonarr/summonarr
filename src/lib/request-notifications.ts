@@ -28,6 +28,43 @@ export interface PendingAvailableRequest {
   user: { mediaServer: string | null } | null;
 }
 
+type InAppNotificationType = "REQUEST_APPROVED" | "REQUEST_AVAILABLE" | "REQUEST_DECLINED";
+
+function inAppBodyFor(type: InAppNotificationType, mediaType: string): string {
+  const label = mediaType === "MOVIE" ? "movie" : "TV show";
+  if (type === "REQUEST_APPROVED") return `Your ${label} request was approved and is downloading.`;
+  if (type === "REQUEST_AVAILABLE") return `Your ${label} is now available to watch.`;
+  return `Your ${label} request was declined.`;
+}
+
+function toMediaTypeEnum(mediaType: string): "MOVIE" | "TV" | null {
+  return mediaType === "MOVIE" ? "MOVIE" : mediaType === "TV" ? "TV" : null;
+}
+
+// Best-effort in-app inbox write (the header bell). Fire-and-forget alongside the
+// email/push/Discord fan-out; UNCONDITIONAL — the inbox is a passive record the
+// user pulls, not a delivered channel to opt out of. A failure never affects the
+// request flow (mirrors the swallowing .catch on the other channels).
+function writeInAppNotification(
+  userId: string,
+  type: InAppNotificationType,
+  info: { title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null },
+): void {
+  void prisma.notification
+    .create({
+      data: {
+        userId,
+        type,
+        title: info.title,
+        body: inAppBodyFor(type, info.mediaType),
+        tmdbId: info.tmdbId ?? null,
+        mediaType: toMediaTypeEnum(info.mediaType),
+        posterPath: info.posterPath ?? null,
+      },
+    })
+    .catch((err) => console.error("[notify] in-app write failed:", err instanceof Error ? err.message : err));
+}
+
 export async function notifyAvailablePerServer(
   pending: PendingAvailableRequest[],
   inPlex: boolean,
@@ -53,6 +90,21 @@ export async function notifyAvailablePerServer(
     const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
+
+    // In-app inbox for the batch winners (one write, same CAS-once guarantee).
+    void prisma.notification
+      .createMany({
+        data: winners.map((r) => ({
+          userId: r.requestedBy,
+          type: "REQUEST_AVAILABLE",
+          title: r.title,
+          body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
+          tmdbId: r.tmdbId ?? null,
+          mediaType: toMediaTypeEnum(r.mediaType),
+          posterPath: r.posterPath ?? null,
+        })),
+      })
+      .catch((err) => console.error(`[${logScope}] in-app write failed:`, err instanceof Error ? err.message : err));
 
     // Email channel — webhook/sync AVAILABLE paths previously fanned out only
     // Discord + push, leaving `emailOnAvailable` a dead preference there.
@@ -171,6 +223,7 @@ export function notifyRequestStatusChange(
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
   if (status === "APPROVED") {
+    writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
@@ -182,6 +235,7 @@ export function notifyRequestStatusChange(
   }
 
   if (status === "AVAILABLE") {
+    writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
@@ -193,6 +247,7 @@ export function notifyRequestStatusChange(
   }
 
   if (status === "DECLINED") {
+    writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })
