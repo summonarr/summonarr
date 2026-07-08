@@ -63,7 +63,6 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   const anon = {
     name: "Deleted user",
     email: `deleted-${id}@deleted.invalid`,
-    emailVerified: null,
     image: null,
     passwordHash: null,
     discordId: null,
@@ -94,7 +93,6 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       // anonymize the row in place (keeps requests/votes/issues linked).
       await tx.account.deleteMany({ where: { userId: id } });
       await tx.authSession.deleteMany({ where: { userId: id } });
-      await tx.session.deleteMany({ where: { userId: id } });
       // Orphaned device + Discord-link rows would otherwise outlive the anonymized
       // row and keep delivering pushes (to a possibly handed-down device) or leave
       // dangling unique link/merge rows. Remove them in the same transaction.

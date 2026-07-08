@@ -13,7 +13,6 @@ import { join } from "node:path";
 export const BACKUP_TABLES = [
   "User",
   "Account",
-  "Session",
   "VerificationToken",
   "AuthSession",
   "DiscordLinkToken",

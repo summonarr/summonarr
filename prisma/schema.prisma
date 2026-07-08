@@ -13,7 +13,6 @@ model User {
   id            String    @id @default(cuid(2))
   name          String?
   email         String    @unique
-  emailVerified DateTime?
   image         String?
   passwordHash  String?
   // Set when the credentials password is changed. refreshToken() rejects any JWT
@@ -107,7 +106,6 @@ model User {
   pushOnDeclined  Boolean @default(true)
 
   accounts          Account[]
-  sessions          Session[]
   requests          MediaRequest[]
   issues            Issue[]            @relation(name: "IssueReporter")
   claimedIssues     Issue[]            @relation(name: "IssueClaimer")
@@ -159,18 +157,6 @@ model Account {
 
   @@unique([provider, providerAccountId])
   @@index([userId])
-}
-
-model Session {
-  id           String   @id @default(cuid(2))
-  sessionToken String   @unique
-  userId       String
-  expires      DateTime
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([expires])
 }
 
 model VerificationToken {

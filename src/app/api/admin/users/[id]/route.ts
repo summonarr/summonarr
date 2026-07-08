@@ -288,7 +288,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   const anon = {
     name: "Deleted user",
     email: `deleted-${id}@deleted.invalid`,
-    emailVerified: null,
     image: null,
     passwordHash: null,
     discordId: null,
@@ -316,7 +315,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       }
       await tx.account.deleteMany({ where: { userId: id } });
       await tx.authSession.deleteMany({ where: { userId: id } });
-      await tx.session.deleteMany({ where: { userId: id } });
       await tx.pushSubscription.deleteMany({ where: { userId: id } });
       await tx.discordLinkToken.deleteMany({ where: { userId: id } });
       await tx.discordMergeCode.deleteMany({ where: { userId: id } });
