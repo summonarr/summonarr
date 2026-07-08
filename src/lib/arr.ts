@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { arrRequesterTagLabel } from "./arr-tags";
+import { arrSettingKey, variantToInstanceKey } from "./arr-instances";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
@@ -138,12 +139,13 @@ export async function isArrConfigured(service: "radarr" | "sonarr", variant: Arr
 }
 
 async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = "hd"): Promise<ArrCfgFull | null> {
-  // HD keys are e.g. "radarrUrl"; 4K keys insert the "4k" segment → "radarr4kUrl".
-  const suffix      = variant === "4k" ? "4k" : "";
-  const urlKey      = `${service}${suffix}Url`;
-  const keyKey      = `${service}${suffix}ApiKey`;
-  const folderKey   = `${service}${suffix}RootFolder`;
-  const profileKey  = `${service}${suffix}QualityProfileId`;
+  // Key derivation is centralized in arr-instances.ts (the single place that
+  // knows how an instance maps to Setting keys) — Phase 1 of N-instance support.
+  const instance    = variantToInstanceKey(variant);
+  const urlKey      = arrSettingKey(service, instance, "Url");
+  const keyKey      = arrSettingKey(service, instance, "ApiKey");
+  const folderKey   = arrSettingKey(service, instance, "RootFolder");
+  const profileKey  = arrSettingKey(service, instance, "QualityProfileId");
   const rows = await prisma.setting.findMany({
     where: { key: { in: [urlKey, keyKey, folderKey, profileKey] } },
   });
