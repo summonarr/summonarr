@@ -90,6 +90,9 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   // Settings sub-routes — admin config surface.
   { route: "/settings/plex", reason: "admin Plex settings" },
   { route: "/settings/webhook-urls", reason: "admin webhook URL settings" },
+  // Jellyfin self-service notification-email verification (send + public confirm).
+  { route: "/profile/notification-email", reason: "start email verification (Jellyfin self-service)" },
+  { route: "/profile/notification-email/confirm", reason: "public email-verification confirm landing" },
   // Requests / issues sub-routes not yet documented (candidates for a later pass).
   { route: "/requests/bulk", reason: "bulk/on-behalf request creation (admin/power-user)" },
   { route: "/requests/quality-profiles", reason: "quality-profile picker source" },

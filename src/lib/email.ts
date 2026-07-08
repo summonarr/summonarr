@@ -699,6 +699,30 @@ export async function sendTestEmail(to: string): Promise<void> {
   await sendOne(cfg, to, "Summonarr — Test Email", html);
 }
 
+// Mails a one-time verification link to `to` for the Jellyfin self-service
+// notification-email flow. Throws when no transport is configured (the route
+// surfaces that to the user). The raw token travels only in this link.
+export async function sendNotificationEmailVerification(to: string, token: string): Promise<void> {
+  const cfg = await getEmailConfig();
+  if (!cfg || !isBackendConfigured(cfg)) {
+    throw new Error("Email transport is not configured on this server");
+  }
+  const base = (cfg.siteUrl || process.env.AUTH_URL || "").replace(/\/+$/, "");
+  if (!base) throw new Error("No site URL is configured for the verification link");
+  const verifyUrl = `${base}/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
+  const html = richEmailHtml({
+    preheader: "Confirm this email address for Summonarr notifications.",
+    accent: "indigo",
+    heading: "Verify your notification email",
+    subheading:
+      "Someone asked to send Summonarr notifications to this address. If that was you, confirm below. If not, you can safely ignore this email — nothing will change.",
+    ctaLabel: "Confirm this email",
+    ctaHref: verifyUrl,
+    siteUrl: cfg.siteUrl,
+  });
+  await sendOne(cfg, to, "Verify your Summonarr notification email", html);
+}
+
 function esc(str: string): string {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
