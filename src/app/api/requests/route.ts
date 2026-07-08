@@ -6,6 +6,7 @@ import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured, listQualityProfil
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { emitSSE } from "@/lib/sse-emitter";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
@@ -116,7 +117,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const limit = parseRateLimit(settings.rateLimitRequests, 20);
   if (!checkRateLimit(`requests:${session.user.id}`, limit, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return tooManyRequests(60, "Too many requests — try again later");
   }
 
   if (settings.discordRequireLinkedAccountSite === "true" && !userRecord?.discordId) {

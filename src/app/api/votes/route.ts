@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -17,7 +18,7 @@ const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`votes-list:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return tooManyRequests(60);
   }
 
   const sp = req.nextUrl.searchParams;
@@ -134,7 +135,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });
   const limit = parseRateLimit(rlRow?.value, 20);
   if (!checkRateLimit(`votes:${session.user.id}`, limit, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return tooManyRequests(60, "Too many requests — try again later");
   }
 
   const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; reason?: string; _token?: string }>(req, 16384);
