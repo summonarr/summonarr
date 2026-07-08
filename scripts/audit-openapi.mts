@@ -61,7 +61,6 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/interactions", reason: "Discord Ed25519 interactions webhook" },
   // Internal / infra endpoints.
   { route: "/openapi", reason: "the spec document itself (ADMIN)" },
-  { route: "/push/apns", reason: "APNs device registration (native, internal transport)" },
   { route: "/push/announce-update", reason: "admin broadcast trigger" },
   // Setup / import — first-run + chunked upload internals.
   { route: "/setup/import", reason: "first-run import (userCount===0 gated)" },
@@ -93,11 +92,6 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   // Jellyfin self-service notification-email verification (send + public confirm).
   { route: "/profile/notification-email", reason: "start email verification (Jellyfin self-service)" },
   { route: "/profile/notification-email/confirm", reason: "public email-verification confirm landing" },
-  // Requests / issues sub-routes not yet documented (candidates for a later pass).
-  { route: "/requests/bulk", reason: "bulk/on-behalf request creation (admin/power-user)" },
-  { route: "/requests/quality-profiles", reason: "quality-profile picker source" },
-  { route: "/requests/users", reason: "on-behalf eligible-user list" },
-  { route: "/issues/{id}/claim", reason: "issue claim toggle (issue-admin)" },
   // Cron — CRON_SECRET jobs; the documented cron set is representative, these are the rest.
   { route: "/cron/sync-download-policies", reason: "cron job (CRON_SECRET)" },
   { route: "/cron/trash-sync", reason: "cron job (CRON_SECRET)" },

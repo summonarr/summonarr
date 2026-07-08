@@ -1710,6 +1710,63 @@ const spec = {
         responses: { "200": { description: "Report received" } },
       },
     },
+    "/requests/bulk": {
+      post: {
+        tags: ["Requests"],
+        summary: "Bulk-create requests, optionally on behalf of another user (REQUEST)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } }, onBehalfOfUserId: { type: "string", nullable: true } } } } },
+        },
+        responses: { "200": { description: "Per-item results" } },
+      },
+    },
+    "/requests/quality-profiles": {
+      get: {
+        tags: ["Requests"],
+        summary: "Quality profiles for the request-time picker (REQUEST_ADVANCED / MANAGE_REQUESTS)",
+        parameters: [
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "is4k", in: "query", schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "{ qualityProfiles: [...] }" } },
+      },
+    },
+    "/requests/users": {
+      get: {
+        tags: ["Requests"],
+        summary: "Users the caller may request on behalf of (REQUEST_ON_BEHALF)",
+        responses: { "200": { description: "Eligible user list" } },
+      },
+    },
+    "/issues/{id}/claim": {
+      post: {
+        tags: ["Issues"],
+        summary: "Claim an issue (issue-admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Claimed" } },
+      },
+    },
+    "/push/apns": {
+      post: {
+        tags: ["Push"],
+        summary: "Register an iOS APNs device token (native)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" }, label: { type: "string" }, publicKey: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Registered" } },
+      },
+      delete: {
+        tags: ["Push"],
+        summary: "Unregister an iOS APNs device token",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Unregistered" } },
+      },
+    },
     "/events": {
       get: {
         tags: ["Events"],
