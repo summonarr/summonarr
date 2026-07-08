@@ -5,6 +5,8 @@ import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUse
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
+import { createInAppNotification } from "./in-app-notify";
+import { buildNotificationData } from "./notification-data";
 
 interface RequestInfo {
   requestedBy: string;
@@ -37,32 +39,23 @@ function inAppBodyFor(type: InAppNotificationType, mediaType: string): string {
   return `Your ${label} request was declined.`;
 }
 
-function toMediaTypeEnum(mediaType: string): "MOVIE" | "TV" | null {
-  return mediaType === "MOVIE" ? "MOVIE" : mediaType === "TV" ? "TV" : null;
-}
-
-// Best-effort in-app inbox write (the header bell). Fire-and-forget alongside the
+// Best-effort in-app inbox write (the header bell). Wraps the shared writer with
+// this module's request-specific body copy. Fire-and-forget alongside the
 // email/push/Discord fan-out; UNCONDITIONAL — the inbox is a passive record the
-// user pulls, not a delivered channel to opt out of. A failure never affects the
-// request flow (mirrors the swallowing .catch on the other channels).
+// user pulls, not a delivered channel to opt out of.
 function writeInAppNotification(
   userId: string,
   type: InAppNotificationType,
   info: { title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null },
 ): void {
-  void prisma.notification
-    .create({
-      data: {
-        userId,
-        type,
-        title: info.title,
-        body: inAppBodyFor(type, info.mediaType),
-        tmdbId: info.tmdbId ?? null,
-        mediaType: toMediaTypeEnum(info.mediaType),
-        posterPath: info.posterPath ?? null,
-      },
-    })
-    .catch((err) => console.error("[notify] in-app write failed:", err instanceof Error ? err.message : err));
+  createInAppNotification(userId, {
+    type,
+    title: info.title,
+    body: inAppBodyFor(type, info.mediaType),
+    tmdbId: info.tmdbId ?? null,
+    mediaType: info.mediaType,
+    posterPath: info.posterPath ?? null,
+  });
 }
 
 export async function notifyAvailablePerServer(
@@ -91,18 +84,21 @@ export async function notifyAvailablePerServer(
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
 
-    // In-app inbox for the batch winners (one write, same CAS-once guarantee).
+    // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
+    // Uses buildNotificationData directly — not createInAppNotification per-row —
+    // to keep this a single DB round-trip while sharing the field-shaping rules.
     void prisma.notification
       .createMany({
-        data: winners.map((r) => ({
-          userId: r.requestedBy,
-          type: "REQUEST_AVAILABLE",
-          title: r.title,
-          body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
-          tmdbId: r.tmdbId ?? null,
-          mediaType: toMediaTypeEnum(r.mediaType),
-          posterPath: r.posterPath ?? null,
-        })),
+        data: winners.map((r) =>
+          buildNotificationData(r.requestedBy, {
+            type: "REQUEST_AVAILABLE",
+            title: r.title,
+            body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
+            tmdbId: r.tmdbId ?? null,
+            mediaType: r.mediaType,
+            posterPath: r.posterPath ?? null,
+          }),
+        ),
       })
       .catch((err) => console.error(`[${logScope}] in-app write failed:`, err instanceof Error ? err.message : err));
 

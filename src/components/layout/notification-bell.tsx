@@ -7,6 +7,8 @@ import { Bell, Film, Tv2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useLiveEvents } from "@/hooks/use-live-events";
+import { notificationHref, timeAgo } from "@/lib/notification-links";
 
 interface NotificationItem {
   id: string;
@@ -22,31 +24,13 @@ interface NotificationItem {
 
 const POLL_MS = 60_000;
 
-// Relative "time ago". Only ever called behind a mounted gate (guardrail 16) so
-// the server/client render never disagrees.
-function timeAgo(iso: string): string {
-  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  return `${d}d ago`;
-}
-
-function hrefFor(n: NotificationItem): string {
-  if (n.tmdbId && n.mediaType === "MOVIE") return `/movie/${n.tmdbId}`;
-  if (n.tmdbId && n.mediaType === "TV") return `/tv/${n.tmdbId}`;
-  return "/requests";
-}
-
 export function NotificationBell() {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useHasMounted();
 
   const load = useCallback(async () => {
@@ -66,6 +50,25 @@ export function NotificationBell() {
     const t = setInterval(() => void load(), POLL_MS);
     return () => clearInterval(t);
   }, [load]);
+
+  // Real-time: the server writes an in-app notification alongside these SSE events
+  // (scoped to this user server-side), so re-fetch on them for a near-instant badge
+  // instead of waiting up to POLL_MS. The 60s poll above stays as the missed-event
+  // safety net. Bursts (a sync flipping several requests at once) coalesce into one refetch.
+  useLiveEvents((event) => {
+    if (
+      event.type === "request:updated" ||
+      event.type === "issue:updated" ||
+      event.type === "issuemessage:created"
+    ) {
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      reloadTimer.current = setTimeout(() => void load(), 400);
+    }
+  });
+
+  useEffect(() => () => {
+    if (reloadTimer.current) clearTimeout(reloadTimer.current);
+  }, []);
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -174,7 +177,7 @@ export function NotificationBell() {
                 return (
                   <Link
                     key={n.id}
-                    href={hrefFor(n)}
+                    href={notificationHref(n)}
                     role="menuitem"
                     onClick={() => setOpen(false)}
                     className="flex gap-2.5 transition-colors"

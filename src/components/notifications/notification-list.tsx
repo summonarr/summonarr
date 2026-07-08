@@ -7,6 +7,7 @@ import { Film, Tv2, Check, X } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { notificationHref, timeAgo } from "@/lib/notification-links";
 import { EmptyState } from "@/components/ui/empty-state";
 
 export interface NotificationListItem {
@@ -19,22 +20,6 @@ export interface NotificationListItem {
   posterPath: string | null;
   readAt: string | null;
   createdAt: string;
-}
-
-function timeAgo(iso: string): string {
-  const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-function hrefFor(n: NotificationListItem): string {
-  if (n.tmdbId && n.mediaType === "MOVIE") return `/movie/${n.tmdbId}`;
-  if (n.tmdbId && n.mediaType === "TV") return `/tv/${n.tmdbId}`;
-  return "/requests";
 }
 
 const POST = (body: string) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body });
@@ -125,7 +110,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                 border: "1px solid var(--ds-border)",
               }}
             >
-              <Link href={hrefFor(n)} className="relative shrink-0 overflow-hidden" style={{ width: 40, height: 60, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}>
+              <Link href={notificationHref(n)} className="relative shrink-0 overflow-hidden" style={{ width: 40, height: 60, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}>
                 {poster ? (
                   <Image src={poster} alt="" fill className="object-cover" sizes="40px" />
                 ) : (
@@ -134,7 +119,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                   </span>
                 )}
               </Link>
-              <Link href={hrefFor(n)} className="min-w-0 flex-1">
+              <Link href={notificationHref(n)} className="min-w-0 flex-1">
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}>{n.title}</div>
                 <div style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 1 }}>{n.body}</div>
                 <div className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</div>
