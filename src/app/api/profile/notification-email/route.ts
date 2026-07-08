@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled, sendNotificationEmailVerification } from "@/lib/email";
+import { tooManyRequests } from "@/lib/http";
 import {
   generateVerifyToken,
   buildVerifyIdentifier,
@@ -30,7 +31,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // 3 sends / 15 min per user — an authenticated user can't weaponize this into
   // an email-bombing tool against an arbitrary mailbox.
   if (!checkRateLimit(`notif-email-verify:${session.user.id}`, 3, 15 * 60_000)) {
-    return NextResponse.json({ error: "Too many verification emails — try again in a bit." }, { status: 429 });
+    return tooManyRequests(900, "Too many verification emails — try again later.");
   }
 
   const parsed = await readJsonCapped<{ email?: string }>(req, 16384);
