@@ -24,16 +24,19 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
   async function unhide(it: HiddenGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
     setRemoving(key);
-    const prev = items;
     setItems((cur) => cur.filter((x) => `${x.tmdbId}:${x.mediaType}` !== key)); // optimistic
+    // Roll back only THIS item — restoring a stale whole-list snapshot would
+    // resurrect other items whose concurrent DELETE already succeeded.
+    const restore = () =>
+      setItems((cur) => (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key) ? cur : [...cur, it]));
     try {
       const res = await fetch(
         withBasePath(`/api/hidden?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
         { method: "DELETE" },
       );
-      if (!res.ok) setItems(prev); // rollback
+      if (!res.ok) restore(); // rollback
     } catch {
-      setItems(prev); // rollback
+      restore(); // rollback
     } finally {
       setRemoving(null);
     }

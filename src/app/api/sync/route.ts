@@ -21,7 +21,7 @@ import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecordi
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { notifyUsersRequestsAvailableEmail } from "@/lib/request-notifications";
+import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -125,18 +125,18 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   const [approved, available] = await Promise.all([
     prisma.mediaRequest.findMany({
       where: { status: "APPROVED" },
-      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, pendingNotifyAt: true, notifiedAvailable: true },
+      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, posterPath: true, pendingNotifyAt: true, notifiedAvailable: true },
     }),
     prisma.mediaRequest.findMany({
       where: { status: "AVAILABLE" },
-      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, notifiedAvailable: true },
+      select: { id: true, tmdbId: true, mediaType: true, is4k: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
     }),
   ]);
 
   let marked = 0;
   let reverted = 0;
   let repushed = 0;
-  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string; tmdbId: number }> = [];
+  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string; tmdbId: number; posterPath: string | null }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -183,7 +183,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       : [];
     const winnerIds = new Set(winners.map((w) => w.id));
     for (const req of winners) {
-      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId });
+      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId, posterPath: req.posterPath });
     }
     // An ARR-driven re-add is an AVAILABLE transition: wipe stale deletion votes and the
     // per-item notify gate so a fresh round can re-arm (mirrors the library-marking path).
@@ -260,6 +260,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   notifyUsersRequestsAvailable(arrNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
   notifyUsersRequestsAvailablePush(arrNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
   void notifyUsersRequestsAvailableEmail(arrNotify, "sync");
+  void writeAvailableInAppNotifications(arrNotify, "sync");
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -397,10 +398,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           data: { pendingNotifyAt: null },
         });
         void clearDeletionVotesForTmdbs(winners.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
-        const secondNotify = winners.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId }));
+        const secondNotify = winners.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath }));
         notifyUsersRequestsAvailable(secondNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
         notifyUsersRequestsAvailablePush(secondNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
         void notifyUsersRequestsAvailableEmail(secondNotify, "sync");
+        void writeAvailableInAppNotifications(secondNotify, "sync");
         marked += winners.length;
       }
     }
@@ -422,7 +424,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       status: "APPROVED",
       OR: [{ lastArrPushAt: null }, { lastArrPushAt: { lte: repushCutoff } }],
     },
-    select: { id: true, tmdbId: true, mediaType: true, is4k: true, qualityProfileId: true, requestedBy: true },
+    select: { id: true, tmdbId: true, mediaType: true, is4k: true, qualityProfileId: true, requestedBy: true, createdAt: true },
   });
   const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
   const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
@@ -451,8 +453,35 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(vkey(r.tmdbId, r.is4k))
       : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(vkey(r.tmdbId, r.is4k)),
   );
+  // Two users can each hold an APPROVED request for the same (tmdbId, mediaType, variant)
+  // — an original plus a later mirror-approved row — with different qualityProfileId. If
+  // the original *arr add never landed, both would enter this batch and race in the same
+  // runConcurrent chunk; whichever POST wins sets the profile nondeterministically (the
+  // *arr holds one item per tmdbId). Collapse to a single add per title/variant, preferring
+  // the ORIGINAL (earliest createdAt, id tie-break) so the chosen profile is stable. The
+  // deduped-out siblings still get lastArrPushAt stamped below so the backoff applies and
+  // they don't re-enter this query every tick.
+  const repushKeyOf = (r: { tmdbId: number; mediaType: string; is4k: boolean }) => `${r.mediaType}:${vkey(r.tmdbId, r.is4k)}`;
+  const repushWinnerByKey = new Map<string, (typeof toRepush)[number]>();
+  const repushSiblingIds: string[] = [];
+  for (const r of toRepush) {
+    const k = repushKeyOf(r);
+    const existing = repushWinnerByKey.get(k);
+    if (!existing) {
+      repushWinnerByKey.set(k, r);
+    } else if (
+      r.createdAt < existing.createdAt ||
+      (r.createdAt.getTime() === existing.createdAt.getTime() && r.id < existing.id)
+    ) {
+      repushSiblingIds.push(existing.id);
+      repushWinnerByKey.set(k, r);
+    } else {
+      repushSiblingIds.push(r.id);
+    }
+  }
+  const dedupedRepush = [...repushWinnerByKey.values()];
   const pushedAt = new Date();
-  await runConcurrent(toRepush, async (req) => {
+  await runConcurrent(dedupedRepush, async (req) => {
     try {
       const variant = req.is4k ? "4k" : "hd";
       if (req.mediaType === "MOVIE") {
@@ -471,6 +500,13 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       console.error("[sync] re-push to *arr failed for", req.id, err);
     }
   });
+  // Stamp the deduped-out siblings: the winner's add (above) covers their title/variant,
+  // so they get the same backoff clock and don't re-enter the re-push query every tick.
+  if (repushSiblingIds.length > 0) {
+    await prisma.mediaRequest
+      .updateMany({ where: { id: { in: repushSiblingIds } }, data: { lastArrPushAt: pushedAt } })
+      .catch((err) => console.error("[sync] re-push sibling backoff stamp failed:", err));
+  }
 
   const availableMovieTmdbIds = available.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const availableTvTmdbIds    = available.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -706,7 +742,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // status are coherent.
   const stillPendingAll = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
   const stillPending = revertedIds.size === 0
     ? stillPendingAll
@@ -758,6 +794,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
           notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
           void notifyUsersRequestsAvailableEmail(winners, "sync");
+          void writeAvailableInAppNotifications(winners, "sync");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -862,6 +899,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
         notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
         void notifyUsersRequestsAvailableEmail(winners, "sync");
+        void writeAvailableInAppNotifications(winners, "sync");
       }
     }
   }

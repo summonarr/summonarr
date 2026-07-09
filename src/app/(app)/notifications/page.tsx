@@ -15,7 +15,11 @@ export default async function NotificationsPage() {
         prisma.notification.findMany({
           where: { userId: session.user.id },
           select: { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true },
-          orderBy: { createdAt: "desc" },
+          // Must match the API cursor ordering in /api/notifications (createdAt
+          // desc, id desc) so the client's keyset cursor cannot skip a same-timestamp
+          // row at the first-page boundary — sync createMany writes a batch of
+          // notifications that share one transaction timestamp.
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           take: 30,
         }),
         prisma.notification.count({ where: { userId: session.user.id } }),

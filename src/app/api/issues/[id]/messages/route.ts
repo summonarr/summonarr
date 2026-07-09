@@ -148,14 +148,19 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   if (isAdmin) {
     void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
     void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
-    createInAppNotification(issue.reportedBy, {
-      type: "ISSUE_REPLY",
-      title: issue.title,
-      body: `${authorName} replied: ${text.slice(0, 400)}`,
-      tmdbId: issue.tmdbId,
-      mediaType: issue.mediaType,
-      posterPath: issue.posterPath,
-    });
+    // An issue admin who reported the issue and then replies in their own thread
+    // shouldn't get a self-notification inbox row ("<self> replied…"). Mirrors the
+    // selfAction guard the request routes use.
+    if (issue.reportedBy !== session.user.id) {
+      createInAppNotification(issue.reportedBy, {
+        type: "ISSUE_REPLY",
+        title: issue.title,
+        body: `${authorName} replied: ${text.slice(0, 400)}`,
+        tmdbId: issue.tmdbId,
+        mediaType: issue.mediaType,
+        posterPath: issue.posterPath,
+      });
+    }
     void prisma.user
       .findUnique({
         where: { id: issue.reportedBy },

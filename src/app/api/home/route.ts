@@ -45,7 +45,11 @@ function project(
 ): TmdbMedia[] {
   const out: TmdbMedia[] = [];
   for (const m of raw) {
-    const e = enriched.get(`${m.mediaType}-${m.id}`) ?? m;
+    const e = enriched.get(`${m.mediaType}-${m.id}`);
+    // A missing map entry means attachAllAvailability intentionally filtered the item
+    // (the user hid it). Drop it — do NOT fall back to the raw item, which would
+    // resurrect the hidden title onto the rail.
+    if (!e) continue;
     // Gate hideAvailable on the user's pinned server so a Plex-pinned user doesn't hide
     // Jellyfin-only titles (and vice versa).
     if (hideAvailable && ((showPlex && e.plexAvailable) || (showJellyfin && e.jellyfinAvailable))) continue;
@@ -109,14 +113,17 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
     const topTV = settled(topTVRes).slice(0, RAIL_OVERFETCH);
 
+    // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
+    // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
+    // tail must be in the enriched map too or rails under-fill when a filter is on.
     const candidateLists = [
       trending,
-      popMovies.slice(0, RAIL_SIZE),
-      popTV.slice(0, RAIL_SIZE),
-      upMovies.slice(0, RAIL_SIZE),
-      upTV.slice(0, RAIL_SIZE),
-      topMovies.slice(0, RAIL_SIZE),
-      topTV.slice(0, RAIL_SIZE),
+      popMovies.slice(0, RAIL_OVERFETCH),
+      popTV.slice(0, RAIL_OVERFETCH),
+      upMovies.slice(0, RAIL_OVERFETCH),
+      upTV.slice(0, RAIL_OVERFETCH),
+      topMovies.slice(0, RAIL_OVERFETCH),
+      topTV.slice(0, RAIL_OVERFETCH),
     ];
     const displaySet = dedupeUnion(candidateLists);
     const show4k = await getShow4kVisibility(session);

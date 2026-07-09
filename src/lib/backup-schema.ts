@@ -44,6 +44,10 @@ export const BACKUP_TABLES = [
   "TrashSpec",
   "TrashApplication",
   "WebhookReplay",
+  "WatchlistItem",
+  "HiddenItem",
+  "Notification",
+  "BlacklistItem",
 ] as const;
 
 export const BACKUP_ENUMS = [

@@ -3,14 +3,23 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { arrRequesterTagLabel } from "../src/lib/arr-tags.ts";
 
-test("prefers display name, sanitized to a lowercase slug", () => {
-  assert.equal(arrRequesterTagLabel("Chris Burton", "c@example.com", "u_12345678"), "chris-burton");
-  assert.equal(arrRequesterTagLabel("Ünïcodé!! 42", null, "u_12345678"), "n-cod-42");
+test("prefers display name, sanitized to a lowercase slug with an id suffix", () => {
+  assert.equal(arrRequesterTagLabel("Chris Burton", "c@example.com", "u_12345678"), "chris-burton-u1234567");
+  assert.equal(arrRequesterTagLabel("Ünïcodé!! 42", null, "u_12345678"), "n-cod-42-u1234567");
 });
 
 test("falls back to the email local-part when name is blank", () => {
-  assert.equal(arrRequesterTagLabel(null, "alice.smith@example.com", "u_12345678"), "alice-smith");
-  assert.equal(arrRequesterTagLabel("   ", "bob@example.com", "u_12345678"), "bob");
+  assert.equal(arrRequesterTagLabel(null, "alice.smith@example.com", "u_12345678"), "alice-smith-u1234567");
+  assert.equal(arrRequesterTagLabel("   ", "bob@example.com", "u_12345678"), "bob-u1234567");
+});
+
+test("two users with the same display name get distinct tags (id disambiguation)", () => {
+  const a = arrRequesterTagLabel("John Smith", "john1@example.com", "aaaaaaaa11112222");
+  const b = arrRequesterTagLabel("John Smith", "john2@example.com", "bbbbbbbb33334444");
+  assert.notEqual(a, b);
+  // Human-readable name portion is preserved in both.
+  assert.equal(a.startsWith("john-smith-"), true);
+  assert.equal(b.startsWith("john-smith-"), true);
 });
 
 test("falls back to a user-id stub when name and email are empty", () => {

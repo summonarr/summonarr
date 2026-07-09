@@ -7,6 +7,7 @@ import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/
 import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
+import { buildNotificationData } from "@/lib/notification-data";
 import { emitSSE } from "@/lib/sse-emitter";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -52,6 +53,43 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
     }
   } catch (err) {
     console.error("[requests/batch] email fan-out failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+// Mirrors the single-request path's inbox write (writeInAppNotification →
+// createInAppNotification in request-notifications.ts): the header bell /
+// /notifications inbox must record a REQUEST_APPROVED / REQUEST_DECLINED row for
+// every batch transition too. The batch route previously fanned out only
+// Discord/push/email and left the inbox empty. One bounded createMany (guardrail
+// 31) instead of per-user creates; body copy matches inAppBodyFor. Unconditional —
+// the inbox is a passive record the user pulls, not a channel to opt out of.
+// Fire-and-forget; a failed inbox write must never break the batch action.
+async function writeBatchInboxRows(
+  targets: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null }>,
+  type: "REQUEST_APPROVED" | "REQUEST_DECLINED",
+): Promise<void> {
+  if (targets.length === 0) return;
+  const bodyFor = (mediaType: string) => {
+    const label = mediaType === "MOVIE" ? "movie" : "TV show";
+    return type === "REQUEST_APPROVED"
+      ? `Your ${label} request was approved and is downloading.`
+      : `Your ${label} request was declined.`;
+  };
+  try {
+    await prisma.notification.createMany({
+      data: targets.map((t) =>
+        buildNotificationData(t.requestedBy, {
+          type,
+          title: t.title,
+          body: bodyFor(t.mediaType),
+          tmdbId: t.tmdbId ?? null,
+          mediaType: t.mediaType,
+          posterPath: t.posterPath ?? null,
+        }),
+      ),
+    });
+  } catch (err) {
+    console.error("[requests/batch] in-app inbox write failed:", err instanceof Error ? err.message : err);
   }
 }
 
@@ -142,10 +180,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       approved.map(async (r) => {
         try {
           const variant = r.is4k ? "4k" : "hd";
+          // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
+          // absent ⇒ the instance default. Mirrors requests/[id] effectiveProfileId
+          // and the sync re-push — batch approve previously discarded it.
+          const profileId = r.qualityProfileId ?? undefined;
           if (r.mediaType === "MOVIE") {
-            await addMovieToRadarr(r.tmdbId, variant, undefined, r.requestedBy);
+            await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, undefined, r.requestedBy);
+            const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
             await prisma.mediaRequest.update({ where: { id: r.id }, data: { tvdbId } });
           }
         } catch (err) {
@@ -171,6 +213,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       notifyUsersRequestsApproved(notifyTargets).catch(() => {});
       notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
       void fanOutEmails(notifyTargets, "APPROVED");
+      void writeBatchInboxRows(notifyTargets, "REQUEST_APPROVED");
     }
   }
 
@@ -187,6 +230,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
     notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
     void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
+    void writeBatchInboxRows(declineTargets, "REQUEST_DECLINED");
   }
 
   // Emit only for rows THIS call actually transitioned (claimedIds) — an

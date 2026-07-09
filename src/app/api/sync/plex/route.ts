@@ -8,7 +8,7 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { notifyUsersRequestsAvailableEmail } from "@/lib/request-notifications";
+import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -185,7 +185,7 @@ async function syncPlex(request: NextRequest) {
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
 
   const toMark = requests.filter((req) =>
@@ -222,6 +222,7 @@ async function syncPlex(request: NextRequest) {
           notifyUsersRequestsAvailable(winners).catch(() => {});
           notifyUsersRequestsAvailablePush(winners).catch(() => {});
           void notifyUsersRequestsAvailableEmail(winners, "sync/plex");
+          void writeAvailableInAppNotifications(winners, "sync/plex");
         }
       }
       if (toMarkOnly.length > 0) {

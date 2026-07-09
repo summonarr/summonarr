@@ -209,10 +209,13 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
 
   // Classify each item; collect the ones to actually create.
   const skipped: { tmdbId: number; mediaType: MediaType; result: ItemResult }[] = [];
-  const toCreate: { tmdbId: number; mediaType: MediaType }[] = [];
-  // Ids of stale, non-permanent DECLINED rows to drop so a fresh request can be
-  // created (the @@unique constraint would otherwise make createMany skip them).
-  const staleDeclinedIds: string[] = [];
+  let toCreate: { tmdbId: number; mediaType: MediaType }[] = [];
+  // Stale, non-permanent DECLINED rows to drop so a fresh request can be created
+  // (the @@unique constraint would otherwise make createMany skip them). Keyed by
+  // (tmdbId:mediaType) so the rating-cap gate below can EXCLUDE a rating-blocked
+  // re-request from the delete set — deleting a DECLINED row for an item we then
+  // reject on rating would erase the user's history with no replacement created.
+  const staleDeclinedIdByKey = new Map<string, string>();
   const blacklistSet = await getBlacklistSet();
   for (const it of items) {
     const k = keyOf(it.tmdbId, it.mediaType);
@@ -237,7 +240,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       // An ordinary (non-permanent) decline is re-requestable: delete the stale
       // row below and create fresh. APPROVED/AVAILABLE/PENDING stay blocked.
       if (ex.status === "DECLINED") {
-        staleDeclinedIds.push(ex.id);
+        staleDeclinedIdByKey.set(k, ex.id);
         toCreate.push(it);
         continue;
       }
@@ -247,8 +250,37 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     toCreate.push(it);
   }
 
+  // Parental control — drop any item whose US certification exceeds the TARGET
+  // user's cap. This MUST run BEFORE the stale-DECLINED delete below (mirrors the
+  // single POST /api/requests, which gates blacklist + rating before deleting the
+  // stale row): otherwise a rating-blocked re-request would delete the user's
+  // DECLINED history row and then create nothing, silently erasing it. Only capped,
+  // non-admin targets pay the per-item certification fetch; unknown/unrated titles
+  // are allowed (see content-rating.ts).
+  let ratingBlocked: CreateOutcome[] = [];
+  if (target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN)) {
+    const cap = target.maxContentRating;
+    const checked = await mapLimit(toCreate, ARR_CONCURRENCY, async (it) => {
+      let cert: string | undefined;
+      try {
+        const d = it.mediaType === "MOVIE" ? await getMovieDetails(it.tmdbId) : await getTVDetails(it.tmdbId);
+        cert = d.certification;
+      } catch {
+        cert = undefined;
+      }
+      return { it, blocked: exceedsCap(cert, cap) };
+    });
+    toCreate = checked.filter((c) => !c.blocked).map((c) => c.it);
+    ratingBlocked = checked
+      .filter((c) => c.blocked)
+      .map((c): CreateOutcome => ({ tmdbId: c.it.tmdbId, mediaType: c.it.mediaType, result: "rating-blocked" }));
+    // A rating-blocked title is NOT being (re)created — keep its stale DECLINED row.
+    for (const b of ratingBlocked) staleDeclinedIdByKey.delete(keyOf(b.tmdbId, b.mediaType));
+  }
+
   // Drop stale declined rows before the create transaction so their fresh
   // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, is4k).
+  const staleDeclinedIds = [...staleDeclinedIdByKey.values()];
   if (staleDeclinedIds.length > 0) {
     // CAS on status + permanentlyDeclined: an admin who re-approved or made the decline
     // permanent between the snapshot and here leaves that row intact. The createMany
@@ -258,7 +290,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   }
 
   if (toCreate.length === 0) {
-    return NextResponse.json({ results: skipped, created: 0 }, { status: 200 });
+    return NextResponse.json({ results: [...skipped, ...ratingBlocked], created: 0 }, { status: 200 });
   }
 
   // Phase 1 — resolve TMDB metadata up front (bounded) so the create transaction
@@ -272,7 +304,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       return { it, meta: null };
     }
   });
-  let prepared = resolved.flatMap((r) =>
+  const prepared = resolved.flatMap((r) =>
     r.meta
       ? [{
           tmdbId: r.it.tmdbId,
@@ -287,29 +319,6 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   const metaFailed = resolved
     .filter((r) => !r.meta)
     .map((r): CreateOutcome => ({ tmdbId: r.it.tmdbId, mediaType: r.it.mediaType, result: "error" }));
-
-  // Parental control — drop any prepared item whose US certification exceeds the
-  // TARGET user's cap (covers on-behalf-of-a-kid AND a capped user's own collection
-  // "Request all"). Only capped, non-admin targets pay the per-item certification
-  // fetch; unknown/unrated titles are allowed (see content-rating.ts).
-  let ratingBlocked: CreateOutcome[] = [];
-  if (target.maxContentRating && !hasPermission(targetPerms, Permission.ADMIN)) {
-    const cap = target.maxContentRating;
-    const checked = await mapLimit(prepared, ARR_CONCURRENCY, async (p) => {
-      let cert: string | undefined;
-      try {
-        const d = p.mediaType === "MOVIE" ? await getMovieDetails(p.tmdbId) : await getTVDetails(p.tmdbId);
-        cert = d.certification;
-      } catch {
-        cert = undefined;
-      }
-      return { p, blocked: exceedsCap(cert, cap) };
-    });
-    prepared = checked.filter((c) => !c.blocked).map((c) => c.p);
-    ratingBlocked = checked
-      .filter((c) => c.blocked)
-      .map((c): CreateOutcome => ({ tmdbId: c.p.tmdbId, mediaType: c.p.mediaType, result: "rating-blocked" }));
-  }
 
   // Phase 2 — quota re-check + insert, atomic under Serializable. This closes the
   // TOCTOU: a concurrent batch (or a single POST /api/requests) for the same target

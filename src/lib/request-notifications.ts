@@ -85,26 +85,55 @@ export async function notifyAvailablePerServer(
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
 
     // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
-    // Uses buildNotificationData directly — not createInAppNotification per-row —
-    // to keep this a single DB round-trip while sharing the field-shaping rules.
-    void prisma.notification
-      .createMany({
-        data: winners.map((r) =>
-          buildNotificationData(r.requestedBy, {
-            type: "REQUEST_AVAILABLE",
-            title: r.title,
-            body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
-            tmdbId: r.tmdbId ?? null,
-            mediaType: r.mediaType,
-            posterPath: r.posterPath ?? null,
-          }),
-        ),
-      })
-      .catch((err) => console.error(`[${logScope}] in-app write failed:`, err instanceof Error ? err.message : err));
+    void writeAvailableInAppNotifications(winners, logScope);
 
     // Email channel — webhook/sync AVAILABLE paths previously fanned out only
     // Discord + push, leaving `emailOnAvailable` a dead preference there.
     await notifyUsersRequestsAvailableEmail(winners, logScope);
+  }
+}
+
+// Shared BATCH in-app inbox writer for the "now available" fan-out. The
+// webhook-poll path (notifyAvailablePerServer above) AND all six
+// sync-orchestrator/per-source claimAvailableNotificationWinners sites route their
+// winners through here so the header bell / /notifications inbox records a
+// REQUEST_AVAILABLE row for every AVAILABLE transition (previously only the
+// webhook path did — sync-path availables never created an inbox row). The manual
+// admin path (notifyRequestStatusChange) writes single rows via
+// createInAppNotification instead. The CAS in claimAvailableNotificationWinners
+// already deduped the winner set; skipDuplicates is belt-and-suspenders. Single
+// createMany, one DB round-trip, shared field-shaping via buildNotificationData.
+// Best-effort: swallows its own
+// errors so an inbox-write blip never aborts the sync run or the triggering
+// action. Exported so the sync routes can fan out the inbox channel for their
+// winner rows. Call fire-and-forget: `void writeAvailableInAppNotifications(...)`.
+export async function writeAvailableInAppNotifications(
+  winners: Array<{
+    requestedBy: string;
+    title: string;
+    mediaType: string;
+    tmdbId?: number | null;
+    posterPath?: string | null;
+  }>,
+  logScope = "notify",
+): Promise<void> {
+  if (winners.length === 0) return;
+  try {
+    await prisma.notification.createMany({
+      data: winners.map((r) =>
+        buildNotificationData(r.requestedBy, {
+          type: "REQUEST_AVAILABLE",
+          title: r.title,
+          body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
+          tmdbId: r.tmdbId ?? null,
+          mediaType: r.mediaType,
+          posterPath: r.posterPath ?? null,
+        }),
+      ),
+      skipDuplicates: true,
+    });
+  } catch (err) {
+    console.error(`[${logScope}] in-app available write failed:`, err instanceof Error ? err.message : err);
   }
 }
 

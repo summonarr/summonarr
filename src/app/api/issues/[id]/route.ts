@@ -150,14 +150,19 @@ export const PATCH = withIssueAdmin(async (
       issueId: id,
     }).catch(() => {});
     const res = (sanitizedResolution ?? issue.resolution) ?? "";
-    createInAppNotification(issue.reportedBy, {
-      type: "ISSUE_RESOLVED",
-      title: issue.title,
-      body: res ? `Resolved: ${res.slice(0, 400)}` : "Your reported issue was resolved.",
-      tmdbId: issue.tmdbId,
-      mediaType: issue.mediaType,
-      posterPath: issue.posterPath,
-    });
+    // An issue admin resolving their OWN reported issue shouldn't get a
+    // self-notification inbox row ("Your reported issue was resolved"). Mirrors the
+    // selfAction guard the request routes use.
+    if (issue.reportedBy !== session.user.id) {
+      createInAppNotification(issue.reportedBy, {
+        type: "ISSUE_RESOLVED",
+        title: issue.title,
+        body: res ? `Resolved: ${res.slice(0, 400)}` : "Your reported issue was resolved.",
+        tmdbId: issue.tmdbId,
+        mediaType: issue.mediaType,
+        posterPath: issue.posterPath,
+      });
+    }
   }
 
   return NextResponse.json(updated);

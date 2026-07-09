@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
@@ -11,12 +11,14 @@ import {
   UserCircle,
   ShieldCheck,
   AlertTriangle,
+  Bell,
   Menu,
   Search,
   X,
   type IconComponent,
 } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { filterNavByFeatures, userNavItems } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
@@ -170,6 +172,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
             >
               <Search style={{ width: 16, height: 16 }} />
             </button>
+            {session && <NotificationsLink />}
             {session && <PushNotifications />}
           </>
         )}
@@ -264,6 +267,75 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
         featureFlags={featureFlags}
       />
     </>
+  );
+}
+
+// The in-app notification inbox is only reachable via the desktop header bell
+// (hidden below lg), so mobile/tablet gets a top-bar link here. Fetches its own
+// unread count once on mount (the /notifications page owns the full list + read
+// state); the badge stays hidden until the count lands, so SSR and first client
+// render agree — no Date.now()/new Date() at render (guardrail 16).
+function NotificationsLink() {
+  const [unread, setUnread] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(withBasePath("/api/notifications"), {
+          credentials: "include",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { unreadCount?: number };
+        if (!cancelled) setUnread(data.unreadCount ?? 0);
+      } catch {
+        // best-effort — a transient failure just leaves the badge hidden
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Link
+      href="/notifications"
+      aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
+      className="ds-tap inline-flex items-center justify-center shrink-0 relative"
+      style={{
+        width: 32,
+        height: 32,
+        borderRadius: 6,
+        background: "transparent",
+        color: "var(--ds-fg-muted)",
+        border: 0,
+      }}
+    >
+      <Bell style={{ width: 16, height: 16 }} />
+      {unread > 0 && (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 2,
+            right: 2,
+            minWidth: 14,
+            height: 14,
+            padding: "0 3px",
+            borderRadius: 7,
+            background: "var(--ds-accent)",
+            color: "var(--ds-accent-fg)",
+            fontSize: 9,
+            fontWeight: 700,
+            lineHeight: "14px",
+            textAlign: "center",
+            boxSizing: "border-box",
+          }}
+        >
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
+    </Link>
   );
 }
 

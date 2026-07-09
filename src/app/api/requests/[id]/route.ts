@@ -117,12 +117,15 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       }
     }
     const variant = existing.is4k ? "4k" : "hd";
+    // Forward the requester's stored profile on retry, consistent with the approve
+    // path's effectiveProfileId — a bare re-push previously dropped it to default.
+    const retryProfileId = existing.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId, variant, undefined, existing.requestedBy);
+        await addMovieToRadarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant, undefined, existing.requestedBy);
+        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
     } catch (err) {

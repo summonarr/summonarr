@@ -23,12 +23,11 @@ export interface NotificationListItem {
 }
 
 const POST = (body: string) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body });
-const DEL = (body: string) => ({ method: "DELETE", headers: { "Content-Type": "application/json" }, body });
 
 export function NotificationList({ initialItems, initialTotal }: { initialItems: NotificationListItem[]; initialTotal: number }) {
   const [items, setItems] = useState(initialItems);
   const [total, setTotal] = useState(initialTotal);
-  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(initialItems.length < initialTotal);
   const [loading, setLoading] = useState(false);
   const mounted = useHasMounted();
 
@@ -46,7 +45,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     const prev = items;
     setItems((cur) => cur.filter((n) => n.id !== id));
     setTotal((t) => Math.max(0, t - 1));
-    const res = await fetch(withBasePath("/api/notifications"), DEL(JSON.stringify({ ids: [id] }))).catch(() => null);
+    // Selection via query param — DELETE bodies are stripped by some proxies.
+    const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
     if (!res || !res.ok) {
       setItems(prev);
       setTotal((t) => t + 1);
@@ -57,22 +57,31 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     const prevTotal = total;
     setItems([]);
     setTotal(0);
-    const res = await fetch(withBasePath("/api/notifications"), DEL("{}")).catch(() => null);
+    setHasMore(false);
+    // Explicit clear-all signal (never "empty body means all").
+    const res = await fetch(withBasePath("/api/notifications?all=1"), { method: "DELETE" }).catch(() => null);
     if (!res || !res.ok) {
       setItems(prevItems);
       setTotal(prevTotal);
+      setHasMore(prevItems.length < prevTotal);
     }
   }
   async function loadMore() {
     setLoading(true);
     try {
-      const next = page + 1;
-      const res = await fetch(withBasePath(`/api/notifications?page=${next}`));
+      const last = items[items.length - 1];
+      const q = last ? `?cursor=${encodeURIComponent(`${last.createdAt}|${last.id}`)}` : "";
+      const res = await fetch(withBasePath(`/api/notifications${q}`));
       if (res.ok) {
-        const data = (await res.json()) as { items: NotificationListItem[]; total: number };
-        setItems((cur) => [...cur, ...data.items]);
+        const data = (await res.json()) as { items: NotificationListItem[]; total: number; nextCursor: string | null };
+        // De-dup by id — a row could have shifted into an already-loaded page as
+        // new notifications arrived since the last fetch.
+        setItems((cur) => {
+          const seen = new Set(cur.map((n) => n.id));
+          return [...cur, ...data.items.filter((n) => !seen.has(n.id))];
+        });
         setTotal(data.total);
-        setPage(next);
+        setHasMore(data.nextCursor != null);
       }
     } finally {
       setLoading(false);
@@ -139,7 +148,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         })}
       </div>
 
-      {items.length < total && (
+      {hasMore && (
         <div className="flex justify-center" style={{ marginTop: 12 }}>
           <button
             type="button"

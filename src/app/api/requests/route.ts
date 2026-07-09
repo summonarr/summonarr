@@ -180,7 +180,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
       return NextResponse.json({ error: "You don't have permission to choose a quality profile" }, { status: 403 });
     }
     const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-    const profileList = await listQualityProfiles(service, is4k ? "4k" : "hd");
+    // An unreachable/erroring ARR instance must not 500 the request. Mirror the
+    // quality-profiles route: map a fetch failure to a clean 502. A request WITHOUT
+    // a profile skips this block entirely, so it still succeeds during an outage.
+    let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+    try {
+      profileList = await listQualityProfiles(service, is4k ? "4k" : "hd");
+    } catch (err) {
+      console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+      return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+    }
     if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
       return NextResponse.json({ error: "Invalid quality profile for this request" }, { status: 400 });
     }

@@ -1,9 +1,6 @@
 // Unit tests for native client/version negotiation (src/lib/api-version.ts) — the
 // parser + the 426 force-upgrade gate. Fail-soft behaviour (never block on an
 // unidentifiable client) is the security-relevant property, so it's tested here.
-//
-// NOTE: this file should be renamed to `api-version.test.mts`; it was created as
-// `_spike.test.mts` and the authoring sandbox could not delete/rename files.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

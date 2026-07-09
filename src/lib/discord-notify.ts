@@ -38,7 +38,16 @@ interface Embed {
 // accepts both the strict Embed and the richer Record<string, unknown> embeds
 // (with thumbnail/components) built inline elsewhere in this file.
 function clampEmbed<T extends { title?: unknown; description?: unknown }>(embed: T): T {
-  const clamp = (s: string, max: number): string => (s.length > max ? s.slice(0, max - 1) + "…" : s);
+  const clamp = (s: string, max: number): string => {
+    if (s.length <= max) return s;
+    let cut = s.slice(0, max - 1);
+    // Slicing on UTF-16 code units can retain a lone high surrogate whose low
+    // surrogate fell past the cut; Discord's strict JSON decoder 400s on that
+    // (dropping the notification). Drop the orphaned surrogate.
+    const last = cut.charCodeAt(cut.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+    return cut + "…";
+  };
   const out: Record<string, unknown> = { ...embed };
   if (typeof embed.title === "string") out.title = clamp(embed.title, 256);
   if (typeof embed.description === "string") out.description = clamp(embed.description, 4096);

@@ -435,6 +435,7 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
   }
 
   async function saveMaxRating(value: string) {
+    const prev = maxRating;
     setMaxRating(value);
     setSaving(true);
     try {
@@ -443,7 +444,11 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ maxContentRating: value === "" ? null : value }),
       });
-      if (res.ok) router.refresh();
+      if (!res.ok) {
+        setMaxRating(prev);
+        return;
+      }
+      router.refresh();
     } finally {
       setSaving(false);
     }

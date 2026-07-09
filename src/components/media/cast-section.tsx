@@ -75,13 +75,15 @@ export function CastSection({ cast }: CastSectionProps) {
     if (isAvailable) {
       close();
       router.push(credit.mediaType === "movie" ? `/movie/${credit.id}` : `/tv/${credit.id}`);
+    } else if (isRequested) {
+      // Precedence matches the overlay label (isRequested before blacklisted) so
+      // a "View Request" label always routes to the request view.
+      close();
+      router.push("/requests");
     } else if (credit.blacklisted) {
       // Admin-blocked — no request; open the detail page (shows the same state).
       close();
       router.push(credit.mediaType === "movie" ? `/movie/${credit.id}` : `/tv/${credit.id}`);
-    } else if (isRequested) {
-      close();
-      router.push("/requests");
     } else if (rs === "idle" || rs === "error") {
       setReqStates((prev) => new Map(prev).set(creditKey(credit), "confirm"));
     } else if (rs === "confirm") {
