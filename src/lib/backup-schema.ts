@@ -13,7 +13,6 @@ import { join } from "node:path";
 export const BACKUP_TABLES = [
   "User",
   "Account",
-  "Session",
   "VerificationToken",
   "AuthSession",
   "DiscordLinkToken",
@@ -45,6 +44,10 @@ export const BACKUP_TABLES = [
   "TrashSpec",
   "TrashApplication",
   "WebhookReplay",
+  "WatchlistItem",
+  "HiddenItem",
+  "Notification",
+  "BlacklistItem",
 ] as const;
 
 export const BACKUP_ENUMS = [

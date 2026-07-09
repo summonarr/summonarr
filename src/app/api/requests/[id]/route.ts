@@ -117,12 +117,15 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       }
     }
     const variant = existing.is4k ? "4k" : "hd";
+    // Forward the requester's stored profile on retry, consistent with the approve
+    // path's effectiveProfileId — a bare re-push previously dropped it to default.
+    const retryProfileId = existing.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
-        await addMovieToRadarr(existing.tmdbId, variant);
+        await addMovieToRadarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant);
+        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
     } catch (err) {
@@ -268,13 +271,17 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
     const variant = updated.is4k ? "4k" : "hd";
+    // The admin's one-time picker choice (qualityProfileId) wins; otherwise fall
+    // back to the profile the requester chose at request time (REQUEST_ADVANCED),
+    // else the instance default (undefined).
+    const effectiveProfileId = qualityProfileId ?? updated.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     let arrPushSucceeded = false;
     try {
       if (updated.mediaType === "MOVIE") {
-        await addMovieToRadarr(updated.tmdbId, variant, qualityProfileId);
+        await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, qualityProfileId);
+        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
         await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
       }
       arrPushSucceeded = true;

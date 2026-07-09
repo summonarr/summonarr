@@ -17,6 +17,9 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
+import { isBlacklisted } from "@/lib/blacklist";
+import { exceedsCap } from "@/lib/content-rating";
+import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -571,35 +574,6 @@ async function handleComponent(interaction: any): Promise<void> {
         confirmEmbed.thumbnail = { url: `${TMDB_POSTER_BASE}${selected.posterPath}` };
       }
 
-      const existing = await prisma.mediaRequest.findFirst({
-        // is4k-scoped: Discord requests are HD-only (is4k: false), so a web-created
-        // 4K request for the same title must not block this user's HD request.
-        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
-      });
-      if (existing) {
-        if (existing.permanentlyDeclined) {
-          confirmEmbed.color = 0xed4245;
-          confirmEmbed.description = `(${selected.releaseYear}) — This request has been permanently denied.`;
-          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
-          return;
-        }
-        // An ordinary (non-permanent) decline is not terminal — parity with the web
-        // route: drop the stale DECLINED row and fall through to a fresh request.
-        // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
-        // double re-request instead of throwing.
-        if (existing.status === "DECLINED") {
-          // CAS on status + permanentlyDeclined: if an admin re-approved or made the
-          // decline permanent between the read and here, the delete no-ops and the
-          // create below 409s on the surviving row instead of orphaning/evading it.
-          await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
-        } else {
-          confirmEmbed.color = 0xfee75c;
-          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
-          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
-          return;
-        }
-      }
-
       // Effective permissions (ADMIN superbit / unseeded → role preset). Drives
       // both the quota bypass and the auto-approve decision below.
       const effPerms = effectivePermissions(dbUser.role, dbUser.permissions);
@@ -614,6 +588,40 @@ async function handleComponent(interaction: any): Promise<void> {
         return;
       }
 
+      // Blacklist gate (parity with the web chokepoints, which 403 on this):
+      // an admin-blocked title must be rejected before any request row is
+      // created, or Discord becomes a bypass around the blacklist.
+      if (await isBlacklisted(selected.id, mediaType)) {
+        confirmEmbed.color = 0xed4245;
+        confirmEmbed.description = `(${selected.releaseYear}) — This title has been blocked by an administrator.`;
+        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+        return;
+      }
+
+      // Parental control (parity with the web chokepoints): block a request whose
+      // US certification exceeds the user's cap. Only capped, non-admin users pay
+      // the (cached) certification fetch; unknown/unrated titles and TMDB failures
+      // are allowed — fail-open, same as requests/route.ts.
+      if (dbUser.maxContentRating && !hasPermission(effPerms, Permission.ADMIN)) {
+        let cert: string | undefined;
+        try {
+          const detail = mediaType === "MOVIE" ? await getMovieDetails(selected.id) : await getTVDetails(selected.id);
+          cert = detail.certification;
+        } catch {
+          cert = undefined;
+        }
+        if (exceedsCap(cert, dbUser.maxContentRating)) {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `(${selected.releaseYear}) — This title's rating exceeds your account's limit.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
+      }
+
+      // Quota gate runs BEFORE the stale-request delete below (parity with
+      // requests/route.ts): a re-request the quota then rejects must NOT have already
+      // erased the user's DECLINED-history row. The authoritative enforcement is the
+      // serializable-tx recheck at create time; this is the early user-facing reject.
       const [quotaLimitRow, quotaPeriodRow] = await Promise.all([
         prisma.setting.findUnique({ where: { key: "quotaLimit" } }),
         prisma.setting.findUnique({ where: { key: "quotaPeriod" } }),
@@ -643,6 +651,38 @@ async function handleComponent(interaction: any): Promise<void> {
             await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
             return;
           }
+        }
+      }
+
+      // Stale-request handling runs AFTER the permission/blacklist/rating/quota
+      // gates (parity with requests/route.ts): a re-request that those gates then
+      // reject must NOT have already erased the user's DECLINED-history row.
+      const existing = await prisma.mediaRequest.findFirst({
+        // is4k-scoped: Discord requests are HD-only (is4k: false), so a web-created
+        // 4K request for the same title must not block this user's HD request.
+        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
+      });
+      if (existing) {
+        if (existing.permanentlyDeclined) {
+          confirmEmbed.color = 0xed4245;
+          confirmEmbed.description = `(${selected.releaseYear}) — This request has been permanently denied.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
+        }
+        // An ordinary (non-permanent) decline is not terminal — parity with the web
+        // route: drop the stale DECLINED row and fall through to a fresh request.
+        // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
+        // double re-request instead of throwing.
+        if (existing.status === "DECLINED") {
+          // CAS on status + permanentlyDeclined: if an admin re-approved or made the
+          // decline permanent between the read and here, the delete no-ops and the
+          // create below 409s on the surviving row instead of orphaning/evading it.
+          await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
+        } else {
+          confirmEmbed.color = 0xfee75c;
+          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
+          await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+          return;
         }
       }
 
@@ -708,9 +748,9 @@ async function handleComponent(interaction: any): Promise<void> {
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
-              await addMovieToRadarr(selected.id);
+              await addMovieToRadarr(selected.id, "hd", undefined, dbUser.id);
             } else {
-              const tvdbId = await addSeriesToSonarr(selected.id);
+              const tvdbId = await addSeriesToSonarr(selected.id, "hd", undefined, dbUser.id);
               await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
             }
           } catch (err) {
@@ -928,7 +968,7 @@ async function handleComponent(interaction: any): Promise<void> {
 
       const request = await prisma.mediaRequest.findUnique({
         where: { id: requestId },
-        select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true },
+        select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true },
       });
 
       if (!request || request.status !== "PENDING") {
@@ -964,9 +1004,11 @@ async function handleComponent(interaction: any): Promise<void> {
         let arrFailed = false;
         try {
           if (request.mediaType === "MOVIE") {
-            await addMovieToRadarr(request.tmdbId);
+            // Forward the requester's stored quality profile (a REQUEST_ADVANCED web
+            // requester may have chosen one) — parity with requests/[id] approve.
+            await addMovieToRadarr(request.tmdbId, "hd", request.qualityProfileId ?? undefined, request.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(request.tmdbId);
+            const tvdbId = await addSeriesToSonarr(request.tmdbId, "hd", request.qualityProfileId ?? undefined, request.requestedBy);
             await prisma.mediaRequest.update({ where: { id: requestId }, data: { tvdbId } });
           }
         } catch (err) {

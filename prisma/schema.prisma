@@ -13,7 +13,6 @@ model User {
   id            String    @id @default(cuid(2))
   name          String?
   email         String    @unique
-  emailVerified DateTime?
   image         String?
   passwordHash  String?
   // Set when the credentials password is changed. refreshToken() rejects any JWT
@@ -55,6 +54,12 @@ model User {
   movieQuotaDays  Int?
   tvQuotaLimit    Int?
   tvQuotaDays     Int?
+
+  // Parental control: the maximum US content rating this user may request. null ⇒
+  // no cap. Enforced at the request chokepoint (src/lib/content-rating.ts); ADMIN
+  // bypasses. Stored as an MPAA cap ("G".."NC-17") that governs BOTH movies and TV
+  // via a unified maturity rank.
+  maxContentRating String?
 
   // For local/OIDC users: which media server's availability badges to show ("plex" | "jellyfin" | null)
   // Plex and Jellyfin OAuth users derive this from their auth provider automatically.
@@ -101,7 +106,6 @@ model User {
   pushOnDeclined  Boolean @default(true)
 
   accounts          Account[]
-  sessions          Session[]
   requests          MediaRequest[]
   issues            Issue[]            @relation(name: "IssueReporter")
   claimedIssues     Issue[]            @relation(name: "IssueClaimer")
@@ -113,6 +117,9 @@ model User {
   discordMergeCode  DiscordMergeCode?
   mediaServerUsers  MediaServerUser[]
   authSessions      AuthSession[]
+  watchlist         WatchlistItem[]
+  hidden            HiddenItem[]
+  notifications     Notification[]
 }
 
 model PushSubscription {
@@ -150,18 +157,6 @@ model Account {
 
   @@unique([provider, providerAccountId])
   @@index([userId])
-}
-
-model Session {
-  id           String   @id @default(cuid(2))
-  sessionToken String   @unique
-  userId       String
-  expires      DateTime
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([expires])
 }
 
 model VerificationToken {
@@ -235,6 +230,11 @@ model MediaRequest {
   // true = the optional 4K instance. Part of the unique key so one user can hold
   // both an HD and a 4K request for the same title.
   is4k Boolean @default(false)
+
+  // Optional per-request quality profile chosen by a REQUEST_ADVANCED user (or an
+  // admin at approve time). null ⇒ use the target instance's configured default.
+  // Flows to addMovieToRadarr/addSeriesToSonarr as the qualityProfileIdOverride.
+  qualityProfileId Int?
 
   lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
@@ -591,6 +591,23 @@ model AuditLog {
   @@index([action, createdAt(sort: Desc)])
 }
 
+// ─── Request Blacklist ─────────────────────────────────────────────────────────
+// Admin-maintained titles that are hidden from discovery AND blocked at the
+// request chokepoint. Keyed by (tmdbId, mediaType) — the app's canonical media
+// identity (matches PlexLibraryItem / TmdbMediaCore).
+
+model BlacklistItem {
+  tmdbId    Int
+  mediaType MediaType
+  title     String?  @db.VarChar(500) // denormalized so the admin list needn't re-fetch TMDB
+  reason    String?  @db.VarChar(500)
+  addedBy   String?  // admin User id; nullable + no FK so user-anonymize can't cascade-delete entries
+  createdAt DateTime @default(now())
+
+  @@id([tmdbId, mediaType])
+  @@index([createdAt])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -626,6 +643,7 @@ enum AuditAction {
   SERVER_USERS_BULK
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
+  BLACKLIST_CHANGE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -636,8 +654,12 @@ model MediaServerUser {
   source           String // "plex" | "jellyfin"
   sourceUserId     String // Plex accountID or Jellyfin userId UUID
   // Server machineIdentifier (Plex) or System/Info Id (Jellyfin) the row was first
-  // observed on. Webhook handlers verify the inbound payload's server identifier
-  // matches this column before attributing playback or recording sessions.
+  // observed on. Currently DORMANT scaffolding: the only writer is the trusted
+  // play-history poller, which does not pass a machineId, so this stays null in
+  // practice. The verification branch in resolveMediaServerUser
+  // (MediaServerMismatchError) only fires if a future *untrusted* ingestion path
+  // passes one. The Plex/Jellyfin webhook handlers this comment once referenced
+  // were removed — do not treat this as an active security control.
   serverMachineId  String?
   username         String
   email            String?
@@ -923,6 +945,70 @@ enum Role {
   USER
   ISSUE_ADMIN
   ADMIN
+}
+
+// Personal "save for later" list. Unlike DeletionVote it is NOT gated on the
+// item being in a library — the whole point is to bookmark things that are not
+// yet available. Title/posterPath are denormalized (like DeletionVote) so the
+// watchlist page renders without a TMDB round-trip per row.
+model WatchlistItem {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  tmdbId     Int
+  mediaType  MediaType
+  title      String  @db.VarChar(500)
+  posterPath String? @db.VarChar(500)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType]) // one watchlist entry per user per item
+  @@index([userId, createdAt])
+}
+
+// Per-user "not interested" / hide list. Distinct from the admin-global
+// BlacklistItem: HiddenItem is per-user and REMOVES a title from that user's
+// discovery (attachAllAvailability filters it out), whereas the admin blacklist
+// keeps a title visible-but-unrequestable for everyone. Title/posterPath are
+// denormalized so the "Hidden" management page renders without a TMDB fetch.
+model HiddenItem {
+  id        String   @id @default(cuid(2))
+  createdAt DateTime @default(now())
+
+  tmdbId     Int
+  mediaType  MediaType
+  title      String  @db.VarChar(500)
+  posterPath String? @db.VarChar(500)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType]) // one hide entry per user per item
+  @@index([userId, createdAt])
+}
+
+// In-app notification inbox (the header bell). One row per user-facing event
+// (request approved / available / declined). Written alongside the email/push/
+// Discord fan-out in request-notifications.ts — UNCONDITIONALLY (unlike the
+// delivered channels, the inbox is a passive record the user pulls, not a
+// channel to opt out of). readAt=null ⇒ unread.
+model Notification {
+  id         String     @id @default(cuid(2))
+  createdAt  DateTime   @default(now())
+
+  userId     String
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type       String // REQUEST_APPROVED | REQUEST_AVAILABLE | REQUEST_DECLINED
+  title      String     @db.VarChar(500)
+  body       String     @db.VarChar(1000)
+  tmdbId     Int?
+  mediaType  MediaType?
+  posterPath String?    @db.VarChar(500)
+  readAt     DateTime?
+
+  @@index([userId, createdAt])
 }
 
 enum MediaType {

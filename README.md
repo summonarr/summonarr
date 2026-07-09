@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.13.11 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.14.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -164,6 +164,26 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.14.0
+
+**Added**
+
+- Watchlist: a personal watchlist — add titles from any detail page and browse them on the new **Watchlist** page.
+- "Not interested": hide titles you don't want to see and they drop off every discovery surface (home, movies, TV, search, upcoming, top). Manage them on the new **Hidden** page.
+- Title blacklist: admins can blacklist a title, which then shows as unrequestable everywhere — web and Discord — instead of being silently hidden.
+- Parental controls: a per-user content-rating cap that blocks requests for titles above a chosen maturity rating, enforced on both the web and Discord request paths.
+- Quality profiles: users with the advanced-request permission can pick a Radarr/Sonarr quality profile at request time.
+- Requester tags: Radarr/Sonarr adds are tagged with the requesting user, so admins can see who asked for a title.
+- Notifications: an in-app notification inbox with a real-time bell and unread badge, a full **Notifications** page (mark-read and clear), and success toasts for actions like watchlisting, hiding, requesting in 4K, and reporting an issue.
+- Email notifications: Jellyfin users can add and verify their own notification email address from their profile.
+
+**Fixed**
+
+- Requests: a second user can again request a title that is already queued for someone else (the web UI was incorrectly blocking it).
+- Email: the notification-email preference now gates every notification send.
+- API: rate-limited responses now include a `Retry-After` header so clients back off correctly.
+- Hardening: bounded async fan-outs and added request-size caps, input validation, and admin-account guards across the admin, requests, and sync paths.
 
 ### v0.13.11
 
@@ -742,7 +762,7 @@ Prior release. See `git log v0.9.1` for details.
 
 ## Beta testing
 
-Summonarr v0.13.11 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.14.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

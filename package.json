@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.13.11",
+  "version": "0.14.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -13,6 +13,8 @@
     "lint": "eslint",
     "audit:deps": "node scripts/audit-deps.mts",
     "audit:routes": "node scripts/audit-routes.mts",
+    "audit:openapi": "node scripts/audit-openapi.mts",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mts",
     "smoke:security": "tsx scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
@@ -22,7 +24,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "jose": "^6.2.3",
-    "next": "16.2.9",
+    "next": "16.2.10",
     "openid-client": "^6.8.4",
     "pg": "^8.22.0",
     "prisma": "^7.8.0",
@@ -38,17 +40,17 @@
     "postcss": "^8.5.10"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.1",
-    "@types/node": "^26.0.1",
+    "@tailwindcss/postcss": "^4.3.2",
+    "@types/node": "^26.1.0",
     "@types/pg": "^8.11.14",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^10.6.0",
-    "eslint-config-next": "16.2.9",
+    "eslint-config-next": "16.2.10",
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.61.1",
     "tailwindcss": "^4.3.1",
-    "tsx": "^4.20.6",
+    "tsx": "^4.23.0",
     "typescript": "^6"
   }
 }

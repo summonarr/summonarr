@@ -2,6 +2,8 @@ import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollecti
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
+import { WatchlistButton } from "@/components/media/watchlist-button";
+import { HideButton } from "@/components/media/hide-button";
 import { isArrConfigured } from "@/lib/arr";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import { RatingsBar } from "@/components/media/ratings-bar";
@@ -22,6 +24,7 @@ import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { isBlacklisted } from "@/lib/blacklist";
 
 export default async function MovieDetailPage({
   params,
@@ -67,6 +70,8 @@ export default async function MovieDetailPage({
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
+  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
+  const blacklisted = await isBlacklisted(media.id, "MOVIE");
 
   const [suggestions, collectionItems] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
@@ -93,6 +98,17 @@ export default async function MovieDetailPage({
   const show4k = has4k && canRequest4k;
   const arr4kAvailable = show4k && !!radarr4kAvailable;
   const arr4kPending = show4k && !!radarr4kWanted;
+
+  const [onWatchlist, onHidden] = session
+    ? await Promise.all([
+        prisma.watchlistItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
+          .then((r) => !!r),
+        prisma.hiddenItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
+          .then((r) => !!r),
+      ])
+    : [false, false];
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -251,6 +267,8 @@ export default async function MovieDetailPage({
                 showJellyfin={showJellyfin}
                 requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                 canRequestOnBehalf={canOnBehalf}
+                canChooseProfile={canChooseProfile}
+                blacklisted={blacklisted}
               />
               {has4k && canRequest4k && (
                 <Request4kButton
@@ -259,6 +277,19 @@ export default async function MovieDetailPage({
                   requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
                   requested={requested4k}
                   available={arr4kAvailable}
+                  blacklisted={blacklisted}
+                />
+              )}
+              {session && (
+                <WatchlistButton tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
+              )}
+              {session && (
+                <HideButton
+                  tmdbId={media.id}
+                  mediaType="MOVIE"
+                  title={media.title}
+                  posterPath={media.posterPath}
+                  initialHidden={onHidden}
                 />
               )}
               {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (

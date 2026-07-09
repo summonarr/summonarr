@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
+import { EmptyState } from "@/components/ui/empty-state";
 import Image from "next/image";
 import Link from "next/link";
 import { VoteActions } from "@/components/votes/vote-actions";
@@ -167,21 +168,11 @@ export default async function VotesPage({
       </div>
 
       {items.length === 0 ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
+        <EmptyState>
           {hasFilters
             ? "No votes match these filters."
             : "No deletion votes yet. Browse your library and vote on items you think should be removed."}
-        </div>
+        </EmptyState>
       ) : (
         <div className="flex flex-col" style={{ gap: 8 }}>
           {items.map((item) => {

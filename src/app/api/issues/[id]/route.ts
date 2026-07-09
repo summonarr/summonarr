@@ -11,6 +11,7 @@ import {
 } from "@/lib/arr";
 import { notifyUserIssueResolved } from "@/lib/discord-notify";
 import { notifyUserIssueResolvedPush } from "@/lib/push";
+import { createInAppNotification } from "@/lib/in-app-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
@@ -148,6 +149,20 @@ export const PATCH = withIssueAdmin(async (
       resolution: sanitizedResolution ?? issue.resolution,
       issueId: id,
     }).catch(() => {});
+    const res = (sanitizedResolution ?? issue.resolution) ?? "";
+    // An issue admin resolving their OWN reported issue shouldn't get a
+    // self-notification inbox row ("Your reported issue was resolved"). Mirrors the
+    // selfAction guard the request routes use.
+    if (issue.reportedBy !== session.user.id) {
+      createInAppNotification(issue.reportedBy, {
+        type: "ISSUE_RESOLVED",
+        title: issue.title,
+        body: res ? `Resolved: ${res.slice(0, 400)}` : "Your reported issue was resolved.",
+        tmdbId: issue.tmdbId,
+        mediaType: issue.mediaType,
+        posterPath: issue.posterPath,
+      });
+    }
   }
 
   return NextResponse.json(updated);

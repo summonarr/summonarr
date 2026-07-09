@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
+import { isNotificationEmailEnabled } from "@/lib/email";
 import { getJellyfinUserEmail } from "@/lib/jellyfin";
 import { prisma } from "@/lib/prisma";
 
@@ -11,18 +12,24 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Current notification preferences for the signed-in user. The web settings
 // page reads these server-side; native clients need a REST surface.
+// `emailEnabled` mirrors the web profile's gate (email feature + "Send
+// notification emails" switch + transport configured) so native clients can
+// hide their email-preference section while the channel can never send.
 export const GET = withAuth(async (_req, _ctx, session) => {
-  const prefs = await prisma.user.findUnique({
-    where: { id: session.user.id },
-    select: {
-      notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true,
-      emailOnApproved:  true, emailOnAvailable:  true, emailOnDeclined:  true,
-      pushOnApproved:   true, pushOnAvailable:   true, pushOnDeclined:   true,
-      notifyOnIssue:    true, notificationEmail: true,
-    },
-  });
+  const [prefs, emailEnabled] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: {
+        notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true,
+        emailOnApproved:  true, emailOnAvailable:  true, emailOnDeclined:  true,
+        pushOnApproved:   true, pushOnAvailable:   true, pushOnDeclined:   true,
+        notifyOnIssue:    true, notificationEmail: true,
+      },
+    }),
+    isNotificationEmailEnabled(),
+  ]);
   if (!prefs) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(prefs);
+  return NextResponse.json({ ...prefs, emailEnabled });
 });
 
 export const PATCH = withAuth(async (req, _ctx, session) => {

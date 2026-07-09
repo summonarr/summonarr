@@ -5,6 +5,7 @@ import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
 type IssueScope = "FULL" | "SEASON" | "EPISODE";
@@ -35,6 +36,7 @@ type DialogState = "idle" | "loading" | "open" | "submitting" | "submitted" | "e
 
 export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath }: ReportIssueButtonProps) {
   const [dialogState, setDialogState] = useState<DialogState>("idle");
+  const { toast } = useToast();
   const [issueType, setIssueType] = useState<IssueType>("BAD_VIDEO");
   const [scope, setScope] = useState<IssueScope>("FULL");
   const [note, setNote] = useState("");
@@ -156,6 +158,7 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
       }
 
       setDialogState("submitted");
+      toast({ title: "Issue reported — thanks!", variant: "success" });
     } catch {
       setErrorMsg("Network error — please try again");
       setDialogState("open");

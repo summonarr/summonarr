@@ -5,6 +5,7 @@ import "./globals.css";
 import { readSummonarrSession } from "@/lib/session-server";
 import { SummonarrSessionProvider } from "@/components/auth/summonarr-session-provider";
 import { ThemeProvider } from "@/components/theme/theme-provider";
+import { ToastProvider } from "@/components/ui/toast";
 
 // Runs before first paint: applies the user's persisted theme/accent so there
 // is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
@@ -95,7 +96,9 @@ export default async function RootLayout({
         style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
       >
         <SummonarrSessionProvider initialSession={summonarrInitialSession}>
-          <ThemeProvider>{children}</ThemeProvider>
+          <ThemeProvider>
+            <ToastProvider>{children}</ToastProvider>
+          </ThemeProvider>
         </SummonarrSessionProvider>
       </body>
     </html>

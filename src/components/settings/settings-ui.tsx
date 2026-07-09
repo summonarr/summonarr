@@ -3800,9 +3800,11 @@ export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boo
   return (
     <div className="flex items-center justify-between gap-4 py-3 border-t border-zinc-800">
       <div>
-        <p className="text-sm font-medium text-zinc-200">Send emails to users</p>
+        <p className="text-sm font-medium text-zinc-200">Send notification emails</p>
         <p className="text-xs text-zinc-500 mt-0.5">
-          When enabled, users receive emails for approved, declined, and available events (based on their own preferences).
+          When enabled, users receive emails for approved, declined, and available events (based on their own preferences)
+          and admins receive new request, issue, and deletion-vote alerts. When disabled, no notification emails are sent
+          (saving the settings above still sends a configuration test email).
         </p>
       </div>
       <div className="flex items-center gap-2 shrink-0">

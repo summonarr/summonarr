@@ -2,10 +2,11 @@ import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured, listQualityProfiles } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { emitSSE } from "@/lib/sse-emitter";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
@@ -15,6 +16,9 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
+import { isBlacklisted } from "@/lib/blacklist";
+import { exceedsCap } from "@/lib/content-rating";
+import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 
@@ -105,6 +109,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         movieQuotaDays: true,
         tvQuotaLimit: true,
         tvQuotaDays: true,
+        maxContentRating: true,
       },
     }),
   ]);
@@ -112,7 +117,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const limit = parseRateLimit(settings.rateLimitRequests, 20);
   if (!checkRateLimit(`requests:${session.user.id}`, limit, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return tooManyRequests(60, "Too many requests — try again later");
   }
 
   if (settings.discordRequireLinkedAccountSite === "true" && !userRecord?.discordId) {
@@ -128,6 +133,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     note?: string;
     _token?: string;
     is4k?: boolean;
+    qualityProfileId?: number;
   }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -159,6 +165,35 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (is4k && !(await isArrConfigured(mediaType === "MOVIE" ? "radarr" : "sonarr", "4k"))) {
     return NextResponse.json({ error: "4K requests aren't available — no 4K instance is configured" }, { status: 400 });
+  }
+
+  // Advanced request option: an explicit quality profile is honored only for
+  // REQUEST_ADVANCED holders (ADMIN passes via the superbit) and is validated
+  // against the target instance's profiles, so a client can't smuggle an arbitrary
+  // id into the ARR add. Absent ⇒ the instance's configured default is used.
+  let chosenQualityProfileId: number | undefined;
+  if (body.qualityProfileId !== undefined) {
+    if (!Number.isInteger(body.qualityProfileId) || body.qualityProfileId <= 0) {
+      return NextResponse.json({ error: "qualityProfileId must be a positive integer" }, { status: 400 });
+    }
+    if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
+      return NextResponse.json({ error: "You don't have permission to choose a quality profile" }, { status: 403 });
+    }
+    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+    // An unreachable/erroring ARR instance must not 500 the request. Mirror the
+    // quality-profiles route: map a fetch failure to a clean 502. A request WITHOUT
+    // a profile skips this block entirely, so it still succeeds during an outage.
+    let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+    try {
+      profileList = await listQualityProfiles(service, is4k ? "4k" : "hd");
+    } catch (err) {
+      console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+      return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+    }
+    if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
+      return NextResponse.json({ error: "Invalid quality profile for this request" }, { status: 400 });
+    }
+    chosenQualityProfileId = body.qualityProfileId;
   }
 
   // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
@@ -206,6 +241,29 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
+  }
+
+  // Blacklist gate — an admin-blocked title can never be requested. This is the
+  // authoritative block (discovery hiding is best-effort UX) and must run before
+  // any request row is created.
+  if (await isBlacklisted(tmdbId, mediaType)) {
+    return NextResponse.json({ error: "This title has been blocked by an administrator" }, { status: 403 });
+  }
+
+  // Parental control — block a request whose US certification exceeds the user's
+  // cap. Only capped, non-admin users pay the (cached) certification fetch;
+  // unknown/unrated titles are allowed (see content-rating.ts).
+  if (userRecord?.maxContentRating && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+    let cert: string | undefined;
+    try {
+      const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
+      cert = detail.certification;
+    } catch {
+      cert = undefined;
+    }
+    if (exceedsCap(cert, userRecord.maxContentRating)) {
+      return NextResponse.json({ error: "This title's rating exceeds your account's limit" }, { status: 403 });
+    }
   }
 
   const existing = await prisma.mediaRequest.findFirst({
@@ -257,7 +315,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // (skip on 4K, same as Plex: an HD copy must not block a 4K request).
   const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
 
-  const baseData = { tmdbId, mediaType, is4k, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+  const baseData = { tmdbId, mediaType, is4k, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
   let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
@@ -361,9 +419,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd");
+        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd");
+        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {

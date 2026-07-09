@@ -50,7 +50,11 @@ function project(
 ): TmdbMedia[] {
   const out: TmdbMedia[] = [];
   for (const m of raw) {
-    const e = enriched.get(`${m.mediaType}-${m.id}`) ?? m;
+    const e = enriched.get(`${m.mediaType}-${m.id}`);
+    // A missing map entry means attachAllAvailability intentionally filtered the item
+    // (the user hid it). Drop it — do NOT fall back to the raw item, which would
+    // resurrect the hidden title onto the rail.
+    if (!e) continue;
     if (hideAvailable && (e.plexAvailable || e.jellyfinAvailable)) continue;
     out.push(e);
     if (out.length >= limit) break;
@@ -99,14 +103,17 @@ export default async function DiscoverPage({
   const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
   const topTV     = settled(topTVRes).slice(0, RAIL_OVERFETCH);
 
+  // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
+  // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
+  // tail must be in the enriched map too or rails under-fill when a filter is on.
   const candidateLists = [
     { raw: trending, limit: trending.length },
-    { raw: popMovies, limit: RAIL_SIZE },
-    { raw: popTV, limit: RAIL_SIZE },
-    { raw: upMovies, limit: RAIL_SIZE },
-    { raw: upTV, limit: RAIL_SIZE },
-    { raw: topMovies, limit: RAIL_SIZE },
-    { raw: topTV, limit: RAIL_SIZE },
+    { raw: popMovies, limit: RAIL_OVERFETCH },
+    { raw: popTV, limit: RAIL_OVERFETCH },
+    { raw: upMovies, limit: RAIL_OVERFETCH },
+    { raw: upTV, limit: RAIL_OVERFETCH },
+    { raw: topMovies, limit: RAIL_OVERFETCH },
+    { raw: topTV, limit: RAIL_OVERFETCH },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
   const show4k = await getShow4kVisibility(session);

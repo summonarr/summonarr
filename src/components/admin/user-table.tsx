@@ -28,6 +28,7 @@ import {
 } from "@/components/icons";
 import { Permission, PRESETS, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
+import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 
 interface User {
   id: string;
@@ -43,6 +44,7 @@ interface User {
   tvQuotaLimit: number | null;
   tvQuotaDays: number | null;
   mediaServer: "plex" | "jellyfin" | null;
+  maxContentRating: string | null;
   notifyOnApproved: boolean;
   notifyOnAvailable: boolean;
   notifyOnDeclined: boolean;
@@ -278,12 +280,15 @@ const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; 
     bits: [
       { key: "REQUEST_ON_BEHALF", label: "Request on behalf of others" },
       { key: "QUOTA_UNLIMITED", label: "Exempt from request quotas" },
+      { key: "REQUEST_ADVANCED", label: "Choose quality profile at request" },
     ],
   },
 ];
 
-// 4K group — rendered only when a configured 4K instance exists (Phase 3 passes
-// show4k). The bits are defined now so the editor is ready.
+// 4K group — rendered only when a configured 4K instance exists (the page passes
+// show4k). Exposes every 4K bit defined in the permission model, including the
+// per-type auto-approve bits so an admin can grant "auto-approve 4K movies" (or
+// TV) without the blanket AUTO_APPROVE_4K.
 const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission; label: string }[] } = {
   title: "4K",
   bits: [
@@ -291,6 +296,8 @@ const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission
     { key: "REQUEST_4K_MOVIE", label: "Request 4K movies" },
     { key: "REQUEST_4K_TV", label: "Request 4K TV" },
     { key: "AUTO_APPROVE_4K", label: "Auto-approve 4K (all)" },
+    { key: "AUTO_APPROVE_4K_MOVIE", label: "Auto-approve 4K movies" },
+    { key: "AUTO_APPROVE_4K_TV", label: "Auto-approve 4K TV" },
   ],
 };
 
@@ -354,6 +361,7 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
     tvQuotaLimit: u.tvQuotaLimit?.toString() ?? "",
     tvQuotaDays: u.tvQuotaDays?.toString() ?? "",
   });
+  const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
   const titleId = `perm-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const isSuperAdmin = (perms & Permission.ADMIN) !== 0n;
@@ -421,6 +429,26 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
         body: JSON.stringify({ [field]: value }),
       });
       if (res.ok) router.refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveMaxRating(value: string) {
+    const prev = maxRating;
+    setMaxRating(value);
+    setSaving(true);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxContentRating: value === "" ? null : value }),
+      });
+      if (!res.ok) {
+        setMaxRating(prev);
+        return;
+      }
+      router.refresh();
     } finally {
       setSaving(false);
     }
@@ -510,6 +538,23 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
                 onBlurDays={() => saveQuota("tvQuotaDays", quota.tvQuotaDays)}
                 disabled={saving}
               />
+            </div>
+
+            <div className="mt-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Parental control</p>
+              <p className="text-[10px] text-zinc-600 mb-2">Maximum content rating this user can request. Applies to movies and TV; admins are exempt.</p>
+              <select
+                value={maxRating}
+                onChange={(e) => saveMaxRating(e.target.value)}
+                disabled={saving}
+                aria-label="Maximum content rating"
+                className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1.5"
+              >
+                <option value="">No limit</option>
+                {CONTENT_RATING_CAPS.map((r) => (
+                  <option key={r} value={r}>{r} and under</option>
+                ))}
+              </select>
             </div>
           </>
         )}

@@ -6,6 +6,10 @@ import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/comp
 import { withBasePath } from "@/lib/base-path";
 
 interface NotificationPrefsProps {
+  // Server-computed: email feature on + "Send notification emails" master
+  // switch on + transport configured. When false the whole Email section is
+  // hidden — no email will ever send, so the prefs would be dead toggles.
+  emailEnabled: boolean;
   discordLinked: boolean;
   isAdminRole: boolean;
   isJellyfin: boolean;
@@ -24,7 +28,7 @@ interface NotificationPrefsProps {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-type AllPrefs = Omit<NotificationPrefsProps, "discordLinked" | "isAdminRole" | "isJellyfin" | "notificationEmail">;
+type AllPrefs = Omit<NotificationPrefsProps, "emailEnabled" | "discordLinked" | "isAdminRole" | "isJellyfin" | "notificationEmail">;
 
 function ToggleRow({
   label,
@@ -64,6 +68,7 @@ function ToggleRow({
 // Per-channel (Discord/email/push) notification toggles with debounced optimistic save +
 // rollback, plus the Jellyfin-only manual notification-email field.
 export function NotificationPrefs({
+  emailEnabled,
   discordLinked,
   isAdminRole,
   isJellyfin,
@@ -96,10 +101,11 @@ export function NotificationPrefs({
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // Jellyfin-only local state for the manually-entered notification email.
-  const [emailInput, setEmailInput] = useState(notificationEmail ?? "");
-  const [emailSavedValue, setEmailSavedValue] = useState(notificationEmail ?? "");
-  const [emailSavingState, setEmailSavingState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  // Jellyfin-only local state for the self-service notification-email flow. The
+  // input holds a NEW address to verify; the current verified address is shown
+  // separately from the `notificationEmail` prop.
+  const [emailInput, setEmailInput] = useState("");
+  const [emailSavingState, setEmailSavingState] = useState<"idle" | "saving" | "sent" | "error">("idle");
   const [emailError, setEmailError] = useState<string | null>(null);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,10 +158,13 @@ export function NotificationPrefs({
     saveTimerRef.current = setTimeout(flush, 400);
   }
 
-  async function saveEmail() {
+  // Jellyfin: mail a one-time verification link to the entered address. The
+  // address is bound to the account only when that link is confirmed (server
+  // route) — this is what prevents redirecting notifications at an address the
+  // user doesn't control.
+  async function sendVerification() {
     const trimmed = emailInput.trim();
-    if (trimmed === emailSavedValue) return;
-    if (trimmed !== "" && !EMAIL_RE.test(trimmed)) {
+    if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
       setEmailError("Please enter a valid email address");
       setEmailSavingState("error");
       return;
@@ -163,19 +172,41 @@ export function NotificationPrefs({
     setEmailError(null);
     setEmailSavingState("saving");
     try {
-      const res = await fetch(withBasePath("/api/profile/notifications"), {
-        method: "PATCH",
+      const res = await fetch(withBasePath("/api/profile/notification-email"), {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notificationEmail: trimmed === "" ? null : trimmed }),
+        body: JSON.stringify({ email: trimmed }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? "Failed to save email");
+        setEmailError(data?.error ?? "Couldn't send verification email");
         setEmailSavingState("error");
         return;
       }
-      setEmailSavedValue(trimmed);
-      setEmailSavingState("saved");
+      setEmailSavingState("sent");
+    } catch {
+      setEmailError("Network error");
+      setEmailSavingState("error");
+    }
+  }
+
+  async function clearNotificationEmail() {
+    setEmailError(null);
+    setEmailSavingState("saving");
+    try {
+      const res = await fetch(withBasePath("/api/profile/notifications"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notificationEmail: null }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setEmailError(data?.error ?? "Failed to remove email");
+        setEmailSavingState("error");
+        return;
+      }
+      setEmailInput("");
+      setEmailSavingState("idle");
       router.refresh();
     } catch {
       setEmailError("Network error");
@@ -185,6 +216,17 @@ export function NotificationPrefs({
 
   return (
     <div className="space-y-6">
+      {!discordLinked && !emailEnabled && (
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-400 flex items-start gap-2">
+          <Bell className="w-4 h-4 shrink-0 text-zinc-500 mt-0.5" />
+          <span>
+            Browser/device push is the only notification channel available to you right now —
+            enable it from the bell in the top bar. Link your Discord account to add another
+            channel, or ask an admin to configure email delivery.
+          </span>
+        </div>
+      )}
+
       {discordLinked && (
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -215,86 +257,102 @@ export function NotificationPrefs({
         </div>
       )}
 
-      <div>
-        <div className="flex items-center gap-2 mb-1">
-          <Mail className="w-4 h-4 text-zinc-400" />
-          <p className="text-sm font-semibold text-zinc-400">Email</p>
-        </div>
+      {emailEnabled && (
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <Mail className="w-4 h-4 text-zinc-400" />
+            <p className="text-sm font-semibold text-zinc-400">Email</p>
+          </div>
 
-        {isJellyfin ? (
-          <div className="py-3 border-b border-zinc-800">
-            <label htmlFor="notificationEmail" className="text-sm font-medium text-zinc-200 block">
-              Notification email address
-            </label>
-            <p className="text-xs text-zinc-500 mt-0.5 mb-2">
-              Where notification emails will be delivered. Jellyfin accounts don&apos;t expose a
-              verified email, so you need to set one here before email notifications will arrive.
-            </p>
-            <div className="flex gap-2">
-              <input
-                id="notificationEmail"
-                type="email"
-                value={emailInput}
-                onChange={(e) => {
-                  setEmailInput(e.target.value);
-                  if (emailSavingState !== "idle") setEmailSavingState("idle");
-                  if (emailError) setEmailError(null);
-                }}
-                placeholder="you@example.com"
-                className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                autoComplete="email"
-                spellCheck={false}
-              />
-              <button
-                type="button"
-                onClick={saveEmail}
-                disabled={emailSavingState === "saving" || emailInput.trim() === emailSavedValue}
-                className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-white transition-colors"
-              >
-                {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
-              </button>
-            </div>
-            {emailError && <p className="text-xs text-red-400 mt-1.5">{emailError}</p>}
-            {emailSavingState === "saved" && !emailError && (
-              <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
-                <Check className="w-3 h-3" /> Saved
+          {isJellyfin ? (
+            <div className="py-3 border-b border-zinc-800">
+              <label htmlFor="notificationEmail" className="text-sm font-medium text-zinc-200 block">
+                Notification email address
+              </label>
+              <p className="text-xs text-zinc-500 mt-0.5 mb-2">
+                Jellyfin accounts don&apos;t expose a verified email. Enter an address and we&apos;ll
+                send a verification link — notifications start once you click it.
               </p>
-            )}
-          </div>
-        ) : (
-          <div className="py-3 border-b border-zinc-800">
-            <p className="text-sm font-medium text-zinc-200">Notification email address</p>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              Synced from your sign-in provider. Update it there to change where notifications are delivered.
-            </p>
-            <p className="text-sm text-zinc-300 mt-2 font-mono">
-              {notificationEmail ?? <span className="text-zinc-500 italic font-sans">Not set</span>}
-            </p>
-          </div>
-        )}
+              {notificationEmail && (
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-sm text-zinc-300 font-mono">{notificationEmail}</span>
+                  <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-400/40 rounded px-1 py-0.5">verified</span>
+                  <button
+                    type="button"
+                    onClick={clearNotificationEmail}
+                    disabled={emailSavingState === "saving"}
+                    className="text-[11px] text-zinc-500 hover:text-zinc-300 underline disabled:opacity-50"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )}
+              <div className="flex gap-2">
+                <input
+                  id="notificationEmail"
+                  type="email"
+                  value={emailInput}
+                  onChange={(e) => {
+                    setEmailInput(e.target.value);
+                    if (emailSavingState !== "idle") setEmailSavingState("idle");
+                    if (emailError) setEmailError(null);
+                  }}
+                  placeholder={notificationEmail ? "change to a different address…" : "you@example.com"}
+                  className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  autoComplete="email"
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  onClick={sendVerification}
+                  disabled={emailSavingState === "saving" || emailInput.trim() === ""}
+                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-white transition-colors whitespace-nowrap"
+                >
+                  {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Send verification"}
+                </button>
+              </div>
+              {emailError && <p className="text-xs text-red-400 mt-1.5">{emailError}</p>}
+              {emailSavingState === "sent" && !emailError && (
+                <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
+                  <Check className="w-3 h-3" /> Verification email sent — check your inbox and click the link.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="py-3 border-b border-zinc-800">
+              <p className="text-sm font-medium text-zinc-200">Notification email address</p>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Synced from your sign-in provider. Update it there to change where notifications are delivered.
+              </p>
+              <p className="text-sm text-zinc-300 mt-2 font-mono">
+                {notificationEmail ?? <span className="text-zinc-500 italic font-sans">Not set</span>}
+              </p>
+            </div>
+          )}
 
-        <ToggleRow
-          label="Request Approved"
-          description="Email me when my request is approved"
-          checked={prefs.emailOnApproved}
-          onChange={() => toggle("emailOnApproved")}
-          disabled={saving}
-        />
-        <ToggleRow
-          label="Now Available"
-          description="Email me when my content is ready to watch"
-          checked={prefs.emailOnAvailable}
-          onChange={() => toggle("emailOnAvailable")}
-          disabled={saving}
-        />
-        <ToggleRow
-          label="Request Declined"
-          description="Email me when my request is declined"
-          checked={prefs.emailOnDeclined}
-          onChange={() => toggle("emailOnDeclined")}
-          disabled={saving}
-        />
-      </div>
+          <ToggleRow
+            label="Request Approved"
+            description="Email me when my request is approved"
+            checked={prefs.emailOnApproved}
+            onChange={() => toggle("emailOnApproved")}
+            disabled={saving}
+          />
+          <ToggleRow
+            label="Now Available"
+            description="Email me when my content is ready to watch"
+            checked={prefs.emailOnAvailable}
+            onChange={() => toggle("emailOnAvailable")}
+            disabled={saving}
+          />
+          <ToggleRow
+            label="Request Declined"
+            description="Email me when my request is declined"
+            checked={prefs.emailOnDeclined}
+            onChange={() => toggle("emailOnDeclined")}
+            disabled={saving}
+          />
+        </div>
+      )}
 
       <div>
         <div className="flex items-center gap-2 mb-1">

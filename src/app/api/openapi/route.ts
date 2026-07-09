@@ -111,6 +111,8 @@ const spec = {
     { name: "Requests", description: "Media request lifecycle" },
     { name: "Issues", description: "Content issue reporting" },
     { name: "Votes", description: "Deletion voting" },
+    { name: "Lists", description: "Personal watchlist and hidden (\"not interested\") titles" },
+    { name: "Notifications", description: "In-app notification inbox" },
     { name: "Ratings", description: "External ratings (MDBList / OMDB)" },
     { name: "Play History", description: "Watch history and sessions" },
     { name: "Sessions", description: "Active playback sessions" },
@@ -1557,6 +1559,214 @@ const spec = {
       },
     },
 
+    "/notifications": {
+      get: {
+        tags: ["Notifications"],
+        summary: "List the caller's in-app notifications + unread count",
+        responses: {
+          "200": {
+            description: "Recent notifications and unread count",
+            content: { "application/json": { schema: { type: "object", properties: { items: { type: "array", items: { type: "object" } }, unreadCount: { type: "integer" } } } } },
+          },
+        },
+      },
+      post: {
+        tags: ["Notifications"],
+        summary: "Mark notifications read (specific ids, or all unread when omitted)",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        },
+        responses: { "200": { description: "{ ok, unreadCount }" } },
+      },
+      delete: {
+        tags: ["Notifications"],
+        summary: "Delete notifications (specific ids, or all when omitted)",
+        requestBody: {
+          required: false,
+          content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        },
+        responses: { "200": { description: "{ ok, unreadCount }" } },
+      },
+    },
+    "/watchlist": {
+      get: {
+        tags: ["Lists"],
+        summary: "List the caller's watchlist",
+        parameters: [
+          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+          { name: "type", in: "query", schema: { $ref: "#/components/schemas/MediaType" }, description: "Filter by media type" },
+        ],
+        responses: {
+          "200": {
+            description: "Paginated watchlist items",
+            content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/PaginatedMeta" }, { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }] } } },
+          },
+        },
+      },
+      post: {
+        tags: ["Lists"],
+        summary: "Add a title to the caller's watchlist",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } } } },
+        responses: { "201": { description: "Added" }, "409": { description: "Already on watchlist" }, "422": { description: "Could not verify media with TMDB" } },
+      },
+      delete: {
+        tags: ["Lists"],
+        summary: "Remove a title from the caller's watchlist",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
+        responses: { "200": { description: "Removed (idempotent)" } },
+      },
+    },
+    "/hidden": {
+      get: {
+        tags: ["Lists"],
+        summary: "List the caller's hidden (\"not interested\") titles",
+        parameters: [{ name: "page", in: "query", schema: { type: "integer", default: 1 } }],
+        responses: {
+          "200": {
+            description: "Paginated hidden items",
+            content: { "application/json": { schema: { allOf: [{ $ref: "#/components/schemas/PaginatedMeta" }, { type: "object", properties: { items: { type: "array", items: { type: "object" } } } }] } } },
+          },
+        },
+      },
+      post: {
+        tags: ["Lists"],
+        summary: "Hide a title from the caller's discovery",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" }, title: { type: "string" }, posterPath: { type: "string", nullable: true } } } } } },
+        responses: { "201": { description: "Hidden" }, "409": { description: "Already hidden" } },
+      },
+      delete: {
+        tags: ["Lists"],
+        summary: "Un-hide a title",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
+        responses: { "200": { description: "Un-hidden (idempotent)" } },
+      },
+    },
+    "/media/{type}/{tmdbId}": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Native detail payload (title detail + related rail + availability)",
+        parameters: [
+          { name: "type", in: "path", required: true, schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "tmdbId", in: "path", required: true, schema: { type: "integer" } },
+        ],
+        responses: { "200": { description: "Title detail with availability + suggestions" }, "422": { description: "Could not load this title" }, "429": { description: "Rate limited" } },
+      },
+    },
+    "/config/public": {
+      get: {
+        tags: ["Config"],
+        summary: "Public client configuration (branding, enabled sign-in providers, feature flags)",
+        responses: { "200": { description: "Public config object" } },
+      },
+    },
+    "/play-history/calendar": {
+      get: {
+        tags: ["Play History"],
+        summary: "365-day activity heatmap data (ADMIN)",
+        responses: { "200": { description: "Calendar cells" }, "403": { description: "Forbidden — ADMIN only" } },
+      },
+    },
+    "/play-history/transcode-offenders": {
+      get: {
+        tags: ["Play History"],
+        summary: "Titles/users driving the most transcodes (ADMIN)",
+        responses: { "200": { description: "Transcode offender list" }, "403": { description: "Forbidden — ADMIN only" } },
+      },
+    },
+    "/admin/library/bad-matches": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "Library items whose TMDB match looks wrong",
+        parameters: [{ name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } }],
+        responses: { "200": { description: "Bad-match candidates" } },
+      },
+    },
+    "/discord/status": {
+      get: {
+        tags: ["Discord"],
+        summary: "Whether the caller has a linked Discord account",
+        responses: { "200": { description: "{ discordId, linked }" } },
+      },
+    },
+    "/discord/unlink": {
+      post: {
+        tags: ["Discord"],
+        summary: "Unlink the caller's Discord account",
+        responses: { "200": { description: "Unlinked" } },
+      },
+    },
+    "/report": {
+      post: {
+        tags: ["Issues"],
+        summary: "Report objectionable content (native app)",
+        requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: { contentType: { type: "string" }, contentId: { type: "string" }, context: { type: "string" }, reason: { type: "string" } } } } } },
+        responses: { "200": { description: "Report received" } },
+      },
+    },
+    "/requests/bulk": {
+      post: {
+        tags: ["Requests"],
+        summary: "Bulk-create requests, optionally on behalf of another user (REQUEST)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } }, onBehalfOfUserId: { type: "string", nullable: true } } } } },
+        },
+        responses: { "200": { description: "Per-item results" } },
+      },
+    },
+    "/requests/quality-profiles": {
+      get: {
+        tags: ["Requests"],
+        summary: "Quality profiles for the request-time picker (REQUEST_ADVANCED / MANAGE_REQUESTS)",
+        parameters: [
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "is4k", in: "query", schema: { type: "boolean" } },
+        ],
+        responses: { "200": { description: "{ qualityProfiles: [...] }" } },
+      },
+    },
+    "/requests/users": {
+      get: {
+        tags: ["Requests"],
+        summary: "Users the caller may request on behalf of (REQUEST_ON_BEHALF)",
+        responses: { "200": { description: "Eligible user list" } },
+      },
+    },
+    "/issues/{id}/claim": {
+      post: {
+        tags: ["Issues"],
+        summary: "Claim an issue (issue-admin)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Claimed" } },
+      },
+    },
+    "/push/apns": {
+      post: {
+        tags: ["Push"],
+        summary: "Register an iOS APNs device token (native)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" }, label: { type: "string" }, publicKey: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Registered" } },
+      },
+      delete: {
+        tags: ["Push"],
+        summary: "Unregister an iOS APNs device token",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["deviceToken"], properties: { deviceToken: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Unregistered" } },
+      },
+    },
     "/events": {
       get: {
         tags: ["Events"],

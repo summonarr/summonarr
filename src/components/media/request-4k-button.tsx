@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Check, Loader2, Clock } from "@/components/icons";
+import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
 // Radarr/Sonarr instance is configured and the viewer holds REQUEST_4K. Posts to
@@ -15,7 +16,7 @@ export function Request4kButton({
   requestToken,
   requested,
   available,
-  pending,
+  blacklisted,
 }: {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
@@ -23,10 +24,10 @@ export function Request4kButton({
   requested?: boolean;
   // The 4K instance already has the file — show an "Available in 4K" state instead of a CTA.
   available?: boolean;
-  // The 4K instance is already downloading/queued for this title (e.g. someone
-  // else requested it) — show a "4K Queued" state instead of a CTA.
-  pending?: boolean;
+  // The title is admin-blacklisted — no 4K request either (the request POST 403s).
+  blacklisted?: boolean;
 }) {
+  const { toast } = useToast();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
@@ -52,6 +53,7 @@ export function Request4kButton({
         return;
       }
       setState("requested");
+      toast({ title: "Requested in 4K", variant: "success" });
     } catch {
       setMsg("Network error — please try again");
       setState("error");
@@ -104,8 +106,12 @@ export function Request4kButton({
     );
   }
 
-  // The 4K copy is already in the download queue (regardless of who requested it).
-  if (pending) {
+  // A 4K copy queued by someone else does NOT block the CTA: the server mirrors
+  // the approved 4K request so this user gets the availability notification. The
+  // queue state is communicated by the "4K Queued" chip in the badges row.
+
+  // Blacklisted blocks all requests (per tmdbId+mediaType, both tiers).
+  if (blacklisted) {
     return (
       <span
         style={{
@@ -115,8 +121,8 @@ export function Request4kButton({
           border: "1px solid var(--ds-border)",
         }}
       >
-        <Clock style={{ width: 14, height: 14 }} />
-        4K Queued
+        <Ban style={{ width: 14, height: 14 }} />
+        Not available to request
       </span>
     );
   }

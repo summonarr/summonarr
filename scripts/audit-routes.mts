@@ -69,6 +69,10 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
     route: "/api/config/compat",
     reason: "intentionally public, coarse API-version descriptor (no secrets/DB) — native clients gate BEFORE sign-in; pre-auth via isPublicPath in proxy.ts",
   },
+  {
+    route: "/api/profile/notification-email/confirm",
+    reason: "public email-verification landing (clicked from email, possibly logged-out); the one-time hashed token in the query IS the credential — pre-auth via isPublicPath in proxy.ts",
+  },
 ];
 
 /**

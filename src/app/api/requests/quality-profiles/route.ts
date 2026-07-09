@@ -4,12 +4,13 @@ import { Permission } from "@/lib/permissions";
 import { listQualityProfiles } from "@/lib/arr";
 
 // Quality profiles for the Radarr/Sonarr instance a given request targets, so the
-// approve UI can offer "approve with profile X". Guarded by MANAGE_REQUESTS (the
-// same permission as the approve PATCH) rather than withAdmin — settings'
-// arr-options route is ADMIN-only and would 403 a non-admin approver.
+// approve UI can offer "approve with profile X", and the request UI can offer a
+// request-time picker to REQUEST_ADVANCED power users. Guarded by MANAGE_REQUESTS
+// OR REQUEST_ADVANCED (not withAdmin — settings' arr-options route is ADMIN-only
+// and would 403 a non-admin approver/requester).
 //   ?mediaType=MOVIE|TV  → radarr | sonarr
 //   ?is4k=true           → the optional 4K instance (default: HD)
-export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, _session) => {
+export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUEST_ADVANCED])(async (req, _ctx, _session) => {
   const sp = req.nextUrl.searchParams;
   const mediaType = sp.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {

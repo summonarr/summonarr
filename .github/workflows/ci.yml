@@ -89,6 +89,13 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Unit tests (Node's built-in runner — no test-framework dependency).
+      # Covers the pure, safety-critical leaf modules: the permission bitmask,
+      # request quotas, the native client/version gate, and the parental-rating
+      # cap. Blocking — a regression in authorization/quota logic is a defect.
+      - name: Unit tests
+        run: npm test
+
       # Security regression smoke test: exercises the SSRF policy, safe-fetch
       # caps/timeouts/allowlist, and webhook replay protection at runtime.
       # Blocking — a regression in these foundations is a security defect.
@@ -105,6 +112,14 @@ jobs:
       # ships unguarded is an auth bypass.
       - name: Route auth audit
         run: npm run audit:routes
+
+      # OpenAPI ↔ route parity: fails the build when a new API route ships that
+      # is neither documented in src/app/api/openapi/route.ts nor grandfathered
+      # in EXCEPTIONS (scripts/audit-openapi.mts), when the spec documents a
+      # path with no route, or when an EXCEPTIONS entry goes stale. Keeps the
+      # hand-maintained OpenAPI document from silently drifting from the routes.
+      - name: OpenAPI route parity
+        run: npm run audit:openapi
 
       # License compliance: THIRD_PARTY_LICENSES.txt is generated from the
       # lockfile and shipped in the Docker image (Next standalone strips

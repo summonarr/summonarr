@@ -75,7 +75,11 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith("/api/cron/") ||
     pathname === "/api/interactions" ||
     pathname === "/api/health" ||
-    pathname === "/api/config/compat"
+    pathname === "/api/config/compat" ||
+    // Notification-email verification link is clicked from an email (possibly
+    // logged-out / another device); the one-time token in the query IS the
+    // credential. Token-authed inside the handler — see audit-routes exception.
+    pathname === "/api/profile/notification-email/confirm"
   );
 }
 

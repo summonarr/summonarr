@@ -21,6 +21,9 @@ import {
   Trash2,
   Activity,
   Sparkles,
+  Ban,
+  Bookmark,
+  EyeOff,
 } from "@/components/icons";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 
@@ -82,6 +85,8 @@ export const userNavItems: NavItem[] = [
   { href: "/popular", label: "Popular on Server", icon: Flame, section: "browse" },
   { href: "/upcoming", label: "Upcoming", icon: CalendarDays, section: "browse" },
   { href: "/requests", label: "Requests", icon: ClipboardList, mobileBottomBar: true, section: "personal" },
+  { href: "/watchlist", label: "Watchlist", icon: Bookmark, section: "personal" },
+  { href: "/hidden", label: "Hidden", icon: EyeOff, section: "personal" },
   { href: "/issues", label: "My Issues", icon: MessageSquare, section: "personal" },
   { href: "/votes", label: "Vote to Delete", icon: Trash2, section: "personal" },
   { href: "/donate", label: "Donate", icon: Heart, section: "personal" },
@@ -93,6 +98,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/issues", label: "Issues", icon: AlertTriangle, section: "admin" },
   { href: "/admin/users", label: "Users", icon: Users, section: "admin" },
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin" },
+  { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },
   { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin" },
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },

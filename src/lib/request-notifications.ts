@@ -5,6 +5,8 @@ import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUse
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
+import { createInAppNotification } from "./in-app-notify";
+import { buildNotificationData } from "./notification-data";
 
 interface RequestInfo {
   requestedBy: string;
@@ -26,6 +28,34 @@ export interface PendingAvailableRequest {
   posterPath?: string | null;
   tmdbId?: number | null;
   user: { mediaServer: string | null } | null;
+}
+
+type InAppNotificationType = "REQUEST_APPROVED" | "REQUEST_AVAILABLE" | "REQUEST_DECLINED";
+
+function inAppBodyFor(type: InAppNotificationType, mediaType: string): string {
+  const label = mediaType === "MOVIE" ? "movie" : "TV show";
+  if (type === "REQUEST_APPROVED") return `Your ${label} request was approved and is downloading.`;
+  if (type === "REQUEST_AVAILABLE") return `Your ${label} is now available to watch.`;
+  return `Your ${label} request was declined.`;
+}
+
+// Best-effort in-app inbox write (the header bell). Wraps the shared writer with
+// this module's request-specific body copy. Fire-and-forget alongside the
+// email/push/Discord fan-out; UNCONDITIONAL — the inbox is a passive record the
+// user pulls, not a delivered channel to opt out of.
+function writeInAppNotification(
+  userId: string,
+  type: InAppNotificationType,
+  info: { title: string; mediaType: string; tmdbId?: number | null; posterPath?: string | null },
+): void {
+  createInAppNotification(userId, {
+    type,
+    title: info.title,
+    body: inAppBodyFor(type, info.mediaType),
+    tmdbId: info.tmdbId ?? null,
+    mediaType: info.mediaType,
+    posterPath: info.posterPath ?? null,
+  });
 }
 
 export async function notifyAvailablePerServer(
@@ -54,9 +84,56 @@ export async function notifyAvailablePerServer(
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
 
+    // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
+    void writeAvailableInAppNotifications(winners, logScope);
+
     // Email channel — webhook/sync AVAILABLE paths previously fanned out only
     // Discord + push, leaving `emailOnAvailable` a dead preference there.
     await notifyUsersRequestsAvailableEmail(winners, logScope);
+  }
+}
+
+// Shared BATCH in-app inbox writer for the "now available" fan-out. The
+// webhook-poll path (notifyAvailablePerServer above) AND all six
+// sync-orchestrator/per-source claimAvailableNotificationWinners sites route their
+// winners through here so the header bell / /notifications inbox records a
+// REQUEST_AVAILABLE row for every AVAILABLE transition (previously only the
+// webhook path did — sync-path availables never created an inbox row). The manual
+// admin path (notifyRequestStatusChange) writes single rows via
+// createInAppNotification instead. The CAS in claimAvailableNotificationWinners
+// already deduped the winner set; skipDuplicates is belt-and-suspenders. Single
+// createMany, one DB round-trip, shared field-shaping via buildNotificationData.
+// Best-effort: swallows its own
+// errors so an inbox-write blip never aborts the sync run or the triggering
+// action. Exported so the sync routes can fan out the inbox channel for their
+// winner rows. Call fire-and-forget: `void writeAvailableInAppNotifications(...)`.
+export async function writeAvailableInAppNotifications(
+  winners: Array<{
+    requestedBy: string;
+    title: string;
+    mediaType: string;
+    tmdbId?: number | null;
+    posterPath?: string | null;
+  }>,
+  logScope = "notify",
+): Promise<void> {
+  if (winners.length === 0) return;
+  try {
+    await prisma.notification.createMany({
+      data: winners.map((r) =>
+        buildNotificationData(r.requestedBy, {
+          type: "REQUEST_AVAILABLE",
+          title: r.title,
+          body: inAppBodyFor("REQUEST_AVAILABLE", r.mediaType),
+          tmdbId: r.tmdbId ?? null,
+          mediaType: r.mediaType,
+          posterPath: r.posterPath ?? null,
+        }),
+      ),
+      skipDuplicates: true,
+    });
+  } catch (err) {
+    console.error(`[${logScope}] in-app available write failed:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -171,6 +248,7 @@ export function notifyRequestStatusChange(
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
   if (status === "APPROVED") {
+    writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
@@ -182,6 +260,7 @@ export function notifyRequestStatusChange(
   }
 
   if (status === "AVAILABLE") {
+    writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
@@ -193,6 +272,7 @@ export function notifyRequestStatusChange(
   }
 
   if (status === "DECLINED") {
+    writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })

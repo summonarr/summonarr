@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { isNotificationEmailEnabled } from "@/lib/email";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { redirect } from "next/navigation";
 import { DiscordLinkSection } from "@/components/discord-link-ui";
@@ -17,7 +18,7 @@ export default async function ProfilePage() {
   const session = await authActive();
   if (!session) redirect("/login");
 
-  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions] = await Promise.all([
+  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -50,6 +51,7 @@ export default async function ProfilePage() {
         ipAddress: true, createdAt: true, lastSeenAt: true, expiresAt: true,
       },
     }),
+    isNotificationEmailEnabled(),
   ]);
   const discordInviteUrl = discordInviteSetting?.value || null;
   const pushCap = maxPushSetting?.value ? parseInt(maxPushSetting.value, 10) || 5 : 5;
@@ -149,9 +151,10 @@ export default async function ProfilePage() {
         >
           <ProfileCard
             title="Notification Preferences"
-            description="Choose which notifications you receive via Discord and email."
+            description="Choose which notifications you receive on each channel."
           >
             <NotificationPrefs
+              emailEnabled={emailEnabled}
               discordLinked={!!user?.discordId}
               isAdminRole={
                 user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"

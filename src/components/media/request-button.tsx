@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useToast } from "@/components/ui/toast";
 import {
   Plus,
   Check,
@@ -12,6 +13,7 @@ import {
   X,
   ExternalLink,
   AlertCircle,
+  Ban,
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
@@ -45,6 +47,14 @@ interface RequestButtonProps {
   // When true, show a "Request for user…" affordance (REQUEST_ON_BEHALF holders).
   // The on-behalf path posts to /api/requests/bulk, which re-checks the permission.
   canRequestOnBehalf?: boolean;
+
+  // When true, offer a request-time quality-profile picker (REQUEST_ADVANCED holders).
+  // The chosen id rides the POST body; the API re-checks the permission + validates it.
+  canChooseProfile?: boolean;
+
+  // When true, the title is admin-blacklisted: show an "unavailable to request"
+  // state instead of the request CTA. The request POST 403s regardless.
+  blacklisted?: boolean;
 }
 
 const btnBase: React.CSSProperties = {
@@ -97,7 +107,10 @@ export function RequestButton({
   showJellyfin = true,
   requestToken,
   canRequestOnBehalf = false,
+  canChooseProfile = false,
+  blacklisted = false,
 }: RequestButtonProps) {
+  const { toast } = useToast();
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
@@ -105,6 +118,20 @@ export function RequestButton({
   const [obUserId, setObUserId] = useState("");
   const [obMsg, setObMsg] = useState("");
   const [obSubmitting, setObSubmitting] = useState(false);
+  // Request-time quality profile (REQUEST_ADVANCED). profiles===null ⇒ not yet
+  // loaded; profileId==="" ⇒ use the server default.
+  const [profiles, setProfiles] = useState<{ id: number; name: string }[] | null>(null);
+  const [profileId, setProfileId] = useState<number | "">("");
+
+  function loadProfiles() {
+    if (!canChooseProfile || profiles !== null) return;
+    fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}`))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { qualityProfiles?: { id: number; name: string }[] } | null) => {
+        if (d?.qualityProfiles) setProfiles(d.qualityProfiles);
+      })
+      .catch(() => {});
+  }
 
   async function submitRequest() {
     setState("loading");
@@ -117,6 +144,7 @@ export function RequestButton({
           tmdbId,
           mediaType,
           ...(note.trim() ? { note: note.trim() } : {}),
+          ...(profileId ? { qualityProfileId: profileId } : {}),
           _token: requestToken,
         }),
       });
@@ -131,6 +159,7 @@ export function RequestButton({
         return;
       }
       setState("requested");
+      toast({ title: `Requested “${title}”`, variant: "success" });
     } catch {
       setErrorMsg("Network error — please try again");
       setState("error");
@@ -176,8 +205,39 @@ export function RequestButton({
   const isAvailable =
     (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable);
   const isDone = state === "requested" || state === "duplicate";
-  const showViewRequest = isDone || arrPending;
+  // Only the viewer's OWN request replaces the CTA. A title queued by someone
+  // else (arrPending) stays requestable: the server mirrors the approved status
+  // so this user is tracked for the "now available" notification. The queue
+  // state is still shown by the "Approved — In Queue" indicator above.
+  const showViewRequest = isDone;
   const label = mediaType === "MOVIE" ? "Movie" : "TV Show";
+
+  // Reused in the confirm and note panels. Same element in two spots is fine — it
+  // only renders when the user can choose a profile and options have loaded.
+  const profileSelect =
+    canChooseProfile && profiles && profiles.length > 0 ? (
+      <select
+        value={profileId}
+        onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : "")}
+        aria-label="Quality profile"
+        className="w-full max-w-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        style={{
+          padding: "8px 12px",
+          fontSize: 13,
+          color: "var(--ds-fg)",
+          background: "var(--ds-bg-1)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 6,
+        }}
+      >
+        <option value="">Server default quality</option>
+        {profiles.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
+      </select>
+    ) : null;
 
   return (
     <div className="flex flex-col gap-2">
@@ -226,7 +286,26 @@ export function RequestButton({
         </Link>
       )}
 
-      {!isAvailable && !showViewRequest && (
+      {!isAvailable && !showViewRequest && blacklisted && (
+        <div
+          className="flex items-center"
+          style={{
+            gap: 6,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--ds-border)",
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg-muted)",
+            fontSize: 13,
+            width: "fit-content",
+          }}
+        >
+          <Ban style={{ width: 14, height: 14 }} />
+          Not available to request
+        </div>
+      )}
+
+      {!isAvailable && !showViewRequest && !blacklisted && (
         <>
           {state === "confirm" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
@@ -249,6 +328,7 @@ export function RequestButton({
                   <span className="font-semibold">{title}</span>?
                 </p>
               </div>
+              {profileSelect}
               <div className="flex items-center gap-2">
                 <button type="button" onClick={submitRequest} style={primaryStyle}>
                   <Check style={{ width: 14, height: 14 }} />
@@ -285,6 +365,7 @@ export function RequestButton({
                   borderRadius: 6,
                 }}
               />
+              {profileSelect}
               <div className="flex items-center gap-2">
                 <button type="button" onClick={submitRequest} style={primaryStyle}>
                   <Plus style={{ width: 14, height: 14 }} />
@@ -377,7 +458,7 @@ export function RequestButton({
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="button"
-                onClick={() => setState("confirm")}
+                onClick={() => { loadProfiles(); setState("confirm"); }}
                 disabled={state === "loading"}
                 style={{
                   ...primaryStyle,
@@ -400,7 +481,7 @@ export function RequestButton({
                 <>
                   <button
                     type="button"
-                    onClick={() => setState("note")}
+                    onClick={() => { loadProfiles(); setState("note"); }}
                     title="Add a note to your request"
                     style={secondaryStyle}
                   >

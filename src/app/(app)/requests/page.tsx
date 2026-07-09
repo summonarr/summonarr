@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Film, Tv2 } from "@/components/icons";
 import Image from "next/image";
 import Link from "next/link";
@@ -107,7 +108,9 @@ export default async function RequestsPage({
   const enriched = await attachAllAvailability(
     availabilityStubs,
     session.user.id,
-    { skipRatings: true },
+    // includeHidden: a user's own requests must stay visible even if they've since
+    // hidden the title from discovery.
+    { skipRatings: true, includeHidden: true },
   );
   const availabilityByKey = new Map(
     enriched.map((e) => [`${e.id}:${e.mediaType}`, e]),
@@ -168,21 +171,11 @@ export default async function RequestsPage({
       </div>
 
       {total === 0 ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
+        <EmptyState>
           {hasFilters
             ? "No requests match these filters."
             : "No requests yet. Find something on Discover, Movies, or TV and hit Request."}
-        </div>
+        </EmptyState>
       ) : (
         <>
           <div className="flex flex-col" style={{ gap: 8 }}>

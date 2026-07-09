@@ -1,4 +1,6 @@
 import { prisma } from "./prisma";
+import { arrRequesterTagLabel } from "./arr-tags";
+import { arrSettingKey, variantToInstanceKey } from "./arr-instances";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
@@ -137,12 +139,13 @@ export async function isArrConfigured(service: "radarr" | "sonarr", variant: Arr
 }
 
 async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = "hd"): Promise<ArrCfgFull | null> {
-  // HD keys are e.g. "radarrUrl"; 4K keys insert the "4k" segment → "radarr4kUrl".
-  const suffix      = variant === "4k" ? "4k" : "";
-  const urlKey      = `${service}${suffix}Url`;
-  const keyKey      = `${service}${suffix}ApiKey`;
-  const folderKey   = `${service}${suffix}RootFolder`;
-  const profileKey  = `${service}${suffix}QualityProfileId`;
+  // Key derivation is centralized in arr-instances.ts (the single place that
+  // knows how an instance maps to Setting keys) — Phase 1 of N-instance support.
+  const instance    = variantToInstanceKey(variant);
+  const urlKey      = arrSettingKey(service, instance, "Url");
+  const keyKey      = arrSettingKey(service, instance, "ApiKey");
+  const folderKey   = arrSettingKey(service, instance, "RootFolder");
+  const profileKey  = arrSettingKey(service, instance, "QualityProfileId");
   const rows = await prisma.setting.findMany({
     where: { key: { in: [urlKey, keyKey, folderKey, profileKey] } },
   });
@@ -316,7 +319,45 @@ export interface ArrRelease {
   downloadAllowed: boolean;
 }
 
-export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number): Promise<void> {
+// Requester tagging (Overseerr parity) — BEST-EFFORT. A grabbed request is tagged
+// in Radarr/Sonarr with the requesting user's label so an admin can filter media
+// by requester in the *arr UI. Tags are additive metadata with no effect on
+// quality/download, so any tagging failure is logged and the add proceeds
+// UNTAGGED — it must NEVER fail the add.
+
+// Find-or-create a tag by label; returns its id, or null on ANY failure so the
+// caller proceeds untagged rather than failing the add.
+async function ensureArrTag(cfg: ArrCfgFull, label: string): Promise<number | null> {
+  try {
+    const tags = await arrFetch<{ id: number; label: string }[]>(cfg, "/api/v3/tag");
+    const existing = tags.find((t) => t.label.toLowerCase() === label.toLowerCase());
+    if (existing) return existing.id;
+    const created = await arrFetch<{ id: number }>(cfg, "/api/v3/tag", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    });
+    return typeof created?.id === "number" ? created.id : null;
+  } catch (err) {
+    console.warn("[arr] requester-tag ensure failed (proceeding untagged):", sanitizeForLog(err instanceof Error ? err.message : String(err)));
+    return null;
+  }
+}
+
+// Resolve the requester's tag id(s) for an instance. Looks the user up for a
+// human-readable label; returns [] on any failure (⇒ the add stays untagged).
+async function resolveRequesterTagIds(cfg: ArrCfgFull, requesterUserId: string | null | undefined): Promise<number[]> {
+  if (!requesterUserId) return [];
+  try {
+    const user = await prisma.user.findUnique({ where: { id: requesterUserId }, select: { name: true, email: true } });
+    const id = await ensureArrTag(cfg, arrRequesterTagLabel(user?.name, user?.email, requesterUserId));
+    return id != null ? [id] : [];
+  } catch (err) {
+    console.warn("[arr] requester-tag resolve failed (proceeding untagged):", sanitizeForLog(err instanceof Error ? err.message : String(err)));
+    return [];
+  }
+}
+
+export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number, requesterUserId?: string | null): Promise<void> {
   const cfg = await getCfg("radarr", variant);
   if (!cfg) throw new Error(variant === "4k" ? "Radarr 4K is not configured" : "Radarr is not configured");
 
@@ -341,6 +382,7 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd
 
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
+  const tagIds = await resolveRequesterTagIds(cfg, requesterUserId);
 
   const movie = movies[0];
   const now = new Date();
@@ -368,6 +410,7 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "hd
         rootFolderPath,
         ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
+        ...(tagIds.length ? { tags: tagIds } : {}),
         monitored: true,
         addOptions: { searchForMovie: movieReleased },
       }),
@@ -506,8 +549,8 @@ export async function getSeriesFirstAired(tmdbId: number): Promise<string | null
   } catch { return null; }
 }
 
-export async function isMovieWantedInRadarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("radarr");
+export async function isMovieWantedInRadarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("radarr", variant);
   if (!cfg) return false;
   try {
     const movies = await arrFetch<{ tmdbId: number; hasFile: boolean }[]>(
@@ -519,8 +562,8 @@ export async function isMovieWantedInRadarr(tmdbId: number): Promise<boolean> {
   }
 }
 
-export async function isSeriesWantedInSonarr(tmdbId: number): Promise<boolean> {
-  const cfg = await getCfg("sonarr");
+export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant = "hd"): Promise<boolean> {
+  const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
     const lookup = await arrFetch<{ tvdbId: number }[]>(
@@ -841,7 +884,7 @@ export async function grabSeriesRelease(
   });
 }
 
-export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number): Promise<number> {
+export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "hd", qualityProfileIdOverride?: number, requesterUserId?: string | null): Promise<number> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error(variant === "4k" ? "Sonarr 4K is not configured" : "Sonarr is not configured");
 
@@ -871,6 +914,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
 
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
+  const tagIds = await resolveRequesterTagIds(cfg, requesterUserId);
 
   // Explicit allowlist of POST body fields — previous code spread the entire
   // lookup row (~30 fields, untyped) which silently forwarded whatever Sonarr
@@ -889,6 +933,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "h
         rootFolderPath,
         ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
+        ...(tagIds.length ? { tags: tagIds } : {}),
         monitored: true,
         addOptions: { searchForMissingEpisodes: seriesReleased },
       }),
