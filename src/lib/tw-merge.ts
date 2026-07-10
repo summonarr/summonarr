@@ -134,8 +134,11 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["ring-offset", /^ring-offset-/],
   ["ring", /^ring-/],
 
-  ["shadow", /^shadow(?:-|$)/],
+  // shadow-color must precede shadow (groupOf returns the FIRST match) or the
+  // negative-lookahead color entry is unreachable and sizes/colors wrongly
+  // collapse into one group — same ordering rule as border-w/border-color above.
   ["shadow-color", /^shadow-(?!sm|md|lg|xl|2xl|inner|none)/],
+  ["shadow", /^shadow(?:-|$)/],
   ["opacity", /^opacity-/],
 
   ["transition", /^transition(?:-|$)/],
