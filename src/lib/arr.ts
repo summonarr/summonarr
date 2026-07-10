@@ -174,11 +174,14 @@ export async function listQualityProfiles(
 }
 
 export class ArrResponseError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly body: string,
-  ) {
+  // Explicit fields (not constructor parameter properties) so the module loads
+  // under Node's strip-only TS mode — the unit suite imports it.
+  public readonly status: number;
+  public readonly body: string;
+  constructor(status: number, body: string) {
     super(`Arr service returned a non-200 response (${status})`);
+    this.status = status;
+    this.body = body;
   }
 }
 

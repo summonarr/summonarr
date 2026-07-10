@@ -14,7 +14,7 @@
     "audit:deps": "node scripts/audit-deps.mts",
     "audit:routes": "node scripts/audit-routes.mts",
     "audit:openapi": "node scripts/audit-openapi.mts",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test tests/*.test.mts",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
     "smoke:security": "tsx scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"

@@ -47,3 +47,18 @@ test("optional tmdbId/posterPath default to null", () => {
   assert.equal(row.tmdbId, null);
   assert.equal(row.posterPath, null);
 });
+
+test("falsy-but-present values pass through: tmdbId 0 stays 0, posterPath '' stays ''", () => {
+  // Pins the `?? null` semantics. A plausible refactor to `|| null` would
+  // silently coerce these falsy inputs to null — tmdbId: 0 is the only numeric
+  // input that distinguishes the two operators.
+  const row = buildNotificationData("u", {
+    type: "REQUEST_APPROVED",
+    title: "a",
+    body: "b",
+    tmdbId: 0,
+    posterPath: "",
+  });
+  assert.equal(row.tmdbId, 0);
+  assert.equal(row.posterPath, "");
+});
