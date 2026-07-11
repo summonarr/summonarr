@@ -23,9 +23,13 @@ const KEY_LEN = 32;
 export const ENCRYPTED_MAGIC = MAGIC;
 
 export class BackupCryptoError extends Error {
-  constructor(message: string, public readonly status: number = 400) {
+  // Written as an explicit field (not a constructor parameter property) so the
+  // module loads under Node's strip-only TS mode — the unit suite imports it.
+  public readonly status: number;
+  constructor(message: string, status: number = 400) {
     super(message);
     this.name = "BackupCryptoError";
+    this.status = status;
   }
 }
 
@@ -84,18 +88,27 @@ export function wrapEncryptStream(
           headerSent = true;
           return;
         }
-        const { value, done } = await reader.read();
-        if (done) {
-          const finalCt = cipher.final();
-          if (finalCt.length > 0) controller.enqueue(new Uint8Array(finalCt));
-          const tag = cipher.getAuthTag();
-          controller.enqueue(new Uint8Array(tag));
-          controller.close();
-          return;
-        }
-        if (value && value.byteLength > 0) {
-          const ct = cipher.update(value);
-          if (ct.length > 0) controller.enqueue(new Uint8Array(ct));
+        // Loop until something is enqueued or the stream closes: a pull that
+        // fulfills without enqueuing is never re-invoked while a read is
+        // pending (WHATWG Streams), so returning early on an empty source
+        // chunk would stall the consumer forever.
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) {
+            const finalCt = cipher.final();
+            if (finalCt.length > 0) controller.enqueue(new Uint8Array(finalCt));
+            const tag = cipher.getAuthTag();
+            controller.enqueue(new Uint8Array(tag));
+            controller.close();
+            return;
+          }
+          if (value && value.byteLength > 0) {
+            const ct = cipher.update(value);
+            if (ct.length > 0) {
+              controller.enqueue(new Uint8Array(ct));
+              return;
+            }
+          }
         }
       } catch (err) {
         controller.error(err);
@@ -161,39 +174,50 @@ export function wrapDecryptStream(
         }
         if (!decipher) await ensureHeader();
 
-        const { value, done: readerDone } = await reader.read();
-        if (readerDone) {
-          done = true;
-          if (tail.length < TAG_LEN) {
-            throw new BackupCryptoError("Backup file is truncated (missing auth tag)");
+        // Loop until something is enqueued or the stream closes: a pull that
+        // fulfills without enqueuing is never re-invoked while a read is
+        // pending (WHATWG Streams). Small incoming chunks that only grow the
+        // tag-reserve tail must keep reading, not return — returning here
+        // stalled the whole decrypt when chunk boundaries fell inside the
+        // 16-byte reserve.
+        for (;;) {
+          const { value, done: readerDone } = await reader.read();
+          if (readerDone) {
+            done = true;
+            if (tail.length < TAG_LEN) {
+              throw new BackupCryptoError("Backup file is truncated (missing auth tag)");
+            }
+            const tag = tail.subarray(tail.length - TAG_LEN);
+            const remaining = tail.subarray(0, tail.length - TAG_LEN);
+            if (remaining.length > 0) {
+              const pt = decipher!.update(remaining);
+              if (pt.length > 0) controller.enqueue(new Uint8Array(pt));
+            }
+            decipher!.setAuthTag(tag);
+            try {
+              const finalPt = decipher!.final();
+              if (finalPt.length > 0) controller.enqueue(new Uint8Array(finalPt));
+            } catch {
+              throw new BackupCryptoError("Invalid password or corrupted backup");
+            }
+            controller.close();
+            return;
           }
-          const tag = tail.subarray(tail.length - TAG_LEN);
-          const remaining = tail.subarray(0, tail.length - TAG_LEN);
-          if (remaining.length > 0) {
-            const pt = decipher!.update(remaining);
-            if (pt.length > 0) controller.enqueue(new Uint8Array(pt));
-          }
-          decipher!.setAuthTag(tag);
-          try {
-            const finalPt = decipher!.final();
-            if (finalPt.length > 0) controller.enqueue(new Uint8Array(finalPt));
-          } catch {
-            throw new BackupCryptoError("Invalid password or corrupted backup");
-          }
-          controller.close();
-          return;
-        }
 
-        const incoming = Buffer.from(value);
-        const combined = tail.length > 0 ? Buffer.concat([tail, incoming]) : incoming;
-        if (combined.length <= TAG_LEN) {
-          tail = combined;
-          return;
+          const incoming = Buffer.from(value);
+          const combined = tail.length > 0 ? Buffer.concat([tail, incoming]) : incoming;
+          if (combined.length <= TAG_LEN) {
+            tail = combined;
+            continue;
+          }
+          const releasable = combined.subarray(0, combined.length - TAG_LEN);
+          tail = Buffer.from(combined.subarray(combined.length - TAG_LEN));
+          const pt = decipher!.update(releasable);
+          if (pt.length > 0) {
+            controller.enqueue(new Uint8Array(pt));
+            return;
+          }
         }
-        const releasable = combined.subarray(0, combined.length - TAG_LEN);
-        tail = Buffer.from(combined.subarray(combined.length - TAG_LEN));
-        const pt = decipher!.update(releasable);
-        if (pt.length > 0) controller.enqueue(new Uint8Array(pt));
       } catch (err) {
         controller.error(err);
       }

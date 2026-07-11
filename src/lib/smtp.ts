@@ -52,6 +52,17 @@ const NUL = Buffer.from([0]);
 
 // ─── Address helpers ────────────────────────────────────────────────────────
 
+// Strip CR/LF (and NUL) from address fields before they reach header lines or
+// the SMTP envelope — a raw CRLF in From/To would otherwise inject arbitrary
+// message headers (via buildMessage) or SMTP commands (via MAIL FROM/RCPT TO).
+// The sole current caller (email.ts sendOne) already strips newlines with
+// safeHeader(); this is defense-in-depth at the layer that writes the wire
+// format, matching the protection encodeSubject already gives the Subject line
+// (non-printable input goes through the RFC 2047 base64 path).
+function sanitizeAddressField(addr: string): string {
+  return addr.replace(/[\r\n\0]/g, "");
+}
+
 // Extract the bare addr-spec from `"Name" <addr@host>` or `addr@host`.
 // SMTP envelope (MAIL FROM, RCPT TO) requires just `<addr@host>`.
 function extractAddrSpec(addr: string): string {
@@ -420,6 +431,10 @@ async function connectSocket(config: SmtpConfig): Promise<net.Socket | tls.TLSSo
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<void> {
+  // Single choke point for the CRLF-injection defense: everything below —
+  // extractAddrSpec (envelope), extractDomain (Message-ID), and buildMessage
+  // (From:/To: header lines) — reads from this sanitized copy.
+  msg = { ...msg, from: sanitizeAddressField(msg.from), to: sanitizeAddressField(msg.to) };
   const socket = await connectSocket(config);
   const conn = new SmtpConnection(socket);
 

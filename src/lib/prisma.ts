@@ -1,7 +1,7 @@
 import { PrismaClient } from "@/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { decryptToken, encryptToken } from "@/lib/token-crypto";
-import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
+import { isSensitiveSettingKey } from "@/lib/settings-sensitive-keys";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
@@ -9,8 +9,10 @@ const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient 
 // Single source of truth — see src/lib/settings-sensitive-keys.ts. Previously
 // this list was duplicated in prisma.ts and settings/route.ts; the lists drifted
 // (six dead keys in this file with no counterpart in the writable schema), so
-// any add-a-key change had to remember both spots.
-const SENSITIVE_KEYS = SETTINGS_SENSITIVE_KEYS_SET;
+// any add-a-key change had to remember both spots. `isSensitiveSettingKey` also
+// matches per-instance Radarr/Sonarr secret keys (radarr<Slug>ApiKey/WebhookSecret)
+// which can't be statically enumerated once instance slugs are admin-defined.
+const isSensitiveKey = isSensitiveSettingKey;
 
 // Account columns whose contents are OAuth secrets and must never sit at rest in plaintext.
 const ACCOUNT_TOKEN_FIELDS = ["refresh_token", "access_token", "id_token"] as const;
@@ -70,7 +72,7 @@ export function getSettingDecryptFailures(): string[] {
 // project `key`), we conservatively fall through to the decrypt path so a sensitive read
 // still works — at the cost of a possible false-positive warning, which is the prior behavior.
 function safeDecryptSettingValue(key: string | undefined, value: string): string {
-  if (typeof key === "string" && !SENSITIVE_KEYS.has(key)) {
+  if (typeof key === "string" && !isSensitiveKey(key)) {
     return value;
   }
   // Cleared sensitive keys (e.g. apnsRelayKey, which is CLEARABLE) persist as
@@ -138,7 +140,7 @@ function createPrismaClient() {
           if (
             data &&
             typeof data.key === "string" &&
-            SENSITIVE_KEYS.has(data.key) &&
+            isSensitiveKey(data.key) &&
             typeof data.value === "string" &&
             data.value.length > 0
           ) {
@@ -154,14 +156,14 @@ function createPrismaClient() {
           if (newValue !== undefined && newValue.length > 0) {
             const key = where?.key;
             if (typeof key === "string") {
-              if (SENSITIVE_KEYS.has(key)) {
+              if (isSensitiveKey(key)) {
                 (data as { value: string }).value = encryptToken(newValue);
               }
             } else {
               // Rare path: where uses something other than `key` (e.g. `id`). Read the row to
               // discover its key, then encrypt if needed. Best-effort — falls through on miss.
               const existing = await base.setting.findFirst({ where: args.where });
-              if (existing && SENSITIVE_KEYS.has(existing.key)) {
+              if (existing && isSensitiveKey(existing.key)) {
                 (data as { value: string }).value = encryptToken(newValue);
               }
             }
@@ -171,7 +173,7 @@ function createPrismaClient() {
         async upsert({ args, query }) {
           const where = args.where as { key?: string } | undefined;
           const key = where?.key;
-          if (typeof key === "string" && SENSITIVE_KEYS.has(key)) {
+          if (typeof key === "string" && isSensitiveKey(key)) {
             const create = args.create as { value?: unknown } | undefined;
             if (create && typeof create.value === "string" && create.value.length > 0) {
               (create as { value: string }).value = encryptToken(create.value);
@@ -191,7 +193,7 @@ function createPrismaClient() {
                 row &&
                 typeof row === "object" &&
                 typeof (row as { key?: unknown }).key === "string" &&
-                SENSITIVE_KEYS.has((row as { key: string }).key) &&
+                isSensitiveKey((row as { key: string }).key) &&
                 typeof (row as { value?: unknown }).value === "string" &&
                 ((row as { value: string }).value.length > 0)
               ) {
@@ -202,7 +204,7 @@ function createPrismaClient() {
             data &&
             typeof data === "object" &&
             typeof (data as { key?: unknown }).key === "string" &&
-            SENSITIVE_KEYS.has((data as { key: string }).key) &&
+            isSensitiveKey((data as { key: string }).key) &&
             typeof (data as { value?: unknown }).value === "string" &&
             ((data as { value: string }).value.length > 0)
           ) {

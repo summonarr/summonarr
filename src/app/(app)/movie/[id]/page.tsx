@@ -48,9 +48,11 @@ export default async function MovieDetailPage({
     prisma.jellyfinLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
     }),
-    prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: false } } }),
+    prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
     session ? prisma.mediaRequest.findFirst({
-      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, is4k: false, status: { not: "DECLINED" } },
+      // Any non-4K instance: the main request button owns the default AND named
+      // (auto-routed, e.g. anime) requests; only 4K has its own separate button.
+      where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: { not: "4k" }, status: { not: "DECLINED" } },
       select: { id: true },
     }) : Promise.resolve(null),
     session ? prisma.deletionVote.findFirst({
@@ -84,13 +86,13 @@ export default async function MovieDetailPage({
     isArrConfigured("radarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
-          where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, is4k: true, status: { not: "DECLINED" } },
+          where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
           select: { id: true },
         })
       : Promise.resolve(null),
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
-    prisma.radarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
-    prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId: media.id, is4k: true } } }),
+    prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
+    prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
   ]);
   const requested4k = !!userRequest4k;
   const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true") : false;

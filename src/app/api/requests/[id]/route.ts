@@ -79,7 +79,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
-    const variant = existing.is4k ? "4k" : "hd";
+    const variant = existing.arrInstance;
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
@@ -116,7 +116,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         });
       }
     }
-    const variant = existing.is4k ? "4k" : "hd";
+    const variant = existing.arrInstance;
     // Forward the requester's stored profile on retry, consistent with the approve
     // path's effectiveProfileId — a bare re-push previously dropped it to default.
     const retryProfileId = existing.qualityProfileId ?? undefined;
@@ -270,7 +270,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
-    const variant = updated.is4k ? "4k" : "hd";
+    const variant = updated.arrInstance;
     // The admin's one-time picker choice (qualityProfileId) wins; otherwise fall
     // back to the profile the requester chose at request time (REQUEST_ADVANCED),
     // else the instance default (undefined).

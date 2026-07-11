@@ -3,6 +3,7 @@
 import { prisma } from "./prisma";
 import { safeFetchTrusted } from "./safe-fetch";
 import { arrFetch, ArrResponseError, getArrCfg, type ArrCfg, type ArrVariant } from "./arr";
+import { getSyncableArrInstances } from "./arr-instance-registry";
 import { BATCH_TX_TIMEOUT } from "./cron-auth";
 import {
   isCustomFormatPayload,
@@ -789,7 +790,7 @@ async function recordApply(
   outcome:
     | { ok: true; remoteId?: number; recreated?: boolean }
     | { ok: false; error: string },
-  is4k: boolean,
+  arrInstance: string,
 ): Promise<ApplyResult> {
   // Race-safety: when two `applySpecs` runs interleave on the same spec (admin Apply during a cron
   // run after lock contention is resolved), a read-modify-write on errorCount loses one of the
@@ -808,9 +809,9 @@ async function recordApply(
       ...(outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}),
     };
     await prisma.trashApplication.upsert({
-      where: { trashSpecId_is4k: { trashSpecId: spec.id, is4k } },
+      where: { trashSpecId_arrInstance: { trashSpecId: spec.id, arrInstance } },
       update: updateData,
-      create: { trashSpecId: spec.id, is4k, ...updateData },
+      create: { trashSpecId: spec.id, arrInstance, ...updateData },
     });
   } else {
     const lastErrorAt = new Date();
@@ -821,7 +822,7 @@ async function recordApply(
     };
     try {
       await prisma.trashApplication.update({
-        where: { trashSpecId_is4k: { trashSpecId: spec.id, is4k } },
+        where: { trashSpecId_arrInstance: { trashSpecId: spec.id, arrInstance } },
         data: failureUpdate,
       });
     } catch (err) {
@@ -830,7 +831,7 @@ async function recordApply(
         await prisma.trashApplication.create({
           data: {
             trashSpecId: spec.id,
-            is4k,
+            arrInstance,
             lastError: outcome.error,
             lastErrorAt,
             errorCount: 1,
@@ -841,7 +842,7 @@ async function recordApply(
         // Concurrent create from another path won the race — increment our count via update instead
         // so the failure tally still reflects this attempt.
         await prisma.trashApplication.update({
-          where: { trashSpecId_is4k: { trashSpecId: spec.id, is4k } },
+          where: { trashSpecId_arrInstance: { trashSpecId: spec.id, arrInstance } },
           data: failureUpdate,
         });
       }
@@ -865,11 +866,11 @@ export async function applyCustomFormats(
   specIds: string[],
   variant: ArrVariant = "hd",
 ): Promise<ApplyResult[]> {
-  const is4k = variant === "4k";
+  const arrInstance = variant === "hd" ? "" : variant;
   const cfg = await resolveCfg(service, variant);
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "CUSTOM_FORMAT" },
-    include: { applications: { where: { is4k } } },
+    include: { applications: { where: { arrInstance } } },
   });
   if (specs.length === 0) return [];
 
@@ -883,7 +884,7 @@ export async function applyCustomFormats(
     // guessing (also satisfies GR7: surface the error).
     console.warn("[trash] failed to prefetch remote customformat list:", err instanceof Error ? err.message : err);
     return Promise.all(
-      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, is4k)),
+      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, arrInstance)),
     );
   }
 
@@ -919,9 +920,9 @@ export async function applyCustomFormats(
           body: JSON.stringify(body),
         });
       }
-      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }, is4k));
+      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }, arrInstance));
     } catch (err) {
-      results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }, is4k));
+      results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }, arrInstance));
     }
   }
   return results;
@@ -933,7 +934,7 @@ export async function applyCustomFormatGroups(
   specIds: string[],
   variant: ArrVariant = "hd",
 ): Promise<ApplyResult[]> {
-  const is4k = variant === "4k";
+  const arrInstance = variant === "hd" ? "" : variant;
   const groups = await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "CUSTOM_FORMAT_GROUP" },
   });
@@ -977,7 +978,7 @@ export async function applyCustomFormatGroups(
       results.push(await recordApply(g, {
         ok: false,
         error: `No member custom formats found in catalog (${memberIds.length} expected). Refresh Catalog first.`,
-      }, is4k));
+      }, arrInstance));
       continue;
     }
     if (failedRequired.length > 0) {
@@ -986,10 +987,10 @@ export async function applyCustomFormatGroups(
       results.push(await recordApply(g, {
         ok: false,
         error: `Required CF apply failed: ${names}${more}`,
-      }, is4k));
+      }, arrInstance));
       continue;
     }
-    results.push(await recordApply(g, { ok: true }, is4k));
+    results.push(await recordApply(g, { ok: true }, arrInstance));
   }
   return results;
 }
@@ -1054,7 +1055,7 @@ export async function applyNaming(
   specIds: string[],
   variant: ArrVariant = "hd",
 ): Promise<ApplyResult[]> {
-  const is4k = variant === "4k";
+  const arrInstance = variant === "hd" ? "" : variant;
   const cfg = await resolveCfg(service, variant);
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "NAMING" },
@@ -1076,12 +1077,12 @@ export async function applyNaming(
       body: JSON.stringify(merged),
     });
     const results: ApplyResult[] = [];
-    for (const spec of specs) results.push(await recordApply(spec, { ok: true }, is4k));
+    for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
     return results;
   } catch (err) {
     const message = formatArrError(err);
     const results: ApplyResult[] = [];
-    for (const spec of specs) results.push(await recordApply(spec, { ok: false, error: message }, is4k));
+    for (const spec of specs) results.push(await recordApply(spec, { ok: false, error: message }, arrInstance));
     return results;
   }
 }
@@ -1092,7 +1093,7 @@ export async function applyQualitySizes(
   specIds: string[],
   variant: ArrVariant = "hd",
 ): Promise<ApplyResult[]> {
-  const is4k = variant === "4k";
+  const arrInstance = variant === "hd" ? "" : variant;
   const cfg = await resolveCfg(service, variant);
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "QUALITY_SIZE" },
@@ -1131,12 +1132,12 @@ export async function applyQualitySizes(
     });
 
     const results: ApplyResult[] = [];
-    for (const spec of specs) results.push(await recordApply(spec, { ok: true }, is4k));
+    for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
     return results;
   } catch (err) {
     const message = formatArrError(err);
     const results: ApplyResult[] = [];
-    for (const spec of specs) results.push(await recordApply(spec, { ok: false, error: message }, is4k));
+    for (const spec of specs) results.push(await recordApply(spec, { ok: false, error: message }, arrInstance));
     return results;
   }
 }
@@ -1171,13 +1172,14 @@ async function buildProfileBody(
   const schemaItems = (schema.items as RemoteQualityItem[] | undefined) ?? [];
 
   const referencedTrashIds = new Set<string>(Object.values(profile.formatItems ?? {}));
-  // Resolve referenced CFs to remoteIds for THIS variant's instance. The 4K Radarr/Sonarr assigns
-  // its own customformat ids, so a 4K profile must map against is4k=true applications — mixing in
-  // HD remoteIds would point the profile at the wrong (or non-existent) CFs on the 4K instance.
+  // Resolve referenced CFs to remoteIds for THIS instance. Each Radarr/Sonarr instance assigns
+  // its own customformat ids, so a profile must map against that instance's applications — mixing in
+  // another instance's remoteIds would point the profile at the wrong (or non-existent) CFs.
+  const arrInstance = variant === "hd" ? "" : variant;
   const applications = await prisma.trashApplication.findMany({
     where: {
       enabled: true,
-      is4k: variant === "4k",
+      arrInstance,
       trashSpec: { service, kind: "CUSTOM_FORMAT", trashId: { in: [...referencedTrashIds] } },
     },
     include: { trashSpec: true },
@@ -1310,11 +1312,11 @@ export async function applyQualityProfiles(
   specIds: string[],
   variant: ArrVariant = "hd",
 ): Promise<ApplyResult[]> {
-  const is4k = variant === "4k";
+  const arrInstance = variant === "hd" ? "" : variant;
   const cfg = await resolveCfg(service, variant);
   const specs = await prisma.trashSpec.findMany({
     where: { id: { in: specIds }, service, kind: "QUALITY_PROFILE" },
-    include: { applications: { where: { is4k } } },
+    include: { applications: { where: { arrInstance } } },
   });
   if (specs.length === 0) return [];
 
@@ -1327,7 +1329,7 @@ export async function applyQualityProfiles(
     // them. Fail the whole batch instead of guessing (also satisfies GR7).
     console.warn("[trash] failed to prefetch remote qualityprofile list:", err instanceof Error ? err.message : err);
     return Promise.all(
-      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, is4k)),
+      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, arrInstance)),
     );
   }
 
@@ -1355,9 +1357,9 @@ export async function applyQualityProfiles(
           body: JSON.stringify(body),
         });
       }
-      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }, is4k));
+      results.push(await recordApply(spec, { ok: true, remoteId: created.id, recreated }, arrInstance));
     } catch (err) {
-      results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }, is4k));
+      results.push(await recordApply(spec, { ok: false, error: formatArrError(err) }, arrInstance));
     }
   }
   return results;
@@ -1443,7 +1445,7 @@ export interface TrashSyncResult {
 // bypasses this — it's an explicit user action that should always hit GitHub.
 const REFRESH_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
-// Cron entry point: refreshes the catalog from GitHub (gated to hourly) when enabled, then applies all enabled specs for both HD and 4K instances.
+// Cron entry point: refreshes the catalog from GitHub (gated to hourly) when enabled, then applies all enabled specs across every configured instance per service.
 export async function runTrashSync(): Promise<TrashSyncResult> {
   const settings = await prisma.setting.findMany({
     where: {
@@ -1506,17 +1508,26 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
   if (map.trashSyncQualityProfiles !== "false") enabledKinds.push("QUALITY_PROFILE");
   if (map.trashSyncQualitySizes !== "false") enabledKinds.push("QUALITY_SIZE");
 
-  // Apply each instance variant independently. The HD pass mirrors the original behaviour; the 4K
-  // pass is a no-op unless an admin has created is4k=true applications (only possible once a 4K
-  // instance is configured), so HD-only deployments behave identically.
+  // Apply each configured instance independently. The default ("") pass mirrors the original
+  // behaviour; every named/4K instance is a no-op unless an admin has created applications for its
+  // slug (only possible once that instance is configured), so single-instance deployments behave
+  // identically. We fan out per service so a service's specs only target that service's instances.
   const applied: ApplyResult[] = [];
-  for (const is4k of [false, true]) {
-    const applications = await prisma.trashApplication.findMany({
-      where: { enabled: true, is4k, trashSpec: { kind: { in: enabledKinds } } },
-      select: { trashSpecId: true },
-    });
-    if (applications.length === 0) continue;
-    applied.push(...(await applySpecs(applications.map((a) => a.trashSpecId), is4k ? "4k" : "hd")));
+  for (const service of services) {
+    const arrService = service === "RADARR" ? "radarr" : "sonarr";
+    const instances = await getSyncableArrInstances(arrService);
+    for (const inst of instances) {
+      const applications = await prisma.trashApplication.findMany({
+        where: {
+          enabled: true,
+          arrInstance: inst.slug,
+          trashSpec: { service, kind: { in: enabledKinds } },
+        },
+        select: { trashSpecId: true },
+      });
+      if (applications.length === 0) continue;
+      applied.push(...(await applySpecs(applications.map((a) => a.trashSpecId), inst.slug)));
+    }
   }
 
   for (const r of applied) {
@@ -1549,7 +1560,7 @@ export interface SpecStatus {
 export async function listSpecs(service: TrashService, variant: ArrVariant = "hd"): Promise<SpecStatus[]> {
   const rows = await prisma.trashSpec.findMany({
     where: { service },
-    include: { applications: { where: { is4k: variant === "4k" } } },
+    include: { applications: { where: { arrInstance: variant === "hd" ? "" : variant } } },
     orderBy: [{ kind: "asc" }, { name: "asc" }],
   });
   return rows.map((r) => {
@@ -1587,7 +1598,7 @@ export interface SpecDetail extends SpecStatus {
 export async function getSpecDetail(id: string, variant: ArrVariant = "hd"): Promise<SpecDetail | null> {
   const row = await prisma.trashSpec.findUnique({
     where: { id },
-    include: { applications: { where: { is4k: variant === "4k" } } },
+    include: { applications: { where: { arrInstance: variant === "hd" ? "" : variant } } },
   });
   if (!row) return null;
   const app = row.applications[0] ?? null;

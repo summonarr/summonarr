@@ -63,10 +63,10 @@ export const GET = withAuth(async (
         distinct: ["tmdbId", "mediaType"],
       }),
       movieIds.length > 0
-        ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
+        ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, arrInstance: "" }, select: { tmdbId: true } })
         : Promise.resolve([]),
       tvIds.length > 0
-        ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
+        ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, arrInstance: "" }, select: { tmdbId: true } })
         : Promise.resolve([]),
     ]);
 

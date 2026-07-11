@@ -4,9 +4,11 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 // "Pending" means the item exists in the Radarr/Sonarr wanted table — it does NOT confirm the item
 // is actively downloading.  A negative result here only means it isn't tracked, not that it's absent.
 //
-// `include4k` additionally resolves the 4K instance partitions: arr4kAvailable (the 4K Radarr/Sonarr
-// has the file) and arr4kPending (wanted in 4K but not yet fetched). It's off by default so HD-only
-// callers run exactly the queries they always did; the 4K rows only exist when a 4K instance is synced.
+// Multi-instance: one unfiltered query per table returns the (tmdbId, arrInstance) rows for every
+// configured instance. From those we derive:
+//   arrPending                    — wanted at the DEFAULT instance ("")            [back-compat]
+//   arr4kPending / arr4kAvailable — wanted/available at the "4k" instance          [back-compat, gated by include4k]
+//   arrInstances                  — the full per-slug { pending, available } map    [named-instance UI]
 export async function attachArrPending(
   items: TmdbMedia[],
   opts?: { include4k?: boolean },
@@ -17,43 +19,55 @@ export async function attachArrPending(
   const movieIds = items.filter((i) => i.mediaType === "movie").map((i) => i.id);
   const tvIds    = items.filter((i) => i.mediaType === "tv").map((i) => i.id);
 
-  const [radarrRows, sonarrRows, radarr4kWanted, sonarr4kWanted, radarr4kAvail, sonarr4kAvail] = await Promise.all([
+  const [radarrWanted, sonarrWanted, radarrAvail, sonarrAvail] = await Promise.all([
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true, arrInstance: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true, arrInstance: true } })
       : Promise.resolve([]),
-    include4k && movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: true }, select: { tmdbId: true } })
+    movieIds.length > 0
+      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true, arrInstance: true } })
       : Promise.resolve([]),
-    include4k && tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: true }, select: { tmdbId: true } })
-      : Promise.resolve([]),
-    include4k && movieIds.length > 0
-      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: true }, select: { tmdbId: true } })
-      : Promise.resolve([]),
-    include4k && tvIds.length > 0
-      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: true }, select: { tmdbId: true } })
+    tvIds.length > 0
+      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true, arrInstance: true } })
       : Promise.resolve([]),
   ]);
 
-  const radarrSet = new Set(radarrRows.map((r) => r.tmdbId));
-  const sonarrSet = new Set(sonarrRows.map((r) => r.tmdbId));
-  const radarr4kWantedSet = new Set(radarr4kWanted.map((r) => r.tmdbId));
-  const sonarr4kWantedSet = new Set(sonarr4kWanted.map((r) => r.tmdbId));
-  const radarr4kAvailSet  = new Set(radarr4kAvail.map((r) => r.tmdbId));
-  const sonarr4kAvailSet  = new Set(sonarr4kAvail.map((r) => r.tmdbId));
+  // tmdbId → (slug → { pending, available }) for movies and TV separately.
+  const movieMap = new Map<number, Map<string, { pending: boolean; available: boolean }>>();
+  const tvMap    = new Map<number, Map<string, { pending: boolean; available: boolean }>>();
+  const bump = (
+    m: Map<number, Map<string, { pending: boolean; available: boolean }>>,
+    tmdbId: number,
+    slug: string,
+    field: "pending" | "available",
+  ) => {
+    let bySlug = m.get(tmdbId);
+    if (!bySlug) { bySlug = new Map(); m.set(tmdbId, bySlug); }
+    const cur = bySlug.get(slug) ?? { pending: false, available: false };
+    cur[field] = true;
+    bySlug.set(slug, cur);
+  };
+  for (const r of radarrWanted) bump(movieMap, r.tmdbId, r.arrInstance, "pending");
+  for (const r of radarrAvail)  bump(movieMap, r.tmdbId, r.arrInstance, "available");
+  for (const r of sonarrWanted) bump(tvMap, r.tmdbId, r.arrInstance, "pending");
+  for (const r of sonarrAvail)  bump(tvMap, r.tmdbId, r.arrInstance, "available");
 
   return items.map((item) => {
     const isMovie = item.mediaType === "movie";
+    const bySlug = (isMovie ? movieMap : tvMap).get(item.id);
+    const arrInstances = bySlug ? Object.fromEntries(bySlug) : undefined;
+    const def = bySlug?.get("");
+    const fourK = bySlug?.get("4k");
     return {
       ...item,
-      arrPending: isMovie ? radarrSet.has(item.id) : sonarrSet.has(item.id),
+      arrPending: def?.pending ?? false,
+      ...(arrInstances ? { arrInstances } : {}),
       ...(include4k
         ? {
-            arr4kAvailable: isMovie ? radarr4kAvailSet.has(item.id) : sonarr4kAvailSet.has(item.id),
-            arr4kPending:   isMovie ? radarr4kWantedSet.has(item.id) : sonarr4kWantedSet.has(item.id),
+            arr4kAvailable: fourK?.available ?? false,
+            arr4kPending: fourK?.pending ?? false,
           }
         : {}),
     };

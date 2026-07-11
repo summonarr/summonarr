@@ -29,6 +29,35 @@ test("per-user prefix matches only that user's identifiers", () => {
   assert.equal(buildVerifyIdentifier("u_other", "a@b.co").startsWith(prefix), false);
 });
 
+test("prefix does not match a longer userId sharing the same leading chars", () => {
+  // The trailing ':' in verifyIdentifierPrefixFor is load-bearing: without it,
+  // deleting "u_abc"'s pending tokens by prefix would also delete "u_abc123"'s.
+  const shortUserPrefix = verifyIdentifierPrefixFor("u_abc");
+  assert.equal(buildVerifyIdentifier("u_abc123", "a@b.co").startsWith(shortUserPrefix), false);
+  assert.equal(buildVerifyIdentifier("u_abc", "a@b.co").startsWith(shortUserPrefix), true);
+});
+
+test("parseVerifyIdentifier rejects an empty email after the separator", () => {
+  assert.equal(parseVerifyIdentifier("notif-email:uid:"), null);
+});
+
+test("identifier round-trips an email containing a colon (split on FIRST colon)", () => {
+  // parseVerifyIdentifier splits userId from email at the first ':' after the
+  // prefix (userId is a cuid, which never contains ':'); everything after it —
+  // colons included — is the email.
+  const id = buildVerifyIdentifier("uid", "a:b@x.co");
+  assert.deepEqual(parseVerifyIdentifier(id), { userId: "uid", email: "a:b@x.co" });
+});
+
+test("generateVerifyToken returns a fresh random token on every call", () => {
+  // A regression to a constant/reused token would break the proof-of-possession
+  // guarantee entirely (any prior link would verify any address).
+  const a = generateVerifyToken();
+  const b = generateVerifyToken();
+  assert.notEqual(a.raw, b.raw);
+  assert.notEqual(a.hash, b.hash);
+});
+
 test("hashVerifyToken is deterministic; generateVerifyToken hashes its own raw", () => {
   assert.equal(hashVerifyToken("abc"), hashVerifyToken("abc"));
   assert.notEqual(hashVerifyToken("abc"), hashVerifyToken("abd"));

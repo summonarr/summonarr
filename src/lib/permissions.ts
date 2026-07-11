@@ -163,6 +163,94 @@ export function canAutoApprove(
     : hasPermission(userPerms, [Permission.AUTO_APPROVE, Permission.AUTO_APPROVE_TV]);
 }
 
+// ─── Per-instance grants (multi-instance Radarr/Sonarr) ─────────────────────
+// The default ("") instance is open to any requester; the legacy "4k" instance
+// keeps using the REQUEST_4K*/AUTO_APPROVE_4K* bits above (zero user-data
+// migration). NAMED instances (anime, …) are gated by a per-user JSON grant map
+// stored on User.instanceGrants: { "<slug>": { request?, autoApprove? } }. ADMIN
+// bypasses everything. Kept structurally typed so this leaf stays import-free.
+
+export interface InstanceGrant {
+  request?: boolean;
+  autoApprove?: boolean;
+}
+export type InstanceGrants = Record<string, InstanceGrant>;
+
+// Minimal shape the checks below read off an instance registry entry.
+export interface InstanceAccess {
+  slug: string;
+  restricted: boolean;
+  serverAll: boolean;
+}
+
+// Parse the untrusted User.instanceGrants JSON into a well-formed grant map.
+export function parseInstanceGrants(raw: unknown): InstanceGrants {
+  if (!raw || typeof raw !== "object") return {};
+  const out: InstanceGrants = {};
+  for (const [slug, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (v && typeof v === "object") {
+      const g = v as Record<string, unknown>;
+      out[slug] = { request: g.request === true, autoApprove: g.autoApprove === true };
+    }
+  }
+  return out;
+}
+
+// Serialize a grant map for persistence (drops all-false entries to keep the blob
+// tidy; an absent slug means "no grant").
+export function serializeInstanceGrants(grants: InstanceGrants): InstanceGrants {
+  const out: InstanceGrants = {};
+  for (const [slug, g] of Object.entries(grants)) {
+    if (g && (g.request || g.autoApprove)) {
+      out[slug] = { ...(g.request ? { request: true } : {}), ...(g.autoApprove ? { autoApprove: true } : {}) };
+    }
+  }
+  return out;
+}
+
+// Can this user request the given media type at the given instance?
+//   default ("")  → any base requester
+//   legacy "4k"   → REQUEST_4K* bits / request4kAll toggle (via canRequest)
+//   named, open   → any base requester
+//   named, restricted → serverAll OR per-user grant.request
+export function canRequestInstance(
+  userPerms: bigint,
+  instance: InstanceAccess,
+  grants: InstanceGrants,
+  mediaType: "MOVIE" | "TV",
+  serverAll4k = false,
+): boolean {
+  if ((userPerms & Permission.ADMIN) !== 0n) return true;
+  const base =
+    mediaType === "MOVIE"
+      ? hasPermission(userPerms, [Permission.REQUEST, Permission.REQUEST_MOVIE])
+      : hasPermission(userPerms, [Permission.REQUEST, Permission.REQUEST_TV]);
+  if (!base) return false;
+  if (instance.slug === "") return true;
+  if (instance.slug === "4k") return canRequest(userPerms, mediaType, true, serverAll4k);
+  if (!instance.restricted) return true;
+  if (instance.serverAll) return true;
+  return grants[instance.slug]?.request === true;
+}
+
+// Can this user AUTO-APPROVE at the given instance (skip the pending queue)?
+//   default ("") → global AUTO_APPROVE* bits
+//   legacy "4k"  → AUTO_APPROVE_4K* bits
+//   named        → per-user grant.autoApprove, OR (unrestricted AND global auto-approve)
+export function canAutoApproveInstance(
+  userPerms: bigint,
+  instance: InstanceAccess,
+  grants: InstanceGrants,
+  mediaType: "MOVIE" | "TV",
+): boolean {
+  if ((userPerms & Permission.ADMIN) !== 0n) return true;
+  if (instance.slug === "") return canAutoApprove(userPerms, mediaType, false);
+  if (instance.slug === "4k") return canAutoApprove(userPerms, mediaType, true);
+  if (grants[instance.slug]?.autoApprove === true) return true;
+  if (!instance.restricted && canAutoApprove(userPerms, mediaType, false)) return true;
+  return false;
+}
+
 // JWT boundary — permissions ride the token as a decimal string.
 export function parsePermissions(claim: string | undefined | null): bigint {
   if (!claim) return 0n;

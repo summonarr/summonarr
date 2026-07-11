@@ -129,9 +129,15 @@ export async function resolveShowTmdbId(
 // scaffolding — reactivate by passing serverMachineId from a future untrusted ingestion path (NOT
 // the poller, which would false-trip on a legitimate server migration).
 export class MediaServerMismatchError extends Error {
-  constructor(public readonly source: string, public readonly sourceUserId: string) {
+  // Explicit fields (not constructor parameter properties) so the module loads
+  // under Node's strip-only TS mode — the unit suite imports it.
+  public readonly source: string;
+  public readonly sourceUserId: string;
+  constructor(source: string, sourceUserId: string) {
     super(`MediaServerUser ${source}:${sourceUserId} bound to a different server`);
     this.name = "MediaServerMismatchError";
+    this.source = source;
+    this.sourceUserId = sourceUserId;
   }
 }
 

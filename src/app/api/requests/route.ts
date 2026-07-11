@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, isArrConfigured, listQualityProfiles } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -13,7 +13,9 @@ import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { canRequest, canAutoApprove, hasPermission, Permission } from "@/lib/permissions";
+import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
+import { getArrInstances, getSyncableArrInstances, isInstanceConfigured } from "@/lib/arr-instance-registry";
+import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
@@ -110,6 +112,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         tvQuotaLimit: true,
         tvQuotaDays: true,
         maxContentRating: true,
+        instanceGrants: true,
       },
     }),
   ]);
@@ -133,13 +136,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     note?: string;
     _token?: string;
     is4k?: boolean;
+    arrInstance?: string;
     qualityProfileId?: number;
   }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   const { tmdbId, mediaType, note, _token } = body;
-  const is4k = body.is4k === true;
 
   if (!tmdbId || !mediaType) {
     return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
@@ -157,14 +160,70 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
   }
 
-  // Capability gate — the permission bitmask is authoritative (admins pass via
-  // the ADMIN superbit). A 4K request also needs REQUEST_4K (checked in canRequest)
-  // AND a configured 4K instance.
-  if (!canRequest(session.user.permissions, mediaType, is4k, settings.request4kAll === "true")) {
-    return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
+  // Resolve which Radarr/Sonarr instance this request targets. Precedence:
+  //   explicit `arrInstance` slug (validated) > legacy `is4k:true` (→ "4k") >
+  //   auto-route by TMDB metadata (anime/genre/language rules) > default instance ("").
+  const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+  const instances = await getArrInstances(service);
+  const rawInstance = typeof body.arrInstance === "string" ? body.arrInstance.trim() : undefined;
+
+  let instanceSlug: string;
+  if (rawInstance !== undefined) {
+    // Explicit target (including "" for the default). Validated against the registry below.
+    instanceSlug = rawInstance;
+  } else if (body.is4k === true) {
+    // Legacy 4K button / native clients — shorthand for the "4k" instance.
+    instanceSlug = "4k";
+  } else {
+    // No explicit target — auto-route. Only pay the TMDB details fetch when at least
+    // one CONFIGURED non-default instance carries an autoRoute rule; otherwise default.
+    const autoCandidates = instances.filter((i) => i.slug !== "" && i.autoRoute);
+    if (autoCandidates.length === 0) {
+      instanceSlug = "";
+    } else {
+      let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
+      try {
+        const detail = mediaType === "MOVIE" ? await getMovieDetails(tmdbId) : await getTVDetails(tmdbId);
+        routable = {
+          genreIds: detail.genreList?.map((g) => g.id) ?? [],
+          originalLanguage: detail.originalLanguage ?? null,
+          originCountries: [],
+        };
+      } catch {
+        // TMDB details unavailable ⇒ fall back to the default instance.
+      }
+      // Route only over configured instances so we never auto-select an unconfigured target.
+      const configured = await getSyncableArrInstances(service);
+      instanceSlug = routeMediaToSlug(configured, routable);
+    }
   }
-  if (is4k && !(await isArrConfigured(mediaType === "MOVIE" ? "radarr" : "sonarr", "4k"))) {
-    return NextResponse.json({ error: "4K requests aren't available — no 4K instance is configured" }, { status: 400 });
+
+  // Whether the client explicitly targeted an instance (arrInstance or the legacy
+  // is4k flag) vs. the server auto-routing it. Matters for the quality-profile
+  // override below: an explicit target means the client knew which instance's
+  // profile list it picked from; an auto-route means it didn't.
+  const instanceExplicit = rawInstance !== undefined || body.is4k === true;
+
+  const instance = instances.find((i) => i.slug === instanceSlug);
+  if (!instance) {
+    return NextResponse.json({ error: "That instance isn't available for requests" }, { status: 400 });
+  }
+  // A non-default instance must have a configured connection (url + apiKey). The default
+  // instance ("") is always allowed — a request with no arr configured simply stays pending.
+  if (instanceSlug !== "" && !(await isInstanceConfigured(service, instanceSlug))) {
+    return NextResponse.json(
+      { error: `Requests to "${instance.name}" aren't available — that instance isn't configured` },
+      { status: 400 },
+    );
+  }
+
+  // Capability gate — the permission bitmask is authoritative (admins pass via the ADMIN
+  // superbit). The default instance is open to any base requester; "4k" gates on the
+  // REQUEST_4K* bits / request4kAll toggle; named instances gate on serverAll or a
+  // per-user instance grant.
+  const grants = parseInstanceGrants(userRecord?.instanceGrants);
+  if (!canRequestInstance(session.user.permissions, instance, grants, mediaType, settings.request4kAll === "true")) {
+    return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
   }
 
   // Advanced request option: an explicit quality profile is honored only for
@@ -179,21 +238,33 @@ export const POST = withAuth(async (req, _ctx, session) => {
     if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
       return NextResponse.json({ error: "You don't have permission to choose a quality profile" }, { status: 403 });
     }
-    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-    // An unreachable/erroring ARR instance must not 500 the request. Mirror the
-    // quality-profiles route: map a fetch failure to a clean 502. A request WITHOUT
-    // a profile skips this block entirely, so it still succeeds during an outage.
-    let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
-    try {
-      profileList = await listQualityProfiles(service, is4k ? "4k" : "hd");
-    } catch (err) {
-      console.error(`[requests] Failed to fetch ${service} profiles:`, err);
-      return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+    if (!instanceExplicit && instanceSlug !== "") {
+      // The request was AUTO-ROUTED to a non-default instance, but the client's
+      // profile picker (instance-blind /api/requests/quality-profiles) listed the
+      // DEFAULT instance's profiles — the picked id is meaningless here. Validating
+      // it against the routed instance either dead-ends the request (400 with no
+      // way to pick a valid id) or, on an id collision, silently applies a
+      // different profile. Drop the override and use the routed instance's
+      // configured default instead.
+      console.warn(
+        `[requests] dropping quality-profile override (picked against the default instance) for auto-routed instance "${instanceSlug}"`,
+      );
+    } else {
+      // An unreachable/erroring ARR instance must not 500 the request. Mirror the
+      // quality-profiles route: map a fetch failure to a clean 502. A request WITHOUT
+      // a profile skips this block entirely, so it still succeeds during an outage.
+      let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+      try {
+        profileList = await listQualityProfiles(service, instanceSlug);
+      } catch (err) {
+        console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+        return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+      }
+      if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
+        return NextResponse.json({ error: "Invalid quality profile for this request" }, { status: 400 });
+      }
+      chosenQualityProfileId = body.qualityProfileId;
     }
-    if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
-      return NextResponse.json({ error: "Invalid quality profile for this request" }, { status: 400 });
-    }
-    chosenQualityProfileId = body.qualityProfileId;
   }
 
   // Per-media-type quota. QUOTA_UNLIMITED (and ADMIN) bypass; otherwise resolve
@@ -267,7 +338,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const existing = await prisma.mediaRequest.findFirst({
-    where: { tmdbId, mediaType, requestedBy: session.user.id, is4k },
+    where: { tmdbId, mediaType, requestedBy: session.user.id, arrInstance: instanceSlug },
   });
 
   if (existing) {
@@ -292,30 +363,32 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }
   }
 
-  const isAutoApprove = canAutoApprove(session.user.permissions, mediaType, is4k);
+  const isAutoApprove = canAutoApproveInstance(session.user.permissions, instance, grants, mediaType);
 
-  // HD request: a Plex/Jellyfin library hit OR the HD *arr-available cache counts
-  // as already-here. 4K request: only the 4K instance's available cache counts —
-  // a Plex HD copy must not block requesting 4K.
+  // Default-instance request: a Plex/Jellyfin library hit OR the default *arr-available
+  // cache counts as already-here. An instance with skipLibraryCheck (4K/opt-in) ignores
+  // the shared library — a copy at another quality must not block requesting this one —
+  // and only that instance's available cache counts.
+  const skipLibraryCheck = instance.skipLibraryCheck;
   const [plexItem, jellyfinItem, arrAvailable] = await Promise.all([
-    is4k
+    skipLibraryCheck
       ? Promise.resolve(null)
       : prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
-    is4k
+    skipLibraryCheck
       ? Promise.resolve(null)
       : prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
     isAutoApprove
       ? mediaType === "MOVIE"
-        ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
-        : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k } } }).then(r => r !== null)
+        ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
+        : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
       : Promise.resolve(false),
   ]);
   // Check BOTH libraries — a Jellyfin-only install has no PlexLibraryItem rows, so
   // a Plex-only check let users re-request titles already in their Jellyfin library
-  // (skip on 4K, same as Plex: an HD copy must not block a 4K request).
+  // (skipped for skipLibraryCheck instances, same reasoning as Plex above).
   const alreadyAvailable = !!plexItem || !!jellyfinItem || arrAvailable;
 
-  const baseData = { tmdbId, mediaType, is4k, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
+  const baseData = { tmdbId, mediaType, arrInstance: instanceSlug, qualityProfileId: chosenQualityProfileId ?? null, title: verified.title, posterPath: verified.posterPath, releaseYear: verified.releaseYear, note: sanitizedNote ?? null, requestedBy: session.user.id } as const;
 
   let createdRequest: MediaRequest | null = null;
   let createdBranch: "auto-approve" | "pending" | "mirror-approved" | null = null;
@@ -357,14 +430,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
         return;
       }
 
-      // If another request for this exact title (+ 4K tier) is already APPROVED or
-      // AVAILABLE, the content is already greenlit / being fulfilled — there is
+      // If another request for this exact title (+ same instance) is already APPROVED
+      // or AVAILABLE, the content is already greenlit / being fulfilled — there is
       // nothing for an admin to review. Mirror that status so this requester is
       // tracked and still receives the "now available" notification (the sync
       // notifies every APPROVED row's requester), while skipping the admin
       // "new request" alert.
       const greenlit = await tx.mediaRequest.findFirst({
-        where: { tmdbId, mediaType, is4k, status: { in: ["APPROVED", "AVAILABLE"] } },
+        where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
         select: { status: true },
       });
       if (greenlit) {
@@ -419,9 +492,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     try {
       if (mediaType === "MOVIE") {
-        await addMovieToRadarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
+        await addMovieToRadarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId, is4k ? "4k" : "hd", chosenQualityProfileId, session.user.id);
+        const tvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
         await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
       }
     } catch (err) {
@@ -453,7 +526,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
   // Suppress duplicate admin alerts for a title that's still pending review: only
-  // the EARLIEST pending request for (tmdbId, mediaType, is4k) fires the admin
+  // the EARLIEST pending request for (tmdbId, mediaType, arrInstance) fires the admin
   // notifications. Total ordering by (createdAt, id) makes this race-safe — among
   // concurrent duplicate requests exactly one (the earliest) has no earlier peer
   // and alerts; the rest find this row and skip.
@@ -461,7 +534,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     where: {
       tmdbId,
       mediaType,
-      is4k,
+      arrInstance: instanceSlug,
       status: "PENDING",
       id: { not: request.id },
       OR: [

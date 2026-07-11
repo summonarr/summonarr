@@ -102,10 +102,12 @@ export async function startSession(
 
     // A session whose file is being read by an in-flight import must never be
     // reclaimed — even if the idle TTL lapsed (a large restore can take longer
-    // than the between-chunks window). Reclaiming it here would rm the tempDir
-    // mid-read and corrupt the restore. Treat it as still in-progress; the
-    // importer's finally always clearSession()s it when done.
-    if (active && active.importing && active.uploadId !== opts.uploadId) {
+    // than the between-chunks window), and even for a retry carrying the SAME
+    // uploadId: reclaiming would rm the tempDir mid-read and corrupt the
+    // restore, and resuming would let fresh chunks race the read. Treat it as
+    // still in-progress for every caller; the importer's finally always
+    // clearSession()s it when done.
+    if (active && active.importing) {
       return { ok: false, error: { kind: "in-progress" } };
     }
 
@@ -157,7 +159,12 @@ async function appendChunkUnsafe(
 ): Promise<AppendResult> {
   if (!active) return { ok: false, error: { kind: "no-session" } };
   if (active.uploadId !== uploadId) return { ok: false, error: { kind: "session-mismatch" } };
-  if (isExpired(active)) {
+  // Same never-reclaim-while-importing rule as startSession: an importing
+  // session that outlived the idle TTL must not have its tempDir rm'd out from
+  // under the in-flight read by a retried chunk. It falls through to the index
+  // check instead (receivedChunks == totalChunks once importing, so any retry
+  // reads as out-of-order and touches nothing).
+  if (isExpired(active) && !active.importing) {
     await cleanupSession(active);
     active = null;
     return { ok: false, error: { kind: "expired" } };

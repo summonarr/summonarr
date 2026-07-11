@@ -119,6 +119,52 @@ try {
 }
 BACKFILL_EOF
 
+echo "Backfilling arrInstance from the legacy is4k discriminator (multi-instance Radarr/Sonarr)..."
+node --input-type=module <<'ARRINSTANCE_EOF'
+const { DATABASE_URL } = process.env;
+// Non-destructive migration for the is4k→arrInstance change (N named Radarr/Sonarr
+// instances). Adds the `arrInstance` column (matching the schema default) and
+// backfills it from the legacy `is4k` boolean (false→'', true→'4k') on the six
+// affected tables, so the subsequent `prisma db push` only has to swap the
+// PK/unique keys onto an already-populated column — which lands as the entrypoint's
+// auto-safe "unique constraint" / "primary key will be changed" warnings, never a
+// destructive column drop (is4k is RETAINED in the schema, deprecated).
+//
+// Idempotent — ADD COLUMN IF NOT EXISTS + a WHERE that skips already-backfilled
+// rows. Best-effort: runs BEFORE db push and continues boot on failure (a real
+// key collision then fails db push loudly, leaving the DB untouched — never a
+// silent merge of 4K into the default instance). Skips cleanly on a fresh DB.
+const TABLES = [
+  "MediaRequest", "RadarrWantedItem", "RadarrAvailableItem",
+  "SonarrWantedItem", "SonarrAvailableItem", "TrashApplication",
+];
+const { default: { Client } } = await import('pg');
+const client = new Client({ connectionString: DATABASE_URL });
+try {
+  await client.connect();
+  for (const table of TABLES) {
+    const t = await client.query(`SELECT to_regclass('"${table}"') AS t`);
+    if (t.rows[0].t === null) continue; // fresh DB — db push will create it
+    // Only migrate while the legacy column is still present; once a future release
+    // drops is4k this whole block is a no-op.
+    const hasIs4k = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = 'is4k'`,
+      [table],
+    );
+    if (hasIs4k.rowCount === 0) continue;
+    await client.query(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "arrInstance" TEXT NOT NULL DEFAULT ''`);
+    const res = await client.query(
+      `UPDATE "${table}" SET "arrInstance" = '4k' WHERE "is4k" = true AND "arrInstance" = ''`,
+    );
+    if (res.rowCount > 0) console.log(`[entrypoint] ${table}: backfilled ${res.rowCount} row(s) to arrInstance='4k'.`);
+  }
+} catch (err) {
+  console.error(`[entrypoint] arrInstance backfill failed — continuing boot: ${err?.message ?? err}`);
+} finally {
+  await client.end().catch(() => {});
+}
+ARRINSTANCE_EOF
+
 echo "Syncing database schema..."
 # Schema migration policy:
 #   1. Try `prisma db push` first. If it succeeds, done.

@@ -99,21 +99,21 @@ async function resolveCurated(item: StarterPackItem) {
   for (const trashId of candidates) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, trashId },
-      include: { applications: { where: { is4k: false } } },
+      include: { applications: { where: { arrInstance: "" } } },
     });
     if (spec) break;
   }
   if (!spec && match.name) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { equals: match.name, mode: "insensitive" } },
-      include: { applications: { where: { is4k: false } } },
+      include: { applications: { where: { arrInstance: "" } } },
     });
   }
   if (!spec && match.name) {
     // Fall back to partial name match so minor TRaSH upstream renames don't break the starter pack display
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { contains: match.name, mode: "insensitive" } },
-      include: { applications: { where: { is4k: false } } },
+      include: { applications: { where: { arrInstance: "" } } },
     });
   }
   return spec;
@@ -147,7 +147,7 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
       kind: { in: ["QUALITY_PROFILE", "NAMING", "QUALITY_SIZE"] },
       ...(curatedSpecIds.size > 0 ? { id: { notIn: [...curatedSpecIds] } } : {}),
     },
-    include: { applications: { where: { is4k: false } } },
+    include: { applications: { where: { arrInstance: "" } } },
     orderBy: [{ service: "asc" }, { kind: "asc" }, { name: "asc" }],
   });
 

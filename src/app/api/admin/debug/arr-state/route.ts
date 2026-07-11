@@ -3,6 +3,8 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
 import { arrFetch, getArrCfg, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
+import { getArrInstances } from "@/lib/arr-instance-registry";
+import { mapLimit } from "@/lib/concurrency";
 import { getCache } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
@@ -38,13 +40,35 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const service = type === "movie" ? "radarr" : "sonarr";
   const [wantedRow, wanted4kRow, has4kInstance] = await Promise.all([
     type === "movie"
-      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } })
-      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: false } } }),
+      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "" } } })
+      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "" } } }),
     type === "movie"
-      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: true } } })
-      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_is4k: { tmdbId, is4k: true } } }),
+      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "4k" } } })
+      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "4k" } } }),
     isArrConfigured(service, "4k"),
   ]);
+
+  // Generalized per-instance view: iterate every configured instance (default
+  // first, plus legacy 4k and any named instances) so the diagnostic can explain
+  // a missing badge on ANY instance, not just HD/4K. Additive — the legacy
+  // top-level `cacheTable` / `fourK` fields above stay populated for the debug UI.
+  const instanceConfigs = await getArrInstances(service);
+  const instances = await mapLimit(instanceConfigs, 4, async (inst) => {
+    const cacheRow = type === "movie"
+      ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: inst.slug } } })
+      : await prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: inst.slug } } });
+    let liveArrApi: { result: boolean; error?: string };
+    try {
+      const result = type === "movie"
+        ? await isMovieWantedInRadarr(tmdbId, inst.slug)
+        : await isSeriesWantedInSonarr(tmdbId, inst.slug);
+      liveArrApi = { result };
+    } catch (err) {
+      console.error(`[arr-state] live Arr check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
+      liveArrApi = { result: false, error: "live Arr check failed" };
+    }
+    return { slug: inst.slug, name: inst.name, cacheRow, hasEntry: !!cacheRow, liveArrApi };
+  });
 
   const mediaRequests = await prisma.mediaRequest.findMany({
     where: { tmdbId, mediaType: dbType },
@@ -141,6 +165,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       hasEntry: !!wanted4kRow,
       liveArrApi: liveCheck4k,
     },
+    instances,
     attachArrPendingReturns: arrPendingResult,
     liveArrApi: liveCheck,
     mediaRequests,

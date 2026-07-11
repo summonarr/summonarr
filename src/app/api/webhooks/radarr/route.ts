@@ -11,6 +11,8 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isMovieDownloadedInRadarr } from "@/lib/arr";
+import { getArrInstances } from "@/lib/arr-instance-registry";
+import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { sanitizeForLog } from "@/lib/sanitize";
 
 function safeCompare(a: string, b: string): boolean {
@@ -37,15 +39,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
-  const [sourceRow, source4kRow, legacyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "radarrWebhookSecret" } }),
-    prisma.setting.findUnique({ where: { key: "radarr4kWebhookSecret" } }),
+  // Every configured instance carries its own webhook secret (Setting key
+  // radarr<Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
+  // DEFAULT instance's ("") secret when it has no per-instance secret of its own.
+  const instances = await getArrInstances("radarr");
+  const [secretRows, legacyRow] = await Promise.all([
+    prisma.setting.findMany({
+      where: { key: { in: instances.map((i) => arrSettingKey("radarr", i.slug, "WebhookSecret")) } },
+    }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
-  const hdSecret = sourceRow?.value || legacyRow?.value || "";
-  const fourKSecret = source4kRow?.value || "";
+  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
+  const instanceSecrets = instances.map((inst) => {
+    const own = secretByKey.get(arrSettingKey("radarr", inst.slug, "WebhookSecret")) || "";
+    const secret = own || (inst.slug === DEFAULT_ARR_INSTANCE ? legacyRow?.value || "" : "");
+    return { slug: inst.slug, secret };
+  });
 
-  if (hdSecret.length === 0 && fourKSecret.length === 0) {
+  if (instanceSecrets.every((i) => i.secret.length === 0)) {
     console.warn("[webhook/radarr] secret not configured");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -56,19 +67,28 @@ export async function POST(req: NextRequest) {
   const token = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : queryToken;
-  // Secret-as-discriminator: the 4K instance is configured with the 4K secret, so
-  // the secret that matches tells us which instance fired. Compare against both
-  // without an early return (no timing oracle). Guardrail 2: keep ?token= + the
-  // timing-safe compare; no HMAC.
-  const matchedHd = token != null && hdSecret.length > 0 && safeCompare(token, hdSecret);
-  const matched4k = token != null && fourKSecret.length > 0 && safeCompare(token, fourKSecret);
-  if (!token || (!matchedHd && !matched4k)) {
+  // Secret-as-discriminator: each instance is configured with its own webhook
+  // secret, so the secret that matches tells us which instance fired. Compare the
+  // presented token against EVERY instance secret with no early return (no timing
+  // oracle). Guardrail 2: keep ?token= + the timing-safe compare; no HMAC.
+  let matchedSlug: string | null = null;
+  let secret = "";
+  for (const inst of instanceSecrets) {
+    const isMatch = token != null && inst.secret.length > 0 && safeCompare(token, inst.secret);
+    if (!isMatch) continue;
+    // Equal-secret collision (misconfig): the DEFAULT instance ("") wins; otherwise
+    // the first configured instance in registry order wins (getArrInstances lists
+    // the default first, so keeping the first match already yields that ordering).
+    if (matchedSlug === null || inst.slug === DEFAULT_ARR_INSTANCE) {
+      matchedSlug = inst.slug;
+      secret = inst.secret;
+    }
+  }
+  if (!token || matchedSlug === null) {
     console.warn("[webhook/radarr] 401 unauthorized");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // HD wins a tie (both secrets equal = misconfig) so we default to the HD instance.
-  const is4k = matched4k && !matchedHd;
-  const secret = is4k ? fourKSecret : hdSecret;
+  const arrInstance = matchedSlug;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {
@@ -128,7 +148,7 @@ export async function POST(req: NextRequest) {
     const stableTmdbId = payload.movie?.tmdbId;
     let shouldNotify = true;
     if (Number.isInteger(stableTmdbId) && (stableTmdbId as number) > 0) {
-      const manualKey = `manualInteractionNotified:radarr:${stableTmdbId}`;
+      const manualKey = `manualInteractionNotified:radarr:${arrInstance}:${stableTmdbId}`;
       const claim = await prisma.setting.createMany({
         data: [{ key: manualKey, value: new Date().toISOString() }],
         skipDuplicates: true,
@@ -165,12 +185,12 @@ export async function POST(req: NextRequest) {
   // verify the title against Radarr's own authoritative API before changing any
   // status. Tri-state result: `false` = Radarr is reachable and confirms there is
   // NO file, so we SKIP the flip (this is the forgery case we reject); `true` =
-  // confirmed downloaded, proceed; `null` = we couldn't determine it (the HD/4K
-  // variant isn't configured, or Radarr is unreachable) so we proceed optimistically
+  // confirmed downloaded, proceed; `null` = we couldn't determine it (the firing
+  // instance isn't configured, or Radarr is unreachable) so we proceed optimistically
   // and let the periodic library sync reconcile availability later. Proceeding on
   // null is safe against forgery because an attacker cannot force a null result
   // without first breaking the operator's own Radarr connectivity.
-  const downloaded = await isMovieDownloadedInRadarr(tmdbId, is4k ? "4k" : "hd");
+  const downloaded = await isMovieDownloadedInRadarr(tmdbId, arrInstance);
   if (downloaded === false) {
     console.warn("[webhook/radarr] Download event for tmdbId=%s not confirmed downloaded in Radarr; skipping status flip.", sanitizeForLog(tmdbId));
     syncCompleted = true;
@@ -183,21 +203,21 @@ export async function POST(req: NextRequest) {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
     // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
     const resetNotify = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: null },
+      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "APPROVED", availableAt: null },
       // Clear the approve-time 90s backstop: the item is downloaded, so a stale
       // timer would fire a false "download pending" if a later sync revert flips
       // this back to APPROVED.
       data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
     const alreadyAvailable = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", is4k, status: "APPROVED", availableAt: { not: null } },
+      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "APPROVED", availableAt: { not: null } },
       // Clear the approve-time 90s backstop: the item is downloaded, so a stale
       // timer would fire a false "download pending" if a later sync revert flips
       // this back to APPROVED.
       data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
     updated = { count: resetNotify.count + alreadyAvailable.count };
-    await tx.radarrWantedItem.deleteMany({ where: { tmdbId, is4k } });
+    await tx.radarrWantedItem.deleteMany({ where: { tmdbId, arrInstance } });
   }, { timeout: 30_000 });
 
   if (updated.count > 0) {
@@ -206,12 +226,13 @@ export async function POST(req: NextRequest) {
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
-    await scheduleLibraryScan("movie", tmdbId, is4k ? "4k" : "hd");
+    await scheduleLibraryScan("movie", tmdbId, arrInstance);
 
-    // Scope by is4k to the variant that fired this webhook: an HD Download must not
-    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
+    // Scope by arrInstance to the instance that fired this webhook: one instance's
+    // Download must not sweep in a sibling instance's request and notify it off the
+    // wrong grab.
     const pending = await prisma.mediaRequest.findMany({
-      where: { tmdbId, mediaType: "MOVIE", is4k, status: "AVAILABLE", notifiedAvailable: false },
+      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "AVAILABLE", notifiedAvailable: false },
       select: { id: true, requestedBy: true, title: true, mediaType: true, posterPath: true, tmdbId: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;
