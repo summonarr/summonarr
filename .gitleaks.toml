@@ -22,6 +22,15 @@
 #    lower-entropy siblings ("radarr4kApiKey" 3.33, "radarrApiKey", …)
 #    never trip it. The pattern allowlists that captured identifier (plus
 #    its radarr twin, in case the list is ever reordered).
+#
+# 3. Crypto/session unit tests use fixed, deterministic fixtures so the
+#    round-trips are reproducible: dummy TOKEN_ENCRYPTION_KEY hex strings
+#    (a plain 0123456789abcdef counting sequence, and AB0123456789CDEF, in
+#    tests/token-crypto*.test.mts) and fake session JWTs whose signature
+#    segment literally base64-decodes to "signature"/"sig"
+#    (tests/sign-in-response.test.mts, tests/session-cookie.test.mts). None
+#    are real secrets; the specific self-describing fixture strings are
+#    allowlisted below (not the files or the rules).
 
 [extend]
 useDefault = true
@@ -32,4 +41,8 @@ regexes = [
   '''not-a-real-secret-not-even-close''',
   '''wrong-secret-no-way-this-matches''',
   '''(?:radarr|sonarr)4kApiKey''',
+  '''(?i)0123456789abcdef''',
+  '''AB0123456789CDEF''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJpZCI6InVfYWxpY2UifQ\.c2lnbmF0dXJl''',
+  '''eyJhbGciOiJIUzI1NiJ9\.eyJpZCI6InUxIn0\.c2ln''',
 ]

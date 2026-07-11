@@ -100,7 +100,7 @@ test("whitespace collapses: runs of spaces/tabs to one space, trimmed around new
   // Space/tab runs touching a newline are removed on both sides.
   assert.equal(stripTrashHtml("line1   \n\t  line2"), "line1\nline2");
   // Consecutive newlines (paragraph breaks from <br><br>) are preserved.
-  assert.equal(stripTrashHtml("a<br><br>b"), "a\nb".replace("\n", "\n\n"));
+  assert.equal(stripTrashHtml("a<br><br>b"), "a\n\nb");
   // Leading/trailing <br> newlines are trimmed off.
   assert.equal(stripTrashHtml("<br>text<br>"), "text");
 });
