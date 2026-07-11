@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.14.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.15.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -165,6 +165,18 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.15.0
+
+**Added**
+
+- Multiple Radarr/Sonarr instances: run named instances beyond the default and 4K — for example a dedicated **anime** instance. Requests auto-route by content (anime, detected from TMDB, lands on the anime instance) or can target a specific instance explicitly, and access to a named instance can be granted per user.
+- Named-instance setup mirrors the main Radarr/Sonarr config: an auto-generated webhook secret with a copyable webhook URL, plus root-folder and quality-profile pickers loaded live from that instance.
+
+**Fixed**
+
+- Backup: fixed a restore stall when an encrypted chunk was smaller than the GCM auth tag, and prevented an in-progress import from being reclaimed on a same-id retry.
+- Email: strip CR/LF/NUL characters from notification sender/recipient addresses (header-injection hardening).
+
 ### v0.14.0
 
 **Added**
@@ -187,7 +199,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.14.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.15.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
