@@ -1299,9 +1299,12 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   const limitIdx = params.length;
 
   const rows = await prisma.$queryRawUnsafe<
-    { tmdbId: number; mediaType: string; title: string; plays: bigint; viewers: bigint }[]
+    { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[]
   >(
+    // Carry the stored posterPath (like getTopWatchedUncached) so the rewatched
+    // rows render real cover art instead of a placeholder — no TmdbCache round-trip.
     `SELECT "tmdbId", "mediaType"::text, MAX("title") AS title,
+            MAX("posterPath") AS "posterPath",
             COUNT(*)::bigint AS plays,
             COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
      FROM "PlayHistory"
@@ -1317,6 +1320,7 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
     title: r.title,
+    posterPath: r.posterPath,
     plays: Number(r.plays),
     viewers: Number(r.viewers),
   }));
@@ -1462,7 +1466,7 @@ export type PlayHistoryStatsResult = {
   sourceSplit: { source: string; count: number }[];
 
   decadeBreakdown: { decade: string; count: number }[];
-  topRewatched: { tmdbId: number; mediaType: string; title: string; plays: number; viewers: number }[];
+  topRewatched: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: number; viewers: number }[];
   topWatched: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: number; viewers: number }[];
   topEpisodes: { tmdbId: number | null; title: string; season: number | null; episode: number | null; episodeTitle: string | null; count: number }[];
 
