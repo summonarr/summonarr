@@ -41,6 +41,14 @@ interface InstanceView {
   hasWebhookSecret: boolean;
 }
 
+// Root folders + quality profiles fetched live from a configured instance (same
+// shape as /api/settings/arr-options), so they render as dropdowns like the base
+// Radarr/Sonarr config instead of a typed id.
+interface ArrOptions {
+  rootFolders: { path: string }[];
+  qualityProfiles: { id: number; name: string }[];
+}
+
 interface Draft {
   slug: string;
   name: string;
@@ -88,6 +96,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
   const [copiedHook, setCopiedHook] = useState<number | null>(null);
+  // slug → its live root-folder/quality-profile options ("loading"/"error" while pending/failed).
+  const [optionsBySlug, setOptionsBySlug] = useState<Record<string, ArrOptions | "loading" | "error">>({});
 
   // Full webhook URL the admin pastes into Radarr/Sonarr. Only rendered inside a
   // card (loaded state = client-only), so window is always defined here.
@@ -104,18 +114,36 @@ function ServiceInstances({ service }: { service: ArrService }) {
     }
   }
 
+  // Fetch an instance's real root folders + quality profiles from the arr API
+  // (same endpoint the base config uses). Requires the connection to be saved
+  // first — the endpoint reads url+key from Settings — so it runs after load()
+  // and after a successful save(), only for configured instances.
+  const fetchOptions = useCallback(async (slug: string) => {
+    setOptionsBySlug((prev) => ({ ...prev, [slug]: "loading" }));
+    try {
+      const res = await fetch(withBasePath(`/api/settings/arr-options?service=${service}&instance=${encodeURIComponent(slug)}`));
+      if (!res.ok) throw new Error();
+      const data = (await res.json()) as ArrOptions;
+      setOptionsBySlug((prev) => ({ ...prev, [slug]: data }));
+    } catch {
+      setOptionsBySlug((prev) => ({ ...prev, [slug]: "error" }));
+    }
+  }, [service]);
+
   const load = useCallback(async () => {
     try {
       const res = await fetch(withBasePath("/api/admin/arr-instances"));
       if (!res.ok) throw new Error();
       const data = (await res.json()) as Record<ArrService, InstanceView[]>;
-      setDrafts((data[service] ?? []).filter((i) => isNamed(i.slug)).map(toDraft));
+      const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
+      setDrafts(named.map(toDraft));
+      named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
     } catch {
       /* leave empty */
     } finally {
       setLoaded(true);
     }
-  }, [service]);
+  }, [service, fetchOptions]);
 
   useEffect(() => {
     load();
@@ -193,8 +221,12 @@ function ServiceInstances({ service }: { service: ArrService }) {
         testResults?: Record<string, { version?: string; error?: string }>;
       };
       if (res.ok && data.ok) {
-        setDrafts((data.instances ?? []).filter((i) => isNamed(i.slug)).map(toDraft));
+        const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
+        setDrafts(named.map(toDraft));
         setTests(data.testResults ?? {});
+        // Now that connections are persisted, (re)load each configured instance's
+        // root folders + quality profiles so the dropdowns populate.
+        named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
         setStatus("ok");
         setMessage("Saved");
       } else {
@@ -228,6 +260,14 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
       {drafts.map((d, idx) => {
         const test = tests[d.slug];
+        const opts = optionsBySlug[d.slug];
+        const optsReady = opts != null && opts !== "loading" && opts !== "error";
+        // Why the dropdowns aren't showing yet, for the note under each field.
+        const optsNote = opts === "loading"
+          ? "Loading options…"
+          : opts === "error"
+            ? "Couldn't load — check the connection above."
+            : "Save the connection to load options.";
         return (
           <div key={idx} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
@@ -282,24 +322,47 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-600">(optional)</span></Label>
-                <Input
-                  id={`${service}-${idx}-folder`}
-                  value={d.rootFolder}
-                  onChange={(e) => update(idx, { rootFolder: e.target.value })}
-                  placeholder={service === "radarr" ? "/movies/anime" : "/tv/anime"}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
-                />
+                <div className="flex items-center justify-between">
+                  <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-600">(optional)</span></Label>
+                  {optsReady && (
+                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white">
+                      <RefreshCw className="w-3 h-3" />Refresh
+                    </button>
+                  )}
+                </div>
+                {optsReady ? (
+                  <select
+                    id={`${service}-${idx}-folder`}
+                    value={d.rootFolder}
+                    onChange={(e) => update(idx, { rootFolder: e.target.value })}
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">— {label}&apos;s default —</option>
+                    {(opts as ArrOptions).rootFolders.map((f) => (
+                      <option key={f.path} value={f.path}>{f.path}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-xs text-zinc-600 h-8 flex items-center">{optsNote}</p>
+                )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-profile`}>Quality Profile ID <span className="text-zinc-600">(optional)</span></Label>
-                <Input
-                  id={`${service}-${idx}-profile`}
-                  value={d.qualityProfileId}
-                  onChange={(e) => update(idx, { qualityProfileId: e.target.value.replace(/[^0-9]/g, "") })}
-                  placeholder="e.g. 1"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
-                />
+                <Label htmlFor={`${service}-${idx}-profile`}>Quality Profile <span className="text-zinc-600">(optional)</span></Label>
+                {optsReady ? (
+                  <select
+                    id={`${service}-${idx}-profile`}
+                    value={d.qualityProfileId}
+                    onChange={(e) => update(idx, { qualityProfileId: e.target.value })}
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">— {label}&apos;s default —</option>
+                    {(opts as ArrOptions).qualityProfiles.map((p) => (
+                      <option key={p.id} value={String(p.id)}>{p.name}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <p className="text-xs text-zinc-600 h-8 flex items-center">{optsNote}</p>
+                )}
               </div>
             </div>
 
