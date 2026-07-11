@@ -39,6 +39,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
     { id: "library-matching", label: "Library Matching",   group: "Media Servers" },
     { id: "radarr",           label: "Radarr",             group: "Automation" },
     { id: "sonarr",           label: "Sonarr",             group: "Automation" },
+    { id: "arr-instances",    label: "Extra Instances",    group: "Automation" },
   ],
   notifications: [
     { id: "email",            label: "Email",              group: "Notifications" },

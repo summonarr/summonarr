@@ -4,8 +4,17 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw } from "@/components/icons";
+import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+
+// 24 random bytes as hex — mirrors generateSecret() in settings-ui.tsx (the
+// HD/4K webhook-secret field). Client-only (crypto.getRandomValues); called from
+// event handlers / addInstance, never during SSR.
+function generateSecret(): string {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 // Admin UI for NAMED Radarr/Sonarr instances (e.g. an "anime" instance). The
 // default and legacy 4K instances keep their own forms above — this manages the
@@ -78,6 +87,22 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
+  const [copiedHook, setCopiedHook] = useState<number | null>(null);
+
+  // Full webhook URL the admin pastes into Radarr/Sonarr. Only rendered inside a
+  // card (loaded state = client-only), so window is always defined here.
+  const webhookUrl = (secret: string) =>
+    `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${secret}`;
+
+  async function copyHook(idx: number, secret: string) {
+    try {
+      await navigator.clipboard.writeText(webhookUrl(secret));
+      setCopiedHook(idx);
+      setTimeout(() => setCopiedHook(null), 2000);
+    } catch {
+      /* clipboard blocked — the URL is visible in the field for manual copy */
+    }
+  }
 
   const load = useCallback(async () => {
     try {
@@ -105,7 +130,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
     setDrafts((prev) => [
       ...prev,
       {
-        slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "", webhookSecret: "",
+        // Auto-generate the webhook secret so the admin never has to invent one —
+        // they just copy the resulting webhook URL into Radarr/Sonarr.
+        slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "", webhookSecret: generateSecret(),
         restricted: false, serverAll: false, skipLibraryCheck: false, animeOnly: false,
         hasApiKey: false, hasWebhookSecret: false, isNew: true,
       },
@@ -192,7 +219,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
       <div>
         <h3 className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>{label} — additional instances</h3>
         <p className="text-xs text-zinc-500 mt-1">
-          Extra {label} instances (e.g. a dedicated <strong>anime</strong> instance). Requests auto-route here when an instance&apos;s
+          Extra {label} instances (e.g. a dedicated <strong>anime</strong>{" "}instance). Requests auto-route here when an instance&apos;s
           rule matches; a request can also target one explicitly. Restricted instances need a per-user grant (Users → Instance access).
         </p>
       </div>
@@ -277,19 +304,38 @@ function ServiceInstances({ service }: { service: ArrService }) {
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-600">(for the {label} connection webhook)</span></Label>
-              <Input
-                id={`${service}-${idx}-hook`}
-                type="password"
-                value={d.webhookSecret}
-                onChange={(e) => update(idx, { webhookSecret: e.target.value })}
-                placeholder={d.hasWebhookSecret ? MASKED_VALUE : "webhook secret"}
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
-              />
-              {d.slug && SLUG_RE.test(d.slug) && (
-                <p className="text-xs text-zinc-600 font-mono">
-                  Webhook URL: /api/webhooks/{service}?token=&lt;this secret&gt;
-                </p>
+              <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-600">(auto-generated — paste the URL below into {label})</span></Label>
+              <div className="flex gap-2">
+                <Input
+                  id={`${service}-${idx}-hook`}
+                  type="text"
+                  value={d.webhookSecret}
+                  onChange={(e) => update(idx, { webhookSecret: e.target.value })}
+                  placeholder={d.hasWebhookSecret ? MASKED_VALUE : "auto-generated when you add an instance"}
+                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0 border-zinc-700 text-zinc-300 hover:text-white"
+                  onClick={() => update(idx, { webhookSecret: generateSecret() })}
+                >
+                  Generate
+                </Button>
+              </div>
+              {d.webhookSecret && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
+                    <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
+                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 text-zinc-500 hover:text-white transition-colors" aria-label="Copy webhook URL">
+                      {copiedHook === idx ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <p className="text-xs text-zinc-600">Add this as a webhook (Connect → Webhook, method POST) in {label}, then Save &amp; Test here.</p>
+                </div>
+              )}
+              {d.hasWebhookSecret && !d.webhookSecret && (
+                <p className="text-xs text-zinc-600">A webhook secret is saved. Click <strong>Generate</strong> to replace it — the current value can&apos;t be shown again.</p>
               )}
             </div>
 
