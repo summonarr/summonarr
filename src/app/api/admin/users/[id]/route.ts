@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
 
 // Thrown inside the anonymization transaction to roll it back when the target is
@@ -36,6 +36,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     tvQuotaDays?: number | null;
     mediaServer?: string | null;
     maxContentRating?: string | null;
+    instanceGrants?: unknown;
   } & Partial<Record<NotifKey, boolean>>;
   const parsedBody = await readJsonCapped<UpdateBody>(req, 32768);
   if (parsedBody instanceof NextResponse) return parsedBody;
@@ -144,6 +145,30 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { targetUser: targetUser.name ?? targetUser.email, before: targetUser.permissions.toString(), after: parsed.toString() }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, permissions: parsed.toString() });
+  }
+
+  // Per-instance grants for NAMED Radarr/Sonarr instances (multi-instance). A JSON
+  // map { "<slug>": { request?, autoApprove? } }; the default/"4k" instances are
+  // NOT gated here (default is open; 4k uses the REQUEST_4K* bits). Stored on
+  // User.instanceGrants and consulted by canRequestInstance/canAutoApproveInstance.
+  if (body.instanceGrants !== undefined) {
+    if (body.instanceGrants !== null && (typeof body.instanceGrants !== "object" || Array.isArray(body.instanceGrants))) {
+      return NextResponse.json({ error: "instanceGrants must be an object map or null" }, { status: 400 });
+    }
+    const grants = serializeInstanceGrants(parseInstanceGrants(body.instanceGrants));
+    const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true, email: true } });
+    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    try {
+      await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+      throw err;
+    }
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    invalidateUserSession(id);
+    return NextResponse.json({ id, instanceGrants: grants });
   }
 
   const quotaFields = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;

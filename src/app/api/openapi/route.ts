@@ -328,6 +328,9 @@ const spec = {
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   note: { type: "string", maxLength: 500 },
                   _token: { type: "string", description: "HMAC-signed request token from /api/requests/token" },
+                  arrInstance: { type: "string", description: "Target Radarr/Sonarr instance slug ('' = default, '4k', or a named instance). Omit to auto-route (anime rules) / default." },
+                  is4k: { type: "boolean", description: "Legacy shorthand for arrInstance='4k'" },
+                  qualityProfileId: { type: "integer", description: "REQUEST_ADVANCED only; validated against the resolved instance's profiles" },
                 },
               },
             },
@@ -1085,6 +1088,15 @@ const spec = {
                   notifyOnApproved: { type: "boolean" },
                   notifyOnAvailable: { type: "boolean" },
                   notifyOnDeclined: { type: "boolean" },
+                  instanceGrants: {
+                    type: "object",
+                    nullable: true,
+                    description: "Per-instance grants for NAMED Radarr/Sonarr instances, keyed by slug",
+                    additionalProperties: {
+                      type: "object",
+                      properties: { request: { type: "boolean" }, autoApprove: { type: "boolean" } },
+                    },
+                  },
                 },
               },
             },
@@ -1100,6 +1112,55 @@ const spec = {
           "200": { description: "User deleted" },
           "400": { description: "Cannot delete last admin" },
           "403": { description: "Forbidden" },
+        },
+      },
+    },
+    "/admin/arr-instances": {
+      get: {
+        tags: ["Admin – Settings"],
+        summary: "List all Radarr/Sonarr instances with connection state (ADMIN)",
+        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+      },
+      post: {
+        tags: ["Admin – Settings"],
+        summary: "Save one service's instance registry + connection settings (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "instances"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instances: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      required: ["slug"],
+                      properties: {
+                        slug: { type: "string", description: "'' = default, '4k', or a named slug (lowercase alnum)" },
+                        name: { type: "string" },
+                        restricted: { type: "boolean" },
+                        serverAll: { type: "boolean" },
+                        skipLibraryCheck: { type: "boolean" },
+                        autoRoute: { type: "object", nullable: true, properties: { animeOnly: { type: "boolean" }, genreIds: { type: "array", items: { type: "integer" } }, originalLanguages: { type: "array", items: { type: "string" } } } },
+                        url: { type: "string" },
+                        apiKey: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                        rootFolder: { type: "string" },
+                        qualityProfileId: { type: "integer", nullable: true },
+                        webhookSecret: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Saved; includes per-instance connection test results" },
+          "400": { description: "Invalid service or slug" },
         },
       },
     },

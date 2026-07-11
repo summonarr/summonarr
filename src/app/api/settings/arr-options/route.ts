@@ -2,17 +2,25 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
+import { arrSettingKey, isValidInstanceSlug } from "@/lib/arr-instances";
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
   const service = req.nextUrl.searchParams.get("service");
   if (service !== "radarr" && service !== "sonarr") {
     return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
   }
-  // ?variant=4k selects the optional 4K instance's namespaced settings keys.
-  const variant = req.nextUrl.searchParams.get("variant") === "4k" ? "4k" : "";
+  // ?instance=<slug> selects a named instance's namespaced settings keys; the
+  // legacy ?variant=4k spelling is still honored. "" = the default instance.
+  const rawInstance = req.nextUrl.searchParams.get("instance");
+  const instance = rawInstance != null
+    ? rawInstance
+    : req.nextUrl.searchParams.get("variant") === "4k" ? "4k" : "";
+  if (!isValidInstanceSlug(instance)) {
+    return NextResponse.json({ error: "invalid instance" }, { status: 400 });
+  }
 
-  const urlKey = `${service}${variant}Url`;
-  const keyKey = `${service}${variant}ApiKey`;
+  const urlKey = arrSettingKey(service, instance, "Url");
+  const keyKey = arrSettingKey(service, instance, "ApiKey");
   const rows = await prisma.setting.findMany({ where: { key: { in: [urlKey, keyKey] } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 

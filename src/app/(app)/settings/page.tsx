@@ -9,6 +9,7 @@ import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
+import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -665,6 +666,14 @@ export default async function SettingsPage({
 
             <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <Request4kAllToggle initialEnabled={cfg.request4kAll === "true"} />
+            </div>
+
+            <div id="arr-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Additional instances</h2>
+                <p className="text-sm text-zinc-500 mt-1">Configure extra Radarr/Sonarr instances (e.g. a dedicated anime instance) beyond the default and 4K instances above.</p>
+              </div>
+              <ArrInstancesManager />
             </div>
           </>
         )}

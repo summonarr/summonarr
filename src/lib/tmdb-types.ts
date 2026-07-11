@@ -22,6 +22,11 @@ export interface TmdbMedia {
   // arr4kAvailable = the 4K Radarr/Sonarr has the file; arr4kPending = wanted but not yet fetched.
   arr4kPending?: boolean;
   arr4kAvailable?: boolean;
+  // Per-instance availability for ALL configured Radarr/Sonarr instances
+  // (multi-instance support), keyed by instance slug ("" = default, "4k", named).
+  // Additive superset of arrPending/arr4k* — a named-instance UI reads this map.
+  // Populated by attachArrPending; absent ⇒ no instance rows for this title.
+  arrInstances?: Record<string, { pending: boolean; available: boolean }>;
   requested?: boolean;
   requestedByMe?: boolean;
   // Admin-blacklisted: the title is shown but cannot be requested (the request POST

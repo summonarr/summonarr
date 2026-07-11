@@ -189,7 +189,7 @@ export default async function AdminPage({
       const requesters: Requester[] = bucket.map((r) => ({
         requestId: r.id,
         status: r.status,
-        is4k: r.is4k,
+        is4k: r.arrInstance === "4k",
         note: r.note,
         adminNote: r.adminNote,
         createdAt: r.createdAt.toISOString(),

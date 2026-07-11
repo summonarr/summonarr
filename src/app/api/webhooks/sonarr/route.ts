@@ -12,6 +12,8 @@ import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isSeriesDownloadedInSonarr, resolveSingleTvdbToTmdb } from "@/lib/arr";
+import { getArrInstances } from "@/lib/arr-instance-registry";
+import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -39,15 +41,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
-  const [sourceRow, source4kRow, legacyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "sonarrWebhookSecret" } }),
-    prisma.setting.findUnique({ where: { key: "sonarr4kWebhookSecret" } }),
+  // Every configured instance carries its own webhook secret (Setting key
+  // sonarr<Slug>WebhookSecret). The legacy shared `webhookSecret` remains the
+  // DEFAULT instance's ("") secret when it has no per-instance secret of its own.
+  const instances = await getArrInstances("sonarr");
+  const [secretRows, legacyRow] = await Promise.all([
+    prisma.setting.findMany({
+      where: { key: { in: instances.map((i) => arrSettingKey("sonarr", i.slug, "WebhookSecret")) } },
+    }),
     prisma.setting.findUnique({ where: { key: "webhookSecret" } }),
   ]);
-  const hdSecret = sourceRow?.value || legacyRow?.value || "";
-  const fourKSecret = source4kRow?.value || "";
+  const secretByKey = new Map(secretRows.map((r) => [r.key, r.value ?? ""]));
+  const instanceSecrets = instances.map((inst) => {
+    const own = secretByKey.get(arrSettingKey("sonarr", inst.slug, "WebhookSecret")) || "";
+    const secret = own || (inst.slug === DEFAULT_ARR_INSTANCE ? legacyRow?.value || "" : "");
+    return { slug: inst.slug, secret };
+  });
 
-  if (hdSecret.length === 0 && fourKSecret.length === 0) {
+  if (instanceSecrets.every((i) => i.secret.length === 0)) {
     console.warn("[webhook/sonarr] secret not configured");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -58,16 +69,28 @@ export async function POST(req: NextRequest) {
   const token = authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : queryToken;
-  // Secret-as-discriminator (see webhooks/radarr): the matching secret selects the
-  // instance variant. Compare against both without an early return. Guardrail 2.
-  const matchedHd = token != null && hdSecret.length > 0 && safeCompare(token, hdSecret);
-  const matched4k = token != null && fourKSecret.length > 0 && safeCompare(token, fourKSecret);
-  if (!token || (!matchedHd && !matched4k)) {
+  // Secret-as-discriminator (see webhooks/radarr): each instance is configured with
+  // its own webhook secret, so the matching secret selects the instance that fired.
+  // Compare against EVERY instance secret with no early return (no timing oracle).
+  // Guardrail 2: keep ?token= + the timing-safe compare; no HMAC.
+  let matchedSlug: string | null = null;
+  let secret = "";
+  for (const inst of instanceSecrets) {
+    const isMatch = token != null && inst.secret.length > 0 && safeCompare(token, inst.secret);
+    if (!isMatch) continue;
+    // Equal-secret collision (misconfig): the DEFAULT instance ("") wins; otherwise
+    // the first configured instance in registry order wins (getArrInstances lists
+    // the default first, so keeping the first match already yields that ordering).
+    if (matchedSlug === null || inst.slug === DEFAULT_ARR_INSTANCE) {
+      matchedSlug = inst.slug;
+      secret = inst.secret;
+    }
+  }
+  if (!token || matchedSlug === null) {
     console.warn("[webhook/sonarr] 401 unauthorized");
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const is4k = matched4k && !matchedHd;
-  const secret = is4k ? fourKSecret : hdSecret;
+  const arrInstance = matchedSlug;
 
   const rawBytes = new Uint8Array(await req.arrayBuffer());
   if (rawBytes.length > 1_048_576) {
@@ -141,7 +164,7 @@ export async function POST(req: NextRequest) {
         : null;
     let shouldNotify = true;
     if (stableSeriesId !== null) {
-      const manualKey = `manualInteractionNotified:sonarr:${stableSeriesId}`;
+      const manualKey = `manualInteractionNotified:sonarr:${arrInstance}:${stableSeriesId}`;
       const claim = await prisma.setting.createMany({
         data: [{ key: manualKey, value: new Date().toISOString() }],
         skipDuplicates: true,
@@ -191,14 +214,14 @@ export async function POST(req: NextRequest) {
   // authoritative API before changing any status. Tri-state result: `false` =
   // Sonarr is reachable and confirms NO episode file exists, so we SKIP the flip
   // (the forgery case we reject); `true` = confirmed downloaded, proceed; `null` =
-  // indeterminate (the HD/4K variant isn't configured, or Sonarr is unreachable) so
+  // indeterminate (the firing instance isn't configured, or Sonarr is unreachable) so
   // we proceed optimistically and let the periodic library sync reconcile
   // availability independently. Proceeding on null is safe against forgery because
   // an attacker cannot force a null result without breaking the operator's own
   // Sonarr connectivity.
   const seriesDownloaded = await isSeriesDownloadedInSonarr(
     { tvdbId: safeVdbId, tmdbId: safeMdbId },
-    is4k ? "4k" : "hd",
+    arrInstance,
   );
   if (seriesDownloaded === false) {
     console.warn("[webhook/sonarr] Download event for tvdbId=%s tmdbId=%s not confirmed downloaded in Sonarr; skipping status flip.", sanitizeForLog(safeVdbId ?? "?"), sanitizeForLog(safeMdbId ?? "?"));
@@ -224,19 +247,19 @@ export async function POST(req: NextRequest) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
       // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
       const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", is4k, status: "APPROVED", availableAt: null },
+        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: null },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", is4k, status: "APPROVED", availableAt: { not: null } },
+        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: { not: null } },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
-      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, is4k } });
+      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, arrInstance } });
       // Backfill tvdbId on the matched request(s). A later Download webhook for the same
       // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
       // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
@@ -258,24 +281,24 @@ export async function POST(req: NextRequest) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
 
       const req = await tx.mediaRequest.findFirst({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance },
         select: { tmdbId: true },
       });
       const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k, status: "APPROVED", availableAt: null },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: null },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", is4k, status: "APPROVED", availableAt: { not: null } },
+        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: { not: null } },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       updated = { count: resetNotify.count + alreadyAvailable.count };
       if (req && updated.count > 0) {
-        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, is4k } });
+        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
         tvdbPathTmdbId = req.tmdbId;
       } else if (!req && updated.count > 0) {
         // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
@@ -292,7 +315,7 @@ export async function POST(req: NextRequest) {
         void (async () => {
           const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
           if (resolved !== null) {
-            await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, is4k } });
+            await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, arrInstance } });
           } else {
             console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
           }
@@ -303,14 +326,15 @@ export async function POST(req: NextRequest) {
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
-    await scheduleLibraryScan("tv", safeMdbId ?? undefined, is4k ? "4k" : "hd");
+    await scheduleLibraryScan("tv", safeMdbId ?? undefined, arrInstance);
 
-    // Scope by is4k to the variant that fired this webhook: an HD Download must not
-    // sweep in the sibling 4K request (or vice versa) and notify it off the wrong grab.
+    // Scope by arrInstance to the instance that fired this webhook: one instance's
+    // Download must not sweep in a sibling instance's request and notify it off the
+    // wrong grab.
     const whereNotify = effectiveMdbId
-      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tmdbId: effectiveMdbId, mediaType: "TV" as const, arrInstance, status: "AVAILABLE" as const, notifiedAvailable: false }
       : effectiveVdbId
-      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, is4k, status: "AVAILABLE" as const, notifiedAvailable: false }
+      ? { tvdbId: effectiveVdbId, mediaType: "TV" as const, arrInstance, status: "AVAILABLE" as const, notifiedAvailable: false }
       : null;
     if (!whereNotify) return;
 

@@ -179,7 +179,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     await Promise.allSettled(
       approved.map(async (r) => {
         try {
-          const variant = r.is4k ? "4k" : "hd";
+          const variant = r.arrInstance;
           // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
           // absent ⇒ the instance default. Mirrors requests/[id] effectiveProfileId
           // and the sync re-push — batch approve previously discarded it.

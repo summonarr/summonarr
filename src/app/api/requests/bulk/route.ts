@@ -184,19 +184,20 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const [existingReqs, plexItems, jellyfinItems, radarrAvail, sonarrAvail] = await Promise.all([
     prisma.mediaRequest.findMany({
-      // Bulk requests are HD-only (is4k defaults false), so scope the existing-request
-      // lookup to HD rows too — otherwise a target who holds only a 4K request for a
-      // title is wrongly classified "already-requested" and the HD create is skipped.
-      where: { requestedBy: targetUserId, is4k: false, OR: orPairs },
+      // Bulk requests always target the default instance (arrInstance:""), so scope the
+      // existing-request lookup to default-instance rows too — otherwise a target who
+      // holds only a non-default (4K/named) request for a title is wrongly classified
+      // "already-requested" and the default create is skipped.
+      where: { requestedBy: targetUserId, arrInstance: "", OR: orPairs },
       select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
     }),
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     movieIds.length
-      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds }, arrInstance: "" }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length
-      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds }, arrInstance: "" }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 
@@ -279,7 +280,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   }
 
   // Drop stale declined rows before the create transaction so their fresh
-  // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, is4k).
+  // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, arrInstance).
   const staleDeclinedIds = [...staleDeclinedIdByKey.values()];
   if (staleDeclinedIds.length > 0) {
     // CAS on status + permanentlyDeclined: an admin who re-approved or made the decline
@@ -364,18 +365,18 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
             // a duplicate's retry re-snapshots, sees the other's committed rows in
             // `before`, and emits nothing. (Bulk analog of the requests/route fix.)
             const before = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, is4k: false, OR: pairs },
+              where: { requestedBy: targetUserId, arrInstance: "", OR: pairs },
               select: { id: true },
             });
             const beforeIds = new Set(before.map((r) => r.id));
 
-            // If another user's HD request for the same title is already APPROVED or
-            // AVAILABLE, the content is greenlit/fulfilled — mirror that status so the
-            // bulk requester is tracked (and gets the "now available" ping) instead of
-            // queuing a duplicate PENDING for an admin to re-review. Matches the single
+            // If another user's default-instance request for the same title is already
+            // APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror that status
+            // so the bulk requester is tracked (and gets the "now available" ping) instead
+            // of queuing a duplicate PENDING for an admin to re-review. Matches the single
             // POST /api/requests "mirror-approved" branch.
             const greenlit = await tx.mediaRequest.findMany({
-              where: { is4k: false, status: { in: ["APPROVED", "AVAILABLE"] }, OR: pairs },
+              where: { arrInstance: "", status: { in: ["APPROVED", "AVAILABLE"] }, OR: pairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
             const greenlitMap = new Map<string, "APPROVED" | "AVAILABLE">();
@@ -414,7 +415,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
               skipDuplicates: true,
             });
             const after = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, is4k: false, OR: pairs },
+              where: { requestedBy: targetUserId, arrInstance: "", OR: pairs },
               select: { id: true, tmdbId: true, mediaType: true, status: true },
             });
             return after.filter((r) => !beforeIds.has(r.id));
@@ -460,9 +461,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
     try {
       if (p.mediaType === "MOVIE") {
-        await addMovieToRadarr(p.tmdbId, "hd", undefined, targetUserId);
+        await addMovieToRadarr(p.tmdbId, "", undefined, targetUserId);
       } else {
-        const tvdbId = await addSeriesToSonarr(p.tmdbId, "hd", undefined, targetUserId);
+        const tvdbId = await addSeriesToSonarr(p.tmdbId, "", undefined, targetUserId);
         await prisma.mediaRequest.update({ where: { id: row.id }, data: { tvdbId } });
       }
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };

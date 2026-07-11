@@ -93,10 +93,10 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
       distinct: ["tmdbId", "mediaType"],
     }),
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, arrInstance: "" }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, is4k: false }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, arrInstance: "" }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 
@@ -389,10 +389,10 @@ async function handleCommand(interaction: any): Promise<void> {
       const approvedTvIds    = requests.filter(r => r.status === "APPROVED" && r.mediaType === "TV").map(r => r.tmdbId);
       const [radarrQueued, sonarrQueued] = await Promise.all([
         approvedMovieIds.length > 0
-          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds }, is4k: false }, select: { tmdbId: true } })
+          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds }, arrInstance: "" }, select: { tmdbId: true } })
           : Promise.resolve([]),
         approvedTvIds.length > 0
-          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds }, is4k: false }, select: { tmdbId: true } })
+          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds }, arrInstance: "" }, select: { tmdbId: true } })
           : Promise.resolve([]),
       ]);
       const radarrQueuedSet = new Set(radarrQueued.map(r => r.tmdbId));
@@ -658,9 +658,10 @@ async function handleComponent(interaction: any): Promise<void> {
       // gates (parity with requests/route.ts): a re-request that those gates then
       // reject must NOT have already erased the user's DECLINED-history row.
       const existing = await prisma.mediaRequest.findFirst({
-        // is4k-scoped: Discord requests are HD-only (is4k: false), so a web-created
-        // 4K request for the same title must not block this user's HD request.
-        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, is4k: false },
+        // Default-instance-scoped: Discord requests always target the default instance
+        // (arrInstance: ""), so a web-created non-default (4K/named) request for the same
+        // title must not block this user's default-instance request.
+        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, arrInstance: "" },
       });
       if (existing) {
         if (existing.permanentlyDeclined) {
@@ -748,9 +749,9 @@ async function handleComponent(interaction: any): Promise<void> {
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
-              await addMovieToRadarr(selected.id, "hd", undefined, dbUser.id);
+              await addMovieToRadarr(selected.id, "", undefined, dbUser.id);
             } else {
-              const tvdbId = await addSeriesToSonarr(selected.id, "hd", undefined, dbUser.id);
+              const tvdbId = await addSeriesToSonarr(selected.id, "", undefined, dbUser.id);
               await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
             }
           } catch (err) {
@@ -825,7 +826,7 @@ async function handleComponent(interaction: any): Promise<void> {
           // If another request for this title is already APPROVED or AVAILABLE, the
           // content is already greenlit — mirror that status so this user is tracked
           // for the "now available" notification, and skip the admin "new request"
-          // alert (nothing to review). Discord requests are HD-only (is4k: false).
+          // alert (nothing to review). Discord requests target the default instance (arrInstance: "").
           // One Serializable tx covers the quota recount, the greenlit check, and
           // the mirror/pending create (parity with requests/route.ts) — mirror rows
           // are APPROVED/AVAILABLE and count against the quota window, so a create
@@ -841,7 +842,7 @@ async function handleComponent(interaction: any): Promise<void> {
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
-                where: { tmdbId: selected.id, mediaType, is4k: false, status: { in: ["APPROVED", "AVAILABLE"] } },
+                where: { tmdbId: selected.id, mediaType, arrInstance: "", status: { in: ["APPROVED", "AVAILABLE"] } },
                 select: { status: true },
               });
               if (alreadyGreenlit) {
@@ -874,7 +875,7 @@ async function handleComponent(interaction: any): Promise<void> {
               where: {
                 tmdbId: selected.id,
                 mediaType,
-                is4k: false,
+                arrInstance: "",
                 status: "PENDING",
                 id: { not: pendingRequest.id },
                 OR: [
@@ -968,7 +969,7 @@ async function handleComponent(interaction: any): Promise<void> {
 
       const request = await prisma.mediaRequest.findUnique({
         where: { id: requestId },
-        select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true },
+        select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true, arrInstance: true },
       });
 
       if (!request || request.status !== "PENDING") {
@@ -1006,9 +1007,9 @@ async function handleComponent(interaction: any): Promise<void> {
           if (request.mediaType === "MOVIE") {
             // Forward the requester's stored quality profile (a REQUEST_ADVANCED web
             // requester may have chosen one) — parity with requests/[id] approve.
-            await addMovieToRadarr(request.tmdbId, "hd", request.qualityProfileId ?? undefined, request.requestedBy);
+            await addMovieToRadarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(request.tmdbId, "hd", request.qualityProfileId ?? undefined, request.requestedBy);
+            const tvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
             await prisma.mediaRequest.update({ where: { id: requestId }, data: { tvdbId } });
           }
         } catch (err) {

@@ -48,6 +48,14 @@ model User {
   // role preset via effectivePermissions(), so an upgrade can run `prisma db
   // push` before the migration without locking anyone out.
   permissions   BigInt    @default(0)
+  // Per-instance access grants for NAMED Radarr/Sonarr instances (multi-instance
+  // support). JSON map keyed by instance slug → { request?, autoApprove? }, e.g.
+  // { "anime": { "request": true, "autoApprove": false } }. The default ("") and
+  // legacy "4k" instances are NOT gated here — the default is open to any requester
+  // and "4k" continues to use the REQUEST_4K*/AUTO_APPROVE_4K* permission bits for
+  // back-compat (see canRequestInstance in src/lib/permissions.ts). null/absent ⇒
+  // no named-instance grants. ADMIN bypasses. Parsed via parseInstanceGrants().
+  instanceGrants Json?
   // Per-user, per-media-type request-quota overrides. null ⇒ use the global
   // quotaLimit/quotaPeriod Settings. QUOTA_UNLIMITED (or ADMIN) bypasses both.
   movieQuotaLimit Int?
@@ -226,9 +234,18 @@ model MediaRequest {
 
   tvdbId Int? // set for TV shows when added to Sonarr; used for webhook matching
 
-  // Which Radarr/Sonarr instance this request targets. false = HD (default),
-  // true = the optional 4K instance. Part of the unique key so one user can hold
-  // both an HD and a 4K request for the same title.
+  // Which Radarr/Sonarr instance this request targets. "" = the default instance
+  // (radarrUrl/sonarrUrl), "4k" = the legacy 4K instance (radarr4kUrl/…), or any
+  // named-instance slug ("anime", …) from the instance registry (see
+  // src/lib/arr-instance-registry.ts). Part of the unique key so one user can hold
+  // a separate request per instance for the same title. Backfilled from the former
+  // `is4k Boolean` (false→"" , true→"4k") by the pre-`db push` hook in docker-entrypoint.sh.
+  arrInstance String @default("")
+  // DEPRECATED legacy discriminator. RETAINED (not dropped) so `prisma db push`
+  // stays non-destructive on upgrade — dropping a column is a "genuinely
+  // destructive" change the entrypoint refuses to auto-apply. New code reads
+  // `arrInstance`; the entrypoint backfills arrInstance from this on boot. Drop in
+  // a later release once every deployment has migrated (mirrors User.autoApprove).
   is4k Boolean @default(false)
 
   // Optional per-request quality profile chosen by a REQUEST_ADVANCED user (or an
@@ -244,7 +261,7 @@ model MediaRequest {
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
 
-  @@unique([tmdbId, mediaType, requestedBy, is4k])
+  @@unique([tmdbId, mediaType, requestedBy, arrInstance])
   @@index([requestedBy])
   @@index([status])
   @@index([tvdbId])
@@ -316,9 +333,10 @@ model TVEpisodeCache {
 
 model RadarrWantedItem {
   tmdbId Int
-  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+  arrInstance String @default("") // "" = default instance, "4k"/named-slug = others
+  is4k        Boolean @default(false) // DEPRECATED, retained so db push stays non-destructive; backfilled → arrInstance by the entrypoint
 
-  @@id([tmdbId, is4k])
+  @@id([tmdbId, arrInstance])
 }
 
 // ─── Radarr Available Cache ───────────────────────────────────────────────────
@@ -328,9 +346,10 @@ model RadarrWantedItem {
 
 model RadarrAvailableItem {
   tmdbId Int
-  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+  arrInstance String @default("") // "" = default instance, "4k"/named-slug = others
+  is4k        Boolean @default(false) // DEPRECATED, retained so db push stays non-destructive; backfilled → arrInstance by the entrypoint
 
-  @@id([tmdbId, is4k])
+  @@id([tmdbId, arrInstance])
 }
 
 // ─── Sonarr Wanted Cache ──────────────────────────────────────────────────────
@@ -339,9 +358,10 @@ model RadarrAvailableItem {
 
 model SonarrWantedItem {
   tmdbId Int
-  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+  arrInstance String @default("") // "" = default instance, "4k"/named-slug = others
+  is4k        Boolean @default(false) // DEPRECATED, retained so db push stays non-destructive; backfilled → arrInstance by the entrypoint
 
-  @@id([tmdbId, is4k])
+  @@id([tmdbId, arrInstance])
 }
 
 // ─── Sonarr Available Cache ───────────────────────────────────────────────────
@@ -351,9 +371,10 @@ model SonarrWantedItem {
 
 model SonarrAvailableItem {
   tmdbId Int
-  is4k   Boolean @default(false) // false = HD instance, true = 4K instance
+  arrInstance String @default("") // "" = default instance, "4k"/named-slug = others
+  is4k        Boolean @default(false) // DEPRECATED, retained so db push stays non-destructive; backfilled → arrInstance by the entrypoint
 
-  @@id([tmdbId, is4k])
+  @@id([tmdbId, arrInstance])
 }
 
 // ─── Upcoming Cache ───────────────────────────────────────────────────────────
@@ -907,10 +928,14 @@ model TrashApplication {
   id          String    @id @default(cuid(2))
   trashSpecId String
   trashSpec   TrashSpec @relation(fields: [trashSpecId], references: [id], onDelete: Cascade)
-  // false = HD instance (radarrUrl/sonarrUrl); true = 4K instance (radarr4kUrl/sonarr4kUrl).
-  // A spec can be managed independently on each instance — each variant keeps its own remoteId,
-  // appliedAt, and error state. The catalog (TrashSpec) is shared across variants.
-  is4k        Boolean   @default(false)
+  // Which Radarr/Sonarr instance this application targets: "" = default
+  // (radarrUrl/sonarrUrl), "4k" = legacy 4K instance, or any named-instance slug.
+  // A spec can be managed independently on each instance — each keeps its own
+  // remoteId, appliedAt, and error state. The catalog (TrashSpec) is shared.
+  // Backfilled from the former `is4k Boolean` by the entrypoint pre-`db push` hook.
+  arrInstance String   @default("")
+  // DEPRECATED legacy discriminator, retained so db push stays non-destructive.
+  is4k        Boolean  @default(false)
   enabled     Boolean   @default(true)
   remoteId    Int?
   appliedAt   DateTime?
@@ -923,7 +948,7 @@ model TrashApplication {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  @@unique([trashSpecId, is4k])
+  @@unique([trashSpecId, arrInstance])
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────

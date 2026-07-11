@@ -95,7 +95,7 @@ export const GET = withAuth(async (
               tmdbId,
               mediaType: type === "tv" ? "TV" : "MOVIE",
               requestedBy: session.user.id,
-              is4k: true,
+              arrInstance: "4k",
               status: { not: "DECLINED" },
             },
             select: { id: true },
