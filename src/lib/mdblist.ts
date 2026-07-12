@@ -37,9 +37,34 @@ export interface MdblistRatings {
   trailerUrl: string | null;
 }
 
-async function getApiKey(): Promise<string | null> {
-  const row = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
-  return row?.value || null;
+// The MDBList API key lives in a single Setting row that changes only when an admin
+// edits it. A blocking ratings batch resolves up to 200 misses and each miss calls
+// getApiKey twice (once in getMdblistRatingsForTmdb, once in fetchAndCacheMdblistForTmdb)
+// — without memoization that is ~400 identical setting.findUnique reads against the
+// small Prisma pool per request. Cache the resolved value for a short window, and
+// coalesce concurrent cold reads into one query, so a key change still propagates
+// within seconds. Pass { fresh: true } to bypass the cache (admin connection test,
+// where stale-by-up-to-TTL would be confusing).
+const API_KEY_TTL_MS = 30_000;
+let apiKeyCache: { value: string | null; at: number } | null = null;
+let apiKeyInflight: Promise<string | null> | null = null;
+
+async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null> {
+  if (!opts.fresh && apiKeyCache && Date.now() - apiKeyCache.at < API_KEY_TTL_MS) {
+    return apiKeyCache.value;
+  }
+  if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
+  const p = (async () => {
+    const row = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
+    const value = row?.value || null;
+    apiKeyCache = { value, at: Date.now() };
+    return value;
+  })();
+  if (!opts.fresh) {
+    apiKeyInflight = p;
+    p.finally(() => { apiKeyInflight = null; }).catch(() => {});
+  }
+  return p;
 }
 
 export type MdblistResult =
@@ -144,7 +169,7 @@ export async function fetchAndCacheMdblistForTmdb(
 
 const MDBLIST_BATCH_SIZE = 200;
 
-type MdblistBatchRaw = {
+export type MdblistBatchRaw = {
   id?: number | null;
   title?: string;
   imdb_id?: string | null;
@@ -156,7 +181,8 @@ type MdblistBatchRaw = {
   ratings?: { source: string; value: number | null; score?: number | null; votes?: number | null }[];
 };
 
-function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
+// Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
+export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
 
   // MDBList source names vary across API versions; multiple aliases are checked per source
   const findSrc = (...names: string[]) => {
@@ -351,7 +377,7 @@ export async function getMdblistRatingsForTmdb(
 }
 
 export async function testMdblistConnection(): Promise<string> {
-  const apiKey = await getApiKey();
+  const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No MDBList API key configured");
 
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/show/1396/`);
