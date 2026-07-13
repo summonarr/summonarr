@@ -17,27 +17,27 @@ const SERVICES: { label: string; value: TrashService; suffix: string }[] = [
   { label: "Sonarr", value: "SONARR", suffix: "TV" },
 ];
 
-type Variant = "hd" | "4k";
-
-const VARIANTS: { label: string; value: Variant }[] = [
-  { label: "HD", value: "hd" },
-  { label: "4K", value: "4k" },
-];
+export interface NavInstanceOption {
+  slug: string;
+  name: string;
+}
 
 interface TrashGuidesNavProps {
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
-  radarr4kConfigured: boolean;
-  sonarr4kConfigured: boolean;
+  // Configured instances per service (default first, from the instance registry).
+  radarrInstances: NavInstanceOption[];
+  sonarrInstances: NavInstanceOption[];
 }
 
-// Sub-page tabs plus service (Radarr/Sonarr) and instance (HD/4K) toggles for
-// the trash-guides admin section; toggles drive the ?service= / ?variant= params.
+// Sub-page tabs plus service (Radarr/Sonarr) and instance toggles for the
+// trash-guides admin section; toggles drive the ?service= / ?variant= params.
+// ?variant= carries an instance SLUG ("" default via param absence, "4k", named).
 export function TrashGuidesNav({
   radarrConfigured,
   sonarrConfigured,
-  radarr4kConfigured,
-  sonarr4kConfigured,
+  radarrInstances,
+  sonarrInstances,
 }: TrashGuidesNavProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -48,17 +48,24 @@ export function TrashGuidesNav({
     ? "SONARR"
     : "RADARR";
 
-  const current4kConfigured = currentService === "RADARR" ? radarr4kConfigured : sonarr4kConfigured;
-  const rawVariant = searchParams.get("variant");
-  // Drop ?variant=4k when the active service has no 4K instance — keeps the view coherent.
-  const currentVariant: Variant = rawVariant === "4k" && current4kConfigured ? "4k" : "hd";
+  const configuredInstances = currentService === "RADARR" ? radarrInstances : sonarrInstances;
+  // Always offer a Default entry so the user can navigate back to it even when
+  // the default connection isn't configured (the page shows its banner there).
+  const instanceOptions: NavInstanceOption[] = configuredInstances.some((i) => i.slug === "")
+    ? configuredInstances
+    : [{ slug: "", name: "Default" }, ...configuredInstances];
 
-  // Hide the service/variant toggles on tabs that don't depend on them.
+  const rawVariant = searchParams.get("variant");
+  // Drop an unknown/unconfigured ?variant= slug — keeps the view coherent.
+  const currentVariant =
+    rawVariant && instanceOptions.some((i) => i.slug === rawVariant) ? rawVariant : "";
+
+  // Hide the service/instance toggles on tabs that don't depend on them.
   const showServiceToggle =
     pathname.startsWith("/admin/trash-guides/custom-formats") ||
     pathname.startsWith("/admin/trash-guides/quality-profiles") ||
     pathname.startsWith("/admin/trash-guides/naming-sizes");
-  const showVariantToggle = showServiceToggle && current4kConfigured;
+  const showVariantToggle = showServiceToggle && instanceOptions.length > 1;
 
   function isPageActive(page: typeof SUB_PAGES[0]) {
     if (page.exact) return pathname === page.href;
@@ -72,20 +79,22 @@ export function TrashGuidesNav({
     } else {
       params.set("service", "sonarr");
     }
-    // If the destination service has no 4K instance, a lingering ?variant=4k would be invalid.
-    const next4kConfigured = next === "RADARR" ? radarr4kConfigured : sonarr4kConfigured;
-    if (!next4kConfigured) params.delete("variant");
+    // If the destination service doesn't have the selected instance, a lingering
+    // ?variant= would be invalid — drop it back to the default.
+    const nextInstances = next === "RADARR" ? radarrInstances : sonarrInstances;
+    const v = params.get("variant");
+    if (v && !nextInstances.some((i) => i.slug === v)) params.delete("variant");
     const qs = params.toString();
     router.push(qs ? `${pathname}?${qs}` : pathname);
     router.refresh();
   }
 
-  function setVariant(next: Variant) {
+  function setVariant(next: string) {
     const params = new URLSearchParams(searchParams.toString());
-    if (next === "hd") {
+    if (next === "") {
       params.delete("variant");
     } else {
-      params.set("variant", "4k");
+      params.set("variant", next);
     }
     const qs = params.toString();
     router.push(qs ? `${pathname}?${qs}` : pathname);
@@ -96,7 +105,7 @@ export function TrashGuidesNav({
   const queryWithParams = (() => {
     const params = new URLSearchParams();
     if (rawService) params.set("service", rawService);
-    if (currentVariant === "4k") params.set("variant", "4k");
+    if (currentVariant !== "") params.set("variant", currentVariant);
     const qs = params.toString();
     return qs ? `?${qs}` : "";
   })();
@@ -157,19 +166,19 @@ export function TrashGuidesNav({
             <div className="flex items-center gap-1">
               <span className="text-xs text-zinc-500 mr-1">Instance</span>
               <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
-                {VARIANTS.map((v) => {
-                  const active = currentVariant === v.value;
+                {instanceOptions.map((v) => {
+                  const active = currentVariant === v.slug;
                   return (
                     <button
-                      key={v.value}
-                      onClick={() => setVariant(v.value)}
+                      key={v.slug || "default"}
+                      onClick={() => setVariant(v.slug)}
                       className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                         active
                           ? "bg-indigo-600 text-white"
                           : "bg-zinc-800 text-zinc-400 hover:text-white"
                       }`}
                     >
-                      {v.label}
+                      {v.name}
                     </button>
                   );
                 })}

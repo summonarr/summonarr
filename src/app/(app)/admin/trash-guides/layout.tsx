@@ -2,23 +2,12 @@ import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { PageHeader } from "@/components/ui/design";
 import { TrashGuidesNav } from "@/components/admin/trash-guides/trash-guides-nav";
 import { TruncationBanner } from "@/components/admin/trash-guides/banners";
 
 export const dynamic = "force-dynamic";
-
-const LAYOUT_KEYS = [
-  "radarrUrl",
-  "radarrApiKey",
-  "sonarrUrl",
-  "sonarrApiKey",
-  "radarr4kUrl",
-  "radarr4kApiKey",
-  "sonarr4kUrl",
-  "sonarr4kApiKey",
-  "trashLastRefreshTruncatedAt",
-] as const;
 
 const TRUNCATION_STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -26,19 +15,18 @@ export default async function TrashGuidesLayout({ children }: { children: React.
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
-  const rows = await prisma.setting.findMany({
-    where: { key: { in: [...LAYOUT_KEYS] } },
-  });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const [radarrInstances, sonarrInstances, truncRow] = await Promise.all([
+    getSyncableArrInstances("radarr"),
+    getSyncableArrInstances("sonarr"),
+    prisma.setting.findUnique({ where: { key: "trashLastRefreshTruncatedAt" } }),
+  ]);
 
-  const radarrConfigured = !!(map.radarrUrl && map.radarrApiKey);
-  const sonarrConfigured = !!(map.sonarrUrl && map.sonarrApiKey);
-  const radarr4kConfigured = !!(map.radarr4kUrl && map.radarr4kApiKey);
-  const sonarr4kConfigured = !!(map.sonarr4kUrl && map.sonarr4kApiKey);
+  const radarrConfigured = radarrInstances.some((i) => i.slug === "");
+  const sonarrConfigured = sonarrInstances.some((i) => i.slug === "");
 
   // Compute truncation staleness server-side — guardrail 16 forbids Date.now() in client render path.
   // The banner only fires if the last truncation was within the last 7 days; older markers are stale signal.
-  const truncatedAtRaw = map.trashLastRefreshTruncatedAt ?? null;
+  const truncatedAtRaw = truncRow?.value ?? null;
   let recentTruncation: { at: string } | null = null;
   if (truncatedAtRaw) {
     const t = Date.parse(truncatedAtRaw);
@@ -72,8 +60,8 @@ export default async function TrashGuidesLayout({ children }: { children: React.
       <TrashGuidesNav
         radarrConfigured={radarrConfigured}
         sonarrConfigured={sonarrConfigured}
-        radarr4kConfigured={radarr4kConfigured}
-        sonarr4kConfigured={sonarr4kConfigured}
+        radarrInstances={radarrInstances.map((i) => ({ slug: i.slug, name: i.name }))}
+        sonarrInstances={sonarrInstances.map((i) => ({ slug: i.slug, name: i.name }))}
       />
       {recentTruncation && <TruncationBanner at={recentTruncation.at} />}
       {children}

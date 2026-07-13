@@ -1,38 +1,33 @@
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { prisma } from "@/lib/prisma";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/components/admin/trash-guides/types";
 
-const SETTING_KEYS = [
-  "radarrUrl",
-  "radarrApiKey",
-  "sonarrUrl",
-  "sonarrApiKey",
-  "radarr4kUrl",
-  "radarr4kApiKey",
-  "sonarr4kUrl",
-  "sonarr4kApiKey",
-] as const;
-
 export type TrashPageSearchParams = Promise<{ service?: string; variant?: string }>;
+
+// A configured instance the trash pages can target (drives the nav toggle).
+export interface TrashInstanceOption {
+  slug: string;
+  name: string;
+}
 
 export interface TrashPageContext {
   service: TrashService;
-  // Which instance the page targets. "4k" only survives when the selected service has a 4K
-  // instance configured (see fallback below).
+  // Which instance the page targets — an instance SLUG ("" default, "4k", or a
+  // named slug). Only survives when the selected service has that instance
+  // configured (see fallback below).
   variant: ArrVariant;
-  is4k: boolean;
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
-  radarr4kConfigured: boolean;
-  sonarr4kConfigured: boolean;
+  // Configured instances for the SELECTED service, default first.
+  instances: TrashInstanceOption[];
   // True when the currently selected (service, variant) pair has its URL + API key set in Settings.
   serviceConfigured: boolean;
 }
 
-// Shared auth + service/variant-resolution for every TRaSH sub-page. The layout already enforces
+// Shared auth + service/instance-resolution for every TRaSH sub-page. The layout already enforces
 // ADMIN, but each page is its own server component and Next won't run the layout's redirect inside
 // it, so we re-check here as a defense-in-depth measure.
 export async function loadTrashPageContext(
@@ -44,33 +39,24 @@ export async function loadTrashPageContext(
   const { service: rawService, variant: rawVariant } = await searchParams;
   const service: TrashService = rawService === "sonarr" ? "SONARR" : "RADARR";
 
-  const rows = await prisma.setting.findMany({
-    where: { key: { in: [...SETTING_KEYS] } },
-  });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const [radarrInstances, sonarrInstances] = await Promise.all([
+    getSyncableArrInstances("radarr"),
+    getSyncableArrInstances("sonarr"),
+  ]);
+  const serviceInstances = service === "RADARR" ? radarrInstances : sonarrInstances;
 
-  const radarrConfigured = !!(map.radarrUrl && map.radarrApiKey);
-  const sonarrConfigured = !!(map.sonarrUrl && map.sonarrApiKey);
-  const radarr4kConfigured = !!(map.radarr4kUrl && map.radarr4kApiKey);
-  const sonarr4kConfigured = !!(map.sonarr4kUrl && map.sonarr4kApiKey);
-
-  const service4kConfigured = service === "RADARR" ? radarr4kConfigured : sonarr4kConfigured;
-  // A 4K view is only valid when the selected service actually has a 4K instance configured —
-  // otherwise fall back to HD so a stale ?variant=4k can't strand the page on an empty instance.
-  const variant: ArrVariant = rawVariant === "4k" && service4kConfigured ? "4k" : "hd";
-  const is4k = variant === "4k";
-
-  const serviceHdConfigured = service === "RADARR" ? radarrConfigured : sonarrConfigured;
-  const serviceConfigured = is4k ? service4kConfigured : serviceHdConfigured;
+  // Accept the legacy "hd" spelling for the default instance; otherwise ?variant=
+  // is an instance slug. An unknown/unconfigured slug falls back to the default so
+  // a stale ?variant= can't strand the page on an empty instance.
+  const requested = rawVariant == null || rawVariant === "hd" ? "" : rawVariant;
+  const variant: ArrVariant = serviceInstances.some((i) => i.slug === requested) ? requested : "";
 
   return {
     service,
     variant,
-    is4k,
-    radarrConfigured,
-    sonarrConfigured,
-    radarr4kConfigured,
-    sonarr4kConfigured,
-    serviceConfigured,
+    radarrConfigured: radarrInstances.some((i) => i.slug === ""),
+    sonarrConfigured: sonarrInstances.some((i) => i.slug === ""),
+    instances: serviceInstances.map((i) => ({ slug: i.slug, name: i.name })),
+    serviceConfigured: serviceInstances.some((i) => i.slug === variant),
   };
 }

@@ -9,24 +9,24 @@ export default async function CustomFormatsPage({
 }: {
   searchParams: TrashPageSearchParams;
 }) {
-  const { service, is4k, serviceConfigured } = await loadTrashPageContext(searchParams);
+  const { service, variant, serviceConfigured } = await loadTrashPageContext(searchParams);
 
   return (
     <div className="space-y-6 max-w-6xl">
       {!serviceConfigured && <NotConfiguredBanner service={service} />}
       <SpecSection
-        key={`cfg-${service}-${is4k ? "4k" : "hd"}`}
+        key={`cfg-${service}-${variant || "default"}`}
         service={service}
-        is4k={is4k}
+        variant={variant}
         kind="CUSTOM_FORMAT_GROUP"
         title="Custom Format Groups"
         description="TRaSH-curated bundles (HDR Formats, Release Groups HQ, Streaming Services, etc.). Applying a group applies every member custom format in one shot."
         disabled={!serviceConfigured}
       />
       <SpecSection
-        key={`cf-${service}-${is4k ? "4k" : "hd"}`}
+        key={`cf-${service}-${variant || "default"}`}
         service={service}
-        is4k={is4k}
+        variant={variant}
         kind="CUSTOM_FORMAT"
         title="Custom Formats"
         description="CFs that will be POSTed/PUT to Radarr/Sonarr. Unmanage to stop overwriting upstream changes."

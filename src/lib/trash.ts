@@ -742,7 +742,8 @@ async function resolveCfg(service: TrashService, variant: ArrVariant = "hd"): Pr
   const key = service === "RADARR" ? "radarr" : "sonarr";
   const cfg = await getArrCfg(key, variant);
   if (!cfg) {
-    throw new Error(`${service}${variant === "4k" ? " 4K" : ""} is not configured`);
+    const instance = variant === "hd" ? "" : variant;
+    throw new Error(`${service}${instance ? ` (${instance})` : ""} is not configured`);
   }
   return cfg;
 }
