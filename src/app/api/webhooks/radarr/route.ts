@@ -256,8 +256,10 @@ export async function POST(req: NextRequest) {
     ).catch((err) => { console.warn("[webhooks/radarr] notification failed after marking AVAILABLE:", err); });
   });
 
+  // arrInstance-scoped: one instance's Download must not claim (and notify off)
+  // a grab that was fired at a sibling instance.
   const pendingGrabs = await prisma.issueGrab.findMany({
-    where: { tmdbId, mediaType: "MOVIE", notifiedAt: null },
+    where: { tmdbId, mediaType: "MOVIE", arrInstance, notifiedAt: null },
   });
   if (pendingGrabs.length > 0) {
     const now = new Date();

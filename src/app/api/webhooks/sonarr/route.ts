@@ -366,10 +366,12 @@ export async function POST(req: NextRequest) {
     ).catch((err) => { console.warn("[webhooks/sonarr] notification failed after marking AVAILABLE:", err); });
   });
 
+  // arrInstance-scoped: one instance's Download must not claim (and notify off)
+  // a grab that was fired at a sibling instance.
   const grabWhere = safeMdbId
-    ? { tmdbId: safeMdbId, mediaType: "TV" as const, notifiedAt: null }
+    ? { tmdbId: safeMdbId, mediaType: "TV" as const, arrInstance, notifiedAt: null }
     : safeVdbId
-    ? { tvdbId: safeVdbId, mediaType: "TV" as const, notifiedAt: null }
+    ? { tvdbId: safeVdbId, mediaType: "TV" as const, arrInstance, notifiedAt: null }
     : null;
   if (grabWhere) {
     const pendingGrabs = await prisma.issueGrab.findMany({ where: grabWhere });

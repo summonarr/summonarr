@@ -21,6 +21,9 @@ interface IssueActionsProps {
   episodeNumber: number | null;
 
   libraryConfirmed?: boolean;
+  // Configured Radarr/Sonarr instances for this issue's service (default first).
+  // More than one ⇒ the Replace panel shows an instance picker.
+  instances?: { slug: string; name: string }[];
 }
 
 const REFETCH_LABEL: Record<string, string> = {
@@ -50,6 +53,7 @@ export function IssueActions({
   seasonNumber,
   episodeNumber,
   libraryConfirmed,
+  instances,
 }: IssueActionsProps) {
   const router = useRouter();
 
@@ -60,6 +64,7 @@ export function IssueActions({
   const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | null>(null);
   const [resolution, setResolution] = useState("");
 
+  const [instance, setInstance] = useState("");
   const [releases, setReleases] = useState<ArrRelease[]>([]);
   const [selectedGuid, setSelectedGuid] = useState<string | null>(null);
   const [grabOk, setGrabOk] = useState(false);
@@ -126,8 +131,7 @@ export function IssueActions({
     }
   }
 
-  async function openReplacePicker() {
-    setPanel("replace");
+  async function loadReleases(targetInstance: string) {
     setLoading("releases");
     setArrError(null);
     setReleases([]);
@@ -136,7 +140,7 @@ export function IssueActions({
     setShowRejected(false);
     setReleaseFilter("");
     try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases`));
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/releases?instance=${encodeURIComponent(targetInstance)}`));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setArrError(data.error ?? "Failed to fetch releases");
@@ -152,6 +156,16 @@ export function IssueActions({
     }
   }
 
+  async function openReplacePicker() {
+    setPanel("replace");
+    await loadReleases(instance);
+  }
+
+  async function switchInstance(next: string) {
+    setInstance(next);
+    await loadReleases(next);
+  }
+
   async function grabRelease() {
     if (!selectedGuid) return;
     const rel = releases.find((r) => r.guid === selectedGuid);
@@ -162,7 +176,7 @@ export function IssueActions({
       const res = await fetch(withBasePath(`/api/issues/${issueId}/releases`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ guid: rel.guid, indexerId: rel.indexerId }),
+        body: JSON.stringify({ guid: rel.guid, indexerId: rel.indexerId, instance }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -355,14 +369,29 @@ export function IssueActions({
               <DialogTitle className="text-base font-semibold text-zinc-100">
                 {libraryConfirmed && scope === "EPISODE" ? "Replace episode" : "Replace"}
               </DialogTitle>
-              <DialogClose
-                disabled={loading === "grab"}
-                aria-label="Close"
-                title="Close"
-                className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </DialogClose>
+              <div className="flex items-center gap-3">
+                {(instances?.length ?? 0) > 1 && (
+                  <select
+                    value={instance}
+                    onChange={(e) => switchInstance(e.target.value)}
+                    disabled={loading !== null}
+                    aria-label="Instance"
+                    className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1 disabled:opacity-50"
+                  >
+                    {(instances ?? []).map((i) => (
+                      <option key={i.slug || "default"} value={i.slug}>{i.name}</option>
+                    ))}
+                  </select>
+                )}
+                <DialogClose
+                  disabled={loading === "grab"}
+                  aria-label="Close"
+                  title="Close"
+                  className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </DialogClose>
+              </div>
             </div>
 
             {loading === "releases" ? (
