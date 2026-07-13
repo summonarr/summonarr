@@ -21,6 +21,14 @@ updates:
       semver-major-days: 14
       semver-minor-days: 5
       semver-patch-days: 2
+    ignore:
+      # TypeScript 7 is the native-compiler port with a different JS API.
+      # Next.js 16.2.x fails to detect it at build time ("please install
+      # typescript") and typescript-eslint 8.x crashes loading it, so the
+      # dev-dependencies group PR goes red (see PR #165). Drop this once
+      # Next and typescript-eslint both support TS 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
