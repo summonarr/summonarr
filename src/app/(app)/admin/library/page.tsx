@@ -202,26 +202,41 @@ function normaliseRelPath(rel: string, stripPrefix: string): string {
 async function buildArrPathMap(
   mediaType: "MOVIE" | "TV",
 ): Promise<Map<string, number>> {
-  const cacheKey = `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths`;
+  const service = mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
+  const cacheKey = `arr:${service}:paths`;
 
   const cached = await getCache<[string, number][]>(cacheKey);
   if (cached) return new Map(cached);
 
+  // Merge the path→tmdbId mapping across EVERY configured instance (default,
+  // 4K, named) — a title that lives only in a non-default instance's library
+  // still gets an arr verdict on the bad-match rows. First instance to claim a
+  // path wins (instances shouldn't share on-disk paths; if they do, the default
+  // instance — listed first — is the sensible tiebreak).
   const map = new Map<string, number>();
   try {
-    // Route through arrFetch so this full-library list call inherits the 30s
+    // Route through arrFetch so these full-library list calls inherit the 30s
     // timeout + 50 MB cap (guardrail 5) + X-Api-Key injection + ArrResponseError.
     const { arrFetch, getArrCfg } = await import("@/lib/arr");
-    const cfg = await getArrCfg(mediaType === "MOVIE" ? "radarr" : "sonarr");
-    if (!cfg) return map;
+    const { getSyncableArrInstances } = await import("@/lib/arr-instance-registry");
+    const instances = await getSyncableArrInstances(service);
+    if (instances.length === 0) return map;
 
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
     type ArrItem = { tmdbId?: number; path?: string };
-    const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
-    for (const item of items) {
-      if (!item.tmdbId || !item.path) continue;
-      const normPath = item.path.replace(/\\/g, "/").replace(/\/$/, "");
-      map.set(normPath, item.tmdbId);
+    for (const inst of instances) {
+      try {
+        const cfg = await getArrCfg(service, inst.slug);
+        if (!cfg) continue;
+        const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
+        for (const item of items) {
+          if (!item.tmdbId || !item.path) continue;
+          const normPath = item.path.replace(/\\/g, "/").replace(/\/$/, "");
+          if (!map.has(normPath)) map.set(normPath, item.tmdbId);
+        }
+      } catch {
+        // One unreachable instance shouldn't blank the whole verdict column.
+      }
     }
 
     await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
