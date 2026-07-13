@@ -11,14 +11,14 @@ interface RequestActionsProps {
   currentStatus: string;
   /** "MOVIE" | "TV" — picks Radarr vs Sonarr for the quality-profile picker. */
   mediaType: string;
-  /** Whether this request targets the optional 4K instance (picks which instance's profiles to list). */
-  is4k: boolean;
+  /** Instance slug this request targets ("" = default, "4k", or a named slug) — picks which instance's profiles to list. */
+  arrInstance: string;
   existingAdminNote?: string | null;
   /** When set, approve/decline apply to all of these PENDING request IDs via the batch endpoint. */
   groupPendingIds?: string[];
 }
 
-export function RequestActions({ requestId, currentStatus, mediaType, is4k, existingAdminNote, groupPendingIds }: RequestActionsProps) {
+export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
 
@@ -48,7 +48,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, is4k, exis
     setProfilesLoading(true);
     setProfilesError(null);
     try {
-      const res = await fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}&is4k=${is4k}`));
+      const res = await fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}&instance=${encodeURIComponent(arrInstance)}`));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setProfilesError((data as { error?: string }).error ?? "Couldn't load quality profiles");

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { listQualityProfiles } from "@/lib/arr";
+import { isValidInstanceSlug } from "@/lib/arr-instances";
 
 // Quality profiles for the Radarr/Sonarr instance a given request targets, so the
 // approve UI can offer "approve with profile X", and the request UI can offer a
@@ -9,7 +10,8 @@ import { listQualityProfiles } from "@/lib/arr";
 // OR REQUEST_ADVANCED (not withAdmin — settings' arr-options route is ADMIN-only
 // and would 403 a non-admin approver/requester).
 //   ?mediaType=MOVIE|TV  → radarr | sonarr
-//   ?is4k=true           → the optional 4K instance (default: HD)
+//   ?instance=<slug>     → any instance slug ("" default, "4k", named)
+//   ?is4k=true           → legacy shorthand for instance=4k
 export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUEST_ADVANCED])(async (req, _ctx, _session) => {
   const sp = req.nextUrl.searchParams;
   const mediaType = sp.get("mediaType");
@@ -17,7 +19,12 @@ export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUES
     return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
   }
   const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-  const variant = sp.get("is4k") === "true" ? "4k" : "hd";
+  const rawInstance = sp.get("instance");
+  const variant =
+    rawInstance !== null ? rawInstance.trim() : sp.get("is4k") === "true" ? "4k" : "";
+  if (!isValidInstanceSlug(variant)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
 
   let result: Awaited<ReturnType<typeof listQualityProfiles>>;
   try {
@@ -28,7 +35,7 @@ export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUES
   }
 
   if (!result) {
-    const label = variant === "4k" ? `${service} 4K` : service;
+    const label = variant === "" ? service : `${service} (${variant})`;
     return NextResponse.json({ error: `${label} is not configured` }, { status: 422 });
   }
 

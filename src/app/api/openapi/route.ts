@@ -1788,7 +1788,8 @@ const spec = {
         summary: "Quality profiles for the request-time picker (REQUEST_ADVANCED / MANAGE_REQUESTS)",
         parameters: [
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
-          { name: "is4k", in: "query", schema: { type: "boolean" } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug ('' default, '4k', or named)" },
+          { name: "is4k", in: "query", schema: { type: "boolean" }, description: "Legacy shorthand for instance=4k" },
         ],
         responses: { "200": { description: "{ qualityProfiles: [...] }" } },
       },
