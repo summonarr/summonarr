@@ -8,7 +8,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
@@ -19,6 +19,7 @@ import { SettingsNav, type NavItem as SettingsNavItem } from "@/components/setti
 import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-table";
 import { FeaturesForm } from "@/components/settings/features-form";
 import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
+import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 
 const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   site: [
@@ -109,7 +110,7 @@ const ALL_KEYS = [
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
-  "omdbApiKey", "mdblistApiKey", "traktClientId",
+  "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
 ] as const;
@@ -776,6 +777,9 @@ export default async function SettingsPage({
                 </div>
                 <div className="border-t border-zinc-800 pt-5">
                   <TraktForm initialApiKey={cfg.traktClientId ? "••••••••" : ""} />
+                </div>
+                <div className="border-t border-zinc-800 pt-5">
+                  <RatingsVisibilityForm initialHidden={parseHiddenRatingSources(cfg.ratingsHiddenSources)} />
                 </div>
                 <div className="border-t border-zinc-800 pt-5">
                   <CacheManagementPanel />

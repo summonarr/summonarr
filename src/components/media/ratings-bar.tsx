@@ -1,3 +1,7 @@
+"use client";
+
+import { useHiddenRatingSources } from "./ratings-visibility";
+
 interface RatingsBarProps {
   imdbRating?: string | null;
   imdbId?: string | null;
@@ -10,6 +14,9 @@ interface RatingsBarProps {
   mdblistScore?: string | null;
   malRating?: string | null;
   rogerEbertRating?: string | null;
+  // Jellyfin community rating (0–10, from the library sync) — only detail pages
+  // supply this; the title must be in the Jellyfin library to have one.
+  jellyfinRating?: string | null;
   voteAverage?: number;
   size?: "sm" | "md";
 
@@ -88,12 +95,29 @@ export function RatingsBar({
   mdblistScore,
   malRating,
   rogerEbertRating,
+  jellyfinRating,
   voteAverage,
   size = "md",
   compact = false,
 }: RatingsBarProps) {
-  const hasAny = imdbRating || rottenTomatoes || metacritic || rtAudienceScore || traktRating ||
-    letterboxdRating || mdblistScore || malRating || rogerEbertRating || (voteAverage && voteAverage > 0);
+  // Admin-hidden sources (ratingsHiddenSources Setting via the layout provider).
+  const hidden = useHiddenRatingSources();
+
+  const showImdb = !!imdbRating && !hidden.includes("imdb");
+  const showRt = !!rottenTomatoes && !hidden.includes("rottenTomatoes");
+  const showRtAudience = !!rtAudienceScore && !hidden.includes("rtAudience");
+  const showMetacritic = !!metacritic && !hidden.includes("metacritic");
+  const showTrakt = !!traktRating && !hidden.includes("trakt");
+  const showLetterboxd = !!letterboxdRating && !hidden.includes("letterboxd");
+  const showMdblist = !!mdblistScore && !hidden.includes("mdblist");
+  const showMal = !!malRating && !hidden.includes("mal");
+  const showRogerEbert = !!rogerEbertRating && !hidden.includes("rogerEbert");
+  const showJellyfin = !!jellyfinRating && !hidden.includes("jellyfin");
+  const showTmdb = !!voteAverage && voteAverage > 0 && !hidden.includes("tmdb");
+
+  const hasAny =
+    showImdb || showRt || showRtAudience || showMetacritic || showTrakt ||
+    showLetterboxd || showMdblist || showMal || showRogerEbert || showJellyfin || showTmdb;
   if (!hasAny) return null;
 
   const textSm = size === "sm" ? "text-[10px]" : "text-sm";
@@ -103,7 +127,7 @@ export function RatingsBar({
 
   return (
     <div className={`flex items-center flex-wrap ${gap}`}>
-      {imdbRating && imdbId ? (
+      {showImdb && imdbId ? (
         <a
           href={`https://www.imdb.com/title/${imdbId}`}
           target="_blank"
@@ -118,7 +142,7 @@ export function RatingsBar({
             <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
           )}
         </a>
-      ) : imdbRating ? (
+      ) : showImdb ? (
         <div className="flex items-center gap-0.5" title="IMDb rating">
           <span className={`font-bold text-[#F5C518] ${textSm}`}>IMDb</span>
           <span className={`font-semibold text-white ${textSm}`}>{imdbRating}</span>
@@ -129,21 +153,21 @@ export function RatingsBar({
         </div>
       ) : null}
 
-      {rottenTomatoes && (
+      {showRt && rottenTomatoes && (
         <div className="flex items-center gap-0.5" title="Rotten Tomatoes">
           <span className={iconSz}>{rtIcon(rottenTomatoes)}</span>
           <span className={`font-semibold ${rtColor(rottenTomatoes)} ${textSm}`}>{rottenTomatoes}</span>
         </div>
       )}
 
-      {rtAudienceScore && (
+      {showRtAudience && rtAudienceScore && (
         <div className="flex items-center gap-0.5" title="Rotten Tomatoes Audience">
           <span className={iconSz}>🍿</span>
           <span className={`font-semibold ${rtAudienceColor(rtAudienceScore)} ${textSm}`}>{rtAudienceScore}</span>
         </div>
       )}
 
-      {metacritic && (
+      {showMetacritic && metacritic && (
         <div className="flex items-center gap-0.5" title="Metacritic">
           <span className={`font-bold text-white rounded px-1 py-0.5 ${textXs} ${metacriticColor(metacritic)}`}>
             {metacritic.replace("/100", "")}
@@ -152,7 +176,7 @@ export function RatingsBar({
         </div>
       )}
 
-      {traktRating && (
+      {showTrakt && traktRating && (
         <div className="flex items-center gap-0.5" title="Trakt rating">
           <span className={`font-bold text-white rounded px-1 py-0.5 ${textXs} ${traktColor(traktRating)}`}>
             {traktRating}
@@ -161,28 +185,28 @@ export function RatingsBar({
         </div>
       )}
 
-      {letterboxdRating && (
+      {showLetterboxd && letterboxdRating && (
         <div className="flex items-center gap-0.5" title="Letterboxd average">
           <span className={`font-semibold ${textXs} text-zinc-400`}>LB</span>
           <span className={`font-semibold ${letterboxdColor(letterboxdRating)} ${textSm}`}>{letterboxdRating}</span>
         </div>
       )}
 
-      {mdblistScore && (
+      {showMdblist && mdblistScore && (
         <div className="flex items-center gap-0.5" title="MDBList score">
           {!compact && <span className={`text-zinc-500 ${textXs}`}>MDB</span>}
           <span className={`font-semibold ${mdblistColor(mdblistScore)} ${textSm}`}>{mdblistScore}</span>
         </div>
       )}
 
-      {malRating && (
+      {showMal && malRating && (
         <div className="flex items-center gap-0.5" title="MyAnimeList">
           <span className={`font-semibold text-blue-400 ${textXs}`}>MAL</span>
           <span className={`font-semibold text-white ${textSm}`}>{malRating}</span>
         </div>
       )}
 
-      {rogerEbertRating && (
+      {showRogerEbert && rogerEbertRating && (
         <div className="flex items-center gap-0.5" title="Roger Ebert">
           <span className={`font-semibold text-zinc-400 ${textXs}`}>RE</span>
           <span className={`font-semibold text-white ${textSm}`}>{rogerEbertRating}</span>
@@ -190,7 +214,15 @@ export function RatingsBar({
         </div>
       )}
 
-      {voteAverage && voteAverage > 0 ? (
+      {showJellyfin && jellyfinRating && (
+        <div className="flex items-center gap-0.5" title="Jellyfin community rating">
+          <span className={`font-semibold text-purple-400 ${textXs}`}>JF</span>
+          <span className={`font-semibold text-white ${textSm}`}>{jellyfinRating}</span>
+          {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
+        </div>
+      )}
+
+      {showTmdb && voteAverage ? (
         <div className="flex items-center gap-0.5" title="TMDB score">
           {!compact && <span className={`text-zinc-500 ${textXs}`}>TMDB</span>}
           <span className={`font-semibold text-yellow-400 ${textSm}`}>{voteAverage.toFixed(1)}</span>

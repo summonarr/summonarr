@@ -13,6 +13,8 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
+import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -41,12 +43,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let maintenanceEnabled = false;
   let maintenanceMessage = "";
   let featureFlags: FeatureFlags | undefined;
+  let hiddenRatingSources: string[] = [];
   try {
     const [rows, flags] = await Promise.all([
-      prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage", ...DONATION_SETTING_KEYS] } } }),
+      prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage", "ratingsHiddenSources", ...DONATION_SETTING_KEYS] } } }),
       getFeatureFlags(),
     ]);
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
     motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
     motdTitle           = cfg.motdTitle            ?? "";
     siteTitle           = cfg.siteTitle           ?? "";
@@ -70,6 +74,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   }
 
   return (
+    <RatingsVisibilityProvider hidden={hiddenRatingSources}>
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
@@ -99,5 +104,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </div>
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
+    </RatingsVisibilityProvider>
   );
 }
