@@ -1348,6 +1348,23 @@ const spec = {
       },
     },
 
+    "/admin/debug/ratings-state": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "Dump full ratings pipeline state for a title (ADMIN)",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "type", in: "query", required: true, schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "live", in: "query", schema: { type: "string" }, description: "Set to 1 for an opt-in live fetchUnifiedRatings probe" },
+        ],
+        responses: {
+          "200": {
+            description: "Provider-configured flags, MDBList/OMDB quota-lockout state, raw ratings cache rows, details-cache rating fields, optional live probe",
+          },
+        },
+      },
+    },
+
     "/admin/fix-match": {
       post: {
         tags: ["Admin – Fix Match"],
