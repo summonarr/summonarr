@@ -11,9 +11,12 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { getBlacklistSet } from "@/lib/blacklist";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import {
-  canRequest,
-  canAutoApprove,
+  canRequestInstance,
+  canAutoApproveInstance,
+  parseInstanceGrants,
   hasPermission,
   effectivePermissions,
   Permission,
@@ -153,6 +156,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       tvQuotaLimit: true,
       tvQuotaDays: true,
       maxContentRating: true,
+      instanceGrants: true,
     },
   });
   if (!target) return NextResponse.json({ error: "Target user not found" }, { status: 404 });
@@ -178,35 +182,87 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
   }
 
+  // Per-item instance routing (auto-route only — bulk has no explicit-instance
+  // input). Mirrors the single POST /api/requests: only pay the TMDB details
+  // fetch when at least one CONFIGURED non-default instance carries an autoRoute
+  // rule; otherwise every item targets the default instance exactly as before.
+  const [radarrConfigured, sonarrConfigured] = await Promise.all([
+    getSyncableArrInstances("radarr"),
+    getSyncableArrInstances("sonarr"),
+  ]);
+  const configuredByType = { MOVIE: radarrConfigured, TV: sonarrConfigured } as const;
+  const routingActive =
+    radarrConfigured.some((i) => i.slug !== "" && i.autoRoute) ||
+    sonarrConfigured.some((i) => i.slug !== "" && i.autoRoute);
+  const slugByKey = new Map<string, string>();
+  if (routingActive) {
+    await mapLimit(items, ARR_CONCURRENCY, async (it) => {
+      const candidates = configuredByType[it.mediaType];
+      if (!candidates.some((i) => i.slug !== "" && i.autoRoute)) return;
+      let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
+      try {
+        const detail = it.mediaType === "MOVIE" ? await getMovieDetails(it.tmdbId) : await getTVDetails(it.tmdbId);
+        routable = {
+          genreIds: detail.genreList?.map((g) => g.id) ?? [],
+          originalLanguage: detail.originalLanguage ?? null,
+          originCountries: [],
+        };
+      } catch {
+        // TMDB details unavailable ⇒ fall back to the default instance.
+      }
+      const slug = routeMediaToSlug(candidates, routable);
+      if (slug !== "") slugByKey.set(keyOf(it.tmdbId, it.mediaType), slug);
+    });
+  }
+  const slugOf = (it: { tmdbId: number; mediaType: MediaType }) =>
+    slugByKey.get(keyOf(it.tmdbId, it.mediaType)) ?? "";
+  // Access metadata for the routed instance; the default instance is open to any
+  // base requester, so a missing registry entry safely degrades to that shape.
+  const DEFAULT_ACCESS = { slug: "", restricted: false, serverAll: false, skipLibraryCheck: false };
+  const instOf = (it: { tmdbId: number; mediaType: MediaType }) =>
+    configuredByType[it.mediaType].find((i) => i.slug === slugOf(it)) ?? DEFAULT_ACCESS;
+  const grants = parseInstanceGrants(target.instanceGrants);
+  const request4kAllRow = routingActive
+    ? await prisma.setting.findUnique({ where: { key: "request4kAll" } })
+    : null;
+  const serverAll4k = request4kAllRow?.value === "true";
+
   // Authoritative existing-state lookup — never trust client-supplied availability.
+  // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
+  // instance, so a target who holds only a request for the same title on a
+  // different instance isn't wrongly classified "already-requested".
   const orPairs = items.map((i) => ({ tmdbId: i.tmdbId, mediaType: i.mediaType }));
-  const movieIds = items.filter((i) => i.mediaType === "MOVIE").map((i) => i.tmdbId);
-  const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
+  const instPairs = items.map((i) => ({ tmdbId: i.tmdbId, mediaType: i.mediaType, arrInstance: slugOf(i) }));
+  const movieItems = items.filter((i) => i.mediaType === "MOVIE");
+  const tvItems = items.filter((i) => i.mediaType === "TV");
   const [existingReqs, plexItems, jellyfinItems, radarrAvail, sonarrAvail] = await Promise.all([
     prisma.mediaRequest.findMany({
-      // Bulk requests always target the default instance (arrInstance:""), so scope the
-      // existing-request lookup to default-instance rows too — otherwise a target who
-      // holds only a non-default (4K/named) request for a title is wrongly classified
-      // "already-requested" and the default create is skipped.
-      where: { requestedBy: targetUserId, arrInstance: "", OR: orPairs },
+      where: { requestedBy: targetUserId, OR: instPairs },
       select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
     }),
     prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
-    movieIds.length
-      ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds }, arrInstance: "" }, select: { tmdbId: true } })
+    movieItems.length
+      ? prisma.radarrAvailableItem.findMany({
+          where: { OR: movieItems.map((i) => ({ tmdbId: i.tmdbId, arrInstance: slugOf(i) })) },
+          select: { tmdbId: true },
+        })
       : Promise.resolve([]),
-    tvIds.length
-      ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds }, arrInstance: "" }, select: { tmdbId: true } })
+    tvItems.length
+      ? prisma.sonarrAvailableItem.findMany({
+          where: { OR: tvItems.map((i) => ({ tmdbId: i.tmdbId, arrInstance: slugOf(i) })) },
+          select: { tmdbId: true },
+        })
       : Promise.resolve([]),
   ]);
 
   const existingMap = new Map(existingReqs.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
-  const availSet = new Set<string>();
-  for (const r of plexItems) availSet.add(keyOf(r.tmdbId, r.mediaType));
-  for (const r of jellyfinItems) availSet.add(keyOf(r.tmdbId, r.mediaType));
-  for (const r of radarrAvail) availSet.add(keyOf(r.tmdbId, "MOVIE"));
-  for (const r of sonarrAvail) availSet.add(keyOf(r.tmdbId, "TV"));
+  const libraryAvailSet = new Set<string>();
+  for (const r of plexItems) libraryAvailSet.add(keyOf(r.tmdbId, r.mediaType));
+  for (const r of jellyfinItems) libraryAvailSet.add(keyOf(r.tmdbId, r.mediaType));
+  const arrAvailSet = new Set<string>();
+  for (const r of radarrAvail) arrAvailSet.add(keyOf(r.tmdbId, "MOVIE"));
+  for (const r of sonarrAvail) arrAvailSet.add(keyOf(r.tmdbId, "TV"));
 
   // Classify each item; collect the ones to actually create.
   const skipped: { tmdbId: number; mediaType: MediaType; result: ItemResult }[] = [];
@@ -224,11 +280,14 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       skipped.push({ ...it, result: "blacklisted" });
       continue;
     }
-    if (!canRequest(targetPerms, it.mediaType, false)) {
+    const inst = instOf(it);
+    if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
       skipped.push({ ...it, result: "no-permission" });
       continue;
     }
-    if (availSet.has(k)) {
+    // skipLibraryCheck instances (e.g. 4K) ignore the shared Plex/Jellyfin
+    // library — only that instance's own arr availability short-circuits.
+    if ((!inst.skipLibraryCheck && libraryAvailSet.has(k)) || arrAvailSet.has(k)) {
       skipped.push({ ...it, result: "already-available" });
       continue;
     }
@@ -310,10 +369,11 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       ? [{
           tmdbId: r.it.tmdbId,
           mediaType: r.it.mediaType,
+          arrInstance: slugOf(r.it),
           title: r.meta.title,
           posterPath: r.meta.posterPath,
           releaseYear: r.meta.releaseYear,
-          autoApprove: canAutoApprove(targetPerms, r.it.mediaType, false),
+          autoApprove: canAutoApproveInstance(targetPerms, instOf(r.it), grants, r.it.mediaType),
         }]
       : [],
   );
@@ -342,6 +402,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       gPeriod = qmap.quotaPeriod ?? "week";
     }
     const pairs = prepared.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType }));
+    const createPairs = prepared.map((p) => ({ tmdbId: p.tmdbId, mediaType: p.mediaType, arrInstance: p.arrInstance }));
     try {
       createdRows = await runWithSerializableRetry(() =>
         prisma.$transaction(
@@ -365,18 +426,18 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
             // a duplicate's retry re-snapshots, sees the other's committed rows in
             // `before`, and emits nothing. (Bulk analog of the requests/route fix.)
             const before = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, arrInstance: "", OR: pairs },
+              where: { requestedBy: targetUserId, OR: createPairs },
               select: { id: true },
             });
             const beforeIds = new Set(before.map((r) => r.id));
 
-            // If another user's default-instance request for the same title is already
-            // APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror that status
-            // so the bulk requester is tracked (and gets the "now available" ping) instead
-            // of queuing a duplicate PENDING for an admin to re-review. Matches the single
-            // POST /api/requests "mirror-approved" branch.
+            // If another user's request for the same title ON THE SAME INSTANCE is
+            // already APPROVED or AVAILABLE, the content is greenlit/fulfilled — mirror
+            // that status so the bulk requester is tracked (and gets the "now available"
+            // ping) instead of queuing a duplicate PENDING for an admin to re-review.
+            // Matches the single POST /api/requests "mirror-approved" branch.
             const greenlit = await tx.mediaRequest.findMany({
-              where: { arrInstance: "", status: { in: ["APPROVED", "AVAILABLE"] }, OR: pairs },
+              where: { status: { in: ["APPROVED", "AVAILABLE"] }, OR: createPairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
             const greenlitMap = new Map<string, "APPROVED" | "AVAILABLE">();
@@ -402,6 +463,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
                 return {
                   tmdbId: p.tmdbId,
                   mediaType: p.mediaType,
+                  arrInstance: p.arrInstance,
                   title: p.title,
                   posterPath: p.posterPath,
                   releaseYear: p.releaseYear,
@@ -415,7 +477,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
               skipDuplicates: true,
             });
             const after = await tx.mediaRequest.findMany({
-              where: { requestedBy: targetUserId, arrInstance: "", OR: pairs },
+              where: { requestedBy: targetUserId, OR: createPairs },
               select: { id: true, tmdbId: true, mediaType: true, status: true },
             });
             return after.filter((r) => !beforeIds.has(r.id));
@@ -461,9 +523,9 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
     try {
       if (p.mediaType === "MOVIE") {
-        await addMovieToRadarr(p.tmdbId, "", undefined, targetUserId);
+        await addMovieToRadarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
       } else {
-        const tvdbId = await addSeriesToSonarr(p.tmdbId, "", undefined, targetUserId);
+        const tvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
         await prisma.mediaRequest.update({ where: { id: row.id }, data: { tvdbId } });
       }
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };

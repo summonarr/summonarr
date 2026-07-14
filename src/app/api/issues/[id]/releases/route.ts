@@ -8,26 +8,50 @@ import {
   grabMovieRelease,
   grabSeriesRelease,
   resolveTvdbIdFromTmdbId,
+  isArrConfigured,
   arrErrorMessage,
 } from "@/lib/arr";
+import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export const GET = withIssueAdmin(async (_req, { params }: RouteContext, _session) => {
+// Resolves + validates the target instance slug for a release browse/grab.
+// "" (default) is always allowed; a non-default slug must be a valid slug with
+// a configured connection. Returns a NextResponse on rejection.
+async function resolveInstanceOr(
+  raw: string | null | undefined,
+  service: "radarr" | "sonarr",
+): Promise<string | NextResponse> {
+  const instance = typeof raw === "string" ? raw.trim() : "";
+  if (!isValidInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
+  if (instance !== "" && !(await isArrConfigured(service, instance))) {
+    return NextResponse.json({ error: `${service} (${instance}) is not configured` }, { status: 422 });
+  }
+  return instance;
+}
+
+export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session) => {
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+  const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
+  const instanceOr = await resolveInstanceOr(req.nextUrl.searchParams.get("instance"), service);
+  if (instanceOr instanceof NextResponse) return instanceOr;
+  const instance = instanceOr;
+
   try {
     let releases;
     if (issue.mediaType === "MOVIE") {
-      releases = await getReleasesForMovie(issue.tmdbId);
+      releases = await getReleasesForMovie(issue.tmdbId, instance);
     } else {
       let tvdbId = issue.tvdbId;
       if (!tvdbId) {
-        tvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId);
+        tvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
         if (!tvdbId) {
           return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
         }
@@ -42,6 +66,7 @@ export const GET = withIssueAdmin(async (_req, { params }: RouteContext, _sessio
         issue.scope as IssueScope,
         issue.seasonNumber,
         issue.episodeNumber,
+        instance,
       );
     }
     return NextResponse.json(releases);
@@ -65,9 +90,14 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
   }
 
-  const parsed = await readJsonCapped<{ guid?: string; indexerId?: number }>(req, 65536);
+  const parsed = await readJsonCapped<{ guid?: string; indexerId?: number; instance?: string }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
+
+  const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
+  const instanceOr = await resolveInstanceOr(body.instance, service);
+  if (instanceOr instanceof NextResponse) return instanceOr;
+  const instance = instanceOr;
 
   const { guid, indexerId } = body;
   if (!guid || typeof guid !== "string") {
@@ -104,10 +134,10 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
 
   try {
     if (issue.mediaType === "MOVIE") {
-      await grabMovieRelease(issue.tmdbId, guid, indexerId as number);
+      await grabMovieRelease(issue.tmdbId, guid, indexerId as number, instance);
     } else {
       if (!resolvedTvdbId) {
-        resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId);
+        resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
         if (!resolvedTvdbId) return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
       }
       // SEASON scope also carries seasonNumber — passing null for SEASON releases
@@ -119,6 +149,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         indexerId as number,
         issue.scope === "EPISODE" || issue.scope === "SEASON" ? issue.seasonNumber : null,
         issue.scope === "EPISODE" ? issue.episodeNumber : null,
+        instance,
       );
     }
 
@@ -134,6 +165,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         scope: issue.scope,
         seasonNumber: issue.seasonNumber,
         episodeNumber: issue.episodeNumber,
+        arrInstance: instance,
       },
     });
 

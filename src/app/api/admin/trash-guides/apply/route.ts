@@ -3,6 +3,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
+import { isValidInstanceSlug } from "@/lib/arr-instances";
 import type { ArrVariant } from "@/lib/arr";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -35,8 +36,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "specIds must be string[]" }, { status: 400 });
   }
   const ids = body.specIds as string[];
-  // Anything other than the literal "4k" routes to the HD instance — fail-safe default.
-  const variant: ArrVariant = body.variant === "4k" ? "4k" : "hd";
+  // body.variant is an instance slug ("" default, "4k", named); "hd" is the
+  // legacy default spelling. An invalid slug is rejected rather than silently
+  // routed to the default so a UI bug can't rewrite the wrong instance.
+  const rawVariant = typeof body.variant === "string" ? body.variant.trim() : "";
+  const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant;
+  if (!isValidInstanceSlug(variant)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
   if (ids.length === 0) {
     return NextResponse.json({ ok: true, results: [] });
   }

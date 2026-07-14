@@ -30,6 +30,17 @@ import { Permission, PRESETS, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/
 import { withBasePath } from "@/lib/base-path";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 
+// A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
+// grants. Mirrors the registry's ArrInstanceConfig access fields.
+export interface NamedInstance {
+  slug: string;
+  name: string;
+  restricted: boolean;
+  serverAll: boolean;
+}
+
+type InstanceGrantMap = Record<string, { request?: boolean; autoApprove?: boolean }>;
+
 interface User {
   id: string;
   name: string | null;
@@ -39,6 +50,7 @@ interface User {
   source: "local" | "plex" | "jellyfin";
   discordId: string | null;
   permissions: string;
+  instanceGrants: InstanceGrantMap;
   movieQuotaLimit: number | null;
   movieQuotaDays: number | null;
   tvQuotaLimit: number | null;
@@ -64,6 +76,9 @@ interface UserTableProps {
   // When a 4K Radarr/Sonarr instance is configured, the permission editor shows
   // the 4K capability toggles (REQUEST_4K / AUTO_APPROVE_4K).
   has4k?: boolean;
+  // Named instances (from the registry) the permission editor can grant
+  // per-user access to. Empty/absent hides the Instance access section.
+  namedInstances?: NamedInstance[];
 }
 
 const sourceStyles: Record<User["source"], string> = {
@@ -351,9 +366,10 @@ function QuotaRow({
   );
 }
 
-function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: () => void; show4k?: boolean }) {
+function PermissionsModal({ u, onClose, show4k = false, namedInstances = [] }: { u: User; onClose: () => void; show4k?: boolean; namedInstances?: NamedInstance[] }) {
   const router = useRouter();
   const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
+  const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
   const [saving, setSaving] = useState(false);
   const [quota, setQuota] = useState({
     movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
@@ -412,6 +428,28 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
     const next = PRESETS[u.role] ?? PRESETS.USER;
     setPerms(next);
     void savePerms(next, prev);
+  }
+
+  async function toggleGrant(slug: string, field: "request" | "autoApprove") {
+    const prev = grants;
+    const entry = { ...prev[slug], [field]: !prev[slug]?.[field] };
+    const next: InstanceGrantMap = { ...prev, [slug]: entry };
+    setGrants(next);
+    setSaving(true);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instanceGrants: next }),
+      });
+      if (!res.ok) {
+        setGrants(prev);
+        return;
+      }
+      router.refresh();
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function saveQuota(
@@ -514,6 +552,42 @@ function PermissionsModal({ u, onClose, show4k = false }: { u: User; onClose: ()
                 ))}
               </div>
             ))}
+
+            {namedInstances.length > 0 && (
+              <div className="mb-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Instance access</p>
+                <p className="text-[10px] text-zinc-600 mb-2">
+                  Per-user access to named Radarr/Sonarr instances. The default instance is open to every requester; 4K uses the permission toggles above.
+                </p>
+                {namedInstances.map((inst) => {
+                  const open = !inst.restricted || inst.serverAll;
+                  return (
+                    <div key={inst.slug} className="mb-2">
+                      <p className="text-[11px] text-zinc-400 mb-0.5">
+                        {inst.name}
+                        {open && (
+                          <span className="text-zinc-600"> — open to all requesters</span>
+                        )}
+                      </p>
+                      {!open && (
+                        <AdminToggleRow
+                          label={`Request on ${inst.name}`}
+                          checked={grants[inst.slug]?.request === true}
+                          onChange={() => toggleGrant(inst.slug, "request")}
+                          disabled={saving}
+                        />
+                      )}
+                      <AdminToggleRow
+                        label={`Auto-approve on ${inst.name}`}
+                        checked={grants[inst.slug]?.autoApprove === true}
+                        onChange={() => toggleGrant(inst.slug, "autoApprove")}
+                        disabled={saving}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="mt-3">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Quota overrides</p>
@@ -827,9 +901,10 @@ interface ActionsMenuProps {
   onPatch: (key: string, body: object) => void;
   onDelete: () => void;
   has4k?: boolean;
+  namedInstances?: NamedInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDelete, has4k }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -958,12 +1033,12 @@ function ActionsMenu({ u, onPatch, onDelete, has4k }: ActionsMenuProps) {
 
       {notifOpen    && <NotificationsModal u={u} onClose={() => setNotifOpen(false)} />}
       {sessionsOpen && <SessionsModal      u={u} onClose={() => setSessionsOpen(false)} />}
-      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} show4k={has4k} />}
+      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} show4k={has4k} namedInstances={namedInstances} />}
     </div>
   );
 }
 
-export function UserTable({ users, currentUserId, has4k }: UserTableProps) {
+export function UserTable({ users, currentUserId, has4k, namedInstances }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1187,6 +1262,7 @@ export function UserTable({ users, currentUserId, has4k }: UserTableProps) {
                 onPatch={(key, body) => patch(u.id, key, body)}
                 onDelete={() => setConfirmingDelete(u.id)}
                 has4k={has4k}
+                namedInstances={namedInstances}
               />
             )}
           </div>

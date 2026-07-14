@@ -2,6 +2,7 @@ import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollecti
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
+import { RequestInstanceButton } from "@/components/media/request-instance-button";
 import { WatchlistButton } from "@/components/media/watchlist-button";
 import { HideButton } from "@/components/media/hide-button";
 import { isArrConfigured } from "@/lib/arr";
@@ -23,7 +24,9 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
-import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { canRequest, canRequestInstance, hasPermission, parseInstanceGrants, Permission } from "@/lib/permissions";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
 
 export default async function MovieDetailPage({
@@ -100,6 +103,38 @@ export default async function MovieDetailPage({
   const show4k = has4k && canRequest4k;
   const arr4kAvailable = show4k && !!radarr4kAvailable;
   const arr4kPending = show4k && !!radarr4kWanted;
+
+  // Named instances (non-default, non-4K): render an explicit "Request on X"
+  // button for each configured one the viewer may target. Grants require a DB
+  // read (they're not in the session JWT), so only pay it when one exists.
+  const namedDefs = (await getSyncableArrInstances("radarr")).filter(
+    (i) => i.slug !== "" && i.slug !== FOURK_ARR_INSTANCE,
+  );
+  let namedTargets: { slug: string; name: string; requested: boolean; available: boolean }[] = [];
+  if (session && namedDefs.length > 0 && !blacklisted) {
+    const viewer = await prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { instanceGrants: true },
+    });
+    const grants = parseInstanceGrants(viewer?.instanceGrants);
+    const eligible = namedDefs.filter((inst) =>
+      canRequestInstance(session.user.permissions, inst, grants, "MOVIE"),
+    );
+    namedTargets = await Promise.all(
+      eligible.map(async (inst) => {
+        const [namedRequest, namedAvailable] = await Promise.all([
+          prisma.mediaRequest.findFirst({
+            where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
+            select: { id: true },
+          }),
+          prisma.radarrAvailableItem.findUnique({
+            where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
+          }),
+        ]);
+        return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
+      }),
+    );
+  }
 
   const [onWatchlist, onHidden] = session
     ? await Promise.all([
@@ -234,6 +269,11 @@ export default async function MovieDetailPage({
               mdblistScore={media.mdblistScore}
               malRating={media.malRating}
               rogerEbertRating={media.rogerEbertRating}
+              jellyfinRating={
+                showJellyfin && jellyfinItem?.communityRating != null
+                  ? jellyfinItem.communityRating.toFixed(1)
+                  : null
+              }
               voteAverage={media.voteAverage}
               size="md"
             />
@@ -282,6 +322,19 @@ export default async function MovieDetailPage({
                   blacklisted={blacklisted}
                 />
               )}
+              {namedTargets.map((t) => (
+                <RequestInstanceButton
+                  key={t.slug}
+                  tmdbId={media.id}
+                  mediaType="MOVIE"
+                  instance={t.slug}
+                  instanceName={t.name}
+                  requestToken={generateRequestToken(media.id, "MOVIE", session?.user.id ?? "")}
+                  requested={t.requested}
+                  available={t.available}
+                  blacklisted={blacklisted}
+                />
+              ))}
               {session && (
                 <WatchlistButton tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
               )}

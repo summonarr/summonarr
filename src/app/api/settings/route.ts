@@ -97,6 +97,7 @@ const SETTINGS_SCHEMA = [
   ["omdbApiKey",                    true ],
   ["mdblistApiKey",                 true ],
   ["traktClientId",                 true ],
+  ["ratingsHiddenSources",          false],
   ["ipinfoToken",                   true ],
   ["vapidPrivateKey",               true ],
   ["sessionDefaultDuration",        false],

@@ -1348,6 +1348,23 @@ const spec = {
       },
     },
 
+    "/admin/debug/ratings-state": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "Dump full ratings pipeline state for a title (ADMIN)",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "type", in: "query", required: true, schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "live", in: "query", schema: { type: "string" }, description: "Set to 1 for an opt-in live fetchUnifiedRatings probe" },
+        ],
+        responses: {
+          "200": {
+            description: "Provider-configured flags, MDBList/OMDB quota-lockout state, raw ratings cache rows, details-cache rating fields, optional live probe",
+          },
+        },
+      },
+    },
+
     "/admin/fix-match": {
       post: {
         tags: ["Admin – Fix Match"],
@@ -1788,7 +1805,8 @@ const spec = {
         summary: "Quality profiles for the request-time picker (REQUEST_ADVANCED / MANAGE_REQUESTS)",
         parameters: [
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
-          { name: "is4k", in: "query", schema: { type: "boolean" } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug ('' default, '4k', or named)" },
+          { name: "is4k", in: "query", schema: { type: "boolean" }, description: "Legacy shorthand for instance=4k" },
         ],
         responses: { "200": { description: "{ qualityProfiles: [...] }" } },
       },

@@ -9,24 +9,24 @@ export default async function NamingSizesPage({
 }: {
   searchParams: TrashPageSearchParams;
 }) {
-  const { service, is4k, serviceConfigured } = await loadTrashPageContext(searchParams);
+  const { service, variant, serviceConfigured } = await loadTrashPageContext(searchParams);
 
   return (
     <div className="space-y-6 max-w-6xl">
       {!serviceConfigured && <NotConfiguredBanner service={service} />}
       <SpecSection
-        key={`nm-${service}-${is4k ? "4k" : "hd"}`}
+        key={`nm-${service}-${variant || "default"}`}
         service={service}
-        is4k={is4k}
+        variant={variant}
         kind="NAMING"
         title="Naming"
         description="Naming schemes. Applying merges selected templates into Radarr/Sonarr's media-management config."
         disabled={!serviceConfigured}
       />
       <SpecSection
-        key={`qs-${service}-${is4k ? "4k" : "hd"}`}
+        key={`qs-${service}-${variant || "default"}`}
         service={service}
-        is4k={is4k}
+        variant={variant}
         kind="QUALITY_SIZE"
         title="Quality Sizes"
         description="TRaSH's recommended min/preferred/max size per quality. Applying overlays these onto Radarr/Sonarr's quality definitions — untouched qualities keep their current values."

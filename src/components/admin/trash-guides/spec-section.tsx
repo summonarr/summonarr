@@ -30,9 +30,10 @@ interface SpecSectionProps {
   description: string;
   service: TrashService;
   kind: TrashSpecKind;
-  // Which instance to manage — HD (default) or the 4K Radarr/Sonarr. The parent remounts this
-  // component (via a variant-keyed `key`) when the toggle flips, so state resets cleanly.
-  is4k?: boolean;
+  // Which instance to manage — an instance slug ("" default, "4k", or a named
+  // slug). The parent remounts this component (via a variant-keyed `key`) when
+  // the toggle flips, so state resets cleanly.
+  variant?: string;
   disabled: boolean;
   // Notify parent to refetch e.g. KPI counts when the application set changes.
   onChanged?: () => void;
@@ -43,7 +44,7 @@ export function SpecSection({
   description,
   service,
   kind,
-  is4k = false,
+  variant = "",
   disabled,
   onChanged,
 }: SpecSectionProps) {
@@ -62,7 +63,7 @@ export function SpecSection({
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${is4k ? "4k" : "hd"}`));
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${encodeURIComponent(variant)}`));
       const data = (await res.json()) as { specs?: SpecStatus[] };
       setSpecs(data.specs ?? []);
       setLoaded(true);
@@ -70,7 +71,7 @@ export function SpecSection({
       setSpecs([]);
       setLoaded(true);
     }
-  }, [service, is4k]);
+  }, [service, variant]);
 
   useEffect(() => {
     void load();
@@ -121,7 +122,7 @@ export function SpecSection({
     setExpanded(nextExpanded);
     if (!details.has(spec.id)) {
       try {
-        const res = await fetch(withBasePath(`/api/admin/trash-guides/spec/${spec.id}?variant=${is4k ? "4k" : "hd"}`));
+        const res = await fetch(withBasePath(`/api/admin/trash-guides/spec/${spec.id}?variant=${encodeURIComponent(variant)}`));
         if (res.ok) {
           const detail = (await res.json()) as SpecDetail;
           setDetails((prev) => new Map(prev).set(spec.id, detail));
@@ -140,7 +141,7 @@ export function SpecSection({
       const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ specIds: [...selected], variant: is4k ? "4k" : "hd" }),
+        body: JSON.stringify({ specIds: [...selected], variant }),
       });
       // A non-OK response (409 lock contention, 429 rate limit, 400 validation,
       // 5xx) returns an { error } body, not the success shape — keep the selection

@@ -23,7 +23,8 @@ const STATUS_TONE: Record<string, ChipTone> = {
 export interface Requester {
   requestId: string;
   status: string;
-  is4k: boolean;
+  /** Instance slug the request targets: "" = default, "4k", or a named slug. */
+  arrInstance: string;
   note: string | null;
   adminNote: string | null;
   createdAt: string;
@@ -71,6 +72,8 @@ interface AdminRequestListProps {
   statusFilter?: string;
   typeFilter?: string;
   sort?: string;
+  /** Display names for non-default instances, keyed by slug (from the instance registry). */
+  instanceNames?: Record<string, string>;
 }
 
 function formatUserLabel(r: Requester) {
@@ -101,10 +104,12 @@ function formatUserLabel(r: Requester) {
 
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const instanceLabel = (slug: string) =>
+    instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
 
   useLiveEvents((event) => {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
@@ -419,9 +424,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             primaryRequester.adminNote;
           // Which Radarr/Sonarr instance the approve picker should read profiles
           // from — follows the same representative request as the rest of the row.
-          const representativeIs4k =
-            group.requesters.find((r) => r.status === group.aggregateStatus)?.is4k ??
-            primaryRequester.is4k;
+          const representativeInstance =
+            group.requesters.find((r) => r.status === group.aggregateStatus)?.arrInstance ??
+            primaryRequester.arrInstance;
+          const groupInstances = [...new Set(group.requesters.map((r) => r.arrInstance))].filter(
+            (slug) => slug !== "",
+          );
+          const mixedInstances =
+            new Set(group.requesters.map((r) => r.arrInstance)).size > 1;
           const groupAllPendingSelected =
             pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
@@ -596,6 +606,22 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
                         {mounted ? `· ${new Date(r.createdAt).toLocaleDateString()}` : ""}
                       </span>
+                      {mixedInstances && r.arrInstance !== "" && (
+                        <span
+                          className="inline-flex items-center"
+                          style={{
+                            padding: "0 5px",
+                            borderRadius: 3,
+                            fontSize: 9.5,
+                            textTransform: "uppercase",
+                            letterSpacing: 0.4,
+                            background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
+                            color: "var(--ds-accent)",
+                          }}
+                        >
+                          {instanceLabel(r.arrInstance)}
+                        </span>
+                      )}
                       {group.requesters.length > 1 && r.status !== group.aggregateStatus && (
                         <span
                           className="inline-flex items-center"
@@ -629,7 +655,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   ))}
                 </div>
 
-                {(group.onPlex || group.onJellyfin) && (
+                {(group.onPlex || group.onJellyfin || groupInstances.length > 0) && (
                   <div
                     className="flex items-center flex-wrap"
                     style={{ gap: 4, marginTop: 6 }}
@@ -640,6 +666,19 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     {group.onJellyfin && (
                       <span className="ds-chip ds-chip-jellyfin">On Jellyfin</span>
                     )}
+                    {groupInstances.map((slug) => (
+                      <span
+                        key={slug}
+                        className="ds-chip"
+                        title="Radarr/Sonarr instance this title was requested on"
+                        style={{
+                          background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
+                          color: "var(--ds-accent)",
+                        }}
+                      >
+                        {instanceLabel(slug)}
+                      </span>
+                    ))}
                   </div>
                 )}
 
@@ -667,7 +706,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 requestId={representativeId}
                 currentStatus={group.aggregateStatus}
                 mediaType={group.mediaType}
-                is4k={representativeIs4k}
+                arrInstance={representativeInstance}
                 existingAdminNote={representativeAdminNote}
                 groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
               />

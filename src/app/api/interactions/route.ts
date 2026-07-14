@@ -16,7 +16,9 @@ import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { canAutoApprove, canRequest, defaultPermissionsForRole, effectivePermissions, hasPermission, Permission } from "@/lib/permissions";
+import { canAutoApproveInstance, canRequest, canRequestInstance, defaultPermissionsForRole, effectivePermissions, hasPermission, parseInstanceGrants, Permission } from "@/lib/permissions";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
@@ -92,11 +94,13 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
       select: { tmdbId: true, mediaType: true },
       distinct: ["tmdbId", "mediaType"],
     }),
+    // Any instance counts as "in queue" for the search-embed badge (requests may
+    // auto-route to a named instance now, not only the default).
     movieIds.length > 0
-      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds }, arrInstance: "" }, select: { tmdbId: true } })
+      ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: { tmdbId: true } })
       : Promise.resolve([]),
     tvIds.length > 0
-      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds }, arrInstance: "" }, select: { tmdbId: true } })
+      ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: { tmdbId: true } })
       : Promise.resolve([]),
   ]);
 
@@ -388,11 +392,12 @@ async function handleCommand(interaction: any): Promise<void> {
       const approvedMovieIds = requests.filter(r => r.status === "APPROVED" && r.mediaType === "MOVIE").map(r => r.tmdbId);
       const approvedTvIds    = requests.filter(r => r.status === "APPROVED" && r.mediaType === "TV").map(r => r.tmdbId);
       const [radarrQueued, sonarrQueued] = await Promise.all([
+        // Any instance counts as queued — approved requests may target a named instance.
         approvedMovieIds.length > 0
-          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds }, arrInstance: "" }, select: { tmdbId: true } })
+          ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: approvedMovieIds } }, select: { tmdbId: true } })
           : Promise.resolve([]),
         approvedTvIds.length > 0
-          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds }, arrInstance: "" }, select: { tmdbId: true } })
+          ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: approvedTvIds } }, select: { tmdbId: true } })
           : Promise.resolve([]),
       ]);
       const radarrQueuedSet = new Set(radarrQueued.map(r => r.tmdbId));
@@ -618,6 +623,41 @@ async function handleComponent(interaction: any): Promise<void> {
         }
       }
 
+      // Auto-route to a named instance (e.g. anime) — parity with the web POST.
+      // Discord has no instance picker, so routing is fully server-side: only pay
+      // the TMDB details fetch when a configured non-default instance carries an
+      // autoRoute rule. If the user lacks access to the routed instance, fall back
+      // to the default — a reviewable default-instance request beats a hard error
+      // in a chat flow.
+      const arrService = mediaType === "MOVIE" ? "radarr" : "sonarr";
+      const configuredInstances = await getSyncableArrInstances(arrService);
+      const grants = parseInstanceGrants(dbUser.instanceGrants);
+      let routedSlug = "";
+      if (configuredInstances.some((i) => i.slug !== "" && i.autoRoute)) {
+        let routable: RoutableMedia = { genreIds: [], originalLanguage: null, originCountries: [] };
+        try {
+          const detail = mediaType === "MOVIE" ? await getMovieDetails(selected.id) : await getTVDetails(selected.id);
+          routable = {
+            genreIds: detail.genreList?.map((g) => g.id) ?? [],
+            originalLanguage: detail.originalLanguage ?? null,
+            originCountries: [],
+          };
+        } catch {
+          // TMDB details unavailable ⇒ fall back to the default instance.
+        }
+        routedSlug = routeMediaToSlug(configuredInstances, routable);
+      }
+      let routedInstance = configuredInstances.find((i) => i.slug === routedSlug);
+      if (routedSlug !== "" && routedInstance) {
+        const request4kAllRow = await prisma.setting.findUnique({ where: { key: "request4kAll" } });
+        if (!canRequestInstance(effPerms, routedInstance, grants, mediaType, request4kAllRow?.value === "true")) {
+          routedSlug = "";
+          routedInstance = undefined;
+        }
+      }
+      const routedAccess = routedInstance ?? { slug: routedSlug, restricted: false, serverAll: false };
+      const skipLibraryCheck = routedInstance?.skipLibraryCheck === true;
+
       // Quota gate runs BEFORE the stale-request delete below (parity with
       // requests/route.ts): a re-request the quota then rejects must NOT have already
       // erased the user's DECLINED-history row. The authoritative enforcement is the
@@ -658,10 +698,9 @@ async function handleComponent(interaction: any): Promise<void> {
       // gates (parity with requests/route.ts): a re-request that those gates then
       // reject must NOT have already erased the user's DECLINED-history row.
       const existing = await prisma.mediaRequest.findFirst({
-        // Default-instance-scoped: Discord requests always target the default instance
-        // (arrInstance: ""), so a web-created non-default (4K/named) request for the same
-        // title must not block this user's default-instance request.
-        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, arrInstance: "" },
+        // Instance-scoped to the ROUTED target: a request for the same title on a
+        // different instance must not block this one.
+        where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, arrInstance: routedSlug },
       });
       if (existing) {
         if (existing.permanentlyDeclined) {
@@ -687,15 +726,23 @@ async function handleComponent(interaction: any): Promise<void> {
         }
       }
 
-      const [plexItem, jellyfinItem] = await Promise.all([
+      const [plexItem, jellyfinItem, arrAvailableRow] = await Promise.all([
         prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
         prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
+        // For a routed non-default instance, that instance's own availability also
+        // short-circuits (the shared library only counts when !skipLibraryCheck).
+        routedSlug !== ""
+          ? mediaType === "MOVIE"
+            ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } })
+            : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } })
+          : Promise.resolve(null),
       ]);
-      const alreadyAvailable = !!plexItem || !!jellyfinItem;
+      const alreadyAvailable = !!arrAvailableRow || (!skipLibraryCheck && (!!plexItem || !!jellyfinItem));
 
       const baseData = {
         tmdbId: selected.id,
         mediaType,
+        arrInstance: routedSlug,
         title: selected.title,
         posterPath: selected.posterPath ?? null,
         releaseYear: selected.releaseYear ?? null,
@@ -711,7 +758,7 @@ async function handleComponent(interaction: any): Promise<void> {
         .filter(Boolean);
       const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
 
-      const mayAutoApprove = hasAutoApproveRole || canAutoApprove(effPerms, mediaType, false);
+      const mayAutoApprove = hasAutoApproveRole || canAutoApproveInstance(effPerms, routedAccess, grants, mediaType);
 
       // Clear the requester's own delete-vote for this title — a request and a deletion
       // vote are contradictory, and the vote route already blocks the reverse.
@@ -749,9 +796,9 @@ async function handleComponent(interaction: any): Promise<void> {
           let arrFailed = false;
           try {
             if (mediaType === "MOVIE") {
-              await addMovieToRadarr(selected.id, "", undefined, dbUser.id);
+              await addMovieToRadarr(selected.id, routedSlug, undefined, dbUser.id);
             } else {
-              const tvdbId = await addSeriesToSonarr(selected.id, "", undefined, dbUser.id);
+              const tvdbId = await addSeriesToSonarr(selected.id, routedSlug, undefined, dbUser.id);
               await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
             }
           } catch (err) {
@@ -783,8 +830,8 @@ async function handleComponent(interaction: any): Promise<void> {
               if (current?.status !== "APPROVED") return;
 
               const downloading = mediaType === "MOVIE"
-                ? await isMovieDownloadingInRadarr(selected.id)
-                : await isSeriesDownloadingInSonarr(selected.id);
+                ? await isMovieDownloadingInRadarr(selected.id, routedSlug)
+                : await isSeriesDownloadingInSonarr(selected.id, routedSlug);
               // Skip on true (downloading) AND null (queue unreadable); only a
               // confirmed "not downloading" fires the pending notify.
               if (downloading !== false) return;
@@ -823,10 +870,10 @@ async function handleComponent(interaction: any): Promise<void> {
             }
           }, { name: "interactions:90s-download-check" });
         } else {
-          // If another request for this title is already APPROVED or AVAILABLE, the
-          // content is already greenlit — mirror that status so this user is tracked
-          // for the "now available" notification, and skip the admin "new request"
-          // alert (nothing to review). Discord requests target the default instance (arrInstance: "").
+          // If another request for this title ON THE SAME INSTANCE is already APPROVED
+          // or AVAILABLE, the content is already greenlit — mirror that status so this
+          // user is tracked for the "now available" notification, and skip the admin
+          // "new request" alert (nothing to review).
           // One Serializable tx covers the quota recount, the greenlit check, and
           // the mirror/pending create (parity with requests/route.ts) — mirror rows
           // are APPROVED/AVAILABLE and count against the quota window, so a create
@@ -842,7 +889,7 @@ async function handleComponent(interaction: any): Promise<void> {
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
               }
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
-                where: { tmdbId: selected.id, mediaType, arrInstance: "", status: { in: ["APPROVED", "AVAILABLE"] } },
+                where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
                 select: { status: true },
               });
               if (alreadyGreenlit) {
@@ -875,7 +922,7 @@ async function handleComponent(interaction: any): Promise<void> {
               where: {
                 tmdbId: selected.id,
                 mediaType,
-                arrInstance: "",
+                arrInstance: routedSlug,
                 status: "PENDING",
                 id: { not: pendingRequest.id },
                 OR: [

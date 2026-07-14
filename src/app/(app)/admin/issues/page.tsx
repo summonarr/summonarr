@@ -13,6 +13,7 @@ import { Film, Tv2, MessageSquare } from "@/components/icons";
 import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
+import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { Chip, PageHeader } from "@/components/ui/design";
 import type { ChipTone } from "@/components/ui/design";
 
@@ -90,7 +91,7 @@ export default async function AdminIssuesPage({
     ? (rawFilter as FilterValue)
     : "OPEN";
 
-  const [allIssues, statusCounts] = await Promise.all([
+  const [allIssues, statusCounts, radarrInstances, sonarrInstances] = await Promise.all([
     prisma.issue.findMany({
       include: {
         user: { select: { name: true, email: true } },
@@ -101,7 +102,14 @@ export default async function AdminIssuesPage({
       take: 500,
     }),
     prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
+    getSyncableArrInstances("radarr"),
+    getSyncableArrInstances("sonarr"),
   ]);
+
+  // Configured-instance options for the Replace panel's instance picker.
+  const radarrOptions = radarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
+  const sonarrOptions = sonarrInstances.map((i) => ({ slug: i.slug, name: i.name }));
+  const instancesFor = (mediaType: string) => (mediaType === "MOVIE" ? radarrOptions : sonarrOptions);
 
   const countFor = (status: string) =>
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
@@ -369,6 +377,7 @@ export default async function AdminIssuesPage({
                           seasonNumber={issue.seasonNumber}
                           episodeNumber={issue.episodeNumber}
                           libraryConfirmed={plexSet.has(`${issue.tmdbId}:${issue.mediaType}`) || jellyfinSet.has(`${issue.tmdbId}:${issue.mediaType}`)}
+                          instances={instancesFor(issue.mediaType)}
                         />
                       </div>
                     </IssueCardShell>
@@ -557,6 +566,7 @@ export default async function AdminIssuesPage({
                       seasonNumber={selectedIssue.seasonNumber}
                       episodeNumber={selectedIssue.episodeNumber}
                       libraryConfirmed={plexSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`) || jellyfinSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`)}
+                      instances={instancesFor(selectedIssue.mediaType)}
                     />
                   </div>
                 </div>

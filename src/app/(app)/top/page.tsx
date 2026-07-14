@@ -123,7 +123,8 @@ function applyFilters(
   if (opts.minVotes) {
     const threshold = parseInt(opts.minVotes, 10);
     if (!isNaN(threshold)) {
-      result = result.filter((m) => (m.voteCount ?? 0) >= threshold);
+      // Unknown voteCount passes — non-TMDB sources (Trakt/MDBList) carry no vote counts; only a known count is filterable (cf. content-rating.ts exceedsCap).
+      result = result.filter((m) => typeof m.voteCount !== "number" || m.voteCount >= threshold);
     }
   }
   if (opts.fromYear) {

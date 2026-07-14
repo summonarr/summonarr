@@ -83,17 +83,21 @@ export const GET = withAuth(async (
     // native detail screen show "Voted to delete" + offer to retract — and,
     // when they can see 4K at all, whether they already hold an open 4K
     // request (drives the native "Request in 4K" button states, mirroring the
-    // per-viewer `requested4k` the web detail pages compute).
-    const [voteRow, my4kRequest] = await Promise.all([
+    // per-viewer `requested4k` the web detail pages compute). Plus whether the
+    // title is on the viewer's watchlist / hidden list, so the native detail
+    // menu's Watchlist + "Not interested" toggles show the correct initial
+    // state (the web movie/tv pages seed the same two flags from SSR).
+    const mediaTypeEnum = type === "tv" ? "TV" : "MOVIE";
+    const [voteRow, my4kRequest, watchlistRow, hiddenRow] = await Promise.all([
       prisma.deletionVote.findFirst({
-        where: { tmdbId, mediaType: type === "tv" ? "TV" : "MOVIE", userId: session.user.id },
+        where: { tmdbId, mediaType: mediaTypeEnum, userId: session.user.id },
         select: { id: true },
       }),
       show4k
         ? prisma.mediaRequest.findFirst({
             where: {
               tmdbId,
-              mediaType: type === "tv" ? "TV" : "MOVIE",
+              mediaType: mediaTypeEnum,
               requestedBy: session.user.id,
               arrInstance: "4k",
               status: { not: "DECLINED" },
@@ -101,8 +105,18 @@ export const GET = withAuth(async (
             select: { id: true },
           })
         : Promise.resolve(null),
+      prisma.watchlistItem.findFirst({
+        where: { userId: session.user.id, tmdbId, mediaType: mediaTypeEnum },
+        select: { id: true },
+      }),
+      prisma.hiddenItem.findFirst({
+        where: { userId: session.user.id, tmdbId, mediaType: mediaTypeEnum },
+        select: { id: true },
+      }),
     ]);
     const votedByMe = voteRow !== null;
+    const onWatchlist = watchlistRow !== null;
+    const onHidden = hiddenRow !== null;
 
     // Additive native-client enrichment derived from the detail payload (which
     // already carries keywords / watchProviders / homepage / collection ids via
@@ -155,6 +169,8 @@ export const GET = withAuth(async (
       homepage,
       collection,
       votedByMe,
+      onWatchlist,
+      onHidden,
       // Present only when the viewer can see 4K state at all — same convention
       // as the arr4k* fields attachAllAvailability emits.
       requested4kByMe: show4k ? my4kRequest !== null : undefined,

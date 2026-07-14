@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
-import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
-import { getOmdbRatingsForTmdb } from "@/lib/omdb";
+import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
+import { isMdblistQuotaLocked } from "@/lib/mdblist";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -19,23 +19,26 @@ async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped:
 
   for (let i = 0; i < items.length && !quotaExhausted; i += BATCH) {
     const batch = items.slice(i, i + BATCH);
+    // The underlying MDBList/OMDB getters warm both ratings caches as a side effect;
+    // the unified helper applies the same MDBList-first / OMDB-on-any-miss policy as
+    // the detail pages and the batch route, so this cron warms whichever cache those
+    // paths will read.
     const results = await Promise.all(
-      batch.map(async (item) => {
-        const mdb = await getMdblistRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => ({ found: false as const, keyConfigured: true }));
-        if (mdb.found) return { found: true, quotaExhausted: false };
-        if ("quotaExhausted" in mdb && mdb.quotaExhausted) return { found: false, quotaExhausted: true };
-        if (!mdb.keyConfigured) {
-          const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => ({ found: false as const, keyConfigured: true }));
-          return { found: omdb.found, quotaExhausted: false };
-        }
-        return { found: false, quotaExhausted: false };
-      })
+      batch.map((item) =>
+        fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate)
+          .catch((): UnifiedRatingsResult => ({ found: false, keyConfigured: true })),
+      ),
     );
     for (const r of results) {
       if (r.found) warmed++;
       else skipped++;
       if (r.quotaExhausted) quotaExhausted = true;
     }
+    // The helper's quotaExhausted flag only surfaces when the OMDB fallback ALSO
+    // missed (an OMDB hit returns found:true), so also honor the module-level
+    // MDBList lockout between batches — continuing would funnel every remaining
+    // item into OMDB's much smaller daily quota.
+    if (isMdblistQuotaLocked()) quotaExhausted = true;
   }
 
   return { warmed, skipped, quotaExhausted };

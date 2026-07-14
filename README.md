@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.15.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.16.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -165,6 +165,26 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.16.0
+
+**Added**
+
+- Named-instance request surfaces: "Request on ⟨instance⟩" buttons on movie/TV pages, per-user instance access grants in the admin user editor (Permissions & Quota → Instance access), instance chips in the admin request queue, and an approve-time quality-profile picker that reads the request's actual instance.
+- Collection "Request all" and Discord `/request` now auto-route to named instances (e.g. anime) the same way single requests do.
+- TRaSH Guides can manage every configured Radarr/Sonarr instance — the HD/4K toggle is now an instance picker.
+- Jellyfin community-rating badge on detail pages, plus admin toggles to hide any rating source everywhere (Settings → External Ratings → Visible rating badges).
+- The issue "Replace" release browser can target any instance, and grab-completion notifications match the instance that grabbed.
+- Admin: disk-space stats for every instance, library-diff arr verdicts merged across all instances, and a ratings-state debug endpoint.
+
+**Changed**
+
+- Ratings pipeline overhaul: detail pages now show the full rating set (Letterboxd, MDBList, MyAnimeList, Roger Ebert) on every path, stale ratings serve instantly and refresh in the background, and OMDB daily-quota exhaustion backs off for an hour instead of retrying every request.
+
+**Fixed**
+
+- Top Rated no longer drops Trakt/MDBList-sourced titles that carry no TMDB vote count.
+- Most Rewatched on the admin activity dashboard shows posters again.
+
 ### v0.15.0
 
 **Added**
@@ -199,7 +219,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.15.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.16.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

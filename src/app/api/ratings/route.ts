@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
-import { getMdblistRatingsForTmdb } from "@/lib/mdblist";
-import { getOmdbRatingsForTmdb } from "@/lib/omdb";
+import { fetchUnifiedRatings } from "@/lib/omdb-availability";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 
-// GET /api/ratings?id=&type= — external ratings for a single title; tries
-// mdblist first, falls back to OMDB only when no mdblist key is configured.
+// GET /api/ratings?id=&type= — external ratings for a single title. MDBList is
+// tried first (richer field set); OMDB is the fallback whenever MDBList can't
+// serve the item — no key configured, a genuine miss, or a quota lockout — the
+// same policy as the batch path (attachRatingsUnified). The payload always
+// follows the MdblistRatings shape; an OMDB hit fills the fields it lacks with
+// null.
 export const GET = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`ratings:${session.user.id}`, 60, 60_000)) {
     return tooManyRequests(60);
@@ -25,13 +28,8 @@ export const GET = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "id must be a positive integer" }, { status: 400 });
   }
 
-  const mdbResult = await getMdblistRatingsForTmdb(numericId, type);
-  if (mdbResult.found) return NextResponse.json(mdbResult.data);
-
-  if (!mdbResult.keyConfigured) {
-    const omdbResult = await getOmdbRatingsForTmdb(numericId, type);
-    if (omdbResult.found) return NextResponse.json(omdbResult.data);
-  }
+  const result = await fetchUnifiedRatings(numericId, type);
+  if (result.found && result.data) return NextResponse.json(result.data);
 
   return NextResponse.json(null);
 });

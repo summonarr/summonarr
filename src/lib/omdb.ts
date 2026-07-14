@@ -19,6 +19,31 @@ function isOmdbTransientError(msg: string | undefined): boolean {
   return m.includes("limit") || m.includes("quota") || m.includes("invalid api key");
 }
 
+// In-memory quota lockout for the current process lifetime — does not survive restarts,
+// but stops the daily library prewarm and per-page lookups from hammering a key whose
+// free-tier quota (1,000 requests/day) is already exhausted. Mirrors mdblist.ts.
+let quotaLockoutUntil = 0;
+const QUOTA_LOCKOUT_MS = 60 * 60 * 1000;
+
+export function isOmdbQuotaLocked(): boolean {
+  return Date.now() < quotaLockoutUntil;
+}
+
+function tripQuotaLockout(reason: string) {
+  quotaLockoutUntil = Date.now() + QUOTA_LOCKOUT_MS;
+  console.warn(`[omdb] Quota lockout tripped (${sanitizeForLog(reason)}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
+}
+
+// Deliberately narrower than isOmdbTransientError: only rate/quota conditions trip the
+// lockout. "Invalid API key" stays transient (never negative-cached) but must NOT lock —
+// it's an operator-config problem, and an admin actively fixing their key needs immediate
+// feedback, not a 1h suspension.
+function isOmdbQuotaErrorMessage(msg: string | undefined): boolean {
+  if (!msg) return false;
+  const m = msg.toLowerCase();
+  return m.includes("limit") || m.includes("quota");
+}
+
 // Sentinel stored in the cache to distinguish "item not in OMDB" from "never fetched" so we don't
 // re-query OMDB on every page load for titles it genuinely doesn't know about.
 const NOT_FOUND_SENTINEL = { _notFound: true } as const;
@@ -74,6 +99,12 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
     return cached;
   }
 
+  // Quota lockout: skip the network entirely. Throw — the function's existing transient
+  // semantics — so callers never negative-cache a lockout as "title not found".
+  if (isOmdbQuotaLocked()) {
+    throw new Error(`OMDB quota locked — skipping fetch for ${sanitizeForLog(imdbId)}`);
+  }
+
   const apiKey = await getApiKey();
   if (!apiKey) return null;
 
@@ -84,6 +115,7 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
+      if (res.status === 429) tripQuotaLockout(`HTTP 429 for ${imdbId}`);
       // Transient upstream failure (5xx/429/etc.) — throw so the caller does NOT
       // write a 24h NOT_FOUND sentinel for it. Genuine "no OMDB entry" is only the
       // Response!=="True" branch below.
@@ -105,6 +137,10 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
       // and an Error string ("Request limit reached!", "Invalid API key!"). Those are
       // transient/config conditions, not a genuine "no such title" — throw so the caller
       // does NOT negative-cache them for 24h. Only a real not-found caches the sentinel.
+      // Rate/quota errors additionally trip the lockout (invalid-key deliberately doesn't).
+      if (isOmdbQuotaErrorMessage(data.Error)) {
+        tripQuotaLockout(`${data.Error} for ${imdbId}`);
+      }
       if (isOmdbTransientError(data.Error)) {
         throw new Error(`OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`);
       }
@@ -135,6 +171,9 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
   }
 }
 
+// Admin connection test. Intentionally ignores the quota lockout (and bypasses the key
+// cache via { fresh: true }) so a recovered or replaced key can be verified immediately
+// instead of waiting out the remainder of the 1h suspension.
 export async function testOmdbConnection(): Promise<string> {
   const apiKey = await getApiKey({ fresh: true });
   if (!apiKey) throw new Error("No OMDB API key configured");
@@ -155,7 +194,8 @@ export type OmdbResult =
   | { found: true; data: OmdbRatings }
   // `transient` marks a failure that is NOT an authoritative "no ratings" (network/timeout,
   // 5xx, quota/auth error) so callers must not pin a null/not-found into a long-lived cache.
-  | { found: false; keyConfigured: boolean; transient?: boolean };
+  // `quotaExhausted` additionally flags the in-process quota lockout (mirrors MdblistResult).
+  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean };
 
 // OMDB only accepts IMDb IDs, not TMDB IDs — we must resolve via TMDB's external_ids endpoint first.
 // If TMDB returns no IMDb ID the item has no OMDB entry and is negative-cached immediately.
@@ -167,6 +207,13 @@ export async function fetchAndCacheOmdbForTmdb(
 ): Promise<OmdbResult> {
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
+
+  // Quota lockout: return without touching the network (this also skips the TMDB
+  // external_ids resolve — pointless work when the OMDB call it feeds can't run).
+  // `transient` ensures no caller negative-caches the miss.
+  if (isOmdbQuotaLocked()) {
+    return { found: false, keyConfigured: true, quotaExhausted: true, transient: true };
+  }
 
   try {
     const auth = tmdbAuth();

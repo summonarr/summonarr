@@ -6,6 +6,7 @@ import { getCacheStaleMany } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { getArrInstances } from "@/lib/arr-instance-registry";
 import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
@@ -181,6 +182,15 @@ export default async function AdminPage({
 
   const groupOrder = pagedGroups.map((g) => `${g.tmdbId}:${g.mediaType}`);
 
+  // Slug → display name for the instance badges + approve picker labels. Union
+  // of both services' registries; a slug defined on both keeps the Radarr name.
+  const instanceNames: Record<string, string> = {};
+  for (const service of ["sonarr", "radarr"] as const) {
+    for (const inst of await getArrInstances(service)) {
+      if (inst.slug !== "") instanceNames[inst.slug] = inst.name;
+    }
+  }
+
   const rows: GroupedRequestRow[] = groupOrder
     .map((key) => grouped.get(key))
     .filter((bucket): bucket is RequestWithUser[] => Array.isArray(bucket) && bucket.length > 0)
@@ -189,7 +199,7 @@ export default async function AdminPage({
       const requesters: Requester[] = bucket.map((r) => ({
         requestId: r.id,
         status: r.status,
-        is4k: r.arrInstance === "4k",
+        arrInstance: r.arrInstance,
         note: r.note,
         adminNote: r.adminNote,
         createdAt: r.createdAt.toISOString(),
@@ -265,6 +275,7 @@ export default async function AdminPage({
           statusFilter={statusFilter}
           typeFilter={typeFilter}
           sort={sort}
+          instanceNames={instanceNames}
         />
       )}
     </div>

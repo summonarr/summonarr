@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { getOmdbRatingsForTmdb } from "./omdb";
+import { getOmdbRatingsForTmdb, isOmdbQuotaLocked } from "./omdb";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
 
 const CONCURRENCY = 5;
@@ -21,6 +21,11 @@ export async function prewarmOmdbCache(): Promise<{
   skipped: number;
   failed: number;
 }> {
+  if (isOmdbQuotaLocked()) {
+    console.warn("[omdb-prewarm] OMDB quota locked — aborting before any calls");
+    return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
+  }
+
   const apiKey = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
   if (!apiKey?.value) {
     return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
@@ -79,6 +84,11 @@ export async function prewarmOmdbCache(): Promise<{
   let failed = 0;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
+    if (isOmdbQuotaLocked()) {
+      console.warn(`[omdb-prewarm] Quota exhausted after ${fetched} fetches — stopping early`);
+      break;
+    }
+
     const batch = toFetch.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map((item) => {
@@ -95,6 +105,10 @@ export async function prewarmOmdbCache(): Promise<{
         if (r.value.found) fetched++;
         else notFound++;
       } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
+    }
+    if (isOmdbQuotaLocked()) {
+      console.warn(`[omdb-prewarm] Quota hit mid-batch after ${fetched} fetches — stopping early`);
+      break;
     }
     if (i + CONCURRENCY < toFetch.length) {
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));

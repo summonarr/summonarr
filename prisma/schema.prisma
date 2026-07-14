@@ -557,6 +557,10 @@ model IssueGrab {
   scope         IssueScope
   seasonNumber  Int?
   episodeNumber Int?
+  // Which Radarr/Sonarr instance the grab was fired at ("" = default). The
+  // webhook completion match filters on this so one instance's Download event
+  // can't claim (and notify off) a sibling instance's grab.
+  arrInstance String @default("")
 
   notifiedAt DateTime? // set when the completion push is sent; prevents duplicate notifications
 

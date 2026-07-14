@@ -1,13 +1,15 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { hasPermission, Permission } from "@/lib/permissions";
-import { UserTable } from "@/components/admin/user-table";
+import { hasPermission, Permission, parseInstanceGrants } from "@/lib/permissions";
+import { UserTable, type NamedInstance } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { CreateUserButton } from "@/components/admin/create-user-button";
 import { PageHeader } from "@/components/ui/design";
 import { isArrConfigured } from "@/lib/arr";
+import { getArrInstances } from "@/lib/arr-instance-registry";
+import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +43,7 @@ export default async function UsersPage() {
         pushOnAvailable: true,
         pushOnDeclined: true,
         notifyOnIssue: true,
+        instanceGrants: true,
         _count: { select: { requests: true } },
       },
       orderBy: [{ name: "asc" }, { email: "asc" }],
@@ -78,6 +81,23 @@ export default async function UsersPage() {
   // Show the 4K capability toggles in the permission editor only when a 4K
   // instance exists (no point granting REQUEST_4K with nowhere to route it).
   const has4k = radarr4kConfigured || sonarr4kConfigured;
+
+  // Named (non-default, non-4K) instances for the per-user grants editor.
+  // Union across both services; a slug on both keeps one entry. 4K stays on
+  // its permission bits (REQUEST_4K*), so it is excluded here.
+  const namedInstanceMap = new Map<string, NamedInstance>();
+  for (const service of ["sonarr", "radarr"] as const) {
+    for (const inst of await getArrInstances(service)) {
+      if (inst.slug === "" || inst.slug === FOURK_ARR_INSTANCE) continue;
+      namedInstanceMap.set(inst.slug, {
+        slug: inst.slug,
+        name: inst.name,
+        restricted: inst.restricted,
+        serverAll: inst.serverAll,
+      });
+    }
+  }
+  const namedInstances = [...namedInstanceMap.values()];
 
   return (
     <div className="ds-page-enter">
@@ -117,6 +137,7 @@ export default async function UsersPage() {
             pushOnAvailable: u.pushOnAvailable,
             pushOnDeclined: u.pushOnDeclined,
             notifyOnIssue: u.notifyOnIssue,
+            instanceGrants: parseInstanceGrants(u.instanceGrants),
             mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
             maxContentRating: u.maxContentRating,
             source: localAuthIds.has(u.id)
@@ -127,6 +148,7 @@ export default async function UsersPage() {
           }))}
           currentUserId={session.user.id}
           has4k={has4k}
+          namedInstances={namedInstances}
         />
       </div>
 

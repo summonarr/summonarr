@@ -15,83 +15,22 @@ function coalesce<T>(key: string, factory: () => Promise<T>): Promise<T> {
   return promise;
 }
 import { syncTmdbMediaCore, upsertTmdbMediaCore } from "./tmdb-core-sync";
-import { getOmdbRatingsForTmdb } from "./omdb";
-import { getMdblistRatingsForTmdb } from "./mdblist";
-import { hasAnyMdblistRating } from "./omdb-availability";
+import { fetchUnifiedRatings } from "./omdb-availability";
+import type { MdblistRatings } from "./mdblist";
 import { tmdbAuth } from "./tmdb-auth";
 import type {
   TmdbMedia, MediaType, CastMember, PersonDetails, PersonCredit,
   Genre, DiscoverFilters, WatchProvider, TmdbSeason, TmdbEpisode,
 } from "./tmdb-types";
 
-type UnifiedRatings = {
-  imdbId: string | null;
-  imdbRating: string | null;
-  imdbVotes: string | null;
-  rottenTomatoes: string | null;
-  rtAudienceScore: string | null;
-  metacritic: string | null;
-  traktRating: string | null;
-};
-
-// MDBList is tried first because it returns more ratings fields (Trakt, Letterboxd, RT Audience).
-// OMDB is consulted as a fallback whenever MDBList cannot serve the item — no key configured,
-// the item is genuinely absent, or MDBList is quota-locked — so a single source being unavailable
-// doesn't leave the title with no ratings at all.
-async function fetchUnifiedRatings(
-  tmdbId: number,
-  mediaType: "movie" | "tv",
-  releaseDate?: string | null,
-): Promise<{ found: boolean; keyConfigured: boolean; transient?: boolean; data?: UnifiedRatings }> {
-  const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
-    () => ({ found: false, keyConfigured: true, transient: true } as const),
-  );
-  // Require an actual score before letting MDBList win — a `found` row with every
-  // field null must not shadow OMDB, which may carry the rating. Fall through to
-  // OMDB when MDBList has no usable data.
-  if (mdb.found && hasAnyMdblistRating(mdb.data)) {
-    return {
-      found: true,
-      keyConfigured: true,
-      data: {
-        imdbId: mdb.data.imdbId,
-        imdbRating: mdb.data.imdbRating,
-        imdbVotes: mdb.data.imdbVotes,
-        rottenTomatoes: mdb.data.rottenTomatoes,
-        rtAudienceScore: mdb.data.rtAudienceScore,
-        metacritic: mdb.data.metacritic,
-        traktRating: mdb.data.traktRating,
-      },
-    };
-  }
-
-  const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
-    () => ({ found: false, keyConfigured: true, transient: true } as const),
-  );
-  if (omdb.found) {
-    return {
-      found: true,
-      keyConfigured: true,
-      data: {
-        imdbId: omdb.data.imdbId,
-        imdbRating: omdb.data.imdbRating,
-        imdbVotes: omdb.data.imdbVotes,
-        rottenTomatoes: omdb.data.rottenTomatoes,
-        rtAudienceScore: null,
-        metacritic: omdb.data.metacritic,
-        traktRating: null,
-      },
-    };
-  }
-  // If either source failed transiently, the null is not authoritative — callers must
-  // not pin it into the long-lived details cache, so the next read retries.
-  // mdb can reach here as not-found OR as found-but-unscored. A found result means
-  // the key worked and the response was real → keyConfigured, not transient —
-  // narrow on mdb.found before touching the not-found-only fields.
-  const mdbKeyConfigured = mdb.found ? true : mdb.keyConfigured;
-  const mdbTransient = mdb.found ? false : Boolean(mdb.transient);
-  const transient = Boolean(mdbTransient || omdb.transient);
-  return { found: false, keyConfigured: mdbKeyConfigured || omdb.keyConfigured, transient };
+// Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
+// `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
+// (mirrors applyMdblist's guard in omdb-availability.ts) — the fresh-fetch paths
+// set trailerKey before this runs, and cached rows already carry theirs.
+function assignUnifiedRatings(media: TmdbMedia, data: MdblistRatings): void {
+  const { trailerUrl, ...rest } = data;
+  Object.assign(media, rest);
+  if (!media.trailerKey) media.trailerUrl = trailerUrl;
 }
 
 export type {
@@ -668,15 +607,22 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
 
   if (cached) {
     let needsWrite = migrateKeywordShape(cached);
-    if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined) {
+    // `mdblistScore === undefined` also catches rows cached before the unified
+    // payload widened to the full MDBList field set, so they lazily re-fetch and
+    // gain the new fields within the 7-day TTL.
+    if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined || cached.mdblistScore === undefined) {
       const r = await fetchUnifiedRatings(id, "movie", cached.releaseDate);
       if (r.found && r.data) {
-        Object.assign(cached, r.data);
+        assignUnifiedRatings(cached, r.data);
         needsWrite = true;
       } else if (r.keyConfigured && !r.transient) {
         cached.imdbRating = null;
         cached.rtAudienceScore = null;
         cached.traktRating = null;
+        cached.mdblistScore = null;
+        cached.letterboxdRating = null;
+        cached.malRating = null;
+        cached.rogerEbertRating = null;
         needsWrite = true;
       }
     }
@@ -699,14 +645,19 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
     media.collectionName = r.belongs_to_collection.name;
   }
   if (ratings.found && ratings.data) {
-    Object.assign(media, ratings.data);
+    assignUnifiedRatings(media, ratings.data);
   } else if (ratings.keyConfigured && !ratings.transient) {
     // Only pin null when a configured source authoritatively has no ratings. A transient
     // failure leaves the fields undefined so the next read re-fetches instead of serving
-    // null for the full 7-day TTL.
+    // null for the full 7-day TTL. Pin every field the cached-branch lazy-upgrade
+    // trigger checks, or a no-ratings title would re-fetch on every read.
     media.imdbRating = null;
     media.rtAudienceScore = null;
     media.traktRating = null;
+    media.mdblistScore = null;
+    media.letterboxdRating = null;
+    media.malRating = null;
+    media.rogerEbertRating = null;
   }
 
   if (r.credits?.cast) {
@@ -747,15 +698,22 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
       prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
     } else {
       let needsWrite = migrateKeywordShape(cached);
-      if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined) {
+      // `mdblistScore === undefined` also catches rows cached before the unified
+      // payload widened to the full MDBList field set, so they lazily re-fetch and
+      // gain the new fields within the 7-day TTL.
+      if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined || cached.mdblistScore === undefined) {
         const r = await fetchUnifiedRatings(id, "tv", cached.releaseDate);
         if (r.found && r.data) {
-          Object.assign(cached, r.data);
+          assignUnifiedRatings(cached, r.data);
           needsWrite = true;
         } else if (r.keyConfigured && !r.transient) {
           cached.imdbRating = null;
           cached.rtAudienceScore = null;
           cached.traktRating = null;
+          cached.mdblistScore = null;
+          cached.letterboxdRating = null;
+          cached.malRating = null;
+          cached.rogerEbertRating = null;
           needsWrite = true;
         }
       }
@@ -785,14 +743,19 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
       overview: s.overview ?? "",
     }));
   if (ratings.found && ratings.data) {
-    Object.assign(media, ratings.data);
+    assignUnifiedRatings(media, ratings.data);
   } else if (ratings.keyConfigured && !ratings.transient) {
     // Only pin null when a configured source authoritatively has no ratings. A transient
     // failure leaves the fields undefined so the next read re-fetches instead of serving
-    // null for the full 7-day TTL.
+    // null for the full 7-day TTL. Pin every field the cached-branch lazy-upgrade
+    // trigger checks, or a no-ratings title would re-fetch on every read.
     media.imdbRating = null;
     media.rtAudienceScore = null;
     media.traktRating = null;
+    media.mdblistScore = null;
+    media.letterboxdRating = null;
+    media.malRating = null;
+    media.rogerEbertRating = null;
   }
 
   if (r.credits?.cast) {

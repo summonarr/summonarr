@@ -264,7 +264,7 @@ export default async function StatsPage() {
         </StatsSection>
       )}
 
-      {(diskSpace.radarr || diskSpace.sonarr) && (
+      {(diskSpace.radarr || diskSpace.sonarr || diskSpace.extra.length > 0) && (
         <StatsSection title="Disk Space">
           <div className="flex flex-col" style={{ gap: 16 }}>
             {diskSpace.radarr && (
@@ -273,6 +273,9 @@ export default async function StatsPage() {
             {diskSpace.sonarr && (
               <DiskGroup label="Sonarr" items={diskSpace.sonarr} formatBytes={formatBytes} />
             )}
+            {diskSpace.extra.map((g) => (
+              <DiskGroup key={`${g.service}:${g.slug}`} label={g.label} items={g.entries} formatBytes={formatBytes} />
+            ))}
           </div>
         </StatsSection>
       )}
