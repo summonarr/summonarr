@@ -11,6 +11,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "typecheck": "node node_modules/tsgo/bin/tsc --noEmit",
+    "typecheck:classic": "node node_modules/typescript/bin/tsc --noEmit",
     "audit:deps": "node scripts/audit-deps.mts",
     "audit:routes": "node scripts/audit-routes.mts",
     "audit:openapi": "node scripts/audit-openapi.mts",
@@ -50,6 +52,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.61.1",
     "tailwindcss": "^4.3.1",
+    "tsgo": "npm:typescript@^7.0.2",
     "tsx": "^4.23.1",
     "typescript": "^6"
   }
