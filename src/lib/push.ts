@@ -647,7 +647,7 @@ export async function notifyUsersRequestsAvailablePush(
       subsByUser.set(s.userId, arr);
     }
 
-    const deduped = eligible.flatMap((r) => {
+    const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
       if (!userSubs.length) return [];
       const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
@@ -660,9 +660,12 @@ export async function notifyUsersRequestsAvailablePush(
       };
       // Send to ALL of the user's devices — matches the approved/declined push
       // siblings; previously only userSubs[0] got the "now available" push.
-      return userSubs.map((s) => sendPush(ctx.keys, s, payload));
+      return userSubs.map((s) => ({ sub: s, payload }));
     });
-    await Promise.allSettled(deduped);
+    // Bounded fan-out (guardrail 31): a large sync can flip a whole backlog to
+    // available at once (requests × devices) — cap in-flight sends like the
+    // APNs broadcast path.
+    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
   } catch (err) {
     console.error("[push] Failed to notify users (available):", err);
   }
@@ -698,20 +701,20 @@ export async function notifyUsersRequestsApprovedPush(
       subsByUser.set(s.userId, arr);
     }
 
-    await Promise.allSettled(
-      eligible.flatMap((r) => {
-        const userSubs = subsByUser.get(r.requestedBy) ?? [];
-        const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-        const payload: PushPayload = {
-          title: "Request Approved",
-          body: `Your ${mediaLabel} request for ${r.title} has been approved`,
-          url: "/requests",
-          category: "approved",
-          deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
-        };
-        return userSubs.map((s) => sendPush(ctx.keys, s, payload));
-      })
-    );
+    const jobs = eligible.flatMap((r) => {
+      const userSubs = subsByUser.get(r.requestedBy) ?? [];
+      const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
+      const payload: PushPayload = {
+        title: "Request Approved",
+        body: `Your ${mediaLabel} request for ${r.title} has been approved`,
+        url: "/requests",
+        category: "approved",
+        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
+      };
+      return userSubs.map((s) => ({ sub: s, payload }));
+    });
+    // Bounded fan-out (guardrail 31): batch approvals fan out requests × devices.
+    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
   } catch (err) {
     console.error("[push] Failed to notify users (approved):", err);
   }
@@ -747,20 +750,20 @@ export async function notifyUsersRequestsDeclinedPush(
       subsByUser.set(s.userId, arr);
     }
 
-    await Promise.allSettled(
-      eligible.flatMap((r) => {
-        const userSubs = subsByUser.get(r.requestedBy) ?? [];
-        const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-        const payload: PushPayload = {
-          title: "Request Declined",
-          body: `Your ${mediaLabel} request for ${r.title} was not approved`,
-          url: "/requests",
-          category: "declined",
-          deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
-        };
-        return userSubs.map((s) => sendPush(ctx.keys, s, payload));
-      })
-    );
+    const jobs = eligible.flatMap((r) => {
+      const userSubs = subsByUser.get(r.requestedBy) ?? [];
+      const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
+      const payload: PushPayload = {
+        title: "Request Declined",
+        body: `Your ${mediaLabel} request for ${r.title} was not approved`,
+        url: "/requests",
+        category: "declined",
+        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
+      };
+      return userSubs.map((s) => ({ sub: s, payload }));
+    });
+    // Bounded fan-out (guardrail 31): batch declines fan out requests × devices.
+    await settleLimit(jobs, 8, (j) => sendPush(ctx.keys, j.sub, j.payload));
   } catch (err) {
     console.error("[push] Failed to notify users (declined):", err);
   }

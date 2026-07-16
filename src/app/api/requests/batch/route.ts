@@ -14,6 +14,12 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { settleLimit } from "@/lib/concurrency";
+
+// Cap concurrent ARR pushes (guardrail 31) — mirrors the bulk route's
+// ARR_CONCURRENCY so a large batch approve doesn't burst every Radarr/Sonarr
+// add at once.
+const ARR_CONCURRENCY = 5;
 
 const VALID_STATUSES = ["APPROVED", "DECLINED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -176,26 +182,24 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     });
 
     // failedIds is declared at function scope above (reused by the SSE emit).
-    await Promise.allSettled(
-      approved.map(async (r) => {
-        try {
-          const variant = r.arrInstance;
-          // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
-          // absent ⇒ the instance default. Mirrors requests/[id] effectiveProfileId
-          // and the sync re-push — batch approve previously discarded it.
-          const profileId = r.qualityProfileId ?? undefined;
-          if (r.mediaType === "MOVIE") {
-            await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
-          } else {
-            const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
-            await prisma.mediaRequest.update({ where: { id: r.id }, data: { tvdbId } });
-          }
-        } catch (err) {
-          console.error("[arr] Batch approve push failed for", r.id, err);
-          failedIds.add(r.id);
+    await settleLimit(approved, ARR_CONCURRENCY, async (r) => {
+      try {
+        const variant = r.arrInstance;
+        // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
+        // absent ⇒ the instance default. Mirrors requests/[id] effectiveProfileId
+        // and the sync re-push — batch approve previously discarded it.
+        const profileId = r.qualityProfileId ?? undefined;
+        if (r.mediaType === "MOVIE") {
+          await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
+        } else {
+          const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
+          await prisma.mediaRequest.update({ where: { id: r.id }, data: { tvdbId } });
         }
-      })
-    );
+      } catch (err) {
+        console.error("[arr] Batch approve push failed for", r.id, err);
+        failedIds.add(r.id);
+      }
+    });
 
     // Roll back rows whose ARR push failed so they aren't stuck APPROVED with no ARR backing.
     if (failedIds.size > 0) {
