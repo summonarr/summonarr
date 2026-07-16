@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
 // Raw Jellyfin user shape — intentionally permissive so nothing is filtered
@@ -31,16 +32,13 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
 }
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
-  const [urlRow, keyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
+  const { url, apiKey } = await getJellyfinConfig();
 
-  if (!urlRow?.value || !keyRow?.value) {
+  if (!url || !apiKey) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 400 });
   }
 
-  const base = urlRow.value.replace(/\/$/, "");
+  const base = url.replace(/\/$/, "");
 
   // Fetch with no query params — baseline
   let httpStatus = 0;
@@ -48,7 +46,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   let fetchError: string | null = null;
   try {
     const res = await safeFetchAdminConfigured(`${base}/Users`, {
-      headers: jellyfinHeaders(keyRow.value),
+      headers: jellyfinHeaders(apiKey),
       timeoutMs: 30_000,
     });
     httpStatus = res.status;

@@ -12,7 +12,9 @@ import {
   addSeriesToSonarr,
 } from "@/lib/arr";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -542,17 +544,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [[plexUrlRow, plexTokenRow, plexLibrariesRow], [jfUrlRow, jfKeyRow, jfLibrariesRow]] = await Promise.all([
-    Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
-    ]),
-    Promise.all([
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
-    ]),
+  const [plexConfig, jellyfinConfig, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+    getPlexConfig(),
+    getJellyfinConfig(),
+    prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
+    prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
   let plexMovieIds = new Map<number, PlexLibraryItemData>();
@@ -574,10 +570,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ),
     (async () => {
       if (!plexEnabled) return;
-      if (!plexUrlRow?.value || !plexTokenRow?.value) return;
+      if (!plexConfig.url || !plexConfig.token) return;
       try {
-        const serverUrl = plexUrlRow.value.replace(/\/$/, "");
-        const token = plexTokenRow.value;
+        const serverUrl = plexConfig.url.replace(/\/$/, "");
+        const token = plexConfig.token;
         // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
         // this the scheduled full sync ingested EVERY section, marking media in an
         // excluded library as owned → availability false positives on every cron tick.
@@ -630,10 +626,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     })(),
     (async () => {
       if (!jellyfinEnabled) return;
-      if (!jfUrlRow?.value || !jfKeyRow?.value) return;
+      if (!jellyfinConfig.url || !jellyfinConfig.apiKey) return;
       try {
-        const baseUrl = jfUrlRow.value.replace(/\/$/, "");
-        const apiKey  = jfKeyRow.value;
+        const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
+        const apiKey  = jellyfinConfig.apiKey;
         // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
         // otherwise the scheduled full sync ingests every library and marks excluded
         // media as owned.
@@ -703,8 +699,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // proof of absence — reading it as "not in library" would false-demote an item that's
   // actually present in the unreached library. Only trust a library map when its source
   // synced; skip the demote entirely while a configured source is down.
-  const plexConfiguredEnabled = plexEnabled && !!(plexUrlRow?.value && plexTokenRow?.value);
-  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jfUrlRow?.value && jfKeyRow?.value);
+  const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
+  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jellyfinConfig.url && jellyfinConfig.apiKey);
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
     // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
@@ -839,8 +835,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   const pendingAvailableNotify = available.filter((r) => !r.notifiedAvailable);
   if (pendingAvailableNotify.length > 0) {
-    const plexConfigured = !!(plexUrlRow?.value && plexTokenRow?.value);
-    const jellyfinConfigured = !!(jfUrlRow?.value && jfKeyRow?.value);
+    const plexConfigured = !!(plexConfig.url && plexConfig.token);
+    const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
 
     // Fallback for notification starvation: if a per-source sync has been failing for more than
     // STALE_SYNC_FALLBACK_MS, treat that source's data as "valid" so the *other* source can

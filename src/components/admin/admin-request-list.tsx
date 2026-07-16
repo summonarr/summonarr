@@ -9,16 +9,9 @@ import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { Chip } from "@/components/ui/design";
-import type { ChipTone } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
-
-const STATUS_TONE: Record<string, ChipTone> = {
-  PENDING: "pending",
-  APPROVED: "approved",
-  DECLINED: "declined",
-  AVAILABLE: "approved",
-};
+import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
 
 export interface Requester {
   requestId: string;
@@ -697,7 +690,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               </div>
 
               <div className="hidden sm:inline-flex shrink-0">
-                <Chip tone={STATUS_TONE[group.aggregateStatus]}>
+                <Chip tone={REQUEST_STATUS_TONE[group.aggregateStatus]}>
                   {group.aggregateStatus.charAt(0) + group.aggregateStatus.slice(1).toLowerCase()}
                 </Chip>
               </div>

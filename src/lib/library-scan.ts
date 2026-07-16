@@ -1,6 +1,7 @@
-import { prisma } from "./prisma";
 import { getPlexLibrarySections, refreshPlexSection } from "./plex";
+import { getPlexConfig } from "./plex-config";
 import { refreshJellyfinLibrary } from "./jellyfin";
+import { getJellyfinConfig } from "./jellyfin-config";
 import {
   countRadarrQueue,
   countSonarrQueue,
@@ -137,15 +138,13 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
 }
 
 async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
-  const [plexUrlRow, plexTokenRow, jellyfinUrlRow, jellyfinKeyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+  const [plexConfig, jellyfinConfig] = await Promise.all([
+    getPlexConfig(),
+    getJellyfinConfig(),
   ]);
 
-  const plexConfigured = !!(plexUrlRow?.value && plexTokenRow?.value);
-  const jellyfinConfigured = !!(jellyfinUrlRow?.value && jellyfinKeyRow?.value);
+  const plexConfigured = !!(plexConfig.url && plexConfig.token);
+  const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
 
   if (!plexConfigured && !jellyfinConfigured) {
     console.warn(`[library-scan] ${mediaType}: no backends configured, skipping`);
@@ -157,8 +156,8 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
   const jobs: Promise<void>[] = [];
 
   if (plexConfigured) {
-    const serverUrl = plexUrlRow!.value!.replace(/\/$/, "");
-    const token = plexTokenRow!.value!;
+    const serverUrl = plexConfig.url!.replace(/\/$/, "");
+    const token = plexConfig.token!;
     jobs.push(
       (async () => {
         const sections = await getPlexLibrarySections(serverUrl, token);
@@ -173,8 +172,8 @@ async function triggerLibraryScan(mediaType: ScanMediaType): Promise<void> {
   }
 
   if (jellyfinConfigured) {
-    const baseUrl = jellyfinUrlRow!.value!;
-    const apiKey = jellyfinKeyRow!.value!;
+    const baseUrl = jellyfinConfig.url!;
+    const apiKey = jellyfinConfig.apiKey!;
     jobs.push(
       refreshJellyfinLibrary(baseUrl, apiKey).catch((err) =>
         console.error(`[library-scan] jellyfin ${mediaType}:`, err),

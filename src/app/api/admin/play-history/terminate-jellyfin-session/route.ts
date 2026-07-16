@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
-import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
 // sends the "Stop" playstate command (POST /Sessions/{id}/Playing/Stop), which
@@ -31,12 +31,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "sessionKey is required" }, { status: 400 });
   }
 
-  const [serverUrlRow, apiKeyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
-  const serverUrl = serverUrlRow?.value?.replace(/\/$/, "") ?? null;
-  const apiKey = apiKeyRow?.value ?? null;
+  const jellyfinConfig = await getJellyfinConfig();
+  const serverUrl = jellyfinConfig.url?.replace(/\/$/, "") ?? null;
+  const apiKey = jellyfinConfig.apiKey;
 
   if (!serverUrl || !apiKey) {
     return NextResponse.json(

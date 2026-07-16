@@ -3,6 +3,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { settleLimit } from "@/lib/concurrency";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -44,18 +45,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     select: { sourceUserId: true, username: true },
   });
 
-  const [jellyfinUrlRow, jellyfinKeyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
+  const { url: jellyfinUrl, apiKey: jellyfinApiKey } = await getJellyfinConfig();
 
   let pushed = 0;
   let errors = 0;
 
-  if (jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
+  if (jellyfinUrl && jellyfinApiKey) {
     await settleLimit(targets, POLICY_PUSH_CONCURRENCY, async (u) => {
       try {
-        await setJellyfinDownloadPolicy(jellyfinUrlRow.value, jellyfinKeyRow.value, u.sourceUserId, downloadsEnabled);
+        await setJellyfinDownloadPolicy(jellyfinUrl, jellyfinApiKey, u.sourceUserId, downloadsEnabled);
         pushed++;
       } catch (err) {
         console.warn(`[server-users/bulk] Failed to push policy for jellyfin/${u.username}:`, err instanceof Error ? err.message : String(err));

@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTVEpisodes } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 
 // 5-minute timeout: fetching episodes for large TV libraries can be slow
@@ -15,21 +17,19 @@ export async function POST(request: NextRequest) {
 }
 
 async function syncTvEpisodes() {
-  const [plexUrlRow, plexTokenRow, plexLibrariesRow, jellyfinUrlRow, jellyfinKeyRow, jellyfinLibrariesRow] =
+  const [plexConfig, jellyfinConfig, plexLibrariesRow, jellyfinLibrariesRow] =
     await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+      getPlexConfig(),
+      getJellyfinConfig(),
       prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
       prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
     ]);
 
   const results = { plex: 0, jellyfin: 0, errors: [] as string[] };
 
-  if (plexUrlRow?.value && plexTokenRow?.value) {
-    const serverUrl = plexUrlRow.value.replace(/\/$/, "");
-    const token = plexTokenRow.value;
+  if (plexConfig.url && plexConfig.token) {
+    const serverUrl = plexConfig.url.replace(/\/$/, "");
+    const token = plexConfig.token;
     const selectedPlexKeys = plexLibrariesRow?.value
       ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
       : undefined;
@@ -62,9 +62,9 @@ async function syncTvEpisodes() {
     }
   }
 
-  if (jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
-    const baseUrl = jellyfinUrlRow.value.replace(/\/$/, "");
-    const apiKey = jellyfinKeyRow.value;
+  if (jellyfinConfig.url && jellyfinConfig.apiKey) {
+    const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
+    const apiKey = jellyfinConfig.apiKey;
     const selectedJellyfinIds = jellyfinLibrariesRow?.value
       ? new Set(jellyfinLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
       : undefined;

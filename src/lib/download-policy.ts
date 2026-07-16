@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { getJellyfinAllUsers, setJellyfinDownloadPolicy } from "./jellyfin";
+import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
 
 interface PolicySyncResult {
@@ -26,9 +27,8 @@ interface PolicySyncResult {
 export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
 
-  const [jellyfinUrlRow, jellyfinKeyRow, autoDisableRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+  const [jellyfinConfig, autoDisableRow] = await Promise.all([
+    getJellyfinConfig(),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
   ]);
 
@@ -37,9 +37,9 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // Users already in the DB with downloadsEnabled=true are never touched.
   const autoDisableNew = autoDisableRow?.value === "true";
 
-  if (jellyfinUrlRow?.value && jellyfinKeyRow?.value) {
+  if (jellyfinConfig.url && jellyfinConfig.apiKey) {
     try {
-      results.push(await syncJellyfinPolicies(jellyfinUrlRow.value, jellyfinKeyRow.value, autoDisableNew));
+      results.push(await syncJellyfinPolicies(jellyfinConfig.url, jellyfinConfig.apiKey, autoDisableNew));
     } catch (err) {
       console.warn("[download-policy] Jellyfin sync task failed:", err instanceof Error ? err.message : String(err));
       // Surface the task-level failure to the caller's error total so the cron
@@ -181,10 +181,7 @@ export async function enforceUserDownloadPolicy(mediaServerUserId: string): Prom
   if (!record || record.isServerAdmin || record.downloadsEnabled === null) return;
   if (record.source !== "jellyfin") return;
 
-  const [urlRow, keyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
-  if (!urlRow?.value || !keyRow?.value) return;
-  await setJellyfinDownloadPolicy(urlRow.value, keyRow.value, record.sourceUserId, record.downloadsEnabled);
+  const { url, apiKey } = await getJellyfinConfig();
+  if (!url || !apiKey) return;
+  await setJellyfinDownloadPolicy(url, apiKey, record.sourceUserId, record.downloadsEnabled);
 }

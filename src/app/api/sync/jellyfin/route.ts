@@ -3,6 +3,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -29,18 +30,17 @@ async function syncJellyfin(request: NextRequest) {
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
-  const [urlRow, keyRow, librariesRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+  const [jellyfinConfig, librariesRow] = await Promise.all([
+    getJellyfinConfig(),
     prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
-  if (!urlRow?.value || !keyRow?.value) {
+  if (!jellyfinConfig.url || !jellyfinConfig.apiKey) {
     return NextResponse.json({ error: "Jellyfin server not configured" }, { status: 400 });
   }
 
-  const baseUrl = urlRow.value.replace(/\/$/, "");
-  const apiKey = keyRow.value;
+  const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
+  const apiKey = jellyfinConfig.apiKey;
   const selectedJellyfinIds = librariesRow?.value
     ? new Set(librariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
     : undefined;

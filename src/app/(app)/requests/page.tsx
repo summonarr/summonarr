@@ -13,23 +13,9 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, PageHeader } from "@/components/ui/design";
-import type { ChipTone } from "@/components/ui/design";
+import { REQUEST_STATUS_TONE, REQUEST_STATUS_LABEL } from "@/lib/status-labels";
 
 export const dynamic = "force-dynamic";
-
-const STATUS_TONE: Record<string, ChipTone> = {
-  PENDING: "pending",
-  APPROVED: "approved",
-  DECLINED: "declined",
-  AVAILABLE: "approved",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  PENDING:   "Pending",
-  APPROVED:  "Approved",
-  DECLINED:  "Declined",
-  AVAILABLE: "Available",
-};
 
 const VALID_STATUSES = ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"] as const;
 const VALID_SORTS = ["newest", "oldest"] as const;
@@ -287,8 +273,8 @@ export default async function RequestsPage({
                     </div>
                   </Link>
 
-                  <Chip tone={STATUS_TONE[r.status]}>
-                    {STATUS_LABEL[r.status]}
+                  <Chip tone={REQUEST_STATUS_TONE[r.status]}>
+                    {REQUEST_STATUS_LABEL[r.status]}
                   </Chip>
                 </div>
               );

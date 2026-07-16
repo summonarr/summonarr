@@ -1,20 +1,17 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { prisma } from "@/lib/prisma";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getPlexLibrarySections } from "@/lib/plex";
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
-  const [serverUrlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
+  const { url, token } = await getPlexConfig();
 
-  if (!serverUrlRow?.value || !tokenRow?.value) {
+  if (!url || !token) {
     return NextResponse.json({ error: "Plex not configured" }, { status: 400 });
   }
 
   try {
-    const sections = await getPlexLibrarySections(serverUrlRow.value.replace(/\/$/, ""), tokenRow.value);
+    const sections = await getPlexLibrarySections(url.replace(/\/$/, ""), token);
     return NextResponse.json(sections);
   } catch (err) {
     console.error("[settings/plex/libraries] Failed to fetch Plex libraries:", err);

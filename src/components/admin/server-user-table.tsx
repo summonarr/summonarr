@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
@@ -276,14 +277,15 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
           {/* Avatar + name */}
           <td className="py-2.5 pl-4 pr-3">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className={`w-7 h-7 shrink-0 rounded-full ${avatarColors[source] ?? "bg-zinc-700"} flex items-center justify-center`}>
-                {u.thumbUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- Plex/Jellyfin avatar URL comes from an arbitrary upstream host; can't be added to next/image remotePatterns up front
-                  <img src={u.thumbUrl} alt={u.username} className="w-7 h-7 rounded-full object-cover" />
-                ) : (
-                  <span className="text-[10px] font-bold text-white">{initials}</span>
-                )}
-              </div>
+              {/* Plex/Jellyfin avatar URL comes from an arbitrary upstream host (can't be
+                  added to next/image remotePatterns up front); the shared Avatar falls back
+                  to initials when the thumb is missing or fails to load. */}
+              <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
+                {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
+                <AvatarFallback className="bg-transparent text-[10px] font-bold text-white">
+                  {initials}
+                </AvatarFallback>
+              </Avatar>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-medium text-white truncate">{u.username}</span>

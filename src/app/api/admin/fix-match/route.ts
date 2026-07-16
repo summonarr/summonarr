@@ -6,7 +6,9 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -44,15 +46,12 @@ async function fixPlexMatch(
   const safeKey = String(parseInt(ratingKey, 10) || 0);
   const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
 
-  const [urlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
-  if (!urlRow?.value || !tokenRow?.value) throw new Error("Plex server not configured");
+  const plexConfig = await getPlexConfig();
+  if (!plexConfig.url || !plexConfig.token) throw new Error("Plex server not configured");
 
-  const serverUrl = urlRow.value.replace(/\/$/, "");
+  const serverUrl = plexConfig.url.replace(/\/$/, "");
 
-  const token = tokenRow.value;
+  const token = plexConfig.token;
   const headers = {
     Accept: "application/json",
     "X-Plex-Token": token,
@@ -354,15 +353,12 @@ async function fixJellyfinMatch(
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
   const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
 
-  const [urlRow, keyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
-  if (!urlRow?.value || !keyRow?.value) throw new Error("Jellyfin server not configured");
+  const jellyfinConfig = await getJellyfinConfig();
+  if (!jellyfinConfig.url || !jellyfinConfig.apiKey) throw new Error("Jellyfin server not configured");
 
-  const baseUrl = urlRow.value.replace(/\/$/, "");
+  const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
 
-  const apiKey  = keyRow.value;
+  const apiKey  = jellyfinConfig.apiKey;
   const headers = {
     "X-MediaBrowser-Token": apiKey,
     "Content-Type": "application/json",

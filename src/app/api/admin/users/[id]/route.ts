@@ -8,10 +8,7 @@ import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
-
-// Thrown inside the anonymization transaction to roll it back when the target is
-// the last active admin (guardrail 23: propagate out of the tx, don't swallow).
-class LastAdminError extends Error {}
+import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
 
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
@@ -306,49 +303,13 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   // Admin delete ANONYMIZES rather than hard-deletes, mirroring the self-delete
   // path (/api/profile): a hard delete cascades and destroys the user's
-  // requests/issues/votes, whereas self-delete deliberately preserves that
-  // instance history behind a de-identified row. Keep the two consistent — scrub
-  // PII + revoke sessions + remove device/link rows, but keep the row.
+  // requests/issues/votes, whereas anonymization preserves that instance history
+  // behind a de-identified row. Both paths share anonymizeUserInTx.
   const now = new Date();
-  const anon = {
-    name: "Deleted user",
-    email: `deleted-${id}@deleted.invalid`,
-    image: null,
-    passwordHash: null,
-    discordId: null,
-    notificationEmail: null,
-    plexClientId: null,
-    plexUserId: null,
-    jellyfinUserId: null,
-    deactivatedAt: now,
-    sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
-  };
 
   try {
     await prisma.$transaction(async (tx) => {
-      if (target.role === "ADMIN") {
-        // Advisory lock 42 + atomic count of NON-deactivated admins ensures we
-        // never disable the last active admin under concurrent requests. A 0-row
-        // result throws to roll the whole anonymization back (guardrail 23).
-        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-        const rows = await tx.$executeRaw`
-          UPDATE "User" SET "deactivatedAt" = ${now}
-          WHERE id = ${id} AND "deactivatedAt" IS NULL
-          AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
-        `;
-        if (rows === 0) throw new LastAdminError();
-      }
-      await tx.account.deleteMany({ where: { userId: id } });
-      await tx.authSession.deleteMany({ where: { userId: id } });
-      await tx.pushSubscription.deleteMany({ where: { userId: id } });
-      await tx.discordLinkToken.deleteMany({ where: { userId: id } });
-      await tx.discordMergeCode.deleteMany({ where: { userId: id } });
-      // Sever the play-history identity link: MediaServerUser rows FK this user and
-      // are NOT cascade-deleted (guardrail 28). Leaving userId set would let a new
-      // account with the same email/sub inherit this user's watch history. History
-      // rows stay (server data), just unattributed.
-      await tx.mediaServerUser.updateMany({ where: { userId: id }, data: { userId: null } });
-      await tx.user.update({ where: { id }, data: anon });
+      await anonymizeUserInTx(tx, id, target.role, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {

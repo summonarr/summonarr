@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { redirect } from "next/navigation";
 import { Film, Wrench } from "@/components/icons";
 import { LoginForm } from "./login-form";
@@ -13,10 +14,9 @@ export default async function LoginPage() {
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
   if (count === 0) redirect("/setup");
 
-  const [plexRow, jellyfinUrlRow, jellyfinKeyRow, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+  const [plexRow, jellyfinConfig, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+    getJellyfinConfig(),
     prisma.setting.findUnique({ where: { key: "siteTitle" } }),
     prisma.setting.findUnique({ where: { key: "siteUrl" } }),
     prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
@@ -24,7 +24,7 @@ export default async function LoginPage() {
   const plexEnabled = !!plexRow?.value;
   // Mirror Plex: fully DB-configured. The Jellyfin tab appears only after an admin has
   // completed the Jellyfin wiring in Admin → Settings → Media (server URL + API key stored).
-  const jellyfinEnabled = !!jellyfinUrlRow?.value && !!jellyfinKeyRow?.value;
+  const jellyfinEnabled = !!jellyfinConfig.url && !!jellyfinConfig.apiKey;
   const oidcEnabled = !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET);
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
   const localLoginDisabled = disableLocalRow?.value === "true";
