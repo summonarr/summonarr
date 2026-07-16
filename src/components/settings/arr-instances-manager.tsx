@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// 24 random bytes as hex — mirrors generateSecret() in settings-ui.tsx (the
+// 24 random bytes as hex — mirrors generateSecret() in forms/webhook-secret-form.tsx (the
 // HD/4K webhook-secret field). Client-only (crypto.getRandomValues); called from
 // event handlers / addInstance, never during SSR.
 function generateSecret(): string {
