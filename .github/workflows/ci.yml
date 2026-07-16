@@ -86,8 +86,16 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Typecheck
-        run: npx tsc --noEmit
+      # Two compilers gate the same tree: the native TS 7 (tsgo alias — what
+      # `npx tsc` resolves to) and the classic TS 6 that `next build` and
+      # typescript-eslint load via require('typescript'). Next 16.2 and
+      # typescript-eslint cannot use TS 7's JS API yet (see dependabot.yml),
+      # so the classic check must stay green until they migrate.
+      - name: Typecheck (native TS 7)
+        run: npm run typecheck
+
+      - name: Typecheck (classic TS 6 — the compiler next build uses)
+        run: npm run typecheck:classic
 
       # Unit tests (Node's built-in runner — no test-framework dependency).
       # Covers the pure, safety-critical leaf modules: the permission bitmask,

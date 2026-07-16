@@ -22,13 +22,21 @@ updates:
       semver-minor-days: 5
       semver-patch-days: 2
     ignore:
-      # TypeScript 7 is the native-compiler port with a different JS API.
-      # Next.js 16.2.x fails to detect it at build time ("please install
-      # typescript") and typescript-eslint 8.x crashes loading it, so the
-      # dev-dependencies group PR goes red (see PR #165). Drop this once
-      # Next and typescript-eslint both support TS 7.
+      # TypeScript 7 is the native-compiler port with a different JS API:
+      # ts.Extension & co. are gone and typescript/lib/typescript.js no longer
+      # exists. Next.js 16.2.x probes that file at build time and dies
+      # ("please install typescript"), and typescript-eslint crashes loading
+      # the package (its own peer range pins typescript <6.1). The root
+      # `typescript` therefore MUST stay on 6 until BOTH support TS 7; the
+      # native compiler is adopted side-by-side as the `tsgo` alias
+      # (npm:typescript@7) powering `npm run typecheck`. The semver-major
+      # update-types filter alone did not stop the grouped "across 1
+      # directory" PR (#165 ignored, #173 still opened), so pin the version
+      # range explicitly.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
     groups:
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
