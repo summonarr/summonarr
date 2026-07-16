@@ -111,15 +111,20 @@ App runs at <http://localhost:3000> in dev mode.
 Available scripts:
 
 ```bash
-npm run dev          # next dev
-npm run build        # next build
-npm run start        # next start (production)
-npm run lint         # eslint
-npm run audit:deps   # custom TypeScript dep audit
-npx tsc --noEmit     # type-check — there is no `typecheck` script
+npm run dev                # next dev
+npm run build              # next build
+npm run start              # next start (production)
+npm run lint               # eslint
+npm run typecheck          # native TS 7 (tsgo) type-check
+npm run typecheck:classic  # classic TS 6 — the compiler `next build` uses
+npm test                   # node:test unit suite (tests/*.test.mts)
+npm run audit:deps         # custom TypeScript dep audit
 ```
 
-There is no test suite yet.
+The unit suite (`npm test`) uses Node's built-in `node:test` runner and covers
+the pure/in-memory surfaces of `src/lib` (auth, crypto, network policy, leaf
+logic). It never touches a live database or the network — sync/webhook/DB/route
+behaviour is exercised by the CI end-to-end crawl instead.
 
 ## Project structure
 

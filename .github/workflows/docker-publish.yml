@@ -24,6 +24,14 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# One publish at a time per ref: rapid pushes to main (or a dispatch racing a
+# push) would otherwise run two builds that both write the shared GHA buildx
+# cache and push the same moving tags. Queue instead of cancel — cancelling a
+# release build would leave its tags unpublished.
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: false
+
 # Workflow-level default. Jobs override with the wider scopes they need
 # (packages: write, id-token: write, attestations: write for the publish
 # job). Scorecard's TokenPermissionsID flagged the missing top-level
@@ -35,6 +43,10 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # The arm64 half runs under QEMU and can hang; without a timeout a stuck
+    # build holds the runner for GitHub's 360-minute default. A warm-cache
+    # build finishes in ~3 min and a cold multi-arch build in ~15-30.
+    timeout-minutes: 90
     # Skip the main-push build when the push contains a `chore(release):`
     # commit — the subsequent tag push (per the PR-then-tag flow in CLAUDE.md)
     # publishes the same SHA with version tags + `:latest`, so the main-push
