@@ -263,7 +263,10 @@ model MediaRequest {
 
   @@unique([tmdbId, mediaType, requestedBy, arrInstance])
   @@index([requestedBy])
-  @@index([status])
+  // Serves the admin request list: `where {status?}` + `ORDER BY createdAt DESC`
+  // (requests/route.ts). The composite's `status` prefix also covers the plain
+  // `where {status}` filter, so a standalone @@index([status]) is unneeded.
+  @@index([status, createdAt(sort: Desc)])
   @@index([tvdbId])
   @@index([status, availableAt])
   @@index([notifiedAvailable])
@@ -594,6 +597,10 @@ model DeletionVote {
 
   @@unique([tmdbId, mediaType, userId]) // one vote per user per item
   @@index([tmdbId, mediaType])
+  // Serves the `where {userId}` reads on account delete (admin/users/[id]) and
+  // Discord account merge (discord-merge.ts) — the unique key leads with tmdbId
+  // and can't serve a userId-only predicate.
+  @@index([userId])
 }
 
 // ─── Audit Log ───────────────────────────────────────────────────────────────

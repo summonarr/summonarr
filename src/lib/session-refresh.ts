@@ -238,8 +238,11 @@ export async function verifyAndRefreshSession(
 
   // Sliding window for non-ADMIN: shorten exp to now+3600, capped at the original
   // session deadline. The cap (`expiresAt` claim) is the value set at sign-in by
-  // initializeTokenOnSignIn — it never moves, so sliding can NEVER push the
-  // effective expiry past the original TTL.
+  // initializeTokenOnSignIn — it never moves, so sliding keeps the effective
+  // expiry at the original TTL. (The sole exception is the same-second
+  // privilege-change rotation below, where signedIat = cutoff+1 makes exp land
+  // ≤2s past the deadline once; the DB AuthSession row / sessionsRevokedAt remain
+  // the real boundary, so this is immaterial.)
   let resignExpiresIn: number | null = null;
   if (workingClaims.role !== "ADMIN") {
     const sessionDeadline = workingClaims.expiresAt;
