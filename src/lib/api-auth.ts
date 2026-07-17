@@ -73,7 +73,8 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
 // from an allowlisted address is rejected if replayed from a different one. The
 // allowlist is fail-closed — an indeterminate client IP ("unknown" when
 // TRUST_PROXY is off) never matches. Absent/empty claim ⇒ no restriction.
-function machineIpAllowed(claims: SessionClaims, headers: Headers): boolean {
+// Exported for unit tests.
+export function machineIpAllowed(claims: SessionClaims, headers: Headers): boolean {
   const allowlist = claims.machineAllowedIps;
   if (!Array.isArray(allowlist) || allowlist.length === 0) return true;
   return isIpAllowed(getClientIp(headers), allowlist);
@@ -122,7 +123,8 @@ export async function requireAuth(
   return claimsToSession(result.claims);
 }
 
-function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
+// Exported for unit tests.
+export function hasRole(actual: string | undefined, required: RequireAuthRole): boolean {
   if (required === "ADMIN") return actual === "ADMIN";
   return actual === "ADMIN" || actual === "ISSUE_ADMIN";
 }

@@ -29,6 +29,7 @@ import {
   invalidateBlacklistCache,
   isBlacklisted,
 } from "../src/lib/blacklist.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 type BlacklistRow = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 type FindManyArgs = { select: { tmdbId: boolean; mediaType: boolean } };
@@ -60,15 +61,10 @@ const blacklistItemStub = {
   },
 };
 
-// Shadow the delegate BEFORE any test runs. If a Prisma upgrade ever stops
-// this from taking effect, fail fast and loudly here — otherwise the first
-// cold read would issue a real query against a DB that doesn't exist and hang.
-(prisma as unknown as { blacklistItem: unknown }).blacklistItem = blacklistItemStub;
-if ((prisma as unknown as { blacklistItem: unknown }).blacklistItem !== blacklistItemStub) {
-  throw new Error(
-    "could not shadow prisma.blacklistItem with the in-memory stub — aborting before a real DB query can hang",
-  );
-}
+// Shadow the delegate BEFORE any test runs; the helper fails fast and loudly
+// if a Prisma upgrade ever stops the shadow from taking effect — otherwise the
+// first cold read would issue a real query against a DB that doesn't exist.
+shadowPrismaModel(prisma, "blacklistItem", blacklistItemStub);
 
 function takePendingRead(): Deferred {
   const d = pendingReads.shift();

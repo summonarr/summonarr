@@ -12,6 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import { getArrInstances, getSyncableArrInstances } from "../src/lib/arr-instance-registry.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 // The registry JSON value keyed by Setting key, plus the set of connection keys
 // that are "present" (have a value) — drives isInstanceConfigured's findMany.
@@ -30,10 +31,7 @@ const settingStub = {
   },
 };
 
-(prisma as unknown as { setting: unknown }).setting = settingStub;
-if ((prisma as unknown as { setting: unknown }).setting !== settingStub) {
-  throw new Error("could not shadow prisma.setting with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "setting", settingStub);
 
 function reset() {
   registryValues.clear();

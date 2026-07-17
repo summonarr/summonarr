@@ -12,6 +12,7 @@ import { prisma } from "../src/lib/prisma.ts";
 import { Permission, PRESETS } from "../src/lib/permissions.ts";
 import type { SummonarrSession } from "../src/lib/api-auth.ts";
 import { getShow4kVisibility } from "../src/lib/four-k-visibility.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 let settings: Record<string, string> = {};
 let findManyCalls = 0;
@@ -25,10 +26,7 @@ const settingStub = {
   },
 };
 
-(prisma as unknown as { setting: unknown }).setting = settingStub;
-if ((prisma as unknown as { setting: unknown }).setting !== settingStub) {
-  throw new Error("could not shadow prisma.setting with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "setting", settingStub);
 
 function makeSession(permissions: bigint, role = "USER"): SummonarrSession {
   return {

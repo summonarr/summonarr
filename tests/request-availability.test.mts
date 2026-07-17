@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import type { TmdbMedia } from "../src/lib/tmdb-types.ts";
 import { buildMediaTypeWhere, attachRequestedStatus } from "../src/lib/request-availability.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 function media(id: number, mediaType: "movie" | "tv"): TmdbMedia {
   return { id, mediaType } as unknown as TmdbMedia;
@@ -70,10 +71,7 @@ const mediaRequestStub = {
   },
 };
 
-(prisma as unknown as { mediaRequest: unknown }).mediaRequest = mediaRequestStub;
-if ((prisma as unknown as { mediaRequest: unknown }).mediaRequest !== mediaRequestStub) {
-  throw new Error("could not shadow prisma.mediaRequest with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "mediaRequest", mediaRequestStub);
 
 test("attachRequestedStatus: empty input returns as-is with zero queries", async () => {
   calls.length = 0;

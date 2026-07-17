@@ -19,6 +19,7 @@
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
     "smoke:security": "tsx scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
+    "licenses:check": "node scripts/generate-licenses.mts --check",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {

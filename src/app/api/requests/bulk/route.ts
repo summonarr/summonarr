@@ -23,6 +23,7 @@ import {
 } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
+import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -55,21 +56,6 @@ interface CreateOutcome {
   tmdbId: number;
   mediaType: MediaType;
   result: ItemResult;
-}
-
-// Minimal bounded-concurrency map so a 50-item collection doesn't fire 50
-// simultaneous Radarr/Sonarr lookups.
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  async function worker() {
-    while (cursor < items.length) {
-      const idx = cursor++;
-      results[idx] = await fn(items[idx]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
 }
 
 const keyOf = (tmdbId: number, mediaType: string) => `${tmdbId}:${mediaType}`;

@@ -19,6 +19,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import { getConfiguredJellyfinUrl } from "../src/lib/jellyfin-config.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 // The real Setting row also carries id/timestamps; the function only reads
 // `value` (via `row?.value?.trim()`), so the stub models just what it touches.
@@ -34,13 +35,10 @@ const settingStub = {
   },
 };
 
-// Shadow the delegate BEFORE any test runs. If a Prisma upgrade ever stops
-// this from taking effect, fail fast and loudly here — otherwise the first
+// Shadow the delegate BEFORE any test runs. The helper fails fast and loudly
+// if a Prisma upgrade ever stops this from taking effect — otherwise the first
 // call would issue a real query against a DB that doesn't exist and hang.
-(prisma as unknown as { setting: unknown }).setting = settingStub;
-if ((prisma as unknown as { setting: unknown }).setting !== settingStub) {
-  throw new Error("could not shadow prisma.setting with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "setting", settingStub);
 
 test("returns the configured URL exactly as stored (happy path)", async () => {
   nextRow = { key: "jellyfinUrl", value: "http://jellyfin.local:8096" };

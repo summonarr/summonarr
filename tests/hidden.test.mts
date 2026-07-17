@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import { getUserHiddenSet } from "../src/lib/hidden.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 type StubRow = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 
@@ -22,13 +23,10 @@ const hiddenItemStub = {
   },
 };
 
-// Shadow the delegate BEFORE any test runs; fail fast if a Prisma upgrade ever
-// stops the shadow from taking effect (otherwise the first call would issue a
-// real query against a DB that doesn't exist and hang).
-(prisma as unknown as { hiddenItem: unknown }).hiddenItem = hiddenItemStub;
-if ((prisma as unknown as { hiddenItem: unknown }).hiddenItem !== hiddenItemStub) {
-  throw new Error("could not shadow prisma.hiddenItem with the in-memory stub — aborting before a real DB query can hang");
-}
+// Shadow the delegate BEFORE any test runs; the helper fails fast if a Prisma
+// upgrade ever stops the shadow from taking effect (otherwise the first call
+// would issue a real query against a DB that doesn't exist and hang).
+shadowPrismaModel(prisma, "hiddenItem", hiddenItemStub);
 
 test("keys are '{tmdbId}:{lowercased mediaType}' — the attach-all keyspace", async () => {
   nextRows = [

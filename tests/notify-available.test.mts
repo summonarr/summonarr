@@ -20,6 +20,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
 import { claimAvailableNotificationWinners } from "../src/lib/notify-available.ts";
+import { shadowPrismaClientMethod } from "./_helpers.mts";
 
 type SqlLike = { sql: string; values: unknown[] };
 
@@ -31,10 +32,7 @@ const queryRawStub = async (query: SqlLike): Promise<{ id: string }[]> => {
   return nextRows;
 };
 
-(prisma as unknown as { $queryRaw: unknown }).$queryRaw = queryRawStub;
-if ((prisma as unknown as { $queryRaw: unknown }).$queryRaw !== queryRawStub) {
-  throw new Error("could not shadow prisma.$queryRaw with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaClientMethod(prisma, "$queryRaw", queryRawStub);
 
 const norm = (sql: string) => sql.replace(/\s+/g, " ").trim();
 

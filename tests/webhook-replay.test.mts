@@ -32,6 +32,7 @@ import {
   clearWebhookReplayDigestJson,
   __resetWebhookReplayCacheForTests,
 } from "../src/lib/webhook-replay.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 0, 15, 12, 0, 0);
@@ -110,13 +111,10 @@ const replayStub = {
   },
 };
 
-// Shadow the delegate BEFORE any test runs. If a Prisma upgrade ever stops
-// this from taking effect, fail fast and loudly here — otherwise the first
+// Shadow the delegate BEFORE any test runs. The helper fails fast and loudly
+// if a Prisma upgrade ever stops this from taking effect — otherwise the first
 // call would issue a real query against a DB that doesn't exist and hang.
-(prisma as unknown as { webhookReplay: unknown }).webhookReplay = replayStub;
-if ((prisma as unknown as { webhookReplay: unknown }).webhookReplay !== replayStub) {
-  throw new Error("could not shadow prisma.webhookReplay with the in-memory stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "webhookReplay", replayStub);
 
 // Pin the 1-in-100 cleanup lottery. Default 0.5 = never fires, so unrelated
 // tests can't flake on a lucky roll; lottery tests set it explicitly.
