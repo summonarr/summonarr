@@ -78,6 +78,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
 
   return (
     <div
+      role="presentation"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={onClose}
     >

@@ -47,12 +47,15 @@ export default async function PopularOnServerPage({
   const [sp, session] = await Promise.all([searchParams, auth()]);
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  const show4k = await getShow4kVisibility(session);
+  const [show4k, playHistoryEnabled] = await Promise.all([
+    getShow4kVisibility(session),
+    isPlayHistoryEnabled(),
+  ]);
 
   // This page is built entirely from recorded play history. When tracking is
   // off no new data accrues, so surface that explicitly rather than rendering a
   // stale or empty grid with no explanation.
-  if (!(await isPlayHistoryEnabled())) {
+  if (!playHistoryEnabled) {
     return (
       <div className="ds-page-enter">
         <PageHeader title="Popular on Server" subtitle="Most played on your servers" />

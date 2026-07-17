@@ -47,8 +47,22 @@ export function NotificationBell() {
 
   useEffect(() => {
     void load();
-    const t = setInterval(() => void load(), POLL_MS);
-    return () => clearInterval(t);
+    // The interval keeps ticking in hidden tabs (simplest correct shape), but
+    // the fetch is skipped there — a background tab doesn't need a fresh badge.
+    const t = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void load();
+    }, POLL_MS);
+    // Refresh immediately when the tab becomes visible again so a returning
+    // user isn't up to POLL_MS stale.
+    function onVisibility() {
+      if (document.visibilityState === "visible") void load();
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [load]);
 
   // Real-time: the server writes an in-app notification alongside these SSE events

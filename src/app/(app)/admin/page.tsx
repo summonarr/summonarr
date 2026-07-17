@@ -85,7 +85,15 @@ export default async function AdminPage({
   const total = Number(distinctGroups[0]?.count ?? 0);
 
   const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
-  const [requests, plexItems, jellyfinItems] = pairs.length
+  const cacheKey = (p: { tmdbId: number; mediaType: string }) =>
+    p.mediaType === "MOVIE" ? `movie:${p.tmdbId}:details` : `tv:${p.tmdbId}:details`;
+
+  // 1. Database first: read the cached TMDB detail (with all rating sources)
+  //    straight from TmdbCache — one findMany over the page's keys, not a
+  //    point read per pair. No external calls; stale rows still serve. Folded
+  //    into the page batch so it doesn't add a serial round-trip (an empty
+  //    pairs list short-circuits to an empty map, same as getCacheStaleMany([])).
+  const [requests, plexItems, jellyfinItems, cached] = pairs.length
     ? await Promise.all([
         prisma.mediaRequest.findMany({
           where: { OR: pairs, ...(statusFilter ? { status: statusFilter } : {}) },
@@ -94,8 +102,9 @@ export default async function AdminPage({
         }),
         prisma.plexLibraryItem.findMany({ where: { OR: pairs } }),
         prisma.jellyfinLibraryItem.findMany({ where: { OR: pairs } }),
+        getCacheStaleMany<TmdbMedia>(pairs.map((p) => cacheKey(p))),
       ])
-    : [[], [], []];
+    : [[], [], [], new Map<string, { value: TmdbMedia; isStale: boolean }>()];
 
   const plexSet = new Set(plexItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((p) => `${p.tmdbId}:${p.mediaType}`));
@@ -116,13 +125,6 @@ export default async function AdminPage({
     rogerEbertRating: m.rogerEbertRating ?? null,
     voteAverage: m.voteAverage || null,
   });
-  const cacheKey = (p: { tmdbId: number; mediaType: string }) =>
-    p.mediaType === "MOVIE" ? `movie:${p.tmdbId}:details` : `tv:${p.tmdbId}:details`;
-
-  // 1. Database first: read the cached TMDB detail (with all rating sources)
-  //    straight from TmdbCache — one findMany over the page's keys, not a
-  //    point read per pair. No external calls; stale rows still serve.
-  const cached = await getCacheStaleMany<TmdbMedia>(pairs.map((p) => cacheKey(p)));
   const inDb = new Set<string>();
   pairs.forEach((p) => {
     const v = cached.get(cacheKey(p))?.value;
@@ -183,10 +185,15 @@ export default async function AdminPage({
   const groupOrder = pagedGroups.map((g) => `${g.tmdbId}:${g.mediaType}`);
 
   // Slug → display name for the instance badges + approve picker labels. Union
-  // of both services' registries; a slug defined on both keeps the Radarr name.
+  // of both services' registries; a slug defined on both keeps the Radarr name
+  // (sonarr is applied first, radarr second, so radarr overwrites).
   const instanceNames: Record<string, string> = {};
-  for (const service of ["sonarr", "radarr"] as const) {
-    for (const inst of await getArrInstances(service)) {
+  const [sonarrInstances, radarrInstances] = await Promise.all([
+    getArrInstances("sonarr"),
+    getArrInstances("radarr"),
+  ]);
+  for (const instances of [sonarrInstances, radarrInstances]) {
+    for (const inst of instances) {
       if (inst.slug !== "") instanceNames[inst.slug] = inst.name;
     }
   }

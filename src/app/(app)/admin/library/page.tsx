@@ -290,25 +290,15 @@ export default async function LibraryDiffPage({
     : null;
 
   const LIBRARY_ITEM_CAP = 25_000;
+  // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
+  const threshold = new Date(Date.now() + LIBRARY_REFRESH_THRESHOLD);
   // overview is omitted here on purpose: it is the heaviest column and is only
   // rendered for the difference sets, so pulling it for up to 50k rows per render
   // is wasted. fetchOverviews backfills it for just the displayed rows below.
-  const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
+  const [plexItems, jellyfinItems, prefixRows, freshMovieCount, freshTvCount] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true }, take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true }, take: LIBRARY_ITEM_CAP }),
     prisma.setting.findMany({ where: { key: { in: ["plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix"] } } }),
-  ]);
-  const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
-
-  const prefixCfg = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
-  const plexMovieStripPrefix     = prefixCfg.plexMoviePathStripPrefix     ?? "";
-  const plexTvStripPrefix        = prefixCfg.plexTvPathStripPrefix        ?? "";
-  const jellyfinMovieStripPrefix = prefixCfg.jellyfinMoviePathStripPrefix ?? "";
-  const jellyfinTvStripPrefix    = prefixCfg.jellyfinTvPathStripPrefix    ?? "";
-
-  // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
-  const threshold = new Date(Date.now() + LIBRARY_REFRESH_THRESHOLD);
-  const [freshMovieCount, freshTvCount] = await Promise.all([
     prisma.tmdbCache.count({
       where: { key: { startsWith: "movie:", endsWith: ":details" }, expiresAt: { gt: threshold } },
     }),
@@ -316,6 +306,24 @@ export default async function LibraryDiffPage({
       where: { key: { startsWith: "tv:", endsWith: ":details" }, expiresAt: { gt: threshold } },
     }),
   ]);
+  const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
+
+  // Start the ARR path-map builds now (external Radarr/Sonarr HTTP, independent
+  // of everything below) so they overlap the fetchOverviews/enrichItems DB
+  // stages; awaited in the bad-match Promise.all where they are consumed. The
+  // no-op catches only mark the promises handled if an intermediate await
+  // throws first — the awaits below still rethrow a buildArrPathMap failure.
+  const movieArrMapPromise = buildArrPathMap("MOVIE");
+  movieArrMapPromise.catch(() => {});
+  const tvArrMapPromise = buildArrPathMap("TV");
+  tvArrMapPromise.catch(() => {});
+
+  const prefixCfg = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
+  const plexMovieStripPrefix     = prefixCfg.plexMoviePathStripPrefix     ?? "";
+  const plexTvStripPrefix        = prefixCfg.plexTvPathStripPrefix        ?? "";
+  const jellyfinMovieStripPrefix = prefixCfg.jellyfinMoviePathStripPrefix ?? "";
+  const jellyfinTvStripPrefix    = prefixCfg.jellyfinTvPathStripPrefix    ?? "";
+
   const uniqueLibraryCount = (() => {
     const seen = new Set<string>();
     for (const i of [...plexItems, ...jellyfinItems]) seen.add(`${i.tmdbId}:${i.mediaType}`);
@@ -403,8 +411,8 @@ export default async function LibraryDiffPage({
   const [bmPlexItems, bmJellyfinItems, movieArrMap, tvArrMap] = await Promise.all([
     enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.plexItem.tmdbId,     mediaType: m.plexItem.mediaType,     filePath: m.plexItem.filePath,     title: m.plexItem.title,     year: m.plexItem.year }))),
     enrichItems(filteredRawBadMatches.map((m) => ({ tmdbId: m.jellyfinItem.tmdbId, mediaType: m.jellyfinItem.mediaType, filePath: m.jellyfinItem.filePath, title: m.jellyfinItem.title, year: m.jellyfinItem.year }))),
-    buildArrPathMap("MOVIE"),
-    buildArrPathMap("TV"),
+    movieArrMapPromise,
+    tvArrMapPromise,
   ]);
 
   const badMatches: BadMatch[] = filteredRawBadMatches.map((m, i) => {

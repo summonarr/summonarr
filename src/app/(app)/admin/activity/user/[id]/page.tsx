@@ -22,20 +22,22 @@ export default async function UserActivityPage({
 
   const { id } = await params;
 
-  const msUser = await prisma.mediaServerUser.findUnique({
-    where: { id },
-    include: { user: { select: { name: true, email: true } } },
-  });
+  // All three are independent side-effect-free reads keyed on the same id, so
+  // run them concurrently; the notFound() check moves after the batch.
+  const [msUser, stats, ipGroups] = await Promise.all([
+    prisma.mediaServerUser.findUnique({
+      where: { id },
+      include: { user: { select: { name: true, email: true } } },
+    }),
+    getUserPlayStats(id),
+    prisma.playHistory.groupBy({
+      by: ["ipAddress"],
+      where: { mediaServerUserId: id, ipAddress: { not: null } },
+      _count: { _all: true },
+      _max: { startedAt: true },
+    }),
+  ]);
   if (!msUser) notFound();
-
-  const stats = await getUserPlayStats(id);
-
-  const ipGroups = await prisma.playHistory.groupBy({
-    by: ["ipAddress"],
-    where: { mediaServerUserId: id, ipAddress: { not: null } },
-    _count: { _all: true },
-    _max: { startedAt: true },
-  });
   const knownIps = ipGroups
     .filter((g): g is typeof g & { ipAddress: string } => !!g.ipAddress)
     .map((g) => ({

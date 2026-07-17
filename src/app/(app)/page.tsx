@@ -77,6 +77,13 @@ export default async function DiscoverPage({
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
 
+  // Start the 4K-visibility read concurrently with the TMDB fan-out; awaited
+  // just before attachAllAvailability consumes it. The no-op catch only marks
+  // the promise handled if something throws first — the await below still
+  // rethrows a getShow4kVisibility failure.
+  const show4kPromise = getShow4kVisibility(session);
+  show4kPromise.catch(() => {});
+
   const [
     trendingRes,
     popMoviesRes,
@@ -116,7 +123,7 @@ export default async function DiscoverPage({
     { raw: topTV, limit: RAIL_OVERFETCH },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
-  const show4k = await getShow4kVisibility(session);
+  const show4k = await show4kPromise;
   const enriched = await attachAllAvailability(displaySet, session?.user.id, { show4k });
   const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
