@@ -833,7 +833,19 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     jellyfinMarked = await markLibraryRequests(jfMovieIds, jfTvIds, "jellyfin");
   }
 
-  const pendingAvailableNotify = available.filter((r) => !r.notifiedAvailable);
+  // Re-query LIVE rather than filter the run-start `available` snapshot: a
+  // request the marking passes flipped AVAILABLE **this run** via the
+  // non-notifying toMarkOnly path (user prefers the OTHER source; title present
+  // in both libraries) is not in the snapshot — the source-pass notify claim
+  // then finds status already AVAILABLE (its CAS only claims PENDING/APPROVED)
+  // and the user's "now available" notification silently slips a full sync
+  // cycle. A live read includes those rows; the requireStatusAvailable CAS
+  // below still guarantees exactly-once against the webhook poller and
+  // concurrent runs. Costs one extra findMany per run.
+  const pendingAvailableNotify = await prisma.mediaRequest.findMany({
+    where: { status: "AVAILABLE", notifiedAvailable: false },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+  });
   if (pendingAvailableNotify.length > 0) {
     const plexConfigured = !!(plexConfig.url && plexConfig.token);
     const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);

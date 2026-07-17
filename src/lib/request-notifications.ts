@@ -77,8 +77,12 @@ export async function notifyAvailablePerServer(
 
   // CAS on notifiedAvailable prevents duplicate "now available" notifications when Plex
   // and Jellyfin both match the item; winner filter ensures we only notify on rows we
-  // actually flipped, not the full pre-CAS overlap set.
-  const winners = await claimAvailableNotificationWinners(toNotify);
+  // actually flipped, not the full pre-CAS overlap set. requireStatusAvailable is the
+  // documented contract for non-markAvailable callers (notify-available.ts): this path
+  // doesn't set status itself, so it must only claim rows ALREADY AVAILABLE. Callers
+  // today pre-filter to AVAILABLE (making this a no-op), but the guard keeps a future
+  // caller from burning the once-only notifiedAvailable flag on a non-AVAILABLE row.
+  const winners = await claimAvailableNotificationWinners(toNotify, { requireStatusAvailable: true });
   if (winners.length > 0) {
     const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
     notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));

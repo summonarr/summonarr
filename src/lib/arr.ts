@@ -481,10 +481,16 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = ""): Promise<
     const wantedNeedsResolve: number[] = [];
     const availableNeedsResolve: number[] = [];
     for (const s of series) {
-
-      const allDownloaded = s.statistics.episodeFileCount >= s.statistics.totalEpisodeCount;
+      // Guard `statistics` like isSeriesDownloadedInSonarr does: the field is
+      // normally always present on /api/v3/series, but ONE anomalous row without
+      // it would throw here, trip the outer catch, and silently skip the entire
+      // wanted/available cache update run after run — an opaque availability
+      // freeze. A missing statistics block reads as zero files (wanted).
+      const episodeFileCount = s.statistics?.episodeFileCount ?? 0;
+      const totalEpisodeCount = s.statistics?.totalEpisodeCount ?? 0;
+      const allDownloaded = episodeFileCount >= totalEpisodeCount;
       // Ongoing series with partial files are "available"; ended series only when fully downloaded
-      const isAvailable = s.statistics.episodeFileCount > 0 &&
+      const isAvailable = episodeFileCount > 0 &&
         (s.status !== "ended" || allDownloaded);
       const isWanted = !isAvailable;
 

@@ -239,11 +239,20 @@ async function fetchPage<T>(
         headers: headers ?? jellyfinHeaders(apiKey),
         timeoutMs: PAGE_TIMEOUT_MS,
       });
-      if (!res.ok) throw new Error(`Jellyfin fetch failed: ${res.status} at StartIndex=${startIndex}`);
+      if (!res.ok) {
+        const err = new Error(`Jellyfin fetch failed: ${res.status} at StartIndex=${startIndex}`);
+        // Fast-fail non-429 4xx: a 400/401/403 (bad request, revoked or
+        // de-elevated API key) can never succeed on retry — retrying just
+        // hammers the server for ~12s per page across a multi-page library.
+        // 429 and 5xx/network errors stay retryable.
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) throw Object.assign(err, { noRetry: true });
+        throw err;
+      }
       const data = (await res.json()) as { Items?: T[]; TotalRecordCount?: number };
       return { items: data.Items ?? [], total: data.TotalRecordCount ?? 0 };
     } catch (err) {
       lastErr = err;
+      if ((err as { noRetry?: boolean }).noRetry) break;
     }
   }
   throw lastErr;
