@@ -10,6 +10,18 @@ interface PolicySyncResult {
   errors: number;
 }
 
+// Pure guard for the Jellyfin user reconcile (soft-delete of departed users).
+// getJellyfinAllUsers only throws on a non-2xx, so a 200 with a truncated/
+// subset list (reduced API-key elevation, transient quirk) would wrongly
+// mass-deactivate everyone absent. Only reconcile when the fetch looks
+// complete: non-empty AND not a suspicious shrink versus the ACTIVE rows we
+// already had (inactive rows accumulate, so comparing against all rows would
+// make the guard read every run as a "shrink"). Exported for unit tests.
+export const PRUNE_MAX_SHRINK = 2; // tolerate small genuine departures per run
+export function isSafeToReconcileJellyfinUsers(fetchedCount: number, priorActiveCount: number): boolean {
+  return fetchedCount > 0 && (priorActiveCount === 0 || fetchedCount >= priorActiveCount - PRUNE_MAX_SHRINK);
+}
+
 /**
  * Fetches all users from each configured media server, upserts them into
  * MediaServerUser, and re-enforces any download restrictions set in Summonarr.
@@ -142,17 +154,11 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   // Mark users no longer on the Jellyfin server as inactive (soft-delete). We
   // NEVER hard-delete a MediaServerUser — PlayHistory + ActiveSession FK it and
   // play history must survive the user's removal (the live poller is the only
-  // writer; no backfill cron exists). Still guard against a degraded fetch:
-  // getJellyfinAllUsers only throws on a non-2xx, so a 200 with a truncated/
-  // subset list (reduced API-key elevation, transient quirk) would wrongly
-  // mass-deactivate everyone absent. Only reconcile when the fetch looks
-  // complete: non-empty AND not a suspicious shrink versus the ACTIVE rows we
-  // already had (inactive rows accumulate, so comparing against all rows would
-  // make the guard read every run as a "shrink").
+  // writer; no backfill cron exists). isSafeToReconcileJellyfinUsers (above)
+  // guards against a degraded (truncated but 200) fetch mass-deactivating
+  // everyone absent.
   const priorActiveCount = existingRows.filter((r) => r.active).length;
-  const PRUNE_MAX_SHRINK = 2; // tolerate small genuine departures per run
-  const safeToReconcile =
-    users.length > 0 && (priorActiveCount === 0 || users.length >= priorActiveCount - PRUNE_MAX_SHRINK);
+  const safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
   if (safeToReconcile) {
     const currentIds = users.map((u) => u.id);
     await prisma.mediaServerUser.updateMany({
