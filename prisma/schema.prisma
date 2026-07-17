@@ -408,6 +408,10 @@ model TmdbCache {
   expiresAt DateTime
 
   @@index([expiresAt])
+  // Serves the admin settings-page provider counts (key startsWith "omdb:" →
+  // LIKE 'omdb:%') — the default-collation PK btree can't serve a LIKE prefix
+  // scan, so those counts full-scanned the largest cache table.
+  @@index([key(ops: raw("text_pattern_ops"))])
 }
 
 // ─── TMDB Media Core ──────────────────────────────────────────────────────────
@@ -1038,6 +1042,9 @@ model Notification {
   readAt     DateTime?
 
   @@index([userId, createdAt])
+  // Serves the unread-count query (userId, readAt: null) without scanning all
+  // of a user's notifications.
+  @@index([userId, readAt])
 }
 
 enum MediaType {
