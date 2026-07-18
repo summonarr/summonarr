@@ -213,6 +213,26 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     : null;
   const serverAll4k = request4kAllRow?.value === "true";
 
+  // An auto-routed instance the target can't access falls back to the DEFAULT instance
+  // (parity with the single-request and Discord paths): a base requester is never
+  // blocked by a server-side routing decision. Remap HERE — before the availability,
+  // create, and arr-push lookups below all key off slugOf() — so the whole item runs on
+  // its effective (default) slug. Bulk items are always auto-routed (never an explicit
+  // target), so there is no explicit-choice case to preserve as a hard reject. An item
+  // the user can't request at all (missing the base media permission) still fails the
+  // per-item canRequestInstance gate below and is skipped "no-permission".
+  if (routingActive) {
+    for (const it of items) {
+      const key = keyOf(it.tmdbId, it.mediaType);
+      const routed = slugByKey.get(key);
+      if (routed === undefined || routed === "") continue;
+      const inst = configuredByType[it.mediaType].find((i) => i.slug === routed) ?? DEFAULT_ACCESS;
+      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+        slugByKey.delete(key); // slugOf() now returns "" (default instance)
+      }
+    }
+  }
+
   // Authoritative existing-state lookup — never trust client-supplied availability.
   // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
   // instance, so a target who holds only a request for the same title on a
