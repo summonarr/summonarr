@@ -605,7 +605,12 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia>(key);
 
-  if (cached) {
+  // Self-heal: the old getMovieReleaseInfo (arr.ts, pre key-split) wrote the
+  // RAW snake_case TMDB body under this key. Every normalized writer sets
+  // `mediaType`; a row without it is a poisoned blob — treat it as a miss so
+  // it re-fetches and overwrites now instead of serving a shape with
+  // mediaType/posterPath/releaseDate undefined for the rest of the TTL.
+  if (cached && cached.mediaType) {
     let needsWrite = migrateKeywordShape(cached);
     // `mdblistScore === undefined` also catches rows cached before the unified
     // payload widened to the full MDBList field set, so they lazily re-fetch and
@@ -843,7 +848,9 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
 
   const r = await tmdbFetch<{
     id: number; name: string; profile_path: string | null; known_for_department: string;
-    combined_credits: {
+    // Optional in the type to match reality: append_to_response payloads can be
+    // absent on edge responses; the guard below degrades to an empty list.
+    combined_credits?: {
       cast: {
         id: number; media_type: string; title?: string; name?: string;
         poster_path: string | null; release_date?: string; first_air_date?: string;
@@ -852,7 +859,9 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
     };
   }>(`/person/${id}`, { append_to_response: "combined_credits" });
 
-  const credits: PersonCredit[] = r.combined_credits.cast
+  // Defensive: a /person response missing the appended combined_credits (or its
+  // cast array) must degrade to an empty filmography, not a route 500.
+  const credits: PersonCredit[] = (r.combined_credits?.cast ?? [])
     .filter((c) => (c.media_type === "movie" || c.media_type === "tv") && c.poster_path && c.vote_count > 10)
     .sort((a, b) => {
       const aDate = a.release_date ?? a.first_air_date ?? "";

@@ -382,7 +382,8 @@ model SonarrAvailableItem {
 
 // ─── Upcoming Cache ───────────────────────────────────────────────────────────
 // Populated by /api/sync/upcoming; full replacement each sync.
-// Stores TMDB upcoming movies (/movie/upcoming) and on-the-air TV (/tv/on_the_air).
+// Stores TMDB upcoming movies (/movie/upcoming) and upcoming TV
+// (/discover/tv with first_air_date.gte — see getUpcomingTV in tmdb.ts).
 
 model UpcomingCacheItem {
   tmdbId       Int

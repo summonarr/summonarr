@@ -79,7 +79,12 @@ export async function upsertTmdbMediaCore(media: TmdbMedia): Promise<void> {
       posterPath:    media.posterPath    ?? null,
       releaseYear:   media.releaseYear   || null,
       voteAverage:   media.voteAverage   ?? 0,
-      certification: media.certification ?? null,
+      // undefined (skip), NOT null: writers with a leaner TMDB fetch (the
+      // prewarm) have no certification on their media object — null here would
+      // erase the value a full getMovieDetails/getTVDetails stored, regressing
+      // the cert badge until the next full details fetch. A movie genuinely
+      // without a cert simply never writes one (create keeps the null default).
+      certification: media.certification ?? undefined,
       expiresAt,
       lastSyncedAt:  new Date(),
     },

@@ -535,10 +535,16 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
 } | null> {
   const auth = tmdbAuth();
   if (!auth) return null;
-  const cacheKey = `movie:${tmdbId}:details`;
+  // DEDICATED key — never `movie:${id}:details`. That key belongs to
+  // getMovieDetails (tmdb.ts) and holds a NORMALIZED TmdbMedia; this fn used to
+  // write the raw snake_case TMDB body under it, poisoning the detail page
+  // (mediaType/posterPath/releaseDate all undefined) for the rest of the 7-day
+  // TTL — and reading a normalized blob back here found no `release_date`, so
+  // release gating silently returned null dates. Store only the field we need.
+  const cacheKey = `movie:${tmdbId}:release-info`;
   try {
-    type TmdbMovieDetails = { release_date?: string };
-    let details = await getCache<TmdbMovieDetails>(cacheKey);
+    type ReleaseInfo = { release_date?: string | null };
+    let details = await getCache<ReleaseInfo>(cacheKey);
     if (!details) {
       const url = new URL(`https://api.themoviedb.org/3/movie/${tmdbId}`);
       for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
@@ -548,7 +554,8 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
         timeoutMs: 10_000,
       });
       if (!res.ok) return null;
-      details = await res.json() as TmdbMovieDetails;
+      const body = await res.json() as { release_date?: string };
+      details = { release_date: body.release_date ?? null };
       await setCache(cacheKey, details, TTL.DETAILS);
     }
     const releaseDate = details.release_date ?? null;
