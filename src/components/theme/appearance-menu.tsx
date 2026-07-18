@@ -1,11 +1,20 @@
 "use client";
 
-import { Moon, Sun, Check } from "@/components/icons";
-import { ACCENTS, useTheme, type Accent } from "./theme-provider";
+import { Moon, Sun } from "@/components/icons";
+import { ACCENTS, useTheme, type Accent, type Theme } from "./theme-provider";
+import {
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@/components/ui/dropdown-menu";
 
-/* Theme + accent picker. Designed to drop into the header user dropdown
-   (renders its own labelled section; does not close the menu on change so
-   the user can preview hues live). */
+/* Theme + accent picker for the header account dropdown. Rendered as two
+   menuitemradio groups so the controls join the menu's arrow-key roving focus
+   and expose aria-checked — the prior custom <button>s sat inside the role=menu
+   but weren't menu items, so base-ui's keyboard model skipped them (keyboard
+   users couldn't reach them). base-ui's RadioItem defaults closeOnClick=false,
+   so selecting a theme/accent keeps the menu open for live preview, preserving
+   the original behavior. The section header is a static, non-focusable label
+   (base-ui correctly skips it in navigation). */
 
 const ACCENT_SWATCH: Record<Accent, string> = {
   indigo: "oklch(0.58 0.21 275)",
@@ -16,129 +25,70 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   mono: "oklch(0.85 0 0)",
 };
 
+const ACCENT_LABEL: Record<Accent, string> = {
+  indigo: "Indigo",
+  amber: "Amber",
+  emerald: "Emerald",
+  cyan: "Cyan",
+  rose: "Rose",
+  mono: "Mono",
+};
+
+const sectionHeaderStyle: React.CSSProperties = {
+  padding: "6px 8px 2px",
+  fontSize: 10.5,
+  textTransform: "uppercase",
+  letterSpacing: "0.08em",
+  color: "var(--ds-fg-subtle)",
+};
+
 export function AppearanceMenu() {
   const { theme, setTheme, accent, setAccent } = useTheme();
 
   return (
-    <div
-      className="ds-mono"
-      style={{ padding: "8px 8px 10px", display: "grid", gap: 8 }}
-      onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => e.stopPropagation()}
-    >
-      <div
-        style={{
-          fontSize: 10.5,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          color: "var(--ds-fg-subtle)",
-        }}
-      >
-        Appearance
+    <>
+      <div style={sectionHeaderStyle} aria-hidden="true">
+        Theme
       </div>
-
-      {/* Theme segmented toggle */}
-      <div
-        role="group"
+      <DropdownMenuRadioGroup
         aria-label="Theme"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 4,
-          padding: 3,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: "var(--ds-r-md)",
-        }}
+        value={theme}
+        onValueChange={(v) => setTheme(v as Theme)}
       >
-        {(
-          [
-            ["dark", "Dark", Moon],
-            ["light", "Light", Sun],
-          ] as const
-        ).map(([value, label, Icon]) => {
-          const active = theme === value;
-          return (
-            <button
-              key={value}
-              type="button"
-              aria-pressed={active}
-              onClick={() => setTheme(value)}
-              className="ds-tap"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 6,
-                height: 28,
-                fontSize: 12,
-                fontWeight: 500,
-                cursor: "pointer",
-                border: 0,
-                borderRadius: "var(--ds-r-sm)",
-                background: active ? "var(--ds-accent)" : "transparent",
-                color: active ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
-                fontFamily: "inherit",
-              }}
-            >
-              <Icon size={13} strokeWidth={2} />
-              {label}
-            </button>
-          );
-        })}
-      </div>
+        <DropdownMenuRadioItem value="dark">
+          <Moon className="size-4" /> Dark
+        </DropdownMenuRadioItem>
+        <DropdownMenuRadioItem value="light">
+          <Sun className="size-4" /> Light
+        </DropdownMenuRadioItem>
+      </DropdownMenuRadioGroup>
 
-      {/* Accent swatches */}
-      <div
-        role="group"
-        aria-label="Accent color"
-        style={{
-          display: "flex",
-          gap: 6,
-          flexWrap: "wrap",
-        }}
-      >
-        {ACCENTS.map((a) => {
-          const active = accent === a;
-          return (
-            <button
-              key={a}
-              type="button"
-              aria-label={a}
-              aria-pressed={active}
-              title={a}
-              onClick={() => setAccent(a)}
-              className="ds-tap"
-              style={{
-                width: 26,
-                height: 26,
-                borderRadius: 999,
-                cursor: "pointer",
-                background: ACCENT_SWATCH[a],
-                border: active
-                  ? "2px solid var(--ds-fg)"
-                  : "2px solid var(--ds-border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: 0,
-              }}
-            >
-              {active && (
-                <Check
-                  size={13}
-                  strokeWidth={3}
-                  color={
-                    a === "amber" || a === "cyan" || a === "mono"
-                      ? "#000"
-                      : "#fff"
-                  }
-                />
-              )}
-            </button>
-          );
-        })}
+      <div style={sectionHeaderStyle} aria-hidden="true">
+        Accent
       </div>
-    </div>
+      <DropdownMenuRadioGroup
+        aria-label="Accent color"
+        value={accent}
+        onValueChange={(v) => setAccent(v as Accent)}
+      >
+        {ACCENTS.map((a) => (
+          <DropdownMenuRadioItem key={a} value={a}>
+            <span
+              aria-hidden="true"
+              style={{
+                width: 14,
+                height: 14,
+                borderRadius: 999,
+                background: ACCENT_SWATCH[a],
+                border: "1px solid var(--ds-border)",
+                display: "inline-block",
+                flexShrink: 0,
+              }}
+            />
+            {ACCENT_LABEL[a]}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+    </>
   );
 }
