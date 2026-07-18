@@ -279,6 +279,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // the revert decision when the current run successfully refreshed it.
   let radarrWanted = 0;
   let radarrSyncSucceeded = false;
+  let radarrSyncedSlugs = new Set<string>();
   if (radarrEnabled) {
     try {
       // Fan out over every configured Radarr instance (default first, plus the legacy
@@ -318,6 +319,14 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }, { timeout: BATCH_TX_TIMEOUT });
         radarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
         radarrSyncSucceeded = true;
+        // The slugs whose cache THIS run actually refreshed. Crucially, an
+        // enabled-but-UNCONFIGURED integration yields writable=[] here while
+        // radarrSyncSucceeded is still true (the no-op "sync" didn't fail) —
+        // the flag keeps meaning "step didn't blow up" for run reporting, and
+        // this set is what the revert/re-push passes below key on so an empty
+        // cache from an unconfigured instance is never read as authoritative
+        // absence (the mass AVAILABLE→APPROVED demotion case).
+        radarrSyncedSlugs = new Set(writable.map((w) => w.slug));
       }
     } catch (err) {
       console.error("[sync] Radarr wanted sync failed:", err);
@@ -326,6 +335,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   let sonarrWanted = 0;
   let sonarrSyncSucceeded = false;
+  let sonarrSyncedSlugs = new Set<string>();
   if (sonarrEnabled) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
@@ -357,6 +367,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }, { timeout: BATCH_TX_TIMEOUT });
         sonarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
         sonarrSyncSucceeded = true;
+        // Same contract as radarrSyncedSlugs — see the comment there.
+        sonarrSyncedSlugs = new Set(writable.map((w) => w.slug));
       }
     } catch (err) {
       console.error("[sync] Sonarr wanted sync failed:", err);
@@ -435,8 +447,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     },
     select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, qualityProfileId: true, requestedBy: true, createdAt: true },
   });
-  const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
-  const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
+  const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncedSlugs.has(r.arrInstance)).map((r) => r.tmdbId);
+  const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncedSlugs.has(r.arrInstance)).map((r) => r.tmdbId);
   let knownRadarrSet = new Set<string>();
   let knownSonarrSet = new Set<string>();
   if (repushMovieIds.length > 0 || repushTvIds.length > 0) {
@@ -457,10 +469,16 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     knownRadarrSet = new Set([...rAvail.map((r) => vkey(r.tmdbId, r.arrInstance)), ...rWant.map((r) => vkey(r.tmdbId, r.arrInstance))]);
     knownSonarrSet = new Set([...sAvail.map((r) => vkey(r.tmdbId, r.arrInstance)), ...sWant.map((r) => vkey(r.tmdbId, r.arrInstance))]);
   }
+  // Per-slug gate (not the global flag): only re-push a request whose OWN instance's
+  // cache was refreshed this run. An unconfigured instance (writable=[] with the flag
+  // still true) would otherwise put every APPROVED title on that instance into a daily
+  // guaranteed-to-fail push attempt; an instance whose fetch failed this run keeps its
+  // stale rows, and pushing against state we couldn't read risks re-adding an item
+  // that's actually there — both wait for a run that actually synced their instance.
   const toRepush = stillApproved.filter((r) =>
     r.mediaType === "MOVIE"
-      ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(vkey(r.tmdbId, r.arrInstance))
-      : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(vkey(r.tmdbId, r.arrInstance)),
+      ? radarrEnabled && radarrSyncedSlugs.has(r.arrInstance) && !knownRadarrSet.has(vkey(r.tmdbId, r.arrInstance))
+      : sonarrEnabled && sonarrSyncedSlugs.has(r.arrInstance) && !knownSonarrSet.has(vkey(r.tmdbId, r.arrInstance)),
   );
   // Two users can each hold an APPROVED request for the same (tmdbId, mediaType, variant)
   // — an original plus a later mirror-approved row — with different qualityProfileId. If
@@ -702,10 +720,15 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
   const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jellyfinConfig.url && jellyfinConfig.apiKey);
   const toRevert = available.filter((req) => {
-    // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
-    // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
-    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
-    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
+    // Only consult the ARR cache when the integration is enabled AND this run refreshed
+    // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
+    // enabled-but-UNCONFIGURED instance all leave that instance's cache meaningless —
+    // skip the demote. (The old global radarrSyncSucceeded flag read true after the
+    // no-op empty loop of an unconfigured integration, so its empty cache masqueraded
+    // as an authoritatively-empty library and mass-demoted every arr-backed AVAILABLE
+    // request the moment an admin cleared the arr connection with the flag still on.)
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncedSlugs.has(req.arrInstance))) return false;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncedSlugs.has(req.arrInstance))) return false;
     // Don't demote while a configured library source is down — we can't prove absence
     // from a library we never reached this run.
     if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
