@@ -67,16 +67,16 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-zinc-800 text-left">
-            <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Job</th>
-            <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Interval</th>
-            <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Last Run</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Job</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Interval</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Last Run</th>
             {/* Duration is the lowest-information column; hidden below the sm
                 breakpoint so the rest of the table fits a ~440px viewport
                 without horizontal scroll (the overflow-x-auto wrapper still
                 allows scroll when widened). */}
-            <th className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
-            <th className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
-            <th className="py-2 text-xs font-semibold uppercase tracking-wider text-zinc-500"></th>
+            <th scope="col" className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
+            <th scope="col" className="py-2 text-xs font-semibold uppercase tracking-wider text-zinc-500"></th>
           </tr>
         </thead>
         <tbody>
@@ -95,7 +95,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                       {mounted ? formatRelativeTime(job.lastRun) : ""}
                     </span>
                   ) : (
-                    <span className="text-zinc-600">never</span>
+                    <span className="text-zinc-500">never</span>
                   )}
                 </td>
                 <td className="hidden sm:table-cell py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
@@ -113,7 +113,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     </span>
                   )}
                   {job.lastStatus === null && (
-                    <span className="flex items-center gap-1 text-zinc-600 text-xs">
+                    <span className="flex items-center gap-1 text-zinc-500 text-xs">
                       <Clock className="w-3.5 h-3.5" /> —
                     </span>
                   )}

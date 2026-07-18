@@ -17,12 +17,10 @@ import {
   type ArrInstanceConfig,
   type ArrService,
   type ArrAutoRoute,
-  type RoutableMedia,
   DEFAULT_ARR_INSTANCE,
   FOURK_ARR_INSTANCE,
   arrSettingKey,
   isValidInstanceSlug,
-  routeMediaToSlug,
 } from "./arr-instances";
 
 const REGISTRY_KEY: Record<ArrService, string> = {
@@ -64,8 +62,12 @@ function normalizeEntry(raw: unknown): ArrInstanceConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   const slug = typeof o.slug === "string" ? o.slug : "";
-  // The default is synthesized separately and must never come from the registry.
-  if (slug === DEFAULT_ARR_INSTANCE || !isValidInstanceSlug(slug)) return null;
+  // The default ("") and legacy 4K ("4k") instances are synthesized separately and
+  // must never come from the registry: a registry "4k" entry would shadow the
+  // synthesized legacyFourKConfig() (flipping skipLibraryCheck, making it autoRoute-
+  // eligible). Access is still governed by the 4K permission bits regardless, so this
+  // is a robustness gate, not a security one.
+  if (slug === DEFAULT_ARR_INSTANCE || slug === FOURK_ARR_INSTANCE || !isValidInstanceSlug(slug)) return null;
   let autoRoute: ArrAutoRoute | null = null;
   if (o.autoRoute && typeof o.autoRoute === "object") {
     const r = o.autoRoute as Record<string, unknown>;
@@ -135,23 +137,12 @@ export async function getArrInstances(service: ArrService): Promise<ArrInstanceC
   return out;
 }
 
-export async function getArrInstance(service: ArrService, slug: string): Promise<ArrInstanceConfig | undefined> {
-  return (await getArrInstances(service)).find((i) => i.slug === slug);
-}
-
 // Only the instances whose connection is actually configured — the set the sync
 // orchestrator fans out over. Always includes the default if configured.
 export async function getSyncableArrInstances(service: ArrService): Promise<ArrInstanceConfig[]> {
   const all = await getArrInstances(service);
   const results = await Promise.all(all.map((i) => isInstanceConfigured(service, i.slug)));
   return all.filter((_, idx) => results[idx]);
-}
-
-// First-match-wins auto-routing for a request. Returns the slug the request should
-// target given its TMDB metadata; falls back to the default instance ("").
-export async function routeArrInstanceForMedia(service: ArrService, media: RoutableMedia): Promise<string> {
-  const instances = await getArrInstances(service);
-  return routeMediaToSlug(instances, media);
 }
 
 // Persist the named-instance registry (admin settings). Validates and de-dupes;

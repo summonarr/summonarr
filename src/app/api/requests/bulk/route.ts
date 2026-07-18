@@ -23,6 +23,7 @@ import {
 } from "@/lib/permissions";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
+import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
@@ -55,21 +56,6 @@ interface CreateOutcome {
   tmdbId: number;
   mediaType: MediaType;
   result: ItemResult;
-}
-
-// Minimal bounded-concurrency map so a 50-item collection doesn't fire 50
-// simultaneous Radarr/Sonarr lookups.
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let cursor = 0;
-  async function worker() {
-    while (cursor < items.length) {
-      const idx = cursor++;
-      results[idx] = await fn(items[idx]);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
 }
 
 const keyOf = (tmdbId: number, mediaType: string) => `${tmdbId}:${mediaType}`;
@@ -226,6 +212,26 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     ? await prisma.setting.findUnique({ where: { key: "request4kAll" } })
     : null;
   const serverAll4k = request4kAllRow?.value === "true";
+
+  // An auto-routed instance the target can't access falls back to the DEFAULT instance
+  // (parity with the single-request and Discord paths): a base requester is never
+  // blocked by a server-side routing decision. Remap HERE — before the availability,
+  // create, and arr-push lookups below all key off slugOf() — so the whole item runs on
+  // its effective (default) slug. Bulk items are always auto-routed (never an explicit
+  // target), so there is no explicit-choice case to preserve as a hard reject. An item
+  // the user can't request at all (missing the base media permission) still fails the
+  // per-item canRequestInstance gate below and is skipped "no-permission".
+  if (routingActive) {
+    for (const it of items) {
+      const key = keyOf(it.tmdbId, it.mediaType);
+      const routed = slugByKey.get(key);
+      if (routed === undefined || routed === "") continue;
+      const inst = configuredByType[it.mediaType].find((i) => i.slug === routed) ?? DEFAULT_ACCESS;
+      if (!canRequestInstance(targetPerms, inst, grants, it.mediaType, serverAll4k)) {
+        slugByKey.delete(key); // slugOf() now returns "" (default instance)
+      }
+    }
+  }
 
   // Authoritative existing-state lookup — never trust client-supplied availability.
   // Every mediaRequest / arr-availability query is scoped to each item's ROUTED

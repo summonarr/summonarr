@@ -109,7 +109,24 @@ export default async function ActivityPage({
   if (source) prismaWhere.source = source;
   if (mediaType) prismaWhere.mediaType = mediaType as "MOVIE" | "TV";
 
-  const [stats, activeSessions, recentPlays, mostRewatched, calendarData, transcodeOffenders, plexReachableRows] = await Promise.all([
+  // Only the window-function leaderboard and the peak-day pick remain inline —
+  // genuinely unique to this page; the rest comes from getPlayHistoryStats.
+  const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
+  const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
+
+  const [
+    stats,
+    activeSessions,
+    recentPlays,
+    mostRewatched,
+    calendarData,
+    transcodeOffenders,
+    plexReachableRows,
+    phEnabled,
+    plexSourceEnabled,
+    watchTimeLeaderboard,
+    mostActiveDay,
+  ] = await Promise.all([
     getPlayHistoryStats({ days, source, mediaType }),
     prisma.activeSession.findMany({
       ...(source || mediaType
@@ -137,40 +154,8 @@ export default async function ActivityPage({
       where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
       select: { key: true, value: true },
     }),
-  ]);
-
-  // Parse the persisted Plex reachability snapshot (JSON written by
-  // plex-events.persistReachability) — defensive parse so a malformed row falls
-  // back to null (= "unknown") instead of crashing the page.
-  //
-  // Only trust the flag when the poller that maintains it is running:
-  // plexServerReachable tracks *local* reachability, written by the 5s poller
-  // (true on getPlexSessions success, false on throw) plus the SSE connect-time
-  // probe. The poller only runs when play-history + Plex source are enabled and
-  // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
-  // value is stale, so gate the badge on the same conditions as its data source.
-  const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
-  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
-  const [phEnabled, plexSourceEnabled] = await Promise.all([
     isPlayHistoryEnabled(),
     isSourceEnabled("plex"),
-  ]);
-  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
-  let initialPlexReachable: boolean | null = null;
-  const reachableValue = plexSettings.get("plexServerReachable");
-  if (plexSseActive && reachableValue) {
-    try {
-      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
-      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
-    } catch { /* leave null */ }
-  }
-
-  // Only the window-function leaderboard and the peak-day pick remain inline —
-  // genuinely unique to this page; the rest comes from getPlayHistoryStats.
-  const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
-  const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
-
-  const [watchTimeLeaderboard, mostActiveDay] = await Promise.all([
     prisma.$queryRawUnsafe<
       { id: string; username: string; source: string; hours: number | null }[]
     >(
@@ -196,6 +181,36 @@ export default async function ActivityPage({
       ...fp.params,
     ),
   ]);
+
+  // Start the rewatched-poster resolution now so it overlaps the tmdb fallback
+  // chain and poster-map reads below; awaited where the value is consumed. The
+  // no-op catch only marks the promise handled if an intermediate await throws
+  // first — the await below still rethrows a resolvePosterMap failure.
+  const rewatchedSlice = mostRewatched.slice(0, 6);
+  const rewatchedPostersPromise = resolvePosterMap(rewatchedSlice);
+  rewatchedPostersPromise.catch(() => {});
+
+  // Parse the persisted Plex reachability snapshot (JSON written by
+  // plex-events.persistReachability) — defensive parse so a malformed row falls
+  // back to null (= "unknown") instead of crashing the page.
+  //
+  // Only trust the flag when the poller that maintains it is running:
+  // plexServerReachable tracks *local* reachability, written by the 5s poller
+  // (true on getPlexSessions success, false on throw) plus the SSE connect-time
+  // probe. The poller only runs when play-history + Plex source are enabled and
+  // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
+  // value is stale, so gate the badge on the same conditions as its data source.
+  const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
+  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
+  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
+  let initialPlexReachable: boolean | null = null;
+  const reachableValue = plexSettings.get("plexServerReachable");
+  if (plexSseActive && reachableValue) {
+    try {
+      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
+      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
+    } catch { /* leave null */ }
+  }
 
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
@@ -535,8 +550,7 @@ export default async function ActivityPage({
     plays: playsById.get(u.id) ?? 0,
     rank: i + 1,
   }));
-  const rewatchedSlice = mostRewatched.slice(0, 6);
-  const rewatchedPosters = await resolvePosterMap(rewatchedSlice);
+  const rewatchedPosters = await rewatchedPostersPromise;
   const leaderRewatched = rewatchedSlice.map((m, i) => ({
     tmdbId: m.tmdbId,
     mediaType: m.mediaType,

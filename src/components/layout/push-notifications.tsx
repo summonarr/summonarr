@@ -146,7 +146,7 @@ export function PushNotifications() {
         disabled
         aria-label="Notifications blocked"
         title="Notifications blocked — enable them in your browser settings"
-        className="ds-tap inline-flex items-center justify-center text-zinc-600 cursor-not-allowed shrink-0"
+        className="ds-tap inline-flex items-center justify-center text-zinc-500 cursor-not-allowed shrink-0"
         style={{ width: 32, height: 32, borderRadius: 6 }}
       >
         <BellOff className="w-4 h-4" />

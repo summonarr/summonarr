@@ -298,7 +298,7 @@ export function NotificationPrefs({
                     if (emailError) setEmailError(null);
                   }}
                   placeholder={notificationEmail ? "change to a different address…" : "you@example.com"}
-                  className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                   autoComplete="email"
                   spellCheck={false}
                 />

@@ -204,7 +204,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // profile list it picked from; an auto-route means it didn't.
   const instanceExplicit = rawInstance !== undefined || body.is4k === true;
 
-  const instance = instances.find((i) => i.slug === instanceSlug);
+  let instance = instances.find((i) => i.slug === instanceSlug);
   if (!instance) {
     return NextResponse.json({ error: "That instance isn't available for requests" }, { status: 400 });
   }
@@ -223,7 +223,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // per-user instance grant.
   const grants = parseInstanceGrants(userRecord?.instanceGrants);
   if (!canRequestInstance(session.user.permissions, instance, grants, mediaType, settings.request4kAll === "true")) {
-    return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
+    // An EXPLICITLY targeted instance the user can't access is a hard 403. An
+    // AUTO-ROUTED one falls back to the default instance instead: a base requester is
+    // never blocked by a server-side routing decision (the default is open to any
+    // requester, and an admin still reviews the resulting request). Auto-routing only
+    // ever selects a CONFIGURED instance, so the default fallback is always valid.
+    // Mirrors the Discord (interactions) and bulk request paths.
+    if (instanceExplicit) {
+      return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
+    }
+    const defaultInstance = instances.find((i) => i.slug === "");
+    if (!defaultInstance) {
+      return NextResponse.json({ error: "That instance isn't available for requests" }, { status: 400 });
+    }
+    instanceSlug = "";
+    instance = defaultInstance;
   }
 
   // Advanced request option: an explicit quality profile is honored only for

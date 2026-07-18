@@ -238,8 +238,11 @@ export async function verifyAndRefreshSession(
 
   // Sliding window for non-ADMIN: shorten exp to now+3600, capped at the original
   // session deadline. The cap (`expiresAt` claim) is the value set at sign-in by
-  // initializeTokenOnSignIn — it never moves, so sliding can NEVER push the
-  // effective expiry past the original TTL.
+  // initializeTokenOnSignIn — it never moves, so sliding keeps the effective
+  // expiry at the original TTL. (The sole exception is the same-second
+  // privilege-change rotation below, where signedIat = cutoff+1 makes exp land
+  // ≤2s past the deadline once; the DB AuthSession row / sessionsRevokedAt remain
+  // the real boundary, so this is immaterial.)
   let resignExpiresIn: number | null = null;
   if (workingClaims.role !== "ADMIN") {
     const sessionDeadline = workingClaims.expiresAt;
@@ -261,9 +264,13 @@ export async function verifyAndRefreshSession(
 
   // Always re-sign on a DB check so dbCheckedAt advances even when nothing else
   // changed; the fast path at the top of the function still skips this entirely.
-  // On a same-second rotation, force iat past the cutoff so the new JWT doesn't
-  // fail its own sessionsRevokedAt check.
-  const signedIat = rotationCutoffSec !== null ? Math.max(now, rotationCutoffSec) : undefined;
+  // On a same-second rotation, force iat STRICTLY past the cutoff: the cutoff
+  // check above rejects `iat <= cutoff` (deliberately inclusive for the
+  // revoke-all path), so `max(now, cutoff)` would mint a token that fails its
+  // own check on the next slow-path verify — bouncing the user to /login right
+  // after their role/permission change. `cutoff + 1` is the smallest iat the
+  // check accepts.
+  const signedIat = rotationCutoffSec !== null ? Math.max(now, rotationCutoffSec + 1) : undefined;
   const newToken = await signSessionJwt(
     {
       id: workingClaims.id,

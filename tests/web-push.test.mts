@@ -242,7 +242,9 @@ test("sendPushNotification: POSTs the encrypted body to the endpoint with RFC 80
   assert.equal(call.bodyWasArrayBuffer, true, "body must be sent as raw bytes");
   assert.equal(call.headers.get("content-type"), "application/octet-stream");
   assert.equal(call.headers.get("content-encoding"), "aes128gcm");
-  assert.equal(call.headers.get("ttl"), "60", "TTL defaults to 60 seconds");
+  // 24h store-and-forward default — matches the APNs relay's apns-expiration
+  // window so an offline device still gets the banner when it reconnects.
+  assert.equal(call.headers.get("ttl"), "86400", "TTL defaults to 24 hours");
   assert.equal(call.headers.get("urgency"), null, "Urgency omitted unless requested");
 });
 

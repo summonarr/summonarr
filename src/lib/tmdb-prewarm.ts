@@ -69,6 +69,8 @@ interface RawItem {
   keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
   "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
   external_ids?: { tvdb_id?: number | null };
+  release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string }[] }[] };
+  content_ratings?: { results?: { iso_3166_1: string; rating?: string }[] };
 }
 
 let pwRegionNames: Intl.DisplayNames | null = null;
@@ -107,11 +109,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
 
   const url = new URL(`${TMDB_BASE}/${type}/${tmdbId}`);
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
+  // release_dates/content_ratings included so the prewarm rewrite of the shared
+  // :details blob (and the TmdbMediaCore upsert) carries the US certification —
+  // omitting them made every prewarm refresh silently drop a previously-stored
+  // cert badge from both the grid and the detail page.
   url.searchParams.set(
     "append_to_response",
     mediaType === "TV"
-      ? "seasons,keywords,watch/providers,external_ids"
-      : "keywords,watch/providers,external_ids",
+      ? "seasons,keywords,watch/providers,external_ids,content_ratings"
+      : "keywords,watch/providers,external_ids,release_dates",
   );
 
   let res: Response;
@@ -156,6 +162,12 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     return;
   }
   const rawDate = mediaType === "MOVIE" ? raw.release_date : raw.first_air_date;
+  // US certification, extracted the same way getMovieDetails/getTVDetails do.
+  const certification =
+    (mediaType === "MOVIE"
+      ? raw.release_dates?.results?.find((x) => x.iso_3166_1 === "US")
+          ?.release_dates.find((d) => d.certification)?.certification
+      : raw.content_ratings?.results?.find((x) => x.iso_3166_1 === "US")?.rating) || undefined;
 
   const seasons = mediaType === "TV"
     ? (raw.seasons ?? [])
@@ -185,12 +197,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     id: raw.id,
     mediaType: type,
     title,
-    overview: raw.overview ?? null,
+    // `?? ""` (not null) — TmdbMedia.overview is a non-nullable string and the
+    // normalize writers use "", so the shared :details key keeps one nullability.
+    overview: raw.overview ?? "",
     posterPath: raw.poster_path ?? null,
     backdropPath: raw.backdrop_path ?? null,
     releaseDate: rawDate ?? null,
     releaseYear,
     voteAverage: raw.vote_average ?? 0,
+    ...(certification && { certification }),
     ...(seasons !== undefined && { seasons }),
 
     genres:          genreObjs.map((g) => g.name),
@@ -229,6 +244,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     releaseDate: rawDate ?? null,
     releaseYear,
     voteAverage: raw.vote_average ?? 0,
+    ...(certification && { certification }),
   });
 }
 

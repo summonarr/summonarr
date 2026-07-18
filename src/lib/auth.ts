@@ -4,7 +4,7 @@ import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password
 import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
-import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
+import { getConfiguredJellyfinUrl, getJellyfinConfig } from "@/lib/jellyfin-config";
 import { checkRateLimit, peekRateLimit, recordFailure, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
@@ -175,12 +175,9 @@ export async function findOrCreateJellyfinUser(
   //    trusted cross-provider identity anchor — only the provider subject id is.
   let realEmail: string | null = null;
   try {
-    const [urlRow, keyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-    ]);
-    if (urlRow?.value && keyRow?.value) {
-      realEmail = await getJellyfinUserEmail(urlRow.value, keyRow.value, jellyfinId);
+    const jellyfinConfig = await getJellyfinConfig();
+    if (jellyfinConfig.url && jellyfinConfig.apiKey) {
+      realEmail = await getJellyfinUserEmail(jellyfinConfig.url, jellyfinConfig.apiKey, jellyfinId);
     }
   } catch {
     // best-effort; missing email just means we use the synthetic anchor on create

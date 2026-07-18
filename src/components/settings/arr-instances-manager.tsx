@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// 24 random bytes as hex — mirrors generateSecret() in settings-ui.tsx (the
+// 24 random bytes as hex — mirrors generateSecret() in forms/webhook-secret-form.tsx (the
 // HD/4K webhook-secret field). Client-only (crypto.getRandomValues); called from
 // event handlers / addInstance, never during SSR.
 function generateSecret(): string {
@@ -281,7 +281,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   placeholder="anime"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm disabled:opacity-60"
                 />
-                {!d.isNew && <p className="text-xs text-zinc-600">Slug is fixed once created.</p>}
+                {!d.isNew && <p className="text-xs text-zinc-500">Slug is fixed once created.</p>}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor={`${service}-${idx}-name`}>Display name</Label>
@@ -323,7 +323,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-600">(optional)</span></Label>
+                  <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-500">(optional)</span></Label>
                   {optsReady && (
                     <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white">
                       <RefreshCw className="w-3 h-3" />Refresh
@@ -343,11 +343,11 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     ))}
                   </select>
                 ) : (
-                  <p className="text-xs text-zinc-600 h-8 flex items-center">{optsNote}</p>
+                  <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-profile`}>Quality Profile <span className="text-zinc-600">(optional)</span></Label>
+                <Label htmlFor={`${service}-${idx}-profile`}>Quality Profile <span className="text-zinc-500">(optional)</span></Label>
                 {optsReady ? (
                   <select
                     id={`${service}-${idx}-profile`}
@@ -361,13 +361,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     ))}
                   </select>
                 ) : (
-                  <p className="text-xs text-zinc-600 h-8 flex items-center">{optsNote}</p>
+                  <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
                 )}
               </div>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-600">(auto-generated — paste the URL below into {label})</span></Label>
+              <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-500">(auto-generated — paste the URL below into {label})</span></Label>
               <div className="flex gap-2">
                 <Input
                   id={`${service}-${idx}-hook`}
@@ -394,11 +394,11 @@ function ServiceInstances({ service }: { service: ArrService }) {
                       {copiedHook === idx ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
-                  <p className="text-xs text-zinc-600">Add this as a webhook (Connect → Webhook, method POST) in {label}, then Save &amp; Test here.</p>
+                  <p className="text-xs text-zinc-500">Add this as a webhook (Connect → Webhook, method POST) in {label}, then Save &amp; Test here.</p>
                 </div>
               )}
               {d.hasWebhookSecret && !d.webhookSecret && (
-                <p className="text-xs text-zinc-600">A webhook secret is saved. Click <strong>Generate</strong> to replace it — the current value can&apos;t be shown again.</p>
+                <p className="text-xs text-zinc-500">A webhook secret is saved. Click <strong>Generate</strong> to replace it — the current value can&apos;t be shown again.</p>
               )}
             </div>
 
@@ -444,7 +444,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
         {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
         {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
       </div>
-      <p className="text-xs text-zinc-600">Extra {mediaWord} instances share the same webhook endpoints — each authenticates with its own webhook secret.</p>
+      <p className="text-xs text-zinc-500">Extra {mediaWord} instances share the same webhook endpoints — each authenticates with its own webhook secret.</p>
     </div>
   );
 }

@@ -47,12 +47,6 @@ export default async function MoviesPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   const [sp, session] = await Promise.all([searchParams, auth()]);
-  const [show4k, plexEnabled, jellyfinEnabled] = await Promise.all([
-    getShow4kVisibility(session, "movie"),
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
-  ]);
-  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;
@@ -78,11 +72,15 @@ export default async function MoviesPage({
       : getPopularMoviesPage(p)
     ).catch(() => ({ items: [] as TmdbMedia[], totalPages: 1 }));
 
-  const [genres, providers, firstPaged] = await Promise.all([
+  const [genres, providers, firstPaged, show4k, plexEnabled, jellyfinEnabled] = await Promise.all([
     getMovieGenres().catch(() => []),
     getWatchProviders("movie", watchRegion).catch(() => []),
     fetchPage(tmdbStartPage),
+    getShow4kVisibility(session, "movie"),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
   ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   let items: TmdbMedia[] = [];
   let totalPages: number;

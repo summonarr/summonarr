@@ -30,3 +30,7 @@ Dockerfile
 *.tsbuildinfo
 next-env.d.ts
 src/generated
+
+# ── Tests + local tooling output (never needed inside the image) ──────────────
+tests
+burn-test-output

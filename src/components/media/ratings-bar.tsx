@@ -155,14 +155,14 @@ export function RatingsBar({
 
       {showRt && rottenTomatoes && (
         <div className="flex items-center gap-0.5" title="Rotten Tomatoes">
-          <span className={iconSz}>{rtIcon(rottenTomatoes)}</span>
+          <span className={iconSz} role="img" aria-label="Rotten Tomatoes">{rtIcon(rottenTomatoes)}</span>
           <span className={`font-semibold ${rtColor(rottenTomatoes)} ${textSm}`}>{rottenTomatoes}</span>
         </div>
       )}
 
       {showRtAudience && rtAudienceScore && (
         <div className="flex items-center gap-0.5" title="Rotten Tomatoes Audience">
-          <span className={iconSz}>🍿</span>
+          <span className={iconSz} role="img" aria-label="Rotten Tomatoes Audience">🍿</span>
           <span className={`font-semibold ${rtAudienceColor(rtAudienceScore)} ${textSm}`}>{rtAudienceScore}</span>
         </div>
       )}

@@ -42,6 +42,30 @@ export function MotdModal({ title, body }: MotdModalProps) {
       if (e.key === "Escape") {
         e.preventDefault();
         dismiss();
+        return;
+      }
+      // Trap Tab within the dialog so focus can't leak to the page behind this
+      // aria-modal overlay.
+      if (e.key !== "Tab") return;
+      const container = dialogRef.current;
+      if (!container) return;
+      const focusables = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !container.contains(active)) {
+        e.preventDefault();
+        first.focus();
       }
     }
     document.addEventListener("keydown", onKey);

@@ -123,6 +123,15 @@ const SNAPSHOT_THROTTLE_MS = 2_000;
 // need to hammer the server.
 const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 60_000;
+// A connection must LIVE this long to earn a backoff reset. Resetting on the
+// first received byte (the old behavior) let a flapping-but-delivering
+// connection — e.g. a reverse proxy whose read-timeout forwards Plex's opening
+// frame then closes the idle upstream — pin the loop at a silent ~1s reconnect
+// cycle forever, with backoff never climbing and the "failing repeatedly"
+// warning below never firing. Tying the reset to uptime ≥ MAX_BACKOFF_MS makes
+// it self-consistent: a connection that outlives the max backoff interval gets
+// a fast retry; anything shorter escalates toward MAX and becomes visible.
+const STABLE_CONNECTION_MS = MAX_BACKOFF_MS;
 
 // Plex's SSE feed has no defined upper time bound. Reconnect periodically to
 // keep the size-cap accumulator and any undici-side state fresh.
@@ -259,6 +268,9 @@ class PlexEventStreamManager {
     const localAbort = new AbortController();
     this.abortController = localAbort;
     const recycleTimer = setTimeout(() => localAbort.abort(), PERIODIC_RECYCLE_MS);
+    // Set once the stream is established; read in the finally to decide whether
+    // this connection lived long enough (STABLE_CONNECTION_MS) to reset backoff.
+    let connectedAt = 0;
 
     try {
       // Subscribe to playing + timeline event types. Playing drives the Now
@@ -290,21 +302,18 @@ class PlexEventStreamManager {
         throw new Error(`SSE status ${res.status}`);
       }
 
-      // First successful read is what resets backoff — reaching this line just
-      // means TCP connected; Plex could still 401 mid-stream.
+      // Stream established. Backoff is NOT reset here (nor on the first byte —
+      // a flapping proxy still delivers one); the finally below resets it only
+      // if this connection survives STABLE_CONNECTION_MS.
+      connectedAt = Date.now();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let firstRead = true;
 
       while (this.running) {
         const { done, value } = await reader.read();
         if (done) {
           throw new Error("SSE stream ended");
-        }
-        if (firstRead) {
-          this.backoffMs = INITIAL_BACKOFF_MS;
-          firstRead = false;
         }
         buffer += decoder.decode(value, { stream: true });
         // SSE spec allows either LF or CRLF line endings; Plex currently emits
@@ -322,6 +331,12 @@ class PlexEventStreamManager {
       }
     } finally {
       clearTimeout(recycleTimer);
+      // Earn the backoff reset via uptime, however this connection ended
+      // (stream end, error, periodic recycle). A connection that never
+      // established (connectedAt === 0) or died young keeps escalating.
+      if (connectedAt > 0 && Date.now() - connectedAt >= STABLE_CONNECTION_MS) {
+        this.backoffMs = INITIAL_BACKOFF_MS;
+      }
       // Clear `this.abortController` only if it still points at our local one.
       // A concurrent reconcile may have swapped it for a fresh connection's
       // controller; in that case we leave it alone so the new connection can

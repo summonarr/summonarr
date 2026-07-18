@@ -7,10 +7,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { verifyPassword } from "@/lib/password-hash";
 import { checkRateLimit } from "@/lib/rate-limit";
-
-// Thrown inside the deactivation transaction to roll it back when the caller is
-// the last active admin (guardrail 23: propagate out of the tx, don't swallow).
-class LastAdminError extends Error {}
+import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
 
 // DELETE /api/profile — the signed-in user deletes their OWN account.
 //
@@ -59,52 +56,10 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   }
 
   const now = new Date();
-  // RFC-2606 reserved `.invalid` TLD — never routable, and `id` keeps it unique.
-  const anon = {
-    name: "Deleted user",
-    email: `deleted-${id}@deleted.invalid`,
-    image: null,
-    passwordHash: null,
-    discordId: null,
-    notificationEmail: null,
-    plexClientId: null,
-    plexUserId: null,
-    jellyfinUserId: null,
-    deactivatedAt: now,
-    sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
-  };
 
   try {
     await prisma.$transaction(async (tx) => {
-      if (target.role === "ADMIN") {
-        // Never let the LAST active admin self-delete and lock the instance out of
-        // administration. Advisory lock 42 + an atomic count of non-deactivated
-        // admins mirrors the admin-delete CAS. A 0-row result throws to roll the
-        // whole anonymization back.
-        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-        const rows = await tx.$executeRaw`
-          UPDATE "User" SET "deactivatedAt" = ${now}
-          WHERE id = ${id} AND "deactivatedAt" IS NULL
-          AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
-        `;
-        if (rows === 0) throw new LastAdminError();
-      }
-      // Remove provider tokens/subject (OAuth) + every device session, then
-      // anonymize the row in place (keeps requests/votes/issues linked).
-      await tx.account.deleteMany({ where: { userId: id } });
-      await tx.authSession.deleteMany({ where: { userId: id } });
-      // Orphaned device + Discord-link rows would otherwise outlive the anonymized
-      // row and keep delivering pushes (to a possibly handed-down device) or leave
-      // dangling unique link/merge rows. Remove them in the same transaction.
-      await tx.pushSubscription.deleteMany({ where: { userId: id } });
-      await tx.discordLinkToken.deleteMany({ where: { userId: id } });
-      await tx.discordMergeCode.deleteMany({ where: { userId: id } });
-      // Sever the play-history identity link: MediaServerUser FKs this user and isn't
-      // cascade-deleted (guardrail 28). Leaving userId set would let a new account with
-      // the same email/sub inherit this user's history, IPs, and devices. History rows
-      // stay, just unattributed.
-      await tx.mediaServerUser.updateMany({ where: { userId: id }, data: { userId: null } });
-      await tx.user.update({ where: { id }, data: anon });
+      await anonymizeUserInTx(tx, id, target.role, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {

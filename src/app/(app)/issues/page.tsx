@@ -15,32 +15,12 @@ import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 import { Chip, PageHeader } from "@/components/ui/design";
-import type { ChipTone } from "@/components/ui/design";
+import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 export const dynamic = "force-dynamic";
 
 const VALID_ISSUE_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
-
-const STATUS_TONE: Record<string, ChipTone> = {
-  OPEN: "declined",
-  IN_PROGRESS: "pending",
-  RESOLVED: "approved",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  OPEN:        "Open",
-  IN_PROGRESS: "In Progress",
-  RESOLVED:    "Resolved",
-};
-
-const ISSUE_TYPE_LABELS: Record<string, string> = {
-  BAD_VIDEO:         "Bad video quality",
-  WRONG_AUDIO:       "Wrong / missing audio",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH:       "Wrong match",
-  OTHER:             "Other",
-};
 
 const PAGE_SIZE = 20;
 
@@ -356,8 +336,8 @@ export default async function IssuesPage({
                       </div>
 
                       <div className="flex items-center shrink-0" style={{ gap: 8 }}>
-                        <Chip tone={STATUS_TONE[issue.status]}>
-                          {STATUS_LABEL[issue.status]}
+                        <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
+                          {ISSUE_STATUS_LABEL[issue.status]}
                         </Chip>
                         <ChevronRight
                           className="xl:hidden"
@@ -471,8 +451,8 @@ export default async function IssuesPage({
                         className="flex items-center flex-wrap"
                         style={{ gap: 6, marginTop: 4 }}
                       >
-                        <Chip tone={STATUS_TONE[selectedIssue.status]}>
-                          {STATUS_LABEL[selectedIssue.status]}
+                        <Chip tone={ISSUE_STATUS_TONE[selectedIssue.status]}>
+                          {ISSUE_STATUS_LABEL[selectedIssue.status]}
                         </Chip>
                         <Chip>
                           {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??

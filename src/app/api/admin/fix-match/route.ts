@@ -6,7 +6,9 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -44,15 +46,12 @@ async function fixPlexMatch(
   const safeKey = String(parseInt(ratingKey, 10) || 0);
   const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
 
-  const [urlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
-  if (!urlRow?.value || !tokenRow?.value) throw new Error("Plex server not configured");
+  const plexConfig = await getPlexConfig();
+  if (!plexConfig.url || !plexConfig.token) throw new Error("Plex server not configured");
 
-  const serverUrl = urlRow.value.replace(/\/$/, "");
+  const serverUrl = plexConfig.url.replace(/\/$/, "");
 
-  const token = tokenRow.value;
+  const token = plexConfig.token;
   const headers = {
     Accept: "application/json",
     "X-Plex-Token": token,
@@ -120,7 +119,7 @@ async function fixPlexMatch(
   if (!canonicalGuid) {
     const plexMatchSearch = async (params: Record<string, string>): Promise<PlexSearchResult | null> => {
       const res = await safeFetchAdminConfigured(
-        `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
+        `${serverUrl}/library/metadata/${safeKey}/matches?` + new URLSearchParams(params),
         { headers, timeoutMs: 30_000 },
       ).catch(() => null);
       if (!res?.ok) return null;
@@ -158,7 +157,7 @@ async function fixPlexMatch(
     }
   }
 
-  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/unmatch`, {
+  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/unmatch`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
@@ -176,7 +175,7 @@ async function fixPlexMatch(
     const params: Record<string, string> = { guid };
     if (name) params.name = name;
     if (yr)   params.year = yr;
-    const url = `${serverUrl}/library/metadata/${ratingKey}/match?` + new URLSearchParams(params);
+    const url = `${serverUrl}/library/metadata/${safeKey}/match?` + new URLSearchParams(params);
     return safeFetchAdminConfigured(url, { method: "PUT", headers, timeoutMs: 30_000 });
   };
 
@@ -193,7 +192,7 @@ async function fixPlexMatch(
     }
   }
 
-  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
@@ -207,7 +206,7 @@ async function fixPlexMatch(
     let plexImdbId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise((r) => setTimeout(r, intervalMs));
-      const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}?includeGuids=1`, {
+      const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}?includeGuids=1`, {
         headers,
         timeoutMs: 10_000,
       }).catch(() => null);
@@ -277,7 +276,7 @@ async function fixPlexMatch(
       const tryGuid = async (guid: string, name: string, yr: string): Promise<boolean> => {
         const res = await applyMatch(guid, name, yr);
         if (!res.ok) return false;
-        await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+        await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
           method: "PUT", headers, timeoutMs: 30_000,
         });
         const poll = await pollForConfirmation(6, 5_000);
@@ -299,7 +298,7 @@ async function fixPlexMatch(
       for (const params of altSearches) {
         if (pollConfirmed || allConflated) break;
         const res = await safeFetchAdminConfigured(
-          `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
+          `${serverUrl}/library/metadata/${safeKey}/matches?` + new URLSearchParams(params),
           { headers, timeoutMs: 30_000 },
         ).catch(() => null);
         if (!res?.ok) continue;
@@ -354,15 +353,12 @@ async function fixJellyfinMatch(
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
   const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
 
-  const [urlRow, keyRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-  ]);
-  if (!urlRow?.value || !keyRow?.value) throw new Error("Jellyfin server not configured");
+  const jellyfinConfig = await getJellyfinConfig();
+  if (!jellyfinConfig.url || !jellyfinConfig.apiKey) throw new Error("Jellyfin server not configured");
 
-  const baseUrl = urlRow.value.replace(/\/$/, "");
+  const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
 
-  const apiKey  = keyRow.value;
+  const apiKey  = jellyfinConfig.apiKey;
   const headers = {
     "X-MediaBrowser-Token": apiKey,
     "Content-Type": "application/json",

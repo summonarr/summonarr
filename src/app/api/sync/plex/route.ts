@@ -3,6 +3,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -23,18 +24,17 @@ async function syncPlex(request: NextRequest) {
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
-  const [serverUrlRow, tokenRow, librariesRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+  const [plexConfig, librariesRow] = await Promise.all([
+    getPlexConfig(),
     prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
   ]);
 
-  if (!serverUrlRow?.value || !tokenRow?.value) {
+  if (!plexConfig.url || !plexConfig.token) {
     return NextResponse.json({ error: "Plex server not configured" }, { status: 400 });
   }
 
-  const serverUrl = serverUrlRow.value.replace(/\/$/, "");
-  const token = tokenRow.value;
+  const serverUrl = plexConfig.url.replace(/\/$/, "");
+  const token = plexConfig.token;
   const selectedPlexKeys = librariesRow?.value
     ? new Set(librariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
     : undefined;

@@ -151,13 +151,24 @@ function readLicenseText(pkgPath: string): string {
   } catch {
     return "";
   }
-  const file = entries.find((f) => LICENSE_FILE_RE.test(f));
-  if (!file) return "";
-  try {
-    return readFileSync(join(pkgPath, file), "utf8").trim();
-  } catch {
-    return "";
+  // ALL notice-class files, sorted: a package can ship LICENSE *and* NOTICE with
+  // different content (e.g. @prisma/studio-core, Apache-2.0 — §4(d) requires the
+  // NOTICE text to travel with redistributions), and `find()` would embed only
+  // whichever readdirSync happened to return first. readdir order is also not
+  // stable across filesystems, so picking "the first" made the output
+  // FS-dependent — the exact cross-OS drift the gated-package path avoids.
+  const files = entries.filter((f) => LICENSE_FILE_RE.test(f)).sort();
+  if (files.length === 0) return "";
+  const texts: string[] = [];
+  for (const file of files) {
+    try {
+      const text = readFileSync(join(pkgPath, file), "utf8").trim();
+      if (text) texts.push(text);
+    } catch {
+      /* unreadable entry (e.g. a LICENSE directory) — skip it */
+    }
   }
+  return texts.join("\n\n");
 }
 
 function declaredLicense(pkgPath: string): string {

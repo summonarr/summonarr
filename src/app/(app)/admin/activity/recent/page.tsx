@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Clock, Film, Tv2 } from "@/components/icons";
+import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
 
 export const dynamic = "force-dynamic";
 
@@ -21,18 +22,6 @@ interface RecentItem {
   // sources rather than letting the second loop overwrite the first.
   sources: { plex: boolean; jellyfin: boolean };
   posterPath: string | null;
-}
-
-function formatRelativeTime(date: Date): string {
-  const diff = Date.now() - date.getTime();
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
 export default async function RecentlyAddedPage() {
@@ -158,9 +147,9 @@ export default async function RecentlyAddedPage() {
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-3">
                       {item.mediaType === "TV" ? (
-                        <Tv2 className="w-8 h-8 text-zinc-600" />
+                        <Tv2 className="w-8 h-8 text-zinc-500" />
                       ) : (
-                        <Film className="w-8 h-8 text-zinc-600" />
+                        <Film className="w-8 h-8 text-zinc-500" />
                       )}
                       <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
                     </div>
@@ -186,7 +175,7 @@ export default async function RecentlyAddedPage() {
                   </Link>
                   <p className="text-[10px] text-zinc-500">
                     {item.year && <span>{item.year} · </span>}
-                    {formatRelativeTime(item.addedAt)}
+                    {formatRelativeTimeWithDateFallback(item.addedAt)}
                   </p>
                 </div>
               </div>

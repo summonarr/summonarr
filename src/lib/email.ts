@@ -128,6 +128,11 @@ async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
     secure: port === 465,
     // requireTLS enforces STARTTLS on port 587 but must be skipped for localhost (plaintext dev/test relay)
     requireTLS: !isLocalhost && port === 587,
+    // The localhost carve-out is the ONLY place plaintext AUTH is permitted.
+    // On any other host, sendMail refuses to transmit credentials unless the
+    // channel is TLS (implicit 465 or a successful STARTTLS) — covers custom
+    // ports (25/2525) where requireTLS above doesn't apply.
+    allowPlaintextAuth: isLocalhost,
     auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPassword ?? "" } : undefined,
   };
 }

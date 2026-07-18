@@ -6,6 +6,8 @@ import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown, Users } from "@/components/icons";
+import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
 export const dynamic = "force-dynamic";
 
@@ -20,21 +22,6 @@ const DEFAULT_DIR: Record<SortField, SortDir> = {
   hours: "desc",
   lastActive: "desc",
 };
-
-// Renders a Date as a compact "just now / Nm / Nh / Nd" label, falling back to
-// an absolute date past 30 days; "Never" for null.
-function formatRelativeTime(date: Date | null): string {
-  if (!date) return "Never";
-  const diff = Date.now() - date.getTime();
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
-}
 
 function SortHeader({
   label,
@@ -67,7 +54,7 @@ function SortHeader({
   const flexAlign = align === "right" ? "justify-end" : "justify-start";
 
   return (
-    <th className={`py-3 px-4 ${alignClass}`}>
+    <th scope="col" className={`py-3 px-4 ${alignClass}`}>
       <Link
         href={`/admin/activity/users?${params.toString()}`}
         className={`inline-flex items-center gap-1 select-none hover:text-zinc-300 transition-colors ${flexAlign}`}
@@ -149,7 +136,7 @@ export default async function UsersActivityPage({
           name="search"
           defaultValue={search ?? ""}
           placeholder="Search by username…"
-          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500"
         />
       </form>
 
@@ -167,8 +154,8 @@ export default async function UsersActivityPage({
                     7-col table sums to ~831 px (≈1.9× a 440 px viewport). The
                     two hidden columns are the lowest-information for a mobile
                     leaderboard view. */}
-                <th className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
-                <th className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
+                <th scope="col" className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
+                <th scope="col" className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
               </tr>
             </thead>
             <tbody>
@@ -186,16 +173,17 @@ export default async function UsersActivityPage({
                         href={`/admin/activity/user/${u.id}`}
                         className="flex items-center gap-2.5 group"
                       >
-                        {u.thumbUrl && /^https?:\/\//i.test(u.thumbUrl) ? (
-                          // eslint-disable-next-line @next/next/no-img-element -- avatar URL is from an arbitrary upstream media-server host; can't be allowlisted in next.config remotePatterns
-                          <img src={u.thumbUrl} alt="" className="w-7 h-7 rounded-full object-cover shrink-0" />
-                        ) : (
-                          <div className="w-7 h-7 rounded-full bg-zinc-700 flex items-center justify-center shrink-0">
-                            <span className="text-[10px] text-zinc-400 font-medium">
-                              {u.username.slice(0, 2).toUpperCase()}
-                            </span>
-                          </div>
-                        )}
+                        {/* Avatar URL is from an arbitrary upstream media-server host (can't be
+                            allowlisted in next/image remotePatterns); the shared Avatar falls
+                            back to initials when the thumb is missing or fails to load. */}
+                        <Avatar className="size-7 shrink-0">
+                          {u.thumbUrl && /^https?:\/\//i.test(u.thumbUrl) ? (
+                            <AvatarImage src={u.thumbUrl} alt="" />
+                          ) : null}
+                          <AvatarFallback className="bg-zinc-700 text-[10px] text-zinc-400 font-medium">
+                            {u.username.slice(0, 2).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
                         <span className="text-white group-hover:text-indigo-400 transition-colors font-medium">
                           {u.username}
                         </span>
@@ -209,16 +197,16 @@ export default async function UsersActivityPage({
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-300 tabular-nums font-medium">
-                      {u.plays > 0 ? u.plays.toLocaleString() : <span className="text-zinc-600">0</span>}
+                      {u.plays > 0 ? u.plays.toLocaleString() : <span className="text-zinc-500">0</span>}
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-400 tabular-nums">
-                      {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-600">—</span>}
+                      {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="py-3 px-4 text-zinc-400 text-xs">
-                      {formatRelativeTime(u.lastActive)}
+                      {u.lastActive ? formatRelativeTimeWithDateFallback(u.lastActive) : "Never"}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
-                      {u.favPlatform ?? <span className="text-zinc-600">—</span>}
+                      {u.favPlatform ?? <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-right">
                       {u.directPct !== null ? (
@@ -236,7 +224,7 @@ export default async function UsersActivityPage({
                           </span>
                         </div>
                       ) : (
-                        <span className="text-zinc-600 text-xs">—</span>
+                        <span className="text-zinc-500 text-xs">—</span>
                       )}
                     </td>
                   </tr>

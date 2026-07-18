@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
 import nodePath from "node:path";
 import { prisma } from "@/lib/prisma";
+import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
@@ -209,19 +210,16 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   // Plex admin-token URL below (rating keys are always integers).
   const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
 
-  const [urlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
-  if (!urlRow?.value || !tokenRow?.value) {
+  const plexConfig = await getPlexConfig();
+  if (!plexConfig.url || !plexConfig.token) {
     return NextResponse.json({ error: "Plex server not configured" }, { status: 500 });
   }
 
-  const serverUrl = urlRow.value.replace(/\/$/, "");
+  const serverUrl = plexConfig.url.replace(/\/$/, "");
 
   const plexHeaders = {
     Accept: "application/json",
-    "X-Plex-Token": tokenRow.value,
+    "X-Plex-Token": plexConfig.token,
     "X-Plex-Client-Identifier": "summonarr-server",
     "X-Plex-Product": "Summonarr",
     "User-Agent": "Summonarr/1.0 (Node.js)",

@@ -552,6 +552,18 @@ export async function processBackupImport(
     );
   }
 
+  // Defense-in-depth floor: a dump that decrypted cleanly (valid GCM tag) but
+  // parsed to ZERO insertable statements would still TRUNCATE every table and
+  // report ok — a "restore" of nothing is a silent wipe. No legitimate export
+  // is empty (every instance has at least Setting rows), so refuse outright.
+  if (validatedStatements.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Backup contains no data statements — refusing to wipe the database with an empty restore.",
+    };
+  }
+
   const truncateList = BACKUP_TABLES.map((t) => `"public"."${t}"`).join(", ");
   const truncateStmt = `TRUNCATE TABLE ${truncateList} RESTART IDENTITY`;
 

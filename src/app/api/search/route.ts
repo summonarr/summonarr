@@ -34,7 +34,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
     return NextResponse.json(enriched);
   } catch (err) {
-    console.error("TMDB search error:", err);
+    console.error("[search] TMDB search error:", err);
     return NextResponse.json({ error: "Search failed" }, { status: 500 });
   }
 });

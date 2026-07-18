@@ -69,7 +69,7 @@ function PlexCandidateRow({
         {thumbSrc
           // eslint-disable-next-line @next/next/no-img-element
           ? <img src={thumbSrc} alt={candidate.name || "thumb"} className="w-full h-full object-cover" />
-          : <span className="text-zinc-600 text-xs">?</span>}
+          : <span className="text-zinc-500 text-xs">?</span>}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
@@ -81,7 +81,7 @@ function PlexCandidateRow({
             {candidate.matchLevel === "exact" ? "Exact ✓" : style.label}
           </span>
           {candidate.confidence > 0 && candidate.matchLevel !== "exact" && (
-            <span className="text-xs text-zinc-600">{candidate.confidence}%</span>
+            <span className="text-xs text-zinc-500">{candidate.confidence}%</span>
           )}
         </div>
         <div className="flex items-center gap-3 mt-1 flex-wrap">
@@ -345,9 +345,9 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
 
             <div className="px-6 py-3 border-b border-zinc-800 flex-shrink-0 space-y-2">
               <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-600 font-mono uppercase shrink-0">Current</span>
+                <span className="text-xs text-zinc-500 font-mono uppercase shrink-0">Current</span>
                 <span className="text-sm text-zinc-400 truncate">{title}</span>
-                <span className="text-xs font-mono text-zinc-600 shrink-0">#{tmdbId}</span>
+                <span className="text-xs font-mono text-zinc-500 shrink-0">#{tmdbId}</span>
               </div>
               {fileInfoError && (
                 <p className="text-xs text-orange-400/80">
@@ -372,7 +372,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
               )}
               {fileInfo?.arrTmdbId !== null && fileInfo?.arrTmdbId !== undefined && fileInfo.arrTmdbId !== tmdbId && (
                 <div className="flex items-center gap-2 pt-0.5">
-                  <span className="text-xs font-semibold text-zinc-600 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
                     {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
                   </span>
                   <div className="flex items-center gap-2 min-w-0">
@@ -405,7 +405,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
               )}
               {fileInfo?.arrTmdbId !== null && fileInfo?.arrTmdbId !== undefined && fileInfo.arrTmdbId === tmdbId && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-zinc-600 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
                     {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
                   </span>
                   <span className="text-xs text-emerald-600">matches current — may be a different issue</span>
@@ -439,7 +439,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                     <p className="px-6 py-8 text-sm text-zinc-500 text-center">No results found.</p>
                   )}
                   {searchResults.length === 0 && !query.trim() && (
-                    <p className="px-6 py-8 text-sm text-zinc-600 text-center">Type to search…</p>
+                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">Type to search…</p>
                   )}
                   {searchResults.map((r) => {
                     const thumb = posterUrl(r.posterPath, "w342");
@@ -464,14 +464,14 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-base font-medium text-zinc-200 leading-tight">{r.title}</span>
                             {r.releaseYear && <span className="text-sm text-zinc-500">({r.releaseYear})</span>}
-                            {isCurrentMatch && <span className="text-xs text-zinc-600">current</span>}
+                            {isCurrentMatch && <span className="text-xs text-zinc-500">current</span>}
                           </div>
-                          <span className="text-xs font-mono text-zinc-600 mt-0.5 block">TMDB #{r.id}</span>
+                          <span className="text-xs font-mono text-zinc-500 mt-0.5 block">TMDB #{r.id}</span>
                           {r.overview && (
                             <p className="text-xs text-zinc-500 mt-1 line-clamp-2 leading-snug">{r.overview}</p>
                           )}
                         </div>
-                        <div className="flex-shrink-0 text-xs text-zinc-600 mt-1">Select →</div>
+                        <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">Select →</div>
                       </button>
                     );
                   })}
@@ -495,7 +495,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                     <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Correct match</p>
                     <p className="text-base font-semibold text-zinc-100 leading-tight">{selected.title}</p>
                     {selected.releaseYear && <p className="text-sm text-zinc-400 mt-0.5">{selected.releaseYear}</p>}
-                    <p className="text-xs font-mono text-zinc-600 mt-0.5">TMDB #{selected.id}</p>
+                    <p className="text-xs font-mono text-zinc-500 mt-0.5">TMDB #{selected.id}</p>
                     {fileInfo?.arrTmdbId === selected.id && (
                       <p className="text-xs text-emerald-500 mt-0.5">
                         ✓ {mediaType === "MOVIE" ? "Radarr" : "Sonarr"} confirmed
@@ -573,7 +573,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                       <p className="text-xs text-zinc-400 leading-snug">
                         The previously wrong match{" "}
                         <span className="font-medium text-zinc-200">{title}</span>{" "}
-                        <span className="font-mono text-zinc-600">#{tmdbId}</span>{" "}
+                        <span className="font-mono text-zinc-500">#{tmdbId}</span>{" "}
                         may still be a title users want. Add it as a new media request?
                       </p>
                       {addWrongState === "idle" && (

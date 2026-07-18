@@ -5,6 +5,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useState,
 } from "react";
 
@@ -100,12 +101,16 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setTheme(theme === "dark" ? "light" : "dark");
   }, [theme, setTheme]);
 
+  // Memoized so consumers of the context don't re-render on every provider
+  // render — the setters are stable (useCallback), so this only changes when
+  // theme/accent actually change.
+  const value = useMemo(
+    () => ({ theme, accent, setTheme, toggleTheme, setAccent }),
+    [theme, accent, setTheme, toggleTheme, setAccent],
+  );
+
   return (
-    <ThemeContext.Provider
-      value={{ theme, accent, setTheme, toggleTheme, setAccent }}
-    >
-      {children}
-    </ThemeContext.Provider>
+    <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
   );
 }
 

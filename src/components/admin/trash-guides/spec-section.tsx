@@ -385,7 +385,7 @@ export function SpecSection({
                               </div>
                             )
                           ) : (
-                            <span className="text-xs text-zinc-600">—</span>
+                            <span className="text-xs text-zinc-500">—</span>
                           )}
                         </td>
                       </tr>

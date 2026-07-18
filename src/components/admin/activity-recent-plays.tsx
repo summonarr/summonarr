@@ -309,6 +309,7 @@ export function ActivityRecentPlays({
               <thead>
                 <tr style={{ background: "var(--ds-bg-1)" }}>
                   <th
+                    scope="col"
                     className="ds-mono uppercase"
                     style={{ ...TH, width: 26 }}
                   />
@@ -316,6 +317,7 @@ export function ActivityRecentPlays({
                     (h, i) => (
                       <th
                         key={i}
+                        scope="col"
                         className="ds-mono uppercase"
                         style={{
                           ...TH,

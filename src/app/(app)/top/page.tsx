@@ -153,7 +153,6 @@ export default async function TopRatedPage({
   const sortBy: SortBy = validSorts.has(sp.sortBy as SortBy) ? (sp.sortBy as SortBy) : "imdb";
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  const show4k = await getShow4kVisibility(session);
 
   const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
@@ -162,6 +161,7 @@ export default async function TopRatedPage({
     rawTmdbMovies, rawTmdbTV,
     rawTraktMovies, rawTraktTV,
     rawMdbMovies, rawMdbTV,
+    show4k,
   ] = await Promise.all([
     mediaType === "tv"     ? [] : getTopRatedMovies().catch(() => [] as TmdbMedia[]),
     mediaType === "movies" ? [] : getTopRatedTV().catch(() => [] as TmdbMedia[]),
@@ -169,6 +169,7 @@ export default async function TopRatedPage({
     mediaType === "movies" ? [] : getTraktPopularTV().catch(() => [] as TmdbMedia[]),
     mediaType === "tv"     ? [] : getMdblistTopRated("movie").catch(() => [] as TmdbMedia[]),
     mediaType === "movies" ? [] : getMdblistTopRated("tv").catch(() => [] as TmdbMedia[]),
+    getShow4kVisibility(session),
   ]);
 
   const allMovies = dedup([rawTmdbMovies, rawTraktMovies, rawMdbMovies]);

@@ -15,27 +15,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { Chip, PageHeader } from "@/components/ui/design";
-import type { ChipTone } from "@/components/ui/design";
-
-const STATUS_TONE: Record<string, ChipTone> = {
-  OPEN: "declined",
-  IN_PROGRESS: "pending",
-  RESOLVED: "approved",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  OPEN: "Open",
-  IN_PROGRESS: "In Progress",
-  RESOLVED: "Resolved",
-};
-
-const ISSUE_TYPE_LABELS: Record<string, string> = {
-  BAD_VIDEO: "Bad video",
-  WRONG_AUDIO: "Wrong audio",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH: "Wrong match",
-  OTHER: "Other",
-};
+import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 const SCOPE_LABELS: Record<string, string> = {
   FULL: "Full",
@@ -254,7 +234,7 @@ export default async function AdminIssuesPage({
                         {poster ? (
                           <Image src={poster} alt={issue.title} fill className="object-cover" sizes="40px" />
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
+                          <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                             {issue.mediaType === "MOVIE" ? <Film className="w-4 h-4" /> : <Tv2 className="w-4 h-4" />}
                           </div>
                         )}
@@ -345,7 +325,7 @@ export default async function AdminIssuesPage({
                       </Link>
 
                       <div className="hidden sm:inline-flex shrink-0">
-                        <Chip tone={STATUS_TONE[issue.status]}>
+                        <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
                           {issue.status === "IN_PROGRESS"
                             ? "In Progress"
                             : issue.status.charAt(0) +
@@ -452,8 +432,8 @@ export default async function AdminIssuesPage({
                         className="flex items-center flex-wrap"
                         style={{ gap: 6, marginTop: 4 }}
                       >
-                        <Chip tone={STATUS_TONE[selectedIssue.status]}>
-                          {STATUS_LABEL[selectedIssue.status]}
+                        <Chip tone={ISSUE_STATUS_TONE[selectedIssue.status]}>
+                          {ISSUE_STATUS_LABEL[selectedIssue.status]}
                         </Chip>
                         <Chip>
                           {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??

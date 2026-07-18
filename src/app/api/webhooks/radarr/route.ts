@@ -5,7 +5,9 @@ import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush
 import { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } from "@/lib/webhook-replay";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { hasPlexItemByTmdbId } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { hasJellyfinItemByTmdbId } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
@@ -237,20 +239,18 @@ export async function POST(req: NextRequest) {
     });
     if (pending.length === 0) return;
 
-    const [plexUrlRow, plexTokenRow, jfUrlRow, jfKeyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
+    const [plexConfig, jellyfinConfig] = await Promise.all([
+      getPlexConfig(),
+      getJellyfinConfig(),
     ]);
 
     await pollAndNotifyAvailable(
       pending,
-      plexUrlRow?.value && plexTokenRow?.value
-        ? () => hasPlexItemByTmdbId(plexUrlRow.value!, plexTokenRow.value!, tmdbId, "movie")
+      plexConfig.url && plexConfig.token
+        ? () => hasPlexItemByTmdbId(plexConfig.url!, plexConfig.token!, tmdbId, "movie")
         : null,
-      jfUrlRow?.value && jfKeyRow?.value
-        ? () => hasJellyfinItemByTmdbId(jfUrlRow.value!, jfKeyRow.value!, tmdbId, "movie")
+      jellyfinConfig.url && jellyfinConfig.apiKey
+        ? () => hasJellyfinItemByTmdbId(jellyfinConfig.url!, jellyfinConfig.apiKey!, tmdbId, "movie")
         : null,
       "webhook/radarr",
     ).catch((err) => { console.warn("[webhooks/radarr] notification failed after marking AVAILABLE:", err); });

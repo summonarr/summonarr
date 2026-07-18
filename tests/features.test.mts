@@ -27,6 +27,7 @@ import {
   invalidateFeatureFlagCache,
   type FeatureCategory,
 } from "../src/lib/features.ts";
+import { shadowPrismaModel } from "./_helpers.mts";
 
 // ── DB guard ─────────────────────────────────────────────────────────────
 // Nothing in this file may read the Setting table. Shadow the delegate so a
@@ -40,10 +41,7 @@ const throwingSettingStub = {
     throw new Error("unexpected prisma.setting.findUnique — this suite must stay on the DB-bypassing cfg path");
   },
 };
-(prisma as unknown as { setting: unknown }).setting = throwingSettingStub;
-if ((prisma as unknown as { setting: unknown }).setting !== throwingSettingStub) {
-  throw new Error("could not shadow prisma.setting with the throwing stub — aborting before a real DB query can hang");
-}
+shadowPrismaModel(prisma, "setting", throwingSettingStub, "the throwing stub");
 
 const VALID_CATEGORIES: readonly FeatureCategory[] = ["pages", "behaviors", "integrations", "admin"];
 

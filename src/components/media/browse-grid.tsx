@@ -218,8 +218,19 @@ export function BrowseGrid({
           )
         ) : (
           <div className="ds-media-grid">
-            {items.map((media) => (
-              <MediaCard key={media.id} media={media} showPlex={showPlex} showJellyfin={showJellyfin} size="md" />
+            {items.map((media, i) => (
+              <MediaCard
+                key={media.id}
+                media={media}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                size="md"
+                // LCP: preload the first row's posters, but only for the
+                // SSR'd list (items still references the initialItems prop —
+                // client-fetched result pages load lazily as usual). Same
+                // value on the server and at hydration, so no mismatch.
+                priority={i < 6 && items === initialItems}
+              />
             ))}
           </div>
         )}

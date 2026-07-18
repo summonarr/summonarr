@@ -36,6 +36,11 @@ export default async function TVDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // Start the session read concurrently with the TMDB details fetch. The no-op
+  // catch only marks the promise handled if notFound() fires first — the await
+  // below still rethrows an auth() failure exactly as before.
+  const sessionPromise = auth();
+  sessionPromise.catch(() => {});
   let media;
   try {
     media = await getTVDetails(Number(id));
@@ -43,7 +48,7 @@ export default async function TVDetailPage({
     notFound();
   }
 
-  const session = await auth();
+  const session = await sessionPromise;
 
   const provider = session?.user.provider;
   const episodeSources =
@@ -53,7 +58,31 @@ export default async function TVDetailPage({
       ? ["jellyfin"]
       : ["plex", "jellyfin"];
 
-  const [plexItem, jellyfinItem, tvdbRequest, userRequest, userDeletionVote, sonarrWanted, cast, rawSuggestions, ownedEpisodes, genreList] = await Promise.all([
+  const [
+    plexItem,
+    jellyfinItem,
+    tvdbRequest,
+    userRequest,
+    userDeletionVote,
+    sonarrWanted,
+    cast,
+    rawSuggestions,
+    ownedEpisodes,
+    genreList,
+    blacklisted,
+    has4k,
+    userRequest4k,
+    request4kAllRow,
+    sonarr4kAvailable,
+    sonarr4kWanted,
+    sonarrInstances,
+    votesEnabled,
+    issuesEnabled,
+    plexEnabled,
+    jellyfinEnabled,
+    onWatchlist,
+    onHidden,
+  ] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "TV" } },
     }),
@@ -82,6 +111,32 @@ export default async function TVDetailPage({
       select: { seasonNumber: true, episodeNumber: true },
     }),
     getTVGenres().catch(() => []),
+    isBlacklisted(media.id, "TV"),
+    isArrConfigured("sonarr", "4k"),
+    session
+      ? prisma.mediaRequest.findFirst({
+          where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
+          select: { id: true },
+        })
+      : Promise.resolve(null),
+    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
+    prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
+    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
+    getSyncableArrInstances("sonarr"),
+    isFeatureEnabled("feature.page.votes"),
+    isFeatureEnabled("feature.page.issues"),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    session
+      ? prisma.watchlistItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+          .then((r) => !!r)
+      : Promise.resolve(false),
+    session
+      ? prisma.hiddenItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+          .then((r) => !!r)
+      : Promise.resolve(false),
   ]);
   const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
@@ -100,19 +155,6 @@ export default async function TVDetailPage({
   const tvdbId = tvdbRequest?.tvdbId ?? null;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
   const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
-  const blacklisted = await isBlacklisted(media.id, "TV");
-  const [has4k, userRequest4k, request4kAllRow, sonarr4kAvailable, sonarr4kWanted] = await Promise.all([
-    isArrConfigured("sonarr", "4k"),
-    session
-      ? prisma.mediaRequest.findFirst({
-          where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
-          select: { id: true },
-        })
-      : Promise.resolve(null),
-    prisma.setting.findUnique({ where: { key: "request4kAll" } }),
-    prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-  ]);
   const requested4k = !!userRequest4k;
   const canRequest4k = session ? canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true") : false;
   // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
@@ -123,54 +165,39 @@ export default async function TVDetailPage({
   // Named instances (non-default, non-4K): render an explicit "Request on X"
   // button for each configured one the viewer may target. Grants require a DB
   // read (they're not in the session JWT), so only pay it when one exists.
-  const namedDefs = (await getSyncableArrInstances("sonarr")).filter(
+  const namedDefs = sonarrInstances.filter(
     (i) => i.slug !== "" && i.slug !== FOURK_ARR_INSTANCE,
   );
-  let namedTargets: { slug: string; name: string; requested: boolean; available: boolean }[] = [];
-  if (session && namedDefs.length > 0 && !blacklisted) {
-    const viewer = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { instanceGrants: true },
-    });
-    const grants = parseInstanceGrants(viewer?.instanceGrants);
-    const eligible = namedDefs.filter((inst) =>
-      canRequestInstance(session.user.permissions, inst, grants, "TV"),
-    );
-    namedTargets = await Promise.all(
-      eligible.map(async (inst) => {
-        const [namedRequest, namedAvailable] = await Promise.all([
-          prisma.mediaRequest.findFirst({
-            where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
-            select: { id: true },
-          }),
-          prisma.sonarrAvailableItem.findUnique({
-            where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
-          }),
-        ]);
-        return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
-      }),
-    );
-  }
 
-  const [suggestions, votesEnabled, issuesEnabled, plexEnabled, jellyfinEnabled] = await Promise.all([
+  const [suggestions, namedTargets] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true, show4k }),
-    isFeatureEnabled("feature.page.votes"),
-    isFeatureEnabled("feature.page.issues"),
-    isFeatureEnabled("feature.integration.plex"),
-    isFeatureEnabled("feature.integration.jellyfin"),
+    (async (): Promise<{ slug: string; name: string; requested: boolean; available: boolean }[]> => {
+      if (!session || namedDefs.length === 0 || blacklisted) return [];
+      const viewer = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { instanceGrants: true },
+      });
+      const grants = parseInstanceGrants(viewer?.instanceGrants);
+      const eligible = namedDefs.filter((inst) =>
+        canRequestInstance(session.user.permissions, inst, grants, "TV"),
+      );
+      return Promise.all(
+        eligible.map(async (inst) => {
+          const [namedRequest, namedAvailable] = await Promise.all([
+            prisma.mediaRequest.findFirst({
+              where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
+              select: { id: true },
+            }),
+            prisma.sonarrAvailableItem.findUnique({
+              where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
+            }),
+          ]);
+          return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
+        }),
+      );
+    })(),
   ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
-
-  const [onWatchlist, onHidden] = session
-    ? await Promise.all([
-        prisma.watchlistItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-          .then((r) => !!r),
-        prisma.hiddenItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-          .then((r) => !!r),
-      ])
-    : [false, false];
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");

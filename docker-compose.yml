@@ -45,26 +45,24 @@ services:
       - "3001:3000"
     environment:
       PORT: "3000"
-      # AUTH_URL (set in .env.local) pins the app's public base URL so auth flows and
-      # redirects don't rely on the incoming Host/X-Forwarded-Host header, eliminating
-      # the host-header injection risk behind a reverse proxy.
-      SYNC_INTERVAL: "${SYNC_INTERVAL:-3600}"
-      UPCOMING_SYNC_INTERVAL: "${UPCOMING_SYNC_INTERVAL:-86400}"
-      RATINGS_SYNC_INTERVAL: "${RATINGS_SYNC_INTERVAL:-86400}"
-      LIST_CACHE_SYNC_INTERVAL: "${LIST_CACHE_SYNC_INTERVAL:-21600}"
-      WARM_ACTIVITY_INTERVAL: "${WARM_ACTIVITY_INTERVAL:-1800}"
-      WARM_MDBLIST_INTERVAL: "${WARM_MDBLIST_INTERVAL:-86400}"
-      WARM_OMDB_INTERVAL: "${WARM_OMDB_INTERVAL:-86400}"
-      SCRUB_AUDIT_PII_INTERVAL: "${SCRUB_AUDIT_PII_INTERVAL:-86400}"
-      PLAY_HISTORY_SYNC_INTERVAL: "${PLAY_HISTORY_SYNC_INTERVAL:-5}"
-      TRASH_SYNC_INTERVAL: "${TRASH_SYNC_INTERVAL:-86400}"
+      # Do NOT re-declare the *_INTERVAL knobs (or AUTH_URL etc.) here.
+      # `environment:` entries outrank `env_file:`, and `${VAR:-default}`
+      # interpolation reads the HOST shell / `.env` — never `.env.local` — so a
+      # `SYNC_INTERVAL=...` set in .env.local (the documented config file) would
+      # be silently overridden by the default baked into this block. Everything
+      # in .env.local flows into the container via env_file below; the
+      # entrypoint and app supply the same built-in defaults when a knob is
+      # unset.
     env_file:
       - .env.local
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      # CMD-SHELL so ${BASE_PATH} expands from the container env (baked in at build for
+      # sub-path images); empty for the default root deployment. Mirrors
+      # docker-container/docker-compose.yml — keep the two in sync.
+      test: ["CMD-SHELL", "wget -qO- \"http://127.0.0.1:3000${BASE_PATH}/api/health\" >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

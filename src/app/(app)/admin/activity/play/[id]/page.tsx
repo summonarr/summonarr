@@ -12,6 +12,7 @@ import {
 } from "@/components/icons";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 import { IpInfo } from "@/components/admin/ip-info";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
 export const dynamic = "force-dynamic";
 
@@ -255,9 +256,16 @@ export default async function PlayDetailPage({
                 href={`/admin/activity/user/${play.mediaServerUser.id}`}
                 className="flex items-center gap-2 text-sm text-indigo-400 hover:text-indigo-300 transition-colors"
               >
+                {/* Avatar URL is from an arbitrary upstream media-server host (can't be
+                    allowlisted in next/image remotePatterns); the shared Avatar falls back
+                    to an initial when the thumb fails to load. */}
                 {play.mediaServerUser.thumbUrl && /^https?:\/\//i.test(play.mediaServerUser.thumbUrl) && (
-                  // eslint-disable-next-line @next/next/no-img-element -- avatar URL is from an arbitrary upstream media-server host; can't be allowlisted in next.config remotePatterns
-                  <img src={play.mediaServerUser.thumbUrl} alt="" className="w-5 h-5 rounded-full object-cover" />
+                  <Avatar className="size-5">
+                    <AvatarImage src={play.mediaServerUser.thumbUrl} alt="" />
+                    <AvatarFallback className="text-[9px]">
+                      {play.mediaServerUser.username.slice(0, 1).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
                 )}
                 <User className="w-3.5 h-3.5" />
                 {play.mediaServerUser.username}

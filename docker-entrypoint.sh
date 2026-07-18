@@ -206,8 +206,11 @@ else
   echo "$push_output"
 
   if [ "$push_exit" -ne 0 ] && echo "$push_output" | grep -q -- "--accept-data-loss"; then
-    # Extract every "•"-prefixed warning line.
-    warnings=$(echo "$push_output" | grep -E "^[[:space:]]*•")
+    # Extract every "•"-prefixed warning line. `|| true`: if a future Prisma
+    # changes the bullet glyph, grep exits 1 and set -e would abort here with no
+    # message — an empty $warnings instead routes to the explicit not-auto-safe
+    # branch below (still fail-closed, but with the operator-facing explanation).
+    warnings=$(echo "$push_output" | grep -E "^[[:space:]]*•" || true)
     # Strip the three auto-safe warning patterns. Anything left over is genuinely destructive.
     unsafe=$(echo "$warnings" \
       | grep -v "unique constraint covering the columns" \
@@ -372,7 +375,12 @@ process.exit(0);
 JSEOF
 
   while true; do
-    _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/play-history}" "play-history" "1"
+    # `|| true`: this subshell inherits set -e, and _cron_sync exits non-zero on
+    # any non-2xx poll (a transient 500/429 is routine). Unguarded, the FIRST
+    # failed poll would kill this loop permanently — play-history/Now Playing
+    # tracking silently stops until the container restarts, while the container
+    # still reports healthy. The _cron_loop calls are all guarded the same way.
+    _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/play-history}" "play-history" "1" || true
     sleep "$INTERVAL"
   done
 }
@@ -389,7 +397,15 @@ NODE_PID=$!
 # Forward SIGTERM/SIGINT so Docker can stop the container cleanly.
 trap "kill $NODE_PID $CRON_PID $PH_PID 2>/dev/null" TERM INT
 
-wait $NODE_PID
+# POSIX: a trapped signal received during `wait` makes it return IMMEDIATELY
+# after the trap runs — it does not resume. A single bare `wait $NODE_PID`
+# would therefore let PID 1 exit while node is still draining its shutdown,
+# and Docker tears the container down (SIGKILL) mid-drain. Re-wait until node
+# has actually exited; `kill -0` probes liveness (fails once the wait reaped
+# it), and `|| true` keeps set -e from aborting on node's signal exit status.
+while kill -0 $NODE_PID 2>/dev/null; do
+  wait $NODE_PID || true
+done
 kill $CRON_PID $PH_PID 2>/dev/null
 wait $CRON_PID 2>/dev/null
 wait $PH_PID 2>/dev/null

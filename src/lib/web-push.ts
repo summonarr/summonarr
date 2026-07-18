@@ -31,6 +31,14 @@ export interface PushSubscription {
   keys: { p256dh: string; auth: string };
 }
 
+// Default store-and-forward window: how long the push service (FCM/autopush/
+// Apple) holds an undeliverable message for an offline device. 24h matches the
+// APNs relay's apns-expiration window — "approved"/"now available" pings are
+// exactly the messages a closed-laptop/backgrounded-phone user expects to see
+// when they come back. (The old default of 60s silently dropped any push to a
+// device offline for more than a minute.)
+const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
+
 export interface SendOptions {
   contact: string;
   vapidPublicKey: string;
@@ -313,7 +321,7 @@ export async function sendPushNotification(
     Authorization: `vapid t=${jwt}, k=${options.vapidPublicKey}`,
     "Content-Type": "application/octet-stream",
     "Content-Encoding": "aes128gcm",
-    TTL: String(options.ttl ?? 60),
+    TTL: String(options.ttl ?? DEFAULT_TTL_SECONDS),
   };
   if (options.urgency) headers.Urgency = options.urgency;
 

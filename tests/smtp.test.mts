@@ -159,6 +159,11 @@ const BASE_CONFIG: SmtpConfig = {
   port: 587,
   secure: false,
   requireTLS: false,
+  // The fake-socket harness runs plaintext (no real TLS upgrade), so the AUTH
+  // negotiation tests need the localhost-carve-out flag or sendMail would now
+  // refuse to send credentials before mechanism selection is even reached.
+  // The plaintext-refusal behavior itself is pinned by its own test below.
+  allowPlaintextAuth: true,
 };
 
 const BASE_MSG: SmtpMessage = {
@@ -486,6 +491,26 @@ test("no mutually supported mechanism → SmtpError listing the server's offer",
   assert.equal(r.writes.some((w) => w.startsWith("AUTH")), false);
 });
 
+test("plaintext channel + AUTH advertised, no allowPlaintextAuth → refuse before credentials", async () => {
+  // A non-587 port (25/2525) gets secure=false + requireTLS=false; a server
+  // there that advertises AUTH but not STARTTLS must NOT receive the password
+  // (AUTH PLAIN/LOGIN are base64, not encryption). The refusal fires before
+  // mechanism selection so nothing credential-shaped ever hits the wire.
+  const r = await runSendMail({
+    caps: ["AUTH PLAIN LOGIN"],
+    config: { auth: { user: "alice", pass: "topsecret" }, allowPlaintextAuth: false },
+  });
+  const err = asSmtpError(r.error);
+  assert.equal(
+    err.message,
+    "Refusing to send SMTP credentials over an unencrypted connection (server did not offer STARTTLS)",
+  );
+  assert.equal(r.writes.some((w) => w.startsWith("AUTH")), false);
+  assert.equal(r.writes.some((w) => w.startsWith("MAIL FROM")), false);
+  const b64pass = Buffer.from("topsecret", "utf8").toString("base64");
+  assert.equal(r.writes.some((w) => w.includes(b64pass)), false);
+});
+
 test("auth omitted from config → no AUTH command even when advertised", async () => {
   const r = await runSendMail({ caps: ["AUTH PLAIN LOGIN"] });
   assert.equal(r.error, undefined);
@@ -508,7 +533,9 @@ test("STARTTLS: upgrade with SNI = original host, re-EHLO, credentials only post
   const r = await runSendMail({
     caps: ["STARTTLS"],
     capsAfterTls: ["AUTH PLAIN"],
-    config: { requireTLS: true, auth: { user: "alice", pass: "pw" } },
+    // allowPlaintextAuth deliberately OFF: a genuine STARTTLS upgrade must
+    // satisfy the encrypted-channel gate on its own.
+    config: { requireTLS: true, auth: { user: "alice", pass: "pw" }, allowPlaintextAuth: false },
   });
   assert.equal(r.error, undefined);
   // TCP connect went to the pre-resolved IP; the TLS upgrade wrapped the

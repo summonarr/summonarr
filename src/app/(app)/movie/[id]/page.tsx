@@ -35,6 +35,11 @@ export default async function MovieDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
+  // Start the session read concurrently with the TMDB details fetch. The no-op
+  // catch only marks the promise handled if notFound() fires first — the await
+  // below still rethrows an auth() failure exactly as before.
+  const sessionPromise = auth();
+  sessionPromise.catch(() => {});
   let media;
   try {
     media = await getMovieDetails(Number(id));
@@ -42,9 +47,28 @@ export default async function MovieDetailPage({
     notFound();
   }
 
-  const session = await auth();
+  const session = await sessionPromise;
 
-  const [plexItem, jellyfinItem, radarrWanted, userRequest, userDeletionVote, cast, rawSuggestions, rawCollection, genreList] = await Promise.all([
+  const [
+    plexItem,
+    jellyfinItem,
+    radarrWanted,
+    userRequest,
+    userDeletionVote,
+    cast,
+    rawSuggestions,
+    rawCollection,
+    genreList,
+    blacklisted,
+    has4k,
+    userRequest4k,
+    request4kAllRow,
+    radarr4kAvailable,
+    radarr4kWanted,
+    radarrInstances,
+    onWatchlist,
+    onHidden,
+  ] = await Promise.all([
     prisma.plexLibraryItem.findUnique({
       where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
     }),
@@ -66,26 +90,9 @@ export default async function MovieDetailPage({
     getMovieSuggestions(media.id).catch(() => []),
     media.collectionId ? getMovieCollection(media.collectionId).catch(() => []) : Promise.resolve([]),
     getMovieGenres().catch(() => []),
-  ]);
-  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
-  const plexAvailable     = !!plexItem;
-  const jellyfinAvailable = !!jellyfinItem;
-  const arrPending        = !!radarrWanted;
-  const requested         = !!userRequest;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
-  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
-  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
-  const blacklisted = await isBlacklisted(media.id, "MOVIE");
-
-  const [suggestions, collectionItems] = await Promise.all([
-    attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
-    attachAllAvailability(rawCollection, session?.user.id, { skipRatings: true }),
-  ]);
-
-  // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
-  // configured AND the viewer holds REQUEST_4K.
-  const [has4k, userRequest4k, request4kAllRow, radarr4kAvailable, radarr4kWanted] = await Promise.all([
+    isBlacklisted(media.id, "MOVIE"),
+    // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
+    // configured AND the viewer holds REQUEST_4K.
     isArrConfigured("radarr", "4k"),
     session
       ? prisma.mediaRequest.findFirst({
@@ -96,7 +103,27 @@ export default async function MovieDetailPage({
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
     prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
+    getSyncableArrInstances("radarr"),
+    session
+      ? prisma.watchlistItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
+          .then((r) => !!r)
+      : Promise.resolve(false),
+    session
+      ? prisma.hiddenItem
+          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
+          .then((r) => !!r)
+      : Promise.resolve(false),
   ]);
+  const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
+  const plexAvailable     = !!plexItem;
+  const jellyfinAvailable = !!jellyfinItem;
+  const arrPending        = !!radarrWanted;
+  const requested         = !!userRequest;
+  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
+  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
+  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
   const requested4k = !!userRequest4k;
   const canRequest4k = session ? canRequest(session.user.permissions, "MOVIE", true, request4kAllRow?.value === "true") : false;
   // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
@@ -107,45 +134,39 @@ export default async function MovieDetailPage({
   // Named instances (non-default, non-4K): render an explicit "Request on X"
   // button for each configured one the viewer may target. Grants require a DB
   // read (they're not in the session JWT), so only pay it when one exists.
-  const namedDefs = (await getSyncableArrInstances("radarr")).filter(
+  const namedDefs = radarrInstances.filter(
     (i) => i.slug !== "" && i.slug !== FOURK_ARR_INSTANCE,
   );
-  let namedTargets: { slug: string; name: string; requested: boolean; available: boolean }[] = [];
-  if (session && namedDefs.length > 0 && !blacklisted) {
-    const viewer = await prisma.user.findUnique({
-      where: { id: session.user.id },
-      select: { instanceGrants: true },
-    });
-    const grants = parseInstanceGrants(viewer?.instanceGrants);
-    const eligible = namedDefs.filter((inst) =>
-      canRequestInstance(session.user.permissions, inst, grants, "MOVIE"),
-    );
-    namedTargets = await Promise.all(
-      eligible.map(async (inst) => {
-        const [namedRequest, namedAvailable] = await Promise.all([
-          prisma.mediaRequest.findFirst({
-            where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
-            select: { id: true },
-          }),
-          prisma.radarrAvailableItem.findUnique({
-            where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
-          }),
-        ]);
-        return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
-      }),
-    );
-  }
 
-  const [onWatchlist, onHidden] = session
-    ? await Promise.all([
-        prisma.watchlistItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
-          .then((r) => !!r),
-        prisma.hiddenItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
-          .then((r) => !!r),
-      ])
-    : [false, false];
+  const [suggestions, collectionItems, namedTargets] = await Promise.all([
+    attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
+    attachAllAvailability(rawCollection, session?.user.id, { skipRatings: true }),
+    (async (): Promise<{ slug: string; name: string; requested: boolean; available: boolean }[]> => {
+      if (!session || namedDefs.length === 0 || blacklisted) return [];
+      const viewer = await prisma.user.findUnique({
+        where: { id: session.user.id },
+        select: { instanceGrants: true },
+      });
+      const grants = parseInstanceGrants(viewer?.instanceGrants);
+      const eligible = namedDefs.filter((inst) =>
+        canRequestInstance(session.user.permissions, inst, grants, "MOVIE"),
+      );
+      return Promise.all(
+        eligible.map(async (inst) => {
+          const [namedRequest, namedAvailable] = await Promise.all([
+            prisma.mediaRequest.findFirst({
+              where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
+              select: { id: true },
+            }),
+            prisma.radarrAvailableItem.findUnique({
+              where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
+            }),
+          ]);
+          return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
+        }),
+      );
+    })(),
+  ]);
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");

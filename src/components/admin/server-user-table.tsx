@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
@@ -83,7 +84,7 @@ function DownloadToggle({
   // null = not yet synced from server — show as indeterminate, not enabled
   if (optimistic === null) {
     return (
-      <span className="text-[11px] text-zinc-600 italic">not synced</span>
+      <span className="text-[11px] text-zinc-500 italic">not synced</span>
     );
   }
 
@@ -94,6 +95,7 @@ function DownloadToggle({
       type="button"
       role="switch"
       aria-checked={on}
+      aria-label="Toggle downloads for this user"
       disabled={loading}
       onClick={toggle}
       title={on ? "Downloads enabled — click to disable" : "Downloads disabled — click to enable"}
@@ -238,6 +240,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
         type="button"
         role="switch"
         aria-checked={on}
+        aria-label="Auto-disable downloads for new Jellyfin users"
         disabled={loading}
         onClick={toggle}
         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-zinc-700"}`}
@@ -276,14 +279,15 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
           {/* Avatar + name */}
           <td className="py-2.5 pl-4 pr-3">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className={`w-7 h-7 shrink-0 rounded-full ${avatarColors[source] ?? "bg-zinc-700"} flex items-center justify-center`}>
-                {u.thumbUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element -- Plex/Jellyfin avatar URL comes from an arbitrary upstream host; can't be added to next/image remotePatterns up front
-                  <img src={u.thumbUrl} alt={u.username} className="w-7 h-7 rounded-full object-cover" />
-                ) : (
-                  <span className="text-[10px] font-bold text-white">{initials}</span>
-                )}
-              </div>
+              {/* Plex/Jellyfin avatar URL comes from an arbitrary upstream host (can't be
+                  added to next/image remotePatterns up front); the shared Avatar falls back
+                  to initials when the thumb is missing or fails to load. */}
+              <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
+                {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
+                <AvatarFallback className="bg-transparent text-[10px] font-bold text-white">
+                  {initials}
+                </AvatarFallback>
+              </Avatar>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-medium text-white truncate">{u.username}</span>
@@ -313,7 +317,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
                 <span className="truncate max-w-[140px]">{linked.name ?? linked.email}</span>
               </div>
             ) : (
-              <span className="text-xs text-zinc-600">—</span>
+              <span className="text-xs text-zinc-500">—</span>
             )}
           </td>
 
@@ -326,7 +330,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
                 disabled={u.isServerAdmin}
               />
             ) : (
-              <span className="text-[11px] text-zinc-600">—</span>
+              <span className="text-[11px] text-zinc-500">—</span>
             )}
           </td>
         </tr>
@@ -369,10 +373,10 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800 bg-zinc-900/60">
-              <th className="py-2 pl-4 pr-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500">User</th>
-              <th className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden sm:table-cell">Source</th>
-              <th className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden md:table-cell">Linked account</th>
-              <th className="py-2 pl-3 pr-4 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Downloads</th>
+              <th scope="col" className="py-2 pl-4 pr-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500">User</th>
+              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden sm:table-cell">Source</th>
+              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden md:table-cell">Linked account</th>
+              <th scope="col" className="py-2 pl-3 pr-4 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Downloads</th>
             </tr>
           </thead>
           <tbody className="bg-zinc-900/30">
@@ -382,7 +386,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
         </table>
       </div>
 
-      <p className="text-[11px] text-zinc-600">
+      <p className="text-[11px] text-zinc-500">
         {users.length} server {users.length === 1 ? "user" : "users"}
         {hasJellyfin && (
           <>

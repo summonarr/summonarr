@@ -53,7 +53,7 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
     <nav className="space-y-5">
       {Object.entries(groups).map(([group, groupItems]) => (
         <div key={group}>
-          <p className="text-xs font-semibold text-zinc-600 uppercase tracking-wider mb-1.5 px-3">
+          <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5 px-3">
             {group}
           </p>
           <div className="space-y-0.5">

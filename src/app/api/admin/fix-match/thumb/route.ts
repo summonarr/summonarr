@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/api-auth";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { prisma } from "@/lib/prisma";
+import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 
 // Hosts Plex's metadata agents return for candidate thumbnails. The external-URL
@@ -74,13 +74,10 @@ export async function GET(request: NextRequest) {
     }).catch(() => null);
   } else {
     // Plex-relative path — join with the configured Plex server URL.
-    const [urlRow, tokenRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-    ]);
-    if (!urlRow?.value || !tokenRow?.value) return new NextResponse("Plex not configured", { status: 500 });
+    const plexConfig = await getPlexConfig();
+    if (!plexConfig.url || !plexConfig.token) return new NextResponse("Plex not configured", { status: 500 });
 
-    const serverUrl = urlRow.value.replace(/\/$/, "");
+    const serverUrl = plexConfig.url.replace(/\/$/, "");
     const url = new URL(`${serverUrl}${thumbPath}`);
 
     const expectedHostname = new URL(serverUrl).hostname;
@@ -91,7 +88,7 @@ export async function GET(request: NextRequest) {
     res = await safeFetchAdminConfigured(url.toString(), {
       timeoutMs: 10_000,
       maxResponseBytes: MAX_THUMB_BYTES,
-      headers: { "User-Agent": "Summonarr/1.0 (Node.js)", "X-Plex-Token": tokenRow.value },
+      headers: { "User-Agent": "Summonarr/1.0 (Node.js)", "X-Plex-Token": plexConfig.token },
     }).catch(() => null);
   }
 

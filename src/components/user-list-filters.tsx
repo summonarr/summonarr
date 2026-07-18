@@ -147,7 +147,7 @@ export function SearchBox({
   return (
     <div className="relative w-full sm:max-w-xs">
       <div
-        className="flex items-center"
+        className="flex items-center focus-within:ring-2 focus-within:ring-ring"
         style={{
           background: "var(--ds-bg-1)",
           border: "1px solid var(--ds-border)",

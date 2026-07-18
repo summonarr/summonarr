@@ -263,7 +263,10 @@ model MediaRequest {
 
   @@unique([tmdbId, mediaType, requestedBy, arrInstance])
   @@index([requestedBy])
-  @@index([status])
+  // Serves the admin request list: `where {status?}` + `ORDER BY createdAt DESC`
+  // (requests/route.ts). The composite's `status` prefix also covers the plain
+  // `where {status}` filter, so a standalone @@index([status]) is unneeded.
+  @@index([status, createdAt(sort: Desc)])
   @@index([tvdbId])
   @@index([status, availableAt])
   @@index([notifiedAvailable])
@@ -379,7 +382,8 @@ model SonarrAvailableItem {
 
 // ─── Upcoming Cache ───────────────────────────────────────────────────────────
 // Populated by /api/sync/upcoming; full replacement each sync.
-// Stores TMDB upcoming movies (/movie/upcoming) and on-the-air TV (/tv/on_the_air).
+// Stores TMDB upcoming movies (/movie/upcoming) and upcoming TV
+// (/discover/tv with first_air_date.gte — see getUpcomingTV in tmdb.ts).
 
 model UpcomingCacheItem {
   tmdbId       Int
@@ -408,6 +412,10 @@ model TmdbCache {
   expiresAt DateTime
 
   @@index([expiresAt])
+  // Serves the admin settings-page provider counts (key startsWith "omdb:" →
+  // LIKE 'omdb:%') — the default-collation PK btree can't serve a LIKE prefix
+  // scan, so those counts full-scanned the largest cache table.
+  @@index([key(ops: raw("text_pattern_ops"))])
 }
 
 // ─── TMDB Media Core ──────────────────────────────────────────────────────────
@@ -590,6 +598,10 @@ model DeletionVote {
 
   @@unique([tmdbId, mediaType, userId]) // one vote per user per item
   @@index([tmdbId, mediaType])
+  // Serves the `where {userId}` reads on account delete (admin/users/[id]) and
+  // Discord account merge (discord-merge.ts) — the unique key leads with tmdbId
+  // and can't serve a userId-only predicate.
+  @@index([userId])
 }
 
 // ─── Audit Log ───────────────────────────────────────────────────────────────
@@ -1038,6 +1050,9 @@ model Notification {
   readAt     DateTime?
 
   @@index([userId, createdAt])
+  // Serves the unread-count query (userId, readAt: null) without scanning all
+  // of a user's notifications.
+  @@index([userId, readAt])
 }
 
 enum MediaType {

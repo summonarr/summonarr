@@ -142,6 +142,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
 | `OIDC_DISPLAY_NAME`  | free-form; default `SSO`                                    | Optional label shown on the login button.                                                                          |
 | `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN` | `"true"` to enable; default off                 | Lets the first Plex / Jellyfin / OIDC sign-in bootstrap as ADMIN. Off by default — normally the first **local** registration becomes admin. Enable only for OAuth-only deployments. |
+| `SUMMONARR_ALLOW_SETUP_RESTORE` | `"true"` to enable; default off                     | Re-enables the **pre-authentication** first-run database restore (`/api/setup/import*`) on an internet-facing instance (`TRUST_PROXY=true`), where it is disabled by default. That path authenticates with `BACKUP_DB_PASSWORD` alone, so while no admin account exists it is a database-takeover surface — set it only for the duration of a first-run restore and **unset it as soon as the admin account exists** (the app warns at boot while it's on). LAN/loopback deployments don't need it. See [Block `/api/setup/*` until first-run completes](#block-apisetup-until-first-run-completes). |
 
 Plex OAuth is configured inside the app (**Admin → Settings → Plex**), not through environment variables.
 
@@ -169,7 +170,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.16.1`.                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.16.2`.                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -294,6 +295,8 @@ Radarr/Sonarr webhook UIs have no header field, so the secret rides in the query
 ### Block `/api/setup/*` until first-run completes
 
 The setup/import routes are **intentionally public while the instance has zero users** — that is what lets you restore a backup *before* the first login. On an internet-exposed fresh instance, a weak or leaked `BACKUP_DB_PASSWORD` could let an attacker replace the database before you register.
+
+On an internet-facing deployment (`TRUST_PROXY=true`) the pre-auth restore is therefore **disabled by default**: it returns `403` unless `SUMMONARR_ALLOW_SETUP_RESTORE=true` is set. To restore a backup on a fresh internet-facing instance, set the flag, complete the restore, then **unset it immediately** — the app warns at boot while it's enabled. LAN/loopback deployments (no `TRUST_PROXY`) keep the first-run restore working with no extra configuration.
 
 - **Register the admin immediately after first boot** — the setup surface closes the moment the first admin exists.
 - Until then, block the routes at the proxy. Nginx:
@@ -559,7 +562,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.16.1
+SUMMONARR_VERSION=v0.16.2
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

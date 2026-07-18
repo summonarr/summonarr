@@ -12,7 +12,9 @@ import {
   addSeriesToSonarr,
 } from "@/lib/arr";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -277,6 +279,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // the revert decision when the current run successfully refreshed it.
   let radarrWanted = 0;
   let radarrSyncSucceeded = false;
+  let radarrSyncedSlugs = new Set<string>();
   if (radarrEnabled) {
     try {
       // Fan out over every configured Radarr instance (default first, plus the legacy
@@ -316,6 +319,14 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }, { timeout: BATCH_TX_TIMEOUT });
         radarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
         radarrSyncSucceeded = true;
+        // The slugs whose cache THIS run actually refreshed. Crucially, an
+        // enabled-but-UNCONFIGURED integration yields writable=[] here while
+        // radarrSyncSucceeded is still true (the no-op "sync" didn't fail) —
+        // the flag keeps meaning "step didn't blow up" for run reporting, and
+        // this set is what the revert/re-push passes below key on so an empty
+        // cache from an unconfigured instance is never read as authoritative
+        // absence (the mass AVAILABLE→APPROVED demotion case).
+        radarrSyncedSlugs = new Set(writable.map((w) => w.slug));
       }
     } catch (err) {
       console.error("[sync] Radarr wanted sync failed:", err);
@@ -324,6 +335,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   let sonarrWanted = 0;
   let sonarrSyncSucceeded = false;
+  let sonarrSyncedSlugs = new Set<string>();
   if (sonarrEnabled) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
@@ -355,6 +367,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }, { timeout: BATCH_TX_TIMEOUT });
         sonarrWanted = writable.reduce((sum, { result }) => sum + result.wanted.size, 0);
         sonarrSyncSucceeded = true;
+        // Same contract as radarrSyncedSlugs — see the comment there.
+        sonarrSyncedSlugs = new Set(writable.map((w) => w.slug));
       }
     } catch (err) {
       console.error("[sync] Sonarr wanted sync failed:", err);
@@ -433,8 +447,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     },
     select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, qualityProfileId: true, requestedBy: true, createdAt: true },
   });
-  const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
-  const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
+  const repushMovieIds = stillApproved.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncedSlugs.has(r.arrInstance)).map((r) => r.tmdbId);
+  const repushTvIds    = stillApproved.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncedSlugs.has(r.arrInstance)).map((r) => r.tmdbId);
   let knownRadarrSet = new Set<string>();
   let knownSonarrSet = new Set<string>();
   if (repushMovieIds.length > 0 || repushTvIds.length > 0) {
@@ -455,10 +469,16 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     knownRadarrSet = new Set([...rAvail.map((r) => vkey(r.tmdbId, r.arrInstance)), ...rWant.map((r) => vkey(r.tmdbId, r.arrInstance))]);
     knownSonarrSet = new Set([...sAvail.map((r) => vkey(r.tmdbId, r.arrInstance)), ...sWant.map((r) => vkey(r.tmdbId, r.arrInstance))]);
   }
+  // Per-slug gate (not the global flag): only re-push a request whose OWN instance's
+  // cache was refreshed this run. An unconfigured instance (writable=[] with the flag
+  // still true) would otherwise put every APPROVED title on that instance into a daily
+  // guaranteed-to-fail push attempt; an instance whose fetch failed this run keeps its
+  // stale rows, and pushing against state we couldn't read risks re-adding an item
+  // that's actually there — both wait for a run that actually synced their instance.
   const toRepush = stillApproved.filter((r) =>
     r.mediaType === "MOVIE"
-      ? radarrEnabled && radarrSyncSucceeded && !knownRadarrSet.has(vkey(r.tmdbId, r.arrInstance))
-      : sonarrEnabled && sonarrSyncSucceeded && !knownSonarrSet.has(vkey(r.tmdbId, r.arrInstance)),
+      ? radarrEnabled && radarrSyncedSlugs.has(r.arrInstance) && !knownRadarrSet.has(vkey(r.tmdbId, r.arrInstance))
+      : sonarrEnabled && sonarrSyncedSlugs.has(r.arrInstance) && !knownSonarrSet.has(vkey(r.tmdbId, r.arrInstance)),
   );
   // Two users can each hold an APPROVED request for the same (tmdbId, mediaType, variant)
   // — an original plus a later mirror-approved row — with different qualityProfileId. If
@@ -542,17 +562,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [[plexUrlRow, plexTokenRow, plexLibrariesRow], [jfUrlRow, jfKeyRow, jfLibrariesRow]] = await Promise.all([
-    Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
-    ]),
-    Promise.all([
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
-    ]),
+  const [plexConfig, jellyfinConfig, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+    getPlexConfig(),
+    getJellyfinConfig(),
+    prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
+    prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
   let plexMovieIds = new Map<number, PlexLibraryItemData>();
@@ -574,10 +588,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ),
     (async () => {
       if (!plexEnabled) return;
-      if (!plexUrlRow?.value || !plexTokenRow?.value) return;
+      if (!plexConfig.url || !plexConfig.token) return;
       try {
-        const serverUrl = plexUrlRow.value.replace(/\/$/, "");
-        const token = plexTokenRow.value;
+        const serverUrl = plexConfig.url.replace(/\/$/, "");
+        const token = plexConfig.token;
         // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
         // this the scheduled full sync ingested EVERY section, marking media in an
         // excluded library as owned → availability false positives on every cron tick.
@@ -630,10 +644,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     })(),
     (async () => {
       if (!jellyfinEnabled) return;
-      if (!jfUrlRow?.value || !jfKeyRow?.value) return;
+      if (!jellyfinConfig.url || !jellyfinConfig.apiKey) return;
       try {
-        const baseUrl = jfUrlRow.value.replace(/\/$/, "");
-        const apiKey  = jfKeyRow.value;
+        const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
+        const apiKey  = jellyfinConfig.apiKey;
         // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
         // otherwise the scheduled full sync ingests every library and marks excluded
         // media as owned.
@@ -703,13 +717,18 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // proof of absence — reading it as "not in library" would false-demote an item that's
   // actually present in the unreached library. Only trust a library map when its source
   // synced; skip the demote entirely while a configured source is down.
-  const plexConfiguredEnabled = plexEnabled && !!(plexUrlRow?.value && plexTokenRow?.value);
-  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jfUrlRow?.value && jfKeyRow?.value);
+  const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
+  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jellyfinConfig.url && jellyfinConfig.apiKey);
   const toRevert = available.filter((req) => {
-    // Only consult the ARR cache when the integration is enabled AND this run refreshed it.
-    // A disabled integration or a failed refresh leaves the cache meaningless — skip the demote.
-    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncSucceeded)) return false;
-    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncSucceeded)) return false;
+    // Only consult the ARR cache when the integration is enabled AND this run refreshed
+    // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
+    // enabled-but-UNCONFIGURED instance all leave that instance's cache meaningless —
+    // skip the demote. (The old global radarrSyncSucceeded flag read true after the
+    // no-op empty loop of an unconfigured integration, so its empty cache masqueraded
+    // as an authoritatively-empty library and mass-demoted every arr-backed AVAILABLE
+    // request the moment an admin cleared the arr connection with the flag still on.)
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncedSlugs.has(req.arrInstance))) return false;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncedSlugs.has(req.arrInstance))) return false;
     // Don't demote while a configured library source is down — we can't prove absence
     // from a library we never reached this run.
     if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
@@ -837,10 +856,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     jellyfinMarked = await markLibraryRequests(jfMovieIds, jfTvIds, "jellyfin");
   }
 
-  const pendingAvailableNotify = available.filter((r) => !r.notifiedAvailable);
+  // Re-query LIVE rather than filter the run-start `available` snapshot: a
+  // request the marking passes flipped AVAILABLE **this run** via the
+  // non-notifying toMarkOnly path (user prefers the OTHER source; title present
+  // in both libraries) is not in the snapshot — the source-pass notify claim
+  // then finds status already AVAILABLE (its CAS only claims PENDING/APPROVED)
+  // and the user's "now available" notification silently slips a full sync
+  // cycle. A live read includes those rows; the requireStatusAvailable CAS
+  // below still guarantees exactly-once against the webhook poller and
+  // concurrent runs. Costs one extra findMany per run.
+  const pendingAvailableNotify = await prisma.mediaRequest.findMany({
+    where: { status: "AVAILABLE", notifiedAvailable: false },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+  });
   if (pendingAvailableNotify.length > 0) {
-    const plexConfigured = !!(plexUrlRow?.value && plexTokenRow?.value);
-    const jellyfinConfigured = !!(jfUrlRow?.value && jfKeyRow?.value);
+    const plexConfigured = !!(plexConfig.url && plexConfig.token);
+    const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
 
     // Fallback for notification starvation: if a per-source sync has been failing for more than
     // STALE_SYNC_FALLBACK_MS, treat that source's data as "valid" so the *other* source can

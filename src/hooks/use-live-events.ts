@@ -62,6 +62,12 @@ type Subscriber = (event: LiveEvent) => void;
 // Module-level singleton: a single SSE connection is shared across all useLiveEvents consumers
 const subscribers = new Set<Subscriber>();
 let singleton: EventSource | null = null;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
+// Probe cadence after a PERMANENT EventSource failure (readyState CLOSED — the
+// browser gave up, e.g. a 401 once the session expired mid-stream). One cheap
+// request per interval while the tab stays open; live updates resume within one
+// interval of re-authenticating.
+const PERMANENT_FAILURE_RETRY_MS = 30_000;
 
 function ensureEventSource() {
   if (singleton) return;
@@ -76,13 +82,35 @@ function ensureEventSource() {
     }
   };
   es.onerror = () => {
-
+    // CONNECTING → the browser is auto-retrying a transient drop; nothing to do.
+    // CLOSED → permanent failure (an HTTP-error/wrong-MIME reconnect — e.g. the
+    // server tore the stream down at the reauth tick and the reconnect got a
+    // 401). The browser will NEVER retry on its own, and a dead singleton would
+    // make ensureEventSource() a no-op forever — live updates gone until a full
+    // page reload. Drop the singleton and re-probe on a timer so a
+    // re-authenticated session picks the stream back up.
+    if (es.readyState === EventSource.CLOSED) {
+      es.close();
+      if (singleton === es) singleton = null;
+      if (retryTimer === null && subscribers.size > 0) {
+        console.warn("[live-events] SSE connection closed permanently; will re-probe");
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (subscribers.size > 0) ensureEventSource();
+        }, PERMANENT_FAILURE_RETRY_MS);
+      }
+      return;
+    }
     console.warn("[live-events] SSE connection error, browser will retry");
   };
   singleton = es;
 }
 
 function teardownEventSource() {
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
   if (!singleton) return;
   singleton.close();
   singleton = null;

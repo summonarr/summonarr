@@ -12,29 +12,10 @@ import {
   DrawerTitle,
   DrawerClose,
 } from "@/components/ui/drawer";
-import { Chip, type ChipTone } from "@/components/ui/design";
+import { Chip } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-
-const STATUS_TONE: Record<string, ChipTone> = {
-  OPEN: "declined",
-  IN_PROGRESS: "pending",
-  RESOLVED: "approved",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  OPEN: "Open",
-  IN_PROGRESS: "In Progress",
-  RESOLVED: "Resolved",
-};
-
-const ISSUE_TYPE_LABELS: Record<string, string> = {
-  BAD_VIDEO: "Bad video quality",
-  WRONG_AUDIO: "Wrong / missing audio",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH: "Wrong match",
-  OTHER: "Other",
-};
+import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 export interface IssueDrawerPayload {
   id: string;
@@ -179,8 +160,8 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                       className="flex items-center flex-wrap"
                       style={{ gap: 6, marginTop: 6 }}
                     >
-                      <Chip tone={STATUS_TONE[issue.status]}>
-                        {STATUS_LABEL[issue.status] ?? issue.status}
+                      <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
+                        {ISSUE_STATUS_LABEL[issue.status] ?? issue.status}
                       </Chip>
                       <Chip>
                         {ISSUE_TYPE_LABELS[issue.issueType] ?? issue.issueType}

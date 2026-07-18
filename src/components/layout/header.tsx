@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { Search, Film, Tv2, Loader2, ChevronRight } from "@/components/icons";
@@ -55,6 +55,12 @@ export function SearchBar({
   const [results, setResults] = useState<TmdbMedia[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
+  // Keyboard-highlighted option (-1 = none). Mouse hover shares the same
+  // state so the highlight visual has a single source of truth.
+  const [activeIndex, setActiveIndex] = useState(-1);
+  // Per-instance option-id base — the SearchBar mounts twice (desktop header
+  // + mobile sheet), so ids must not collide for aria-activedescendant.
+  const optionIdBase = useId();
   const containerRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -99,6 +105,7 @@ export function SearchBar({
     abortRef.current?.abort();
     if (!query.trim()) {
       setResults([]);
+      setActiveIndex(-1);
       setOpen(false);
       return;
     }
@@ -115,9 +122,13 @@ export function SearchBar({
         // non-array body doesn't blow up the debounced handler.
         const data: unknown = res.ok ? await res.json() : null;
         setResults(Array.isArray(data) ? (data as TmdbMedia[]).slice(0, 8) : []);
+        setActiveIndex(-1);
         setOpen(true);
       } catch (err) {
-        if ((err as Error).name !== "AbortError") setResults([]);
+        if ((err as Error).name !== "AbortError") {
+          setResults([]);
+          setActiveIndex(-1);
+        }
       } finally {
         setLoading(false);
       }
@@ -132,8 +143,33 @@ export function SearchBar({
   function handleSelect(media: TmdbMedia) {
     setOpen(false);
     setQuery("");
+    setActiveIndex(-1);
     onAfterSelect?.();
     router.push(`/${media.mediaType}/${media.id}`);
+  }
+
+  // Minimal combobox keyboard support: ArrowDown/ArrowUp move the highlight
+  // (wrapping), Enter activates it. Escape is handled by the window-level
+  // listener above.
+  function handleInputKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (results.length === 0) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!open) {
+        setOpen(true);
+        return;
+      }
+      setActiveIndex((i) =>
+        e.key === "ArrowDown"
+          ? (i + 1) % results.length
+          : i <= 0
+            ? results.length - 1
+            : i - 1,
+      );
+    } else if (e.key === "Enter" && open && activeIndex >= 0 && activeIndex < results.length) {
+      e.preventDefault();
+      handleSelect(results[activeIndex]);
+    }
   }
 
   const filterLabels: { value: MediaFilter; label: string }[] = [
@@ -178,6 +214,11 @@ export function SearchBar({
           aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
           aria-controls="header-search-results"
           aria-autocomplete="list"
+          aria-activedescendant={
+            open && activeIndex >= 0 && activeIndex < results.length
+              ? `${optionIdBase}-option-${activeIndex}`
+              : undefined
+          }
           placeholder="Search movies, TV, requests…"
           value={query}
           onChange={(e) => {
@@ -185,6 +226,7 @@ export function SearchBar({
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
+          onKeyDown={handleInputKeyDown}
           className="flex-1 min-w-0 bg-transparent border-0 outline-none rounded-sm focus-visible:ring-2 focus-visible:ring-ring"
           style={{
             fontSize: variant === "full" ? 14 : 13,
@@ -233,10 +275,12 @@ export function SearchBar({
                 <button
                   key={value}
                   type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    setFilter(value);
-                  }}
+                  // preventDefault on mousedown keeps focus in the search input
+                  // (no blur/close); the actual filter change is on onClick so
+                  // keyboard users (Enter/Space on the focused button) can toggle
+                  // it too — onMouseDown alone was mouse-only.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setFilter(value)}
                   className="inline-flex items-center gap-1 font-medium transition-colors"
                   style={{
                     padding: "2px 10px",
@@ -265,26 +309,24 @@ export function SearchBar({
               No matches
             </div>
           ) : (
-            results.map((media) => {
+            results.map((media, i) => {
               const poster = posterUrl(media.posterPath, "w342");
               return (
                 <button
                   key={`${media.mediaType}-${media.id}`}
+                  id={`${optionIdBase}-option-${i}`}
                   role="option"
-                  aria-selected={false}
+                  aria-selected={activeIndex === i}
                   onClick={() => handleSelect(media)}
                   className="flex items-center gap-2.5 w-full text-left transition-colors"
                   style={{
                     padding: "8px 12px",
                     color: "var(--ds-fg)",
-                    background: "transparent",
+                    background:
+                      activeIndex === i ? "var(--ds-bg-3)" : "transparent",
                   }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--ds-bg-3)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "transparent";
-                  }}
+                  onMouseEnter={() => setActiveIndex(i)}
+                  onMouseLeave={() => setActiveIndex(-1)}
                 >
                   <div
                     className="relative shrink-0 overflow-hidden"

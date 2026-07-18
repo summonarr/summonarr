@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
-import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
+import { getPlexConfig } from "@/lib/plex-config";
 
 // Admin terminate-playback endpoint. POSTs to Plex's
 // /status/sessions/terminate, which prompts the client's player with `reason`
@@ -31,12 +31,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "sessionKey is required" }, { status: 400 });
   }
 
-  const [serverUrlRow, tokenRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-  ]);
-  const serverUrl = serverUrlRow?.value?.replace(/\/$/, "") ?? null;
-  const token = tokenRow?.value ?? null;
+  const plexConfig = await getPlexConfig();
+  const serverUrl = plexConfig.url?.replace(/\/$/, "") ?? null;
+  const token = plexConfig.token;
 
   if (!serverUrl || !token) {
     return NextResponse.json(

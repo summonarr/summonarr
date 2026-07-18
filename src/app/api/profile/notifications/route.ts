@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { getJellyfinUserEmail } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { prisma } from "@/lib/prisma";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
@@ -96,14 +97,11 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
 
       let reportedEmail: string | null = null;
       if (jellyfinUserId) {
-        const [urlRow, keyRow] = await Promise.all([
-          prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-          prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-        ]);
-        if (urlRow?.value && keyRow?.value) {
+        const { url, apiKey } = await getJellyfinConfig();
+        if (url && apiKey) {
           // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
           // reads Settings (no encryptToken at the call site — guardrail 7a holds).
-          const fromJellyfin = await getJellyfinUserEmail(urlRow.value, keyRow.value, jellyfinUserId);
+          const fromJellyfin = await getJellyfinUserEmail(url, apiKey, jellyfinUserId);
           if (fromJellyfin) reportedEmail = normalizeEmail(fromJellyfin);
         }
       }

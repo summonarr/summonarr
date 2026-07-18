@@ -955,7 +955,7 @@ export default async function SettingsPage({
 
               <div className="border-t border-zinc-800 pt-5">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">TmdbMediaCore</h3>
-                <p className="text-xs text-zinc-600 mb-3">
+                <p className="text-xs text-zinc-500 mb-3">
                   Normalised metadata table (title, poster, year, rating) used by all grid pages to avoid live TMDB calls.
                   Populated automatically as pages are browsed; use Initial DB Fill to seed it immediately.
                 </p>

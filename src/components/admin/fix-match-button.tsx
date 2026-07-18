@@ -148,7 +148,7 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
             Plex candidates — select the correct match
           </p>
-          <p className="text-xs text-zinc-600">{candidates.length} found</p>
+          <p className="text-xs text-zinc-500">{candidates.length} found</p>
         </div>
 
         <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
@@ -212,7 +212,7 @@ function CandidateRow({
           // eslint-disable-next-line @next/next/no-img-element
           <img src={thumbSrc} alt={candidate.name || "thumb"} className="w-full h-full object-cover" />
         ) : (
-          <span className="text-zinc-600 text-xs">?</span>
+          <span className="text-zinc-500 text-xs">?</span>
         )}
       </div>
 
@@ -239,7 +239,7 @@ function CandidateRow({
             </span>
           )}
           {candidate.confidence > 0 && candidate.matchLevel !== "exact" && (
-            <span className="text-xs text-zinc-600">{candidate.confidence}%</span>
+            <span className="text-xs text-zinc-500">{candidate.confidence}%</span>
           )}
         </div>
 
@@ -284,7 +284,7 @@ function CandidateRow({
         )}
 
         {candidate.tmdbOverview && candidate.matchLevel !== "wrong" && (
-          <p className="text-xs text-zinc-600 mt-1.5 leading-snug line-clamp-2">{candidate.tmdbOverview}</p>
+          <p className="text-xs text-zinc-500 mt-1.5 leading-snug line-clamp-2">{candidate.tmdbOverview}</p>
         )}
       </div>
 

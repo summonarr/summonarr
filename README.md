@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.16.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.16.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -111,15 +111,20 @@ App runs at <http://localhost:3000> in dev mode.
 Available scripts:
 
 ```bash
-npm run dev          # next dev
-npm run build        # next build
-npm run start        # next start (production)
-npm run lint         # eslint
-npm run audit:deps   # custom TypeScript dep audit
-npx tsc --noEmit     # type-check — there is no `typecheck` script
+npm run dev                # next dev
+npm run build              # next build
+npm run start              # next start (production)
+npm run lint               # eslint
+npm run typecheck          # native TS 7 (tsgo) type-check
+npm run typecheck:classic  # classic TS 6 — the compiler `next build` uses
+npm test                   # node:test unit suite (tests/*.test.mts)
+npm run audit:deps         # custom TypeScript dep audit
 ```
 
-There is no test suite yet.
+The unit suite (`npm test`) uses Node's built-in `node:test` runner and covers
+the pure/in-memory surfaces of `src/lib` (auth, crypto, network policy, leaf
+logic). It never touches a live database or the network — sync/webhook/DB/route
+behaviour is exercised by the CI end-to-end crawl instead.
 
 ## Project structure
 
@@ -164,6 +169,26 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.16.2
+
+**Changed**
+
+- Accessibility: screen-reader announcements for asynchronous actions, focus traps in dialogs, correct menu/ARIA roles, AA-contrast fixes throughout, and a fully keyboard-navigable appearance menu.
+- Performance: faster admin request/vote and activity pages and quicker cold discovery loads — new database indexes (admin scans, TmdbCache prefix lookups, Notification unread counts), stabilized play-history pagination, and server pages that no longer wait on serial data fetches (loading skeletons added).
+
+**Fixed**
+
+- Plex/Jellyfin: raised the library-fetch cap to 50 MB so large libraries (over ~3k items) no longer truncate silently.
+- Live activity: the Plex event stream recovers the client feed after a permanent failure and only resets its reconnect backoff after staying connected.
+- Sync & auth: gate a request's revert/re-push on its own synced instance, stop a dual-library "now available" notification from being skipped, and fix a session-rotation cutoff off-by-one.
+- Ratings: the discovery grid's OMDB fallback now matches the detail page, and TMDB detail rows self-heal when cached data is corrupted while preserving certification.
+- Requests & instances: reject the reserved "4k" slug from the instance registry, and unify handling when an auto-routed request lands on an instance the user can't access.
+- Backup: refuse empty restores and gate chunked setup uploads at chunk 0.
+- Admin: a concurrent trash-guides application delete now returns 404 instead of a 500.
+- Notifications: web-push messages expire after 24 hours, and SMTP AUTH is refused on unencrypted connections.
+- Security: redact Discord tokens that appear in URL paths from logs, and NFKC-normalize new usernames.
+- Docker: guard the play-history loop against crashes, honor `.env.local` interval overrides, and drain in-flight work fully on shutdown.
 
 ### v0.16.1
 
@@ -225,7 +250,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.16.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.16.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

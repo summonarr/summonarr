@@ -138,6 +138,7 @@ function PagerButton({
       className={className}
       style={style}
       aria-label={ariaLabel}
+      aria-current={active ? "page" : undefined}
       aria-disabled={disabled ? "true" : undefined}
     >
       {children}

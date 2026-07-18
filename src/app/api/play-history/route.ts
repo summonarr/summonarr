@@ -247,7 +247,11 @@ async function ungroupedQuery(
     ];
   }
 
-  const orderBy: Record<string, string> = { [sortBy]: sortDir };
+  // Append `id` as a stable secondary sort so OFFSET pagination can't duplicate
+  // or skip rows when the primary column is non-unique (title/platform/source/
+  // duration/playDuration all repeat) and data shifts between page fetches.
+  // Mirrors the export path's [{startedAt},{id}] tiebreaker.
+  const orderBy: Record<string, string>[] = [{ [sortBy]: sortDir }, { id: sortDir }];
 
   const [items, total] = await Promise.all([
     prisma.playHistory.findMany({

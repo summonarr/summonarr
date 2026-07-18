@@ -4,7 +4,8 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 
 // Build a `tmdbId IN […]` clause per mediaType — replaces the prior wide `OR: items.map(...)`
 // pattern which the planner couldn't serve from the composite (tmdbId, mediaType) index.
-function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWhereInput | null {
+// Exported for unit tests.
+export function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWhereInput | null {
   const movieIds = items.filter((i) => i.mediaType === "movie").map((i) => i.id);
   const tvIds = items.filter((i) => i.mediaType === "tv").map((i) => i.id);
   if (movieIds.length === 0 && tvIds.length === 0) return null;

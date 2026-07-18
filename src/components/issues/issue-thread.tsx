@@ -145,7 +145,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           <p className="text-xs text-red-400 py-2">Failed to load messages.</p>
         )}
         {loadState === "ready" && messages.length === 0 && (
-          <p className="text-xs text-zinc-600 py-2">No messages yet. Start the conversation below.</p>
+          <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>
         )}
         {messages.map((msg) => {
           const authorName = msg.author.name ?? msg.author.email;
@@ -166,7 +166,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
                 }`}>
                   {msg.body}
                 </div>
-                <p className="text-[10px] text-zinc-600 px-1">
+                <p className="text-[10px] text-zinc-500 px-1">
                   {isAdmin ? "Admin" : authorName} · {mounted ? new Date(msg.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                 </p>
               </div>
