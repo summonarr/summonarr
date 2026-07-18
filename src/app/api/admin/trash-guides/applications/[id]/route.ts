@@ -23,10 +23,13 @@ export const PATCH = withAdmin(async (
   });
   if (!app) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  await prisma.trashApplication.update({
+  // updateMany (not update) so a concurrent delete returns count:0 instead of
+  // throwing an unhandled P2025 → 500 (mirrors the issues route convention).
+  const updated = await prisma.trashApplication.updateMany({
     where: { id },
     data: { enabled: body.enabled },
   });
+  if (updated.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await logAudit({
     userId: session.user.id,
@@ -51,7 +54,10 @@ export const DELETE = withAdmin(async (
   });
   if (!app) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  await prisma.trashApplication.delete({ where: { id } });
+  // deleteMany (not delete) so a concurrent delete returns count:0 instead of
+  // throwing an unhandled P2025 → 500 (mirrors the issues route convention).
+  const deleted = await prisma.trashApplication.deleteMany({ where: { id } });
+  if (deleted.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await logAudit({
     userId: session.user.id,
