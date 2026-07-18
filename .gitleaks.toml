@@ -31,6 +31,17 @@
 #    (tests/sign-in-response.test.mts, tests/session-cookie.test.mts). None
 #    are real secrets; the specific self-describing fixture strings are
 #    allowlisted below (not the files or the rules).
+#
+# 4. The expanded route/lib unit tests add fixtures that match a rule's
+#    *shape* rather than any real secret: a placeholder Discord snowflake
+#    "123456789012345678" (a 1-2-3… counting sequence that trips the
+#    18-digit discord-client-id shape rule in tests/discord-merge.test.mts
+#    and tests/requests-route.test.mts), a self-describing CRON_SECRET
+#    fixture "internal-trigger-test-cron-secret-0123456789"
+#    (tests/internal-trigger.test.mts), and a throwaway web-push auth key
+#    that is only round-tripped through encryptToken/decryptToken,
+#    "k9Xzm6H1c3RhbXBsZQ" (tests/push-routes.test.mts). Each specific
+#    fixture string is allowlisted below — not the files or the rules.
 
 [extend]
 useDefault = true
@@ -45,4 +56,7 @@ regexes = [
   '''AB0123456789CDEF''',
   '''eyJhbGciOiJIUzI1NiJ9\.eyJpZCI6InVfYWxpY2UifQ\.c2lnbmF0dXJl''',
   '''eyJhbGciOiJIUzI1NiJ9\.eyJpZCI6InUxIn0\.c2ln''',
+  '''123456789012345678''',
+  '''internal-trigger-test-cron-secret-0123456789''',
+  '''k9Xzm6H1c3RhbXBsZQ''',
 ]
