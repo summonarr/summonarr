@@ -22,6 +22,21 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
 async function gate(): Promise<NextResponse | { password: string } | { closed: true }> {
+  // Mirror processBackupImport's internet-facing opt-in HERE, at chunk 0 — the
+  // authoritative check only runs on the FINAL chunk, which would let an
+  // unauthenticated caller stream the full ciphertext (up to the session cap)
+  // onto the server's temp disk before the 403. Same condition + message as
+  // backup-import.ts so the two gates can't drift apart silently.
+  if (process.env.TRUST_PROXY === "true" && process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true") {
+    return NextResponse.json(
+      {
+        error:
+          "Pre-authentication restore is disabled on this internet-facing instance. " +
+          "Set SUMMONARR_ALLOW_SETUP_RESTORE=true to enable a first-run restore, then unset it once the admin account exists.",
+      },
+      { status: 403 },
+    );
+  }
   // Advisory lock 43 is shared with /api/auth/register and /api/setup/import. Mirroring the
   // setup/import gate guarantees a racing register can't sneak between the freshness check and
   // the eventual processBackupImport on the final chunk. processBackupImport re-takes the lock
