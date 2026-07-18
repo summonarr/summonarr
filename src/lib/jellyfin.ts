@@ -214,6 +214,12 @@ export interface JellyfinLibraryItemData {
 const LIBRARY_PAGE_SIZE   = 5_000;
 // 60 s per page — Jellyfin can be slow on large libraries over slow connections
 const PAGE_TIMEOUT_MS     = 60_000;
+// Response cap per page. safe-fetch's default is 10 MB of DECOMPRESSED bytes —
+// at 5000 items/page with Overview + ImageBlurHashes/ImageTags a page can top
+// that, and the size error retries identically 3× then aborts the whole
+// movie/series sync. Same undersized-cap failure arr.ts hit at 10 MB (its cap
+// was raised to 50 MB for >3k-item libraries — guardrail 5); match it.
+const LIBRARY_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 // Parallel pages are capped to avoid hammering small Jellyfin instances
 const MAX_PARALLEL_PAGES  = 3;
 const EPISODE_PAGE_SIZE   = 1_000;
@@ -238,6 +244,7 @@ async function fetchPage<T>(
       const res = await safeFetchAdminConfigured(`${baseQuery}&StartIndex=${startIndex}&Limit=${limit}`, {
         headers: headers ?? jellyfinHeaders(apiKey),
         timeoutMs: PAGE_TIMEOUT_MS,
+        maxResponseBytes: LIBRARY_FETCH_MAX_BYTES,
       });
       if (!res.ok) {
         const err = new Error(`Jellyfin fetch failed: ${res.status} at StartIndex=${startIndex}`);

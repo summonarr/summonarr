@@ -105,6 +105,11 @@ function plexServerHeaders(token: string): Record<string, string> {
 
 const FETCH_TIMEOUT_MS = 60_000;
 const PLEX_PAGE_SIZE   = 1_000;
+// Response cap per fetch. The safe-fetch default is 10 MB decompressed; a
+// 1000-item page has ~10× headroom today, but match jellyfin.ts/arr.ts's 50 MB
+// so a verbose Plex response (extra Guids/Media parts) can never abort a sync
+// on the same undersized-cap failure arr.ts hit (guardrail 5).
+const LIBRARY_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 
 async function plexFetchAllPages<T>(
   baseUrl: string,
@@ -140,6 +145,7 @@ function plexFetch(url: string, token: string): Promise<Response> {
   return safeFetchAdminConfigured(url, {
     headers: plexServerHeaders(token),
     timeoutMs: FETCH_TIMEOUT_MS,
+    maxResponseBytes: LIBRARY_FETCH_MAX_BYTES,
   });
 }
 

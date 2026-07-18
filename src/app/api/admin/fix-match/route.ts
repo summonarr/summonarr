@@ -119,7 +119,7 @@ async function fixPlexMatch(
   if (!canonicalGuid) {
     const plexMatchSearch = async (params: Record<string, string>): Promise<PlexSearchResult | null> => {
       const res = await safeFetchAdminConfigured(
-        `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
+        `${serverUrl}/library/metadata/${safeKey}/matches?` + new URLSearchParams(params),
         { headers, timeoutMs: 30_000 },
       ).catch(() => null);
       if (!res?.ok) return null;
@@ -157,7 +157,7 @@ async function fixPlexMatch(
     }
   }
 
-  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/unmatch`, {
+  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/unmatch`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
@@ -175,7 +175,7 @@ async function fixPlexMatch(
     const params: Record<string, string> = { guid };
     if (name) params.name = name;
     if (yr)   params.year = yr;
-    const url = `${serverUrl}/library/metadata/${ratingKey}/match?` + new URLSearchParams(params);
+    const url = `${serverUrl}/library/metadata/${safeKey}/match?` + new URLSearchParams(params);
     return safeFetchAdminConfigured(url, { method: "PUT", headers, timeoutMs: 30_000 });
   };
 
@@ -192,7 +192,7 @@ async function fixPlexMatch(
     }
   }
 
-  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
@@ -206,7 +206,7 @@ async function fixPlexMatch(
     let plexImdbId: string | undefined;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise((r) => setTimeout(r, intervalMs));
-      const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}?includeGuids=1`, {
+      const checkRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}?includeGuids=1`, {
         headers,
         timeoutMs: 10_000,
       }).catch(() => null);
@@ -276,7 +276,7 @@ async function fixPlexMatch(
       const tryGuid = async (guid: string, name: string, yr: string): Promise<boolean> => {
         const res = await applyMatch(guid, name, yr);
         if (!res.ok) return false;
-        await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${ratingKey}/refresh?force=1`, {
+        await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
           method: "PUT", headers, timeoutMs: 30_000,
         });
         const poll = await pollForConfirmation(6, 5_000);
@@ -298,7 +298,7 @@ async function fixPlexMatch(
       for (const params of altSearches) {
         if (pollConfirmed || allConflated) break;
         const res = await safeFetchAdminConfigured(
-          `${serverUrl}/library/metadata/${ratingKey}/matches?` + new URLSearchParams(params),
+          `${serverUrl}/library/metadata/${safeKey}/matches?` + new URLSearchParams(params),
           { headers, timeoutMs: 30_000 },
         ).catch(() => null);
         if (!res?.ok) continue;
