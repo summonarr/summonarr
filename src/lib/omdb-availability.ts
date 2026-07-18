@@ -168,12 +168,19 @@ export async function attachRatingsUnified(
             movieBatch.length > 0 ? fetchMdblistBatch(movieBatch, "movie") : Promise.resolve(new Map<number, MdblistRatings>()),
             tvBatch.length    > 0 ? fetchMdblistBatch(tvBatch,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
           ]);
-          const found = new Set([...movieRatings.keys(), ...tvRatings.keys()]);
+          // Mirror the blocking path (below): only count an MDBList row as a hit when it
+          // carries a rating, and key by `${mediaType}:${id}`. An indexed-but-unscored
+          // (all-null) row must NOT mark the item found — it has nothing to display, so it
+          // stays a candidate for the OMDB fallback probe. The media-type prefix stops a
+          // movie and a TV show that share a TMDB id from cross-suppressing each other.
+          const found = new Set<string>();
+          for (const [id, data] of movieRatings) if (hasAnyMdblistRating(data)) found.add(`movie:${id}`);
+          for (const [id, data] of tvRatings)    if (hasAnyMdblistRating(data)) found.add(`tv:${id}`);
 
           // Only genuinely-uncached items feed the OMDB fallback probe. A stale item
           // absent from a full batch response just had its _notFound sentinel refreshed
           // by fetchMdblistBatch — chasing it through OMDB would burn quota for nothing.
-          const stillMissing = uncached.filter((m) => !found.has(m.id));
+          const stillMissing = uncached.filter((m) => !found.has(fetchedKey(m)));
           if (stillMissing.length > 0) {
             // Fall back to OMDB whenever MDBList can't serve the item (no key, genuine miss,
             // or mid-batch quota trip), not only when the MDBList key is absent.
