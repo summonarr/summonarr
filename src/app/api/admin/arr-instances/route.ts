@@ -108,9 +108,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const beforeNamed = new Set(before.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
   const nextNamed = new Set(instances.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
 
-  // Persist registry metadata (default excluded — it's synthesized).
+  // Persist registry metadata (built-ins excluded — the default ("") and legacy 4K
+  // ("4k") instances are synthesized in getArrInstances, never registry-backed; a
+  // "4k" entry here would shadow legacyFourKConfig(). Mirrors normalizeEntry's
+  // read-side reject of both slugs.
   const registry: ArrInstanceConfig[] = instances
-    .filter((i) => i.slug !== DEFAULT_ARR_INSTANCE)
+    .filter((i) => i.slug !== DEFAULT_ARR_INSTANCE && i.slug !== FOURK_ARR_INSTANCE)
     .map((i) => ({
       slug: i.slug,
       name: typeof i.name === "string" && i.name.trim() ? i.name : i.slug,

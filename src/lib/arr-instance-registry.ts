@@ -62,8 +62,12 @@ function normalizeEntry(raw: unknown): ArrInstanceConfig | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   const slug = typeof o.slug === "string" ? o.slug : "";
-  // The default is synthesized separately and must never come from the registry.
-  if (slug === DEFAULT_ARR_INSTANCE || !isValidInstanceSlug(slug)) return null;
+  // The default ("") and legacy 4K ("4k") instances are synthesized separately and
+  // must never come from the registry: a registry "4k" entry would shadow the
+  // synthesized legacyFourKConfig() (flipping skipLibraryCheck, making it autoRoute-
+  // eligible). Access is still governed by the 4K permission bits regardless, so this
+  // is a robustness gate, not a security one.
+  if (slug === DEFAULT_ARR_INSTANCE || slug === FOURK_ARR_INSTANCE || !isValidInstanceSlug(slug)) return null;
   let autoRoute: ArrAutoRoute | null = null;
   if (o.autoRoute && typeof o.autoRoute === "object") {
     const r = o.autoRoute as Record<string, unknown>;
