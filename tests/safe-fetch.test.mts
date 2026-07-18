@@ -64,6 +64,31 @@ test("redactUrlForLog returns the sentinel for unparseable input", () => {
   assert.equal(redactUrlForLog("//protocol-relative.example/x"), "[unparseable-url]");
 });
 
+test("redactUrlForLog scrubs Discord webhook/interaction tokens carried in the PATH", () => {
+  // Interaction follow-up: /webhooks/{appId}/{token}/messages/@original
+  assert.equal(
+    redactUrlForLog(
+      "https://discord.com/api/v10/webhooks/123456789012345678/aW50ZXJhY3Rpb24tdG9rZW4/messages/@original",
+    ),
+    "https://discord.com/api/v10/webhooks/123456789012345678/%3Credacted%3E/messages/@original",
+  );
+  // Plain webhook URL: /api/webhooks/{id}/{token}
+  const plain = redactUrlForLog("https://discord.com/api/webhooks/987654321098765432/sEcReT_ToKeN-77");
+  assert.ok(!plain.includes("sEcReT_ToKeN-77"));
+  // Non-webhook numeric paths are untouched.
+  assert.equal(
+    redactUrlForLog("https://api.themoviedb.org/3/movie/550/recommendations"),
+    "https://api.themoviedb.org/3/movie/550/recommendations",
+  );
+});
+
+test("SafeFetchError scrubs a path-borne Discord token from message and url", () => {
+  const raw = "https://discord.com/api/v10/webhooks/123456789012345678/tOkEnVaLuE123/messages/@original";
+  const err = new SafeFetchError("timeout", raw, `Request timed out: ${raw}`);
+  assert.ok(!err.message.includes("tOkEnVaLuE123"), "token must not survive in .message");
+  assert.ok(!err.url.includes("tOkEnVaLuE123"), "token must not survive in .url");
+});
+
 // ---------------------------------------------------------------------------
 // SafeFetchError — every instance must be safe to log verbatim
 // ---------------------------------------------------------------------------

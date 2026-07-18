@@ -21,6 +21,13 @@ export function redactUrlForLog(raw: string): string {
     u.search = "";
     u.username = "";
     u.password = "";
+    // Discord carries its secret in the PATH, not the query: webhook URLs and
+    // interaction follow-ups are both /webhooks/{id}/{token}[/...]. Without
+    // this, a thrown SafeFetchError (timeout/network) from editOriginal or a
+    // follow-up POST would embed the interaction token — a ~15-min bearer
+    // credential for posting as the bot — in .message/.url, breaking the
+    // "safe to log verbatim" contract below for path-borne secrets.
+    u.pathname = u.pathname.replace(/(\/webhooks\/\d+\/)[^/]+/, "$1<redacted>");
     return u.toString();
   } catch {
     return "[unparseable-url]";

@@ -69,7 +69,7 @@ async function hashPassword(password) {
 
 // Mirrors src/lib/email-normalize.ts so the stored email matches sign-in lookup.
 function normalizeEmail(email) {
-  return email.toLowerCase().trim();
+  return email.normalize("NFKC").toLowerCase().trim();
 }
 
 function usage(code = 0) {
