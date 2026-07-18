@@ -26,6 +26,15 @@ export interface SmtpConfig {
   secure: boolean;
   /** true → require STARTTLS upgrade on the plaintext channel. */
   requireTLS: boolean;
+  /**
+   * Permit AUTH over an UNENCRYPTED channel. Only ever set for the localhost
+   * dev/test-relay carve-out (see email.ts). Without it, sendMail refuses to
+   * transmit credentials on a plaintext socket even when the server advertises
+   * AUTH — base64 is not encryption, and a non-587 port (25/2525) otherwise
+   * gets `secure=false, requireTLS=false` and would leak the password to any
+   * on-path observer.
+   */
+  allowPlaintextAuth?: boolean;
   auth?: { user: string; pass: string };
 }
 
@@ -448,6 +457,7 @@ export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<vo
     expectCode(ehlo, 250);
 
     // 3. STARTTLS upgrade if we're on a plaintext channel
+    let channelEncrypted = config.secure;
     if (!config.secure) {
       const supportsStartTls = hasCapability(ehlo.capabilities, "STARTTLS");
       if (config.requireTLS && !supportsStartTls) {
@@ -457,6 +467,7 @@ export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<vo
         await conn.send("STARTTLS\r\n");
         expectCode(await conn.readReply(), 220);
         await conn.upgradeToTls(config.host);
+        channelEncrypted = true;
         // Re-EHLO over the encrypted channel — server capabilities may differ.
         await conn.send(`EHLO ${ehloName()}\r\n`);
         ehlo = await conn.readReply();
@@ -466,6 +477,16 @@ export async function sendMail(config: SmtpConfig, msg: SmtpMessage): Promise<vo
 
     // 4. AUTH
     if (config.auth) {
+      // Never transmit credentials on a plaintext socket (AUTH PLAIN/LOGIN are
+      // base64, not encrypted). requireTLS only covers the port-587 config; a
+      // custom port (25/2525) whose server advertises AUTH but not STARTTLS
+      // would otherwise fall straight through to AUTH in the clear. The
+      // localhost dev-relay carve-out opts out via allowPlaintextAuth.
+      if (!channelEncrypted && !config.allowPlaintextAuth) {
+        throw new SmtpError(
+          "Refusing to send SMTP credentials over an unencrypted connection (server did not offer STARTTLS)",
+        );
+      }
       const mechs = authMechanisms(ehlo.capabilities);
       if (mechs.length === 0) {
         // Some servers advertise AUTH only after STARTTLS. We've already done that.
