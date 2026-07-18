@@ -68,16 +68,30 @@ function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMen
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [permOpen, setPermOpen]     = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
+    // Move focus into the menu so a keyboard user lands on the first item.
+    menuRef.current?.querySelector<HTMLElement>("button")?.focus();
     function handleClick(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         setOpen(false);
       }
     }
+    function handleKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setOpen(false);
+        triggerRef.current?.focus(); // return focus to the trigger on dismiss
+      }
+    }
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
   }, [open]);
 
   function item(
@@ -104,15 +118,18 @@ function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMen
   return (
     <div ref={ref} className="relative shrink-0">
       <button
+        ref={triggerRef}
         onClick={() => setOpen((v) => !v)}
         aria-label="User actions"
+        aria-haspopup="true"
+        aria-expanded={open}
         className="h-7 w-7 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500 transition-colors"
       >
         <MoreHorizontal className="w-4 h-4" />
       </button>
 
       {open && (
-        <div className="absolute right-0 top-9 z-50 w-44 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl p-1">
+        <div ref={menuRef} className="absolute right-0 top-9 z-50 w-44 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl p-1">
           <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
             Set role
           </p>

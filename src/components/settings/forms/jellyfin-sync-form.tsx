@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, RefreshCcw } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
 
@@ -102,8 +103,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
             >
               {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Library Selection"}
             </Button>
-            {saveStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-            {saveStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
+            <SaveStatusMessage status={saveStatus} />
           </div>
         </>
       )}
@@ -261,7 +261,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             )}
           </Button>
           {saveStatus === "ok" && (
-            <span className="flex items-center gap-1.5 text-sm text-green-400">
+            <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
               <CheckCircle className="w-4 h-4" />
               Connected
               {librariesCount !== null && (
@@ -270,7 +270,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             </span>
           )}
           {saveStatus === "error" && (
-            <span className="flex items-center gap-1.5 text-sm text-red-400">
+            <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
               <XCircle className="w-4 h-4" />{saveErrorMessage || "Failed"}
             </span>
           )}
@@ -293,7 +293,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         </div>
 
         {syncStatus === "done" && syncResult && (
-          <span className="flex items-center gap-1.5 text-sm text-green-400">
+          <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
             <CheckCircle className="w-4 h-4" />
             {syncResult.marked} marked available
             <span className="text-zinc-500">
@@ -302,7 +302,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
           </span>
         )}
         {syncStatus === "error" && (
-          <span className="flex items-center gap-1.5 text-sm text-red-400">
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
             <XCircle className="w-4 h-4" />Sync failed — check server URL and API key
           </span>
         )}

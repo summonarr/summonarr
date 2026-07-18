@@ -227,7 +227,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 value={batchNote}
                 onChange={(e) => setBatchNote(e.target.value)}
                 placeholder="Decline reason (optional)"
-                className="flex-1 min-w-40 focus:outline-none"
+                className="flex-1 min-w-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 style={{
                   padding: "5px 10px",
                   borderRadius: 6,

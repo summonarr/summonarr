@@ -52,7 +52,8 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            role="status"
+            role={t.variant === "error" ? "alert" : "status"}
+            aria-live={t.variant === "error" ? "assertive" : "polite"}
             className="pointer-events-auto flex items-start gap-2.5 ds-page-enter"
             style={{
               padding: "10px 12px",

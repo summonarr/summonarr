@@ -15,6 +15,7 @@ import {
   Clock,
 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useModalA11y } from "@/hooks/use-modal-a11y";
 import type { User } from "./shared";
 
 interface AdminAuthSession {
@@ -45,23 +46,10 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   const mounted = useHasMounted();
   const titleId = `sessions-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Focus the close button on mount, return focus to opener on unmount, ESC closes.
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    closeBtnRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      opener?.focus?.();
-    };
-  }, [onClose]);
+  // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
+  useModalA11y(dialogRef, onClose, closeBtnRef);
 
   useEffect(() => {
     fetch(withBasePath(`/api/admin/users/${u.id}/sessions`))
@@ -118,10 +106,12 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[460px] shadow-2xl flex flex-col max-h-[80vh]"
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[460px] shadow-2xl flex flex-col max-h-[80vh] outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         {}
@@ -179,7 +169,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                       <Clock className="w-2.5 h-2.5" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
                     </span>
                   </div>
-                  <p className="text-[10px] text-zinc-600">
+                  <p className="text-[10px] text-zinc-500">
                     Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
                   </p>
                 </div>

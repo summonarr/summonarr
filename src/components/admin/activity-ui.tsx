@@ -1513,6 +1513,7 @@ export function Th({
 }) {
   return (
     <th
+      scope="col"
       onClick={onSort}
       style={{
         textAlign: align,

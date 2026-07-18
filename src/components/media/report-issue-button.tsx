@@ -432,7 +432,7 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
 
                 <div className="space-y-1.5">
                   <label htmlFor="report-issue-note" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                    Additional details <span className="text-zinc-600 normal-case">(optional)</span>
+                    Additional details <span className="text-zinc-500 normal-case">(optional)</span>
                   </label>
                   <textarea
                     id="report-issue-note"

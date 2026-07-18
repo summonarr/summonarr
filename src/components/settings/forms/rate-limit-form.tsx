@@ -4,7 +4,8 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 
@@ -104,8 +105,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
         </Button>
-        {status === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-        {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
+        <SaveStatusMessage status={status} />
       </div>
     </form>
   );

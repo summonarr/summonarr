@@ -80,13 +80,13 @@ export function AnnounceUpdateButton() {
           {phase === "sending" ? "Sending…" : "Send update notice to all iOS devices"}
         </Button>
         {summary && (
-          <span className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
+          <span role={phase === "error" ? "alert" : "status"} aria-live={phase === "error" ? "assertive" : "polite"} className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
             {summary}
           </span>
         )}
       </div>
       {phase === "idle" && (
-        <p className="text-xs text-zinc-600">
+        <p className="text-xs text-zinc-500">
           Pushes a generic &quot;a new version is available on the App Store&quot; alert to every iOS device registered on this server.
         </p>
       )}

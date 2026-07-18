@@ -275,10 +275,12 @@ export function SearchBar({
                 <button
                   key={value}
                   type="button"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    setFilter(value);
-                  }}
+                  // preventDefault on mousedown keeps focus in the search input
+                  // (no blur/close); the actual filter change is on onClick so
+                  // keyboard users (Enter/Space on the focused button) can toggle
+                  // it too — onMouseDown alone was mouse-only.
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setFilter(value)}
                   className="inline-flex items-center gap-1 font-medium transition-colors"
                   style={{
                     padding: "2px 10px",

@@ -234,7 +234,7 @@ export default async function AdminIssuesPage({
                         {poster ? (
                           <Image src={poster} alt={issue.title} fill className="object-cover" sizes="40px" />
                         ) : (
-                          <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
+                          <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                             {issue.mediaType === "MOVIE" ? <Film className="w-4 h-4" /> : <Tv2 className="w-4 h-4" />}
                           </div>
                         )}

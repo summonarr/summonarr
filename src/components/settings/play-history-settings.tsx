@@ -135,7 +135,7 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setWatchedThreshold(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-600">Minimum percentage of media that must be played to count as &quot;watched&quot;</p>
+            <p className="text-xs text-zinc-500">Minimum percentage of media that must be played to count as &quot;watched&quot;</p>
           </div>
 
           <div className="space-y-1.5">
@@ -149,7 +149,7 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setCompletionThreshold(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-600">Cumulative watch percentage across one viewing arc to count as a completion in &quot;Popular on Server&quot;. Stricter than the per-session Watched threshold.</p>
+            <p className="text-xs text-zinc-500">Cumulative watch percentage across one viewing arc to count as a completion in &quot;Popular on Server&quot;. Stricter than the per-session Watched threshold.</p>
           </div>
 
           <div className="space-y-1.5">
@@ -163,7 +163,7 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setArcGapDays(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-600">Sessions on the same media farther apart than this start a new viewing arc. A weekend chunked watch stays one arc; a months-later rewatch starts a new one.</p>
+            <p className="text-xs text-zinc-500">Sessions on the same media farther apart than this start a new viewing arc. A weekend chunked watch stays one arc; a months-later rewatch starts a new one.</p>
           </div>
 
           <div className="space-y-1.5">
@@ -177,7 +177,7 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setPollingInterval(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-600">How often to check for active sessions (default: 5s). Requires container restart via PLAY_HISTORY_SYNC_INTERVAL env var.</p>
+            <p className="text-xs text-zinc-500">How often to check for active sessions (default: 5s). Requires container restart via PLAY_HISTORY_SYNC_INTERVAL env var.</p>
           </div>
 
           <div className="space-y-1.5">
@@ -190,7 +190,7 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setRetentionDays(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-600">Delete play history older than this many days. 0 = keep forever.</p>
+            <p className="text-xs text-zinc-500">Delete play history older than this many days. 0 = keep forever.</p>
           </div>
 
           <div className="space-y-2 pt-2 border-t border-zinc-800">

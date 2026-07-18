@@ -28,7 +28,7 @@ export function IssueCardShell({ issueId, messageCount, children }: IssueCardShe
               ? "bg-indigo-600/20 border-indigo-500/40 text-indigo-400"
               : messageCount > 0
               ? "bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-indigo-400 hover:border-indigo-500/40"
-              : "border-zinc-800 text-zinc-600 hover:text-zinc-400 hover:border-zinc-700"
+              : "border-zinc-800 text-zinc-500 hover:text-zinc-400 hover:border-zinc-700"
           }`}
         >
           <MessageSquare className="w-3.5 h-3.5" />

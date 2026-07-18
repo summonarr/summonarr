@@ -148,7 +148,7 @@ export function WebhookUrls({
           No secret token set — webhook endpoints are unauthenticated. Set a token above.
         </p>
       )}
-      <p className="text-xs text-zinc-600">
+      <p className="text-xs text-zinc-500">
         In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Import + On Manual Interaction Required · Use the URLs above (token is included). 4K rows point at the same endpoint with the 4K instance&apos;s own token.
       </p>
     </div>

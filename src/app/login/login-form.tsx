@@ -352,7 +352,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               `Sign in with ${oidcName}`
             )}
           </Button>
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
         </div>
       )}
 
@@ -370,7 +370,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               "Sign in with Plex"
             )}
           </Button>
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
         </div>
       )}
 
@@ -409,7 +409,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
               {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> : "Generate QuickConnect Code"}
             </Button>
           )}
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
           <button
             type="button"
             onClick={() => { setJellyfinMode("password"); setError(""); setQcCode(null); setLoading(false); }}
@@ -480,7 +480,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
             </>
           )}
 
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
 
           <RememberMeCheckbox checked={rememberMe} onChange={setRememberMe} />
 

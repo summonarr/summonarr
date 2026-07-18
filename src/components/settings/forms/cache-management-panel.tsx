@@ -136,7 +136,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       )}
 
       {msg && (
-        <span className={`text-xs w-full sm:w-auto ${msg.kind === "err" ? "text-red-400" : "text-green-400"}`}>
+        <span role={msg.kind === "err" ? "alert" : "status"} aria-live={msg.kind === "err" ? "assertive" : "polite"} className={`text-xs w-full sm:w-auto ${msg.kind === "err" ? "text-red-400" : "text-green-400"}`}>
           {msg.text}
         </span>
       )}

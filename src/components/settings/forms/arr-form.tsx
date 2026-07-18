@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, RefreshCw, Download } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
 
@@ -148,8 +149,7 @@ export function ArrForm({
           <Button type="submit" disabled={status === "saving" || !url || !apiKey} className="bg-indigo-600 hover:bg-indigo-500">
             {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save & Test"}
           </Button>
-          {status === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{message}</span>}
-          {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{message}</span>}
+          <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
         </div>
       </form>
 
@@ -212,8 +212,7 @@ export function ArrForm({
                 >
                   {optionsSaveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Defaults"}
                 </Button>
-                {optionsSaveStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-                {optionsSaveStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
+                <SaveStatusMessage status={optionsSaveStatus} />
               </div>
             </form>
           )}
@@ -269,13 +268,13 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
             : <><Download className="w-4 h-4 mr-2" />Import from {label}</>}
         </Button>
         {importStatus === "ok" && (
-          <span className="flex items-center gap-1.5 text-sm text-green-400">
+          <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
             <CheckCircle className="w-4 h-4" />
             {importCount} {service === "radarr" ? "movie(s)" : "show(s)"} pending
           </span>
         )}
         {importStatus === "error" && (
-          <span className="flex items-center gap-1.5 text-sm text-red-400">
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
             <XCircle className="w-4 h-4" />{importError}
           </span>
         )}

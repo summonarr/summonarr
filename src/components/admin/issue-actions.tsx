@@ -314,7 +314,7 @@ export function IssueActions({
             disabled={loading !== null}
             aria-label="Delete issue"
             title="Delete issue"
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-600 hover:text-red-400 hover:border-red-500/50"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-red-400 hover:border-red-500/50"
           >
             <Trash2 className="w-3 h-3" />
           </Button>
@@ -340,7 +340,7 @@ export function IssueActions({
             {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
             Done
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-600 hover:text-zinc-400 text-xs">Cancel</button>
+          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">Cancel</button>
         </div>
       )}
 
@@ -356,7 +356,7 @@ export function IssueActions({
             {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
             Delete
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-600 hover:text-zinc-400 text-xs">Cancel</button>
+          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">Cancel</button>
         </div>
       )}
 
@@ -471,7 +471,7 @@ export function IssueActions({
                               {rel.quality.revision.version > 1 && " v2"}
                             </span>
                             <span className="text-xs text-zinc-500">{formatSize(rel.size)}</span>
-                            <span className="text-xs text-zinc-600">{rel.indexer}</span>
+                            <span className="text-xs text-zinc-500">{rel.indexer}</span>
                             {rel.protocol === "torrent" && rel.seeders != null && (
                               <span className={`text-xs ${rel.seeders > 5 ? "text-green-500/70" : rel.seeders > 0 ? "text-yellow-500/70" : "text-red-500/70"}`}>
                                 {rel.seeders}S
@@ -493,7 +493,7 @@ export function IssueActions({
                 {rejectedCount > 0 && (
                   <button
                     onClick={() => setShowRejected((v) => !v)}
-                    className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-zinc-600 hover:text-zinc-400 border-t border-zinc-800 transition-colors flex-shrink-0"
+                    className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-zinc-500 hover:text-zinc-400 border-t border-zinc-800 transition-colors flex-shrink-0"
                   >
                     {showRejected ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                     {showRejected ? "Hide" : "Show"} {rejectedCount} rejected

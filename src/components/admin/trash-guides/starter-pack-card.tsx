@@ -262,7 +262,7 @@ export function StarterPackCard({
                 <div key={service} className="mb-4 last:mb-0">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">
                     {service === "RADARR" ? "Radarr (Movies)" : "Sonarr (TV)"}
-                    <span className="ml-2 font-normal normal-case tracking-normal text-zinc-600">{rows.length}</span>
+                    <span className="ml-2 font-normal normal-case tracking-normal text-zinc-500">{rows.length}</span>
                   </h3>
                   <div className="grid sm:grid-cols-2 gap-3">
                     {rows.map((row, i) => (
@@ -376,7 +376,7 @@ function StarterPackRow({
           </div>
           <p className="text-xs text-zinc-500 mt-1 whitespace-pre-line">{item.rationale}</p>
           {spec && (
-            <p className="text-[11px] text-zinc-600 mt-2 font-mono truncate" title={spec.trashId}>
+            <p className="text-[11px] text-zinc-500 mt-2 font-mono truncate" title={spec.trashId}>
               {spec.name} · {spec.trashId.slice(0, 14)}…
             </p>
           )}

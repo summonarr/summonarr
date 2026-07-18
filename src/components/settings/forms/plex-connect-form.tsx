@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Unlink, Download } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
 
@@ -102,8 +103,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
             >
               {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Library Selection"}
             </Button>
-            {saveStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-            {saveStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
+            <SaveStatusMessage status={saveStatus} />
           </div>
         </>
       )}
@@ -322,7 +322,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       )}
 
       {status === "error" && (
-        <p className="flex items-center gap-1.5 text-sm text-red-400">
+        <p role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
           <XCircle className="w-4 h-4" />{error}
         </p>
       )}
@@ -359,7 +359,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 )}
               </Button>
               {serverStatus === "ok" && (
-                <span className="flex items-center gap-1.5 text-sm text-green-400">
+                <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
                   <CheckCircle className="w-4 h-4" />
                   Connected
                   {librariesCount !== null && (
@@ -368,7 +368,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 </span>
               )}
               {serverStatus === "error" && (
-                <span className="flex items-center gap-1.5 text-sm text-red-400">
+                <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
                   <XCircle className="w-4 h-4" />{serverErrorMessage || "Failed"}
                 </span>
               )}
@@ -392,7 +392,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   )}
                 </Button>
                 {importStatus === "done" && importResult && (
-                  <span className="flex items-center gap-1.5 text-sm text-green-400">
+                  <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
                     <CheckCircle className="w-4 h-4" />
                     {importResult.marked} marked available
                     <span className="text-zinc-500">
@@ -401,7 +401,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   </span>
                 )}
                 {importStatus === "error" && (
-                  <span className="flex items-center gap-1.5 text-sm text-red-400">
+                  <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
                     <XCircle className="w-4 h-4" />Import failed — check server URL
                   </span>
                 )}

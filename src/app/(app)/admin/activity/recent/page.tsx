@@ -147,9 +147,9 @@ export default async function RecentlyAddedPage() {
                   ) : (
                     <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-3">
                       {item.mediaType === "TV" ? (
-                        <Tv2 className="w-8 h-8 text-zinc-600" />
+                        <Tv2 className="w-8 h-8 text-zinc-500" />
                       ) : (
-                        <Film className="w-8 h-8 text-zinc-600" />
+                        <Film className="w-8 h-8 text-zinc-500" />
                       )}
                       <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
                     </div>

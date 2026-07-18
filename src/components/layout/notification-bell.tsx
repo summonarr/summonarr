@@ -87,13 +87,19 @@ export function NotificationBell() {
   // Close on outside click / Escape.
   useEffect(() => {
     if (!open) return;
+    // Move focus into the panel on open so keyboard users land inside it (was
+    // relying on Tab reaching the links after the trigger).
+    (panelRef.current?.querySelector<HTMLElement>("a[href], button") ?? panelRef.current)?.focus();
     function onDoc(e: MouseEvent) {
       const t = e.target as Node;
       if (panelRef.current?.contains(t) || btnRef.current?.contains(t)) return;
       setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        btnRef.current?.focus(); // return focus to the bell on dismiss
+      }
     }
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -162,7 +168,8 @@ export function NotificationBell() {
         <div
           ref={panelRef}
           role="menu"
-          className="absolute right-0 mt-2 overflow-hidden"
+          tabIndex={-1}
+          className="absolute right-0 mt-2 overflow-hidden outline-none"
           style={{
             width: 340,
             maxWidth: "calc(100vw - 24px)",

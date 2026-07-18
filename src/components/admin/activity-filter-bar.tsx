@@ -182,7 +182,7 @@ export function ActivityFilterBar() {
                   onChange={(e) => setCustomValue(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && applyCustomDays()}
                   placeholder="days"
-                  className="w-16 px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500 tabular-nums"
+                  className="w-16 px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 tabular-nums"
                 />
                 <button
                   onClick={applyCustomDays}

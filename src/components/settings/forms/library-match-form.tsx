@@ -4,7 +4,8 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2, RefreshCw } from "@/components/icons";
+import { Loader2, RefreshCw } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 
@@ -31,14 +32,14 @@ function LibraryMatchMediaBlock({
       {data && (
         <>
           <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-0.5">
-            <p className="text-[10px] text-zinc-600 uppercase tracking-wide">Mount point (auto-stripped)</p>
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wide">Mount point (auto-stripped)</p>
             <p className="text-xs text-zinc-300 font-mono">{data.mountPoint || "(none detected)"}</p>
           </div>
 
           <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
-            <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Sample relative paths</p>
+            <p className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Sample relative paths</p>
             {data.samples.length === 0
-              ? <p className="text-[11px] text-zinc-600 italic">No paths found</p>
+              ? <p className="text-[11px] text-zinc-500 italic">No paths found</p>
               : data.samples.map((s, i) => (
                   <p key={i} className="text-[11px] text-zinc-400 font-mono truncate" title={s}>{s}</p>
                 ))
@@ -59,7 +60,7 @@ function LibraryMatchMediaBlock({
 
       {data && prefix && (
         <div className="rounded bg-zinc-800/60 border border-zinc-700/60 px-3 py-2 space-y-1">
-          <p className="text-[10px] text-zinc-600 uppercase tracking-wide mb-1">Preview after stripping</p>
+          <p className="text-[10px] text-zinc-500 uppercase tracking-wide mb-1">Preview after stripping</p>
           {data.samples.map((s, i) => {
             const after   = applyPrefix(s, prefix);
             const changed = after !== s;
@@ -89,7 +90,7 @@ function LibraryMatchServerBlock({
       <p className={`text-xs font-semibold uppercase tracking-wide ${accent}`}>{label}</p>
 
       {!data && !loading && (
-        <p className="text-xs text-zinc-600 italic">Click &quot;Load examples&quot; to see sample paths.</p>
+        <p className="text-xs text-zinc-500 italic">Click &quot;Load examples&quot; to see sample paths.</p>
       )}
       {loadError && <p className="text-xs text-red-400">{loadError}</p>}
 
@@ -221,8 +222,7 @@ export function LibraryMatchForm({
         <Button type="submit" disabled={saveStatus === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
         </Button>
-        {saveStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />Saved</span>}
-        {saveStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />Failed to save</span>}
+        <SaveStatusMessage status={saveStatus} />
       </form>
     </div>
   );

@@ -80,7 +80,7 @@ export function RatingsWarmButton() {
         <RefreshCw className="w-4 h-4" />Full Sync
       </Button>
       {results && (
-        <div className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}>
+        <div role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}>
           <div>OMDB: {results.omdb}</div>
           <div>MDBList: {results.mdblist}</div>
         </div>

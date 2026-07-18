@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Loader2,
@@ -12,6 +12,7 @@ import {
   AlertTriangle,
 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useModalA11y } from "@/hooks/use-modal-a11y";
 import { AdminToggleRow, type User } from "./shared";
 
 type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
@@ -33,25 +34,10 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
   const [saving, setSaving] = useState(false);
   const titleId = `notif-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Focus the close button on mount, return focus to the opener on unmount,
-  // and close on ESC. Minimal a11y trap (no Tab cycling — small panel, low
-  // risk of focus escape; can revisit if we adopt @base-ui/react Dialog).
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    closeBtnRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      opener?.focus?.();
-    };
-  }, [onClose]);
+  // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
+  useModalA11y(dialogRef, onClose, closeBtnRef);
 
   async function toggle(key: NotifKey) {
     const newVal = !prefs[key];
@@ -83,10 +69,12 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl"
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
@@ -119,7 +107,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             <AdminToggleRow label="Request Declined" checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} disabled={saving} />
           </div>
         ) : (
-          <p className="text-xs text-zinc-600 mb-3 italic">Discord not linked — no Discord notifications</p>
+          <p className="text-xs text-zinc-500 mb-3 italic">Discord not linked — no Discord notifications</p>
         )}
 
         <div>

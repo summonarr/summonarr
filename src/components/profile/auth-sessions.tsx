@@ -97,7 +97,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   <Clock className="w-3 h-3" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
                 </span>
               </div>
-              <p className="text-xs text-zinc-600">
+              <p className="text-xs text-zinc-500">
                 Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
               </p>
             </div>

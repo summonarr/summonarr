@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   ShieldCheck,
@@ -10,6 +10,7 @@ import {
 import { Permission, PRESETS, parsePermissions } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
+import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   AdminToggleRow,
   roleLabel,
@@ -133,23 +134,11 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
   const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
   const titleId = `perm-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const isSuperAdmin = (perms & Permission.ADMIN) !== 0n;
 
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    closeBtnRef.current?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      opener?.focus?.();
-    };
-  }, [onClose]);
+  // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
+  useModalA11y(dialogRef, onClose, closeBtnRef);
 
   async function savePerms(next: bigint, prev: bigint) {
     setSaving(true);
@@ -251,10 +240,12 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
   return (
     <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl max-h-[85vh] overflow-y-auto"
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl max-h-[85vh] overflow-y-auto outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
@@ -309,7 +300,7 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
             {namedInstances.length > 0 && (
               <div className="mb-3">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Instance access</p>
-                <p className="text-[10px] text-zinc-600 mb-2">
+                <p className="text-[10px] text-zinc-500 mb-2">
                   Per-user access to named Radarr/Sonarr instances. The default instance is open to every requester; 4K uses the permission toggles above.
                 </p>
                 {namedInstances.map((inst) => {
@@ -319,7 +310,7 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
                       <p className="text-[11px] text-zinc-400 mb-0.5">
                         {inst.name}
                         {open && (
-                          <span className="text-zinc-600"> — open to all requesters</span>
+                          <span className="text-zinc-500"> — open to all requesters</span>
                         )}
                       </p>
                       {!open && (
@@ -344,7 +335,7 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
 
             <div className="mt-3">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Quota overrides</p>
-              <p className="text-[10px] text-zinc-600 mb-2">Blank = use the global quota. Limit = max requests in a rolling window of N days.</p>
+              <p className="text-[10px] text-zinc-500 mb-2">Blank = use the global quota. Limit = max requests in a rolling window of N days.</p>
               <QuotaRow
                 label="Movies"
                 limit={quota.movieQuotaLimit}
@@ -369,7 +360,7 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
 
             <div className="mt-3">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Parental control</p>
-              <p className="text-[10px] text-zinc-600 mb-2">Maximum content rating this user can request. Applies to movies and TV; admins are exempt.</p>
+              <p className="text-[10px] text-zinc-500 mb-2">Maximum content rating this user can request. Applies to movies and TV; admins are exempt.</p>
               <select
                 value={maxRating}
                 onChange={(e) => saveMaxRating(e.target.value)}

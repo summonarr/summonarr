@@ -54,7 +54,7 @@ function SortHeader({
   const flexAlign = align === "right" ? "justify-end" : "justify-start";
 
   return (
-    <th className={`py-3 px-4 ${alignClass}`}>
+    <th scope="col" className={`py-3 px-4 ${alignClass}`}>
       <Link
         href={`/admin/activity/users?${params.toString()}`}
         className={`inline-flex items-center gap-1 select-none hover:text-zinc-300 transition-colors ${flexAlign}`}
@@ -136,7 +136,7 @@ export default async function UsersActivityPage({
           name="search"
           defaultValue={search ?? ""}
           placeholder="Search by username…"
-          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500"
         />
       </form>
 
@@ -154,8 +154,8 @@ export default async function UsersActivityPage({
                     7-col table sums to ~831 px (≈1.9× a 440 px viewport). The
                     two hidden columns are the lowest-information for a mobile
                     leaderboard view. */}
-                <th className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
-                <th className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
+                <th scope="col" className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
+                <th scope="col" className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
               </tr>
             </thead>
             <tbody>
@@ -197,16 +197,16 @@ export default async function UsersActivityPage({
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-300 tabular-nums font-medium">
-                      {u.plays > 0 ? u.plays.toLocaleString() : <span className="text-zinc-600">0</span>}
+                      {u.plays > 0 ? u.plays.toLocaleString() : <span className="text-zinc-500">0</span>}
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-400 tabular-nums">
-                      {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-600">—</span>}
+                      {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="py-3 px-4 text-zinc-400 text-xs">
                       {u.lastActive ? formatRelativeTimeWithDateFallback(u.lastActive) : "Never"}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
-                      {u.favPlatform ?? <span className="text-zinc-600">—</span>}
+                      {u.favPlatform ?? <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-right">
                       {u.directPct !== null ? (
@@ -224,7 +224,7 @@ export default async function UsersActivityPage({
                           </span>
                         </div>
                       ) : (
-                        <span className="text-zinc-600 text-xs">—</span>
+                        <span className="text-zinc-500 text-xs">—</span>
                       )}
                     </td>
                   </tr>

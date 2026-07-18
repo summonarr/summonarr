@@ -444,7 +444,7 @@ export function CastSection({ cast }: CastSectionProps) {
                                 className="object-cover"
                               />
                             ) : (
-                              <div className="absolute inset-0 flex items-center justify-center text-zinc-600">
+                              <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                                 {credit.mediaType === "movie" ? <Film className="w-8 h-8" /> : <Tv2 className="w-8 h-8" />}
                               </div>
                             )}

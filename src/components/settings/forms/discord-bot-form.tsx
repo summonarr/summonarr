@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, ChevronDown, ExternalLink } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import type { SaveStatus } from "./shared";
@@ -481,8 +482,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
             {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
           </Button>
-          {status === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{message}</span>}
-          {status === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{message}</span>}
+          <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
         </div>
       </form>
 
@@ -515,8 +515,8 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           >
             {regStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Registering…</> : "Register Slash Commands"}
           </Button>
-          {regStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{regMessage}</span>}
-          {regStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{regMessage}</span>}
+          {regStatus === "ok"    && <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{regMessage}</span>}
+          {regStatus === "error" && <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{regMessage}</span>}
         </div>
         <p className="text-xs text-zinc-500 mt-1.5">Re-registers slash commands with Discord. Run this after changing Guild ID or Bot Token.</p>
       </div>
@@ -550,8 +550,8 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           >
             {syncRolesStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</> : "Sync Discord Roles"}
           </Button>
-          {syncRolesStatus === "ok"    && <span className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{syncRolesMessage}</span>}
-          {syncRolesStatus === "error" && <span className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{syncRolesMessage}</span>}
+          {syncRolesStatus === "ok"    && <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{syncRolesMessage}</span>}
+          {syncRolesStatus === "error" && <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{syncRolesMessage}</span>}
         </div>
         <p className="text-xs text-zinc-500 mt-1.5">Assigns the Linked, Plex, and Jellyfin roles to all users who have already linked their Discord account. Run this once after configuring role IDs to backfill existing users.</p>
       </div>

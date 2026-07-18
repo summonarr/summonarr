@@ -146,7 +146,7 @@ export function MasterDbFillButton() {
         )}
       </div>
       {phase === "idle" && (
-        <p className="text-xs text-zinc-600">
+        <p className="text-xs text-zinc-500">
           Full library scan + TMDB metadata seed. One-time operation for new installs.
         </p>
       )}

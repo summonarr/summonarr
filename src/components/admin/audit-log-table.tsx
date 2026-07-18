@@ -440,7 +440,7 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
 function DetailSection({ details, action, expanded }: { details: string | null; action: string; expanded?: boolean }) {
   const [isExpanded, setIsExpanded] = useState(expanded ?? false);
   const parsed = parseDetails(details);
-  if (!parsed) return <span className="text-zinc-600 text-xs">—</span>;
+  if (!parsed) return <span className="text-zinc-500 text-xs">—</span>;
 
   const before = parsed.before as Record<string, unknown> | undefined;
   const after = parsed.after as Record<string, unknown> | undefined;
@@ -500,12 +500,12 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   lowest-information columns for a mobile glance (Source is
                   usually inferable from the Action verb; Details truncates
                   anyway). The wrapping overflow-x-auto div remains a safety net. */}
-              <th className="text-left px-4 py-3 font-medium">Time</th>
-              <th className="text-left px-4 py-3 font-medium">User</th>
-              <th className="text-left px-4 py-3 font-medium">Action</th>
-              <th className="text-left px-4 py-3 font-medium">Target</th>
-              <th className="hidden sm:table-cell text-left px-4 py-3 font-medium">Details</th>
-              <th className="hidden sm:table-cell text-left px-4 py-3 font-medium">Source</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">Time</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">User</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">Action</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">Target</th>
+              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">Details</th>
+              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">Source</th>
             </tr>
           </thead>
           <tbody>
@@ -600,7 +600,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                           </span>
                           <span className="text-xs text-zinc-500 font-mono">{log.target}</span>
                         </div>
-                        <span className="text-xs text-zinc-600" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
+                        <span className="text-xs text-zinc-500" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                           {mounted ? relativeTime(log.createdAt) : ""}
                         </span>
                       </div>
@@ -610,7 +610,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                       </div>
 
                       {(log.ipAddress || log.provider || log.userAgent) && (
-                        <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-600">
+                        <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-500">
                           {log.ipAddress && (
                             <span className="flex items-center gap-1">
                               <Globe size={10} /> {log.ipAddress}
@@ -762,7 +762,7 @@ export function AuditLogView({
       )}
 
       {!hasMore && logs.length > 0 && (
-        <p className="text-center text-xs text-zinc-600">{logs.length} entries loaded</p>
+        <p className="text-center text-xs text-zinc-500">{logs.length} entries loaded</p>
       )}
     </div>
   );

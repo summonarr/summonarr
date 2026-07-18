@@ -111,7 +111,7 @@ export function EnableMachineSessionToggle({
             rows={2}
             spellCheck={false}
             placeholder="Any IP allowed"
-            className="w-full rounded-md bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full rounded-md bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <div className="flex items-center gap-2 mt-1.5">
             <button
