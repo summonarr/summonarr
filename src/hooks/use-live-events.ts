@@ -128,6 +128,14 @@ export function useLiveEvents(onEvent: (event: LiveEvent) => void) {
     const sub: Subscriber = (event) => onEventRef.current(event);
     subscribers.add(sub);
     ensureEventSource();
+    // The server sends its one-shot {type:"connected"} only at stream open, so a
+    // subscriber joining an already-open singleton (opened long ago by an
+    // always-mounted consumer like the header bell) would never see it and any
+    // connection indicator would read "Connecting…" until the stream recycles.
+    // Synthesize it for late joiners.
+    if (singleton && singleton.readyState === EventSource.OPEN) {
+      sub({ type: "connected" });
+    }
     return () => {
       subscribers.delete(sub);
       if (subscribers.size === 0) teardownEventSource();

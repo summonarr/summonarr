@@ -17,7 +17,7 @@
 //  - TV items key on the SERIES folder (first path segment after the
 //    configured strip prefix), not the season/episode path, and the sonarr
 //    verdict lookup uses that same series key;
-//  - the ARR tie-breaker reads the cached `arr:radarr|sonarr:paths` map
+//  - the ARR tie-breaker reads the cached `arr:radarr|sonarr:paths:name` map
 //    (folder-basename → tmdbId): arr agreeing with Plex flags the JELLYFIN
 //    side and vice versa; an arr id matching neither side yields a verdict of
 //    null while still exposing arrTmdbId; a cache hit never re-writes the
@@ -126,7 +126,7 @@ function jfItem(tmdbId: number, mediaType: MediaType, filePath: string | null): 
 // Seed a FRESH arr path-map cache row so buildArrPathMap takes the cache-hit
 // path (real getCache) and never reaches settings / the dynamic arr import.
 function seedArrPaths(service: "radarr" | "sonarr", entries: [string, number][]): void {
-  const key = `arr:${service}:paths`;
+  const key = `arr:${service}:paths:name`;
   cacheRows.set(key, {
     key,
     data: JSON.stringify(entries),

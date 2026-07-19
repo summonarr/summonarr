@@ -532,7 +532,7 @@ export function buildDeviceMeta(headers: Headers): DeviceMeta {
 type JwtToken = Record<string, unknown>;
 
 // Mutates `token` in place at sign-in: fills sessionId, computes the TTL →
-// expiresAt/maxExpiresAt, resolves mediaServer when not provider-pinned, and
+// expiresAt, resolves mediaServer when not provider-pinned, and
 // upserts the backing AuthSession row.
 export async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
   if (!token.sessionId) {
@@ -581,12 +581,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   } else {
     ttl = desktopDuration;
   }
+  // Hard ceiling captured once at sign-in. verifyAndRefreshSession bounds the
+  // sliding expiry against the `expiresAt` claim so non-admins can't be silently
+  // extended past the original session TTL (which is itself capped at
+  // MAX_ALLOWED_SESSION_SECONDS in getSessionDurations()).
   token.expiresAt = Math.floor(Date.now() / 1000) + ttl;
-  // Hard ceiling captured once at sign-in. refreshToken() bounds the sliding
-  // expiry against this value so non-admins can't be silently extended past
-  // the original session TTL (which is itself capped at MAX_ALLOWED_SESSION_SECONDS
-  // in getSessionDurations()). Server-side only — never exposed via session().
-  token.maxExpiresAt = token.expiresAt;
 
   const userId = user.id as string | undefined;
   if (!token.mediaServer && userId) {
@@ -803,7 +802,10 @@ export async function authorizeWithPlex(
 
     if (adminTokenRow?.value) {
       const allowed = await getPlexFriendEmails(adminTokenRow.value, plexServerUrl);
-      if (adminEmailRow?.value) allowed.add(adminEmailRow.value.toLowerCase());
+      // normalizeEmail (NFKC + lowercase + trim) — verifiedEmail is normalized the
+      // same way, and plex-membership.ts normalizes identically, so a Setting value
+      // with stray whitespace/Unicode form can't make the two gates disagree.
+      if (adminEmailRow?.value) allowed.add(normalizeEmail(adminEmailRow.value));
 
       if (allowed.has(verifiedEmail)) {
         const plexDbUser = await findOrCreatePlexUser({
@@ -1084,8 +1086,8 @@ export async function signInAndMintSession(params: {
   const deviceLabelField = (user as { _deviceLabel?: string })._deviceLabel;
   if (deviceLabelField) token.deviceLabel = deviceLabelField;
 
-  // initializeTokenOnSignIn mutates `token` in place: sets sessionId/expiresAt/
-  // maxExpiresAt, looks up mediaServer if not provider-pinned, AND creates the
+  // initializeTokenOnSignIn mutates `token` in place: sets sessionId/expiresAt,
+  // looks up mediaServer if not provider-pinned, AND creates the
   // AuthSession row.
   await initializeTokenOnSignIn(token, user);
 

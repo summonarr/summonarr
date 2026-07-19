@@ -16,7 +16,20 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
 
   const authToken = body.authToken;
-  const plexUser = await getPlexUser(authToken);
+  // Validate the token against plex.tv BEFORE any Setting write. getPlexUser
+  // throws on a bad/expired token or an unreachable plex.tv — map that to a
+  // clean 422 (mirrors the settings PATCH route's plexError semantics) instead
+  // of an unhandled 500.
+  let plexUser: Awaited<ReturnType<typeof getPlexUser>>;
+  try {
+    plexUser = await getPlexUser(authToken);
+  } catch (err) {
+    console.error("[settings/plex] Plex token validation failed:", err);
+    return NextResponse.json(
+      { error: "Plex token is invalid or plex.tv could not be reached" },
+      { status: 422 },
+    );
+  }
 
   await Promise.all([
     prisma.setting.upsert({

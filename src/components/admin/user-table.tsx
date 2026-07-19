@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -70,6 +70,12 @@ function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMen
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Stable identities — useModalA11y keys its effect on onClose, so an inline
+  // arrow would re-run the focus-trap setup (and steal focus) on every render.
+  const closeNotif = useCallback(() => setNotifOpen(false), []);
+  const closeSessions = useCallback(() => setSessionsOpen(false), []);
+  const closePerm = useCallback(() => setPermOpen(false), []);
 
   useEffect(() => {
     if (!open) return;
@@ -206,9 +212,9 @@ function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMen
         </div>
       )}
 
-      {notifOpen    && <NotificationsModal u={u} onClose={() => setNotifOpen(false)} />}
-      {sessionsOpen && <SessionsModal      u={u} onClose={() => setSessionsOpen(false)} />}
-      {permOpen     && <PermissionsModal   u={u} onClose={() => setPermOpen(false)} show4k={has4k} namedInstances={namedInstances} />}
+      {notifOpen    && <NotificationsModal u={u} onClose={closeNotif} />}
+      {sessionsOpen && <SessionsModal      u={u} onClose={closeSessions} />}
+      {permOpen     && <PermissionsModal   u={u} onClose={closePerm} show4k={has4k} namedInstances={namedInstances} />}
     </div>
   );
 }

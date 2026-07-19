@@ -191,7 +191,7 @@ function CandidateRow({
 }) {
   const hash     = candidate.guid.split("/").pop() ?? candidate.guid;
   const thumbSrc = candidate.thumb
-    ? `/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`
+    ? withBasePath(`/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`)
     : posterUrl(candidate.tmdbPosterPath, "w342");
   const arrMatch = arrTmdbId !== null && candidate.tmdbId === String(arrTmdbId);
 

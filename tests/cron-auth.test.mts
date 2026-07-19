@@ -3,10 +3,15 @@
 //
 //   - isCronAuthorized's CRON_SECRET Bearer path: exact "Bearer " scheme, the
 //     hash-first timing-safe compare (differing lengths never throw), and
-//     fail-closed on a wrong/missing/blank secret or an unset env var. The
-//     admin-session path needs a DB and is intentionally NOT exercised — with
-//     no cookie and a non-JWT bearer, readActiveSummonarrSessionFromRequest
-//     resolves null without touching prisma, so these tests stay offline.
+//     fail-closed on a wrong/missing/blank secret or an unset env var.
+//   - isCronAuthorized's admin-session path, per transport (guardrail 6b): a
+//     COOKIE admin session must pass BOTH the same-origin check and the
+//     UA-fingerprint check (load-bearing CSRF defenses — cron/sync routes are
+//     exempt from the proxy's Origin gate), while a BEARER admin session skips
+//     both (a cross-origin page cannot attach a custom Authorization header to
+//     a credentialed request, and native clients send no Origin/Referer at
+//     all). The DB reads behind verifyAndRefreshSession run against the fake
+//     prisma's authSession/user models below, so these tests stay offline.
 //   - batchCreateMany's chunking contract (guardrail 4): CREATE_MANY_BATCH is
 //     5000 (pinned via 12001 rows → 5000/5000/2001), chunks run sequentially
 //     (never a parallel burst against the pool), skipDuplicates on every call,
@@ -43,12 +48,44 @@ type SettingUpsertArgs = {
 const upsertCalls: SettingUpsertArgs[] = [];
 let failUpserts = false;
 
+// In-memory backing for the admin-session transport tests: session rows by
+// sessionId, users by id. Empty by default so the CRON_SECRET tests never see
+// a session even if a stray cookie/bearer header were present.
+const sessionRows = new Set<string>();
+const usersById = new Map<
+  string,
+  {
+    role: string;
+    permissions: bigint;
+    mediaServer: string | null;
+    sessionsRevokedAt: Date | null;
+    passwordChangedAt: Date | null;
+    deactivatedAt: Date | null;
+    email: string | null;
+    notificationEmail: string | null;
+  }
+>();
+
 const fakePrisma = {
   setting: {
     upsert: async (args: SettingUpsertArgs): Promise<{ key: string; value: string }> => {
       upsertCalls.push(args);
       if (failUpserts) throw new Error("unit-test DB write failure");
       return args.create;
+    },
+  },
+  authSession: {
+    findUnique: async (args: { where: { sessionId: string } }) =>
+      sessionRows.has(args.where.sessionId)
+        ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
+        : null,
+    // lastSeenAt fire-and-forget touch — no-op.
+    update: async () => ({}),
+  },
+  user: {
+    findUnique: async (args: { where: { id: string } }) => {
+      const u = usersById.get(args.where.id);
+      return u ? { ...u } : null;
     },
   },
 };
@@ -63,6 +100,10 @@ const {
   recordCronRun,
   withCronRunRecording,
 } = await import("../src/lib/cron-auth.ts");
+const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
+const { extractUaFingerprint, serializeFingerprint } = await import(
+  "../src/lib/ua-fingerprint.ts"
+);
 
 function lastLedgerWrite(): { key: string; parsed: ReturnType<typeof parseCronLastRun> } {
   const call = upsertCalls[upsertCalls.length - 1];
@@ -309,6 +350,116 @@ test("isCronAuthorized: webhook-style ?token= query param is NOT accepted here",
   const ok = await isCronAuthorized(
     cronRequest(undefined, `/api/sync?token=${encodeURIComponent(CRON_SECRET)}`),
   );
+  assert.equal(ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// isCronAuthorized — admin-session path, per transport (guardrail 6b)
+// ---------------------------------------------------------------------------
+
+// With neither env set, buildSessionTrustedOrigins falls back to the request's
+// own origin (http://localhost:3000) — deterministic for these tests.
+delete process.env.AUTH_URL;
+delete process.env.AUTH_TRUSTED_ORIGIN;
+
+const ADMIN_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// Mints a REAL session JWT whose AuthSession row + User row exist in the fake
+// prisma, so readActiveSummonarrSessionFromRequest's DB-checked slow path
+// resolves it. Claim permissions mirror the DB mask so no sessionId rotation
+// (which would need $transaction) is triggered.
+async function mintSession(sessionId: string, role: "ADMIN" | "USER"): Promise<string> {
+  const userId = `user-${sessionId}`;
+  sessionRows.add(sessionId);
+  usersById.set(userId, {
+    role,
+    permissions: role === "ADMIN" ? 1n : 0n,
+    mediaServer: null,
+    sessionsRevokedAt: null,
+    passwordChangedAt: null,
+    deactivatedAt: null,
+    email: "admin@example.com",
+    notificationEmail: null,
+  });
+  return signSessionJwt(
+    {
+      id: userId,
+      role,
+      permissions: role === "ADMIN" ? "1" : "0",
+      email: "admin@example.com",
+      name: null,
+      provider: "credentials",
+      mediaServer: null,
+      sessionId,
+      uaFingerprint: serializeFingerprint(extractUaFingerprint(ADMIN_UA)),
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    },
+    { expiresInSeconds: 3600 },
+  );
+}
+
+test("isCronAuthorized: cookie admin session + same-origin + matching UA → authorized", async () => {
+  const jwt = await mintSession("sess-cookie-ok", "ADMIN");
+  const ok = await isCronAuthorized(
+    cronRequest({
+      cookie: `summonarr-session=${jwt}`,
+      origin: "http://localhost:3000",
+      "user-agent": ADMIN_UA,
+    }),
+  );
+  assert.equal(ok, true);
+});
+
+test("isCronAuthorized: cookie admin session WITHOUT Origin/Referer fails closed (CSRF gate is load-bearing for cookies)", async () => {
+  const jwt = await mintSession("sess-cookie-no-origin", "ADMIN");
+  const ok = await isCronAuthorized(
+    cronRequest({
+      cookie: `summonarr-session=${jwt}`,
+      "user-agent": ADMIN_UA,
+    }),
+  );
+  assert.equal(ok, false);
+});
+
+test("isCronAuthorized: cookie admin session with a mismatched UA fingerprint fails closed", async () => {
+  const jwt = await mintSession("sess-cookie-bad-ua", "ADMIN");
+  const ok = await isCronAuthorized(
+    cronRequest({
+      cookie: `summonarr-session=${jwt}`,
+      origin: "http://localhost:3000",
+      "user-agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    }),
+  );
+  assert.equal(ok, false);
+});
+
+test("isCronAuthorized: BEARER admin session authorizes with no Origin and an arbitrary UA (guardrail 6b)", async () => {
+  // A native client sends no Origin/Referer and its own UA; the custom
+  // Authorization header is the CSRF-sound signal, so neither browser-shaped
+  // gate applies to this transport.
+  const jwt = await mintSession("sess-bearer-ok", "ADMIN");
+  const ok = await isCronAuthorized(
+    cronRequest({
+      authorization: `Bearer ${jwt}`,
+      "user-agent": "Summonarr-iOS/42",
+    }),
+  );
+  assert.equal(ok, true);
+});
+
+test("isCronAuthorized: a bearer NON-admin session is still refused (role gate unchanged)", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const jwt = await mintSession("sess-bearer-user", "USER");
+  const ok = await isCronAuthorized(
+    cronRequest({
+      authorization: `Bearer ${jwt}`,
+      "user-agent": "Summonarr-iOS/42",
+    }),
+  );
+  // Not ADMIN → the session branch declines; the JWT then fails the
+  // CRON_SECRET compare, so the request is unauthorized.
   assert.equal(ok, false);
 });
 

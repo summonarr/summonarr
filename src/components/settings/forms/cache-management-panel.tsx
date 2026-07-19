@@ -80,7 +80,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
     setBusy("refetch");
     setMsg(null);
     try {
-      const res = await fetch(source.warmUrl, {
+      const res = await fetch(withBasePath(source.warmUrl), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(source.warmBody ?? {}),
@@ -171,7 +171,7 @@ export function CacheManagementPanel() {
 
     for (const source of CACHE_SOURCES) {
       try {
-        const res = await fetch(source.warmUrl, {
+        const res = await fetch(withBasePath(source.warmUrl), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(source.warmBody ?? {}),

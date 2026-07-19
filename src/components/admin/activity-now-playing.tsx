@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
+import { withBasePath } from "@/lib/base-path";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
 import {
@@ -156,7 +157,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetch(withBasePath(endpoint), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

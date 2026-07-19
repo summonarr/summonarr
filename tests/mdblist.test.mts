@@ -393,25 +393,25 @@ test("response rows are matched by id (out-of-order); rows beyond the page lengt
   assert.ok(cacheRows.has("mdblist:tmdb:movie:7"));
 });
 
-test("PINS CURRENT BEHAVIOR: in a full-length response an unknown id consumes a position — the displaced requested id gets the 24h sentinel", async () => {
-  // MDBList echoing an id we never asked for (here 42) still occupies a page
-  // slot: raw.id wins over the positional pageItem's id, so 42 lands in the
-  // map/cache and the requested id 2 reads as omitted → negative-cached. If
-  // MDBList ever legitimately returns substitute ids this is the line to
-  // revisit; until then, pin the raw.id-first resolution.
+test("a full-length response padded with an unknown id drops the foreign row and does NOT sentinel the displaced requested id", async () => {
+  // MDBList echoing an id we never asked for (here 42) must not fall back
+  // positionally — that would mis-bind it to the wrong requested item — and it
+  // must not pad the "response covered the full request" count: id 2 was never
+  // actually answered for, so negative-caching it would suppress a title that
+  // may exist for the full 24h TTL.
   respond = () => jsonResponse([
     { id: 1, ratings: [{ source: "imdb", value: 8 }] },
     { id: 42, ratings: [{ source: "imdb", value: 3 }] },
   ]);
   const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }], "movie");
-  assert.deepEqual([...map.keys()].sort((a, b) => a - b), [1, 42]);
-  assert.equal(map.get(42)?.imdbRating, "3");
-  assert.ok(cacheRows.has("mdblist:tmdb:movie:42"), "the unknown id is cached under itself");
-
-  const sentinel = cacheRows.get("mdblist:tmdb:movie:2");
-  assert.ok(sentinel, "the displaced requested id must be negative-cached");
-  assert.deepEqual(JSON.parse(sentinel.data), { _notFound: true });
-  assert.equal(sentinel.expiresAt.getTime(), Date.now() + DAY_MS);
+  assert.deepEqual([...map.keys()], [1]);
+  assert.equal(map.has(42), false);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:42"), false, "the foreign id is dropped, not cached");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:2"), false, "the displaced requested id is NOT negative-cached");
+  assert.ok(
+    warns.some((w) => w.includes("[mdblist] batch movie returned 1 unmatched row(s) (2 rows for 2 ids)")),
+    "the unmatched row must be warned",
+  );
 });
 
 test("short and empty batch responses NEVER negative-cache the omitted ids (warned as partial/transient instead)", async () => {

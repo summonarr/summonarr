@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -104,11 +104,18 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const instanceLabel = (slug: string) =>
     instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
 
+  // Debounced ~500ms so a burst of request:* events (bulk approve, a sync run)
+  // coalesces into one refresh — mirrors activity-live-refresher.tsx.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useLiveEvents((event) => {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
-      router.refresh();
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = setTimeout(() => router.refresh(), 500);
     }
   });
+  useEffect(() => () => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+  }, []);
   const [batchLoading, setBatchLoading] = useState(false);
   const [batchNote, setBatchNote] = useState("");
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
