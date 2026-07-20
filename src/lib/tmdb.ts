@@ -635,10 +635,12 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
     return cached;
   }
 
-  const [r, ratings] = await Promise.all([
-    tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar,keywords,watch/providers,external_ids" }),
-    fetchUnifiedRatings(id, "movie"),
-  ]);
+  // Sequential on purpose: the ratings caches derive their TTL from the release
+  // date (libraryDetailsTtl). Fetching in parallel passed no date, so a
+  // brand-new release's MDBList/OMDB rows were cached with the 30-day
+  // back-catalog TTL instead of the 3-day fresh-title one.
+  const r = await tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar,keywords,watch/providers,external_ids" });
+  const ratings = await fetchUnifiedRatings(id, "movie", r.release_date ?? null);
 
   const media = normalizeMovie(r);
   const usEntry = r.release_dates?.results.find((x) => x.iso_3166_1 === "US");
@@ -727,10 +729,10 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     }
   }
 
-  const [r, ratings] = await Promise.all([
-    tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons,keywords,watch/providers,external_ids" }),
-    fetchUnifiedRatings(id, "tv"),
-  ]);
+  // Sequential on purpose — see getMovieDetails: the ratings caches key their
+  // TTL off the release date, so it must be known before the ratings fetch.
+  const r = await tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons,keywords,watch/providers,external_ids" });
+  const ratings = await fetchUnifiedRatings(id, "tv", r.first_air_date ?? null);
 
   const media = normalizeTV(r);
   const usEntry = r.content_ratings?.results.find((x) => x.iso_3166_1 === "US");
@@ -1144,29 +1146,20 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
 
-  let fromYear = filters.fromYear ? parseInt(filters.fromYear, 10) : undefined;
-  let toYear = filters.toYear ? parseInt(filters.toYear, 10) : undefined;
-  let minRating = filters.minRating ? parseFloat(filters.minRating) : undefined;
-  const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
-  if (fromYear !== undefined && (isNaN(fromYear) || fromYear < 1888 || fromYear > 2100)) fromYear = undefined;
-  if (toYear !== undefined && (isNaN(toYear) || toYear < 1888 || toYear > 2100)) toYear = undefined;
-  if (minRating !== undefined) {
-    if (isNaN(minRating)) minRating = undefined;
-    else minRating = Math.min(10, Math.max(0, minRating));
-  }
-
+  // Every filter below was already validated/normalized (or dropped) by
+  // sanitizeDiscoverFilters above — no re-parsing needed.
   const params: Record<string, string> = {
     include_adult: "false",
     sort_by: filters.sortBy ?? "popularity.desc", // already allowlisted at entry
     page: String(p),
   };
-  if (filters.genreId)         params["with_genres"] = filters.genreId;
-  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
-  if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
-  if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
-  if (fromYear !== undefined)   params["primary_release_date.gte"] = `${fromYear}-01-01`;
-  if (toYear !== undefined)     params["primary_release_date.lte"] = `${toYear}-12-31`;
-  if (watchProvider) { params["with_watch_providers"] = watchProvider; params["watch_region"] = filters.watchRegion ?? "US"; }
+  if (filters.genreId)       params["with_genres"] = filters.genreId;
+  if (filters.keywordId)     params["with_keywords"] = filters.keywordId;
+  if (filters.minRating)     params["vote_average.gte"] = filters.minRating;
+  if (filters.minVoteCount)  params["vote_count.gte"] = filters.minVoteCount;
+  if (filters.fromYear)      params["primary_release_date.gte"] = `${filters.fromYear}-01-01`;
+  if (filters.toYear)        params["primary_release_date.lte"] = `${filters.toYear}-12-31`;
+  if (filters.watchProvider) { params["with_watch_providers"] = filters.watchProvider; params["watch_region"] = filters.watchRegion ?? "US"; }
 
   const r = await tmdbFetch<PagedResponse<RawMovie>>("/discover/movie", params);
   const result: PagedResult = {
@@ -1186,29 +1179,20 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
 
-  let fromYear = filters.fromYear ? parseInt(filters.fromYear, 10) : undefined;
-  let toYear = filters.toYear ? parseInt(filters.toYear, 10) : undefined;
-  let minRating = filters.minRating ? parseFloat(filters.minRating) : undefined;
-  const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
-  if (fromYear !== undefined && (isNaN(fromYear) || fromYear < 1888 || fromYear > 2100)) fromYear = undefined;
-  if (toYear !== undefined && (isNaN(toYear) || toYear < 1888 || toYear > 2100)) toYear = undefined;
-  if (minRating !== undefined) {
-    if (isNaN(minRating)) minRating = undefined;
-    else minRating = Math.min(10, Math.max(0, minRating));
-  }
-
+  // Every filter below was already validated/normalized (or dropped) by
+  // sanitizeDiscoverFilters above — no re-parsing needed.
   const params: Record<string, string> = {
     include_adult: "false",
     sort_by: filters.sortBy ?? "popularity.desc", // already allowlisted at entry
     page: String(p),
   };
-  if (filters.genreId)         params["with_genres"] = filters.genreId;
-  if (filters.keywordId && /^[\d|,]+$/.test(filters.keywordId)) params["with_keywords"] = filters.keywordId;
-  if (minRating !== undefined)  params["vote_average.gte"] = String(minRating);
-  if (filters.minVoteCount)    params["vote_count.gte"] = filters.minVoteCount;
-  if (fromYear !== undefined)   params["first_air_date.gte"] = `${fromYear}-01-01`;
-  if (toYear !== undefined)     params["first_air_date.lte"] = `${toYear}-12-31`;
-  if (watchProvider) { params["with_watch_providers"] = watchProvider; params["watch_region"] = filters.watchRegion ?? "US"; }
+  if (filters.genreId)       params["with_genres"] = filters.genreId;
+  if (filters.keywordId)     params["with_keywords"] = filters.keywordId;
+  if (filters.minRating)     params["vote_average.gte"] = filters.minRating;
+  if (filters.minVoteCount)  params["vote_count.gte"] = filters.minVoteCount;
+  if (filters.fromYear)      params["first_air_date.gte"] = `${filters.fromYear}-01-01`;
+  if (filters.toYear)        params["first_air_date.lte"] = `${filters.toYear}-12-31`;
+  if (filters.watchProvider) { params["with_watch_providers"] = filters.watchProvider; params["watch_region"] = filters.watchRegion ?? "US"; }
 
   const r = await tmdbFetch<PagedResponse<RawTV>>("/discover/tv", params);
   const result: PagedResult = {

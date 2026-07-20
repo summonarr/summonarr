@@ -44,7 +44,10 @@ interface RawItem {
   first_air_date?: string;
   last_air_date?: string | null;
   vote_average?: number;
+  vote_count?: number;
   seasons?: RawSeason[];
+  videos?: { results?: { key: string; site: string; type: string; official: boolean }[] };
+  belongs_to_collection?: { id: number; name: string } | null;
 
   runtime?: number;
   episode_run_time?: number[];
@@ -86,6 +89,15 @@ function pwKeywords(raw?: RawItem["keywords"]): { id: number; name: string }[] |
   if (!list?.length) return undefined;
   return list.slice(0, 12).map((k) => ({ id: k.id, name: k.name }));
 }
+// Mirrors extractTrailerKey in tmdb.ts (not exported there): official YouTube
+// trailer first, then any trailer, then official teaser, then any teaser.
+function pwTrailerKey(videos?: RawItem["videos"]): string | null {
+  if (!videos?.results?.length) return null;
+  const trailers = videos.results.filter((v) => v.site === "YouTube" && v.type === "Trailer");
+  const teasers  = videos.results.filter((v) => v.site === "YouTube" && v.type === "Teaser");
+  const official = trailers.find((v) => v.official) ?? trailers[0] ?? teasers.find((v) => v.official) ?? teasers[0];
+  return official?.key ?? null;
+}
 function pwWatchProviders(raw?: RawItem["watch/providers"], region = "US"): TmdbMedia["watchProviders"] {
   const r = raw?.results?.[region];
   if (!r) return undefined;
@@ -112,12 +124,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   // release_dates/content_ratings included so the prewarm rewrite of the shared
   // :details blob (and the TmdbMediaCore upsert) carries the US certification —
   // omitting them made every prewarm refresh silently drop a previously-stored
-  // cert badge from both the grid and the detail page.
+  // cert badge from both the grid and the detail page. `videos` rides along for
+  // the same reason: without it the rewrite dropped the trailerKey that
+  // getMovieDetails/getTVDetails had stored, and the trailer button vanished
+  // for library titles (same failure class as the cert drop).
   url.searchParams.set(
     "append_to_response",
     mediaType === "TV"
-      ? "seasons,keywords,watch/providers,external_ids,content_ratings"
-      : "keywords,watch/providers,external_ids,release_dates",
+      ? "seasons,keywords,watch/providers,external_ids,content_ratings,videos"
+      : "keywords,watch/providers,external_ids,release_dates,videos",
   );
 
   let res: Response;
@@ -183,7 +198,9 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     : undefined;
 
   const title = (mediaType === "MOVIE" ? raw.title : raw.name) ?? "";
-  const releaseYear = rawDate ? rawDate.substring(0, 4) : "Unknown";
+  // null (not "Unknown") — the normalize writers (tmdb.ts) use null for a
+  // missing year, and both persist the same :details key / TmdbMediaCore row.
+  const releaseYear = rawDate ? rawDate.substring(0, 4) : null;
   const originalTitle = mediaType === "MOVIE" ? raw.original_title : raw.original_name;
   const studios = (mediaType === "TV" && raw.networks?.length ? raw.networks : raw.production_companies) ?? [];
   const countries = raw.production_countries?.length
@@ -205,8 +222,16 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     releaseDate: rawDate ?? null,
     releaseYear,
     voteAverage: raw.vote_average ?? 0,
+    voteCount: raw.vote_count ?? 0,
     ...(certification && { certification }),
     ...(seasons !== undefined && { seasons }),
+    // trailerKey/collection mirror getMovieDetails/getTVDetails — omitting them
+    // made every prewarm refresh erase the trailer button and the collection
+    // row from library titles' detail pages (see the append_to_response note).
+    trailerKey: pwTrailerKey(raw.videos),
+    ...(mediaType === "MOVIE" && raw.belongs_to_collection
+      ? { collectionId: raw.belongs_to_collection.id, collectionName: raw.belongs_to_collection.name }
+      : {}),
 
     genres:          genreObjs.map((g) => g.name),
     genreList:       genreObjs,

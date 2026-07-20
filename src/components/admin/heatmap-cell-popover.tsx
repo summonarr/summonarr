@@ -8,6 +8,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import Link from "next/link";
 import { Loader2, X } from "@/components/icons";
 import type { HeatmapCellDetail } from "@/lib/play-history";
 import { withBasePath } from "@/lib/base-path";
@@ -160,7 +161,7 @@ export function HeatmapCellPopover({
       </div>
 
       {viewPlaysHref && detail && detail.totalPlays > 0 && (
-        <a
+        <Link
           href={viewPlaysHref}
           className="ds-mono"
           style={{
@@ -173,7 +174,7 @@ export function HeatmapCellPopover({
           }}
         >
           View these plays →
-        </a>
+        </Link>
       )}
     </div>,
     document.body,
@@ -384,13 +385,13 @@ function KV({
       >
         {dot && <span style={{ width: 7, height: 7, borderRadius: 2, background: dot, flexShrink: 0 }} />}
         {href ? (
-          <a
+          <Link
             href={href}
             title={k}
             style={{ color: "var(--ds-accent)", textDecoration: "none", minWidth: 0 }}
           >
             {keyText}
-          </a>
+          </Link>
         ) : (
           keyText
         )}

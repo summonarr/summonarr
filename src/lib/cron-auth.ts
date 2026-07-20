@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
+import { parseBearerToken } from "@/lib/mobile-auth";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { prisma } from "@/lib/prisma";
 
@@ -61,11 +62,22 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   // path. readActiveSummonarrSession() read the cookie only.
   const claims = await readActiveSummonarrSessionFromRequest(request);
   if (claims?.role === "ADMIN") {
-    if (!isSameOriginRequest(request)) return false;
-    // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
-    // admin cookie replayed from another device (with a forged trusted Origin) must
-    // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
-    if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
+    // Transport check: the session read above resolves bearer-FIRST (token =
+    // bearer ?? cookie), so when an Authorization bearer is present, the claims
+    // came from it — a cookie can never produce claims while a bearer header
+    // exists. Bearer/native sessions skip the same-origin and UA-fingerprint
+    // gates (guardrail 6b): a cross-origin page cannot attach a custom
+    // Authorization header to a credentialed request, so neither check defends
+    // anything for that transport — and enforcing them locked native admins
+    // (no Origin/Referer header) out of every cron/sync route.
+    const fromBearer = parseBearerToken(request.headers.get("authorization")) !== null;
+    if (!fromBearer) {
+      if (!isSameOriginRequest(request)) return false;
+      // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
+      // admin cookie replayed from another device (with a forged trusted Origin) must
+      // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
+      if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
+    }
     return true;
   }
 

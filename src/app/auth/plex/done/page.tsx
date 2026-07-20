@@ -129,7 +129,7 @@ export default function PlexDonePage() {
     const stored = sessionStorage.getItem("plex-redirect-auth");
 
     if (!stored) {
-      window.location.replace("/login");
+      window.location.replace(withBasePath("/login"));
       return;
     }
 
@@ -141,7 +141,7 @@ export default function PlexDonePage() {
       // Corrupted/tampered sessionStorage value would otherwise throw here and leave the user
       // stuck on the loading spinner with no recovery path. Fall back to /login the same way the
       // missing-key branch above does.
-      window.location.replace("/login");
+      window.location.replace(withBasePath("/login"));
       return;
     }
 
