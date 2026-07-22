@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Loader2 } from "@/components/icons";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { withBasePath } from "@/lib/base-path";
+import { safeInternalPath } from "@/lib/safe-url";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -51,8 +52,10 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   // on session.role === "ADMIN").
   const { refresh: refreshSession } = useSummonarrSession();
 
-  const rawCallback = searchParams.get("callbackUrl") ?? "/";
-  const callbackUrl = rawCallback.startsWith("/") && !rawCallback.startsWith("//") ? rawCallback : "/";
+  // Resolve-then-compare-origin, not a startsWith test: `?callbackUrl=/%09/evil.com`
+  // decodes to `/\t/evil.com`, which passes "starts with / and not //" but which
+  // router.push resolves to https://evil.com/. See src/lib/safe-url.ts.
+  const callbackUrl = safeInternalPath(searchParams.get("callbackUrl")) ?? "/";
 
   const defaultProvider: Provider = localLoginDisabled
     ? (oidcEnabled ? "oidc" : plexEnabled ? "plex" : jellyfinEnabled ? "jellyfin" : "credentials")

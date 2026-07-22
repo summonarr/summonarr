@@ -6,6 +6,7 @@ import {
   signOidcStateCookie,
 } from "@/lib/oidc";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { safeInternalPath } from "@/lib/safe-url";
 
 function getRedirectUri(base: string): string {
   return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
@@ -19,16 +20,11 @@ function isSecureCookieContext(): boolean {
 }
 
 // Validates a callbackUrl query param so an attacker can't smuggle an open
-// redirect through the OIDC state cookie. Same rules as login-form.tsx
-// (must start with "/", not "//"). Returns undefined for missing or invalid
+// redirect through the OIDC state cookie. Shares safeInternalPath with the
+// callback route and login-form.tsx — the old hand-rolled
+// `startsWith("/") && !startsWith("//")` test was bypassable with an embedded
+// TAB/LF/CR (see src/lib/safe-url.ts). Returns undefined for missing or invalid
 // input — the callback then falls back to "/".
-function safeCallbackUrl(raw: string | null): string | undefined {
-  if (!raw) return undefined;
-  if (!raw.startsWith("/") || raw.startsWith("//")) return undefined;
-  // Reject `\` which Internet Explorer / older browsers historically treated as `/`.
-  if (raw.includes("\\")) return undefined;
-  return raw;
-}
 
 export async function GET(req: NextRequest) {
   if (!checkRateLimit(`oidc-start:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
@@ -45,7 +41,7 @@ export async function GET(req: NextRequest) {
   }
 
   const redirectUri = getRedirectUri(authUrl);
-  const returnTo = safeCallbackUrl(req.nextUrl.searchParams.get("callbackUrl"));
+  const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
   let auth;
   try {
     auth = await buildOidcAuthorization(redirectUri, returnTo);
