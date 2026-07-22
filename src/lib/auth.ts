@@ -11,6 +11,7 @@ import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matches
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
 import { markUserForceRevalidate, markSessionForceRevoked } from "@/lib/session-revocation";
 import type { SummonarrSession } from "@/lib/api-auth";
+import { machineIpAllowed } from "@/lib/api-auth";
 import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-server";
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
@@ -432,8 +433,12 @@ export async function authActive(): Promise<SummonarrSession | null> {
   // stolen cookie replayed with a prefetch-looking header could render protected
   // pages. Page renders are cookie/SSR only (no bearer); machine:/no-fingerprint
   // sessions are skipped inside the helper.
-  const ua = (await headers()).get("user-agent");
-  if (!matchesStoredFingerprint(claims.uaFingerprint, ua)) return null;
+  const h = await headers();
+  if (!matchesStoredFingerprint(claims.uaFingerprint, h.get("user-agent"))) return null;
+  // A machine session carries a mint-time IP allowlist; the API guards + isCronAuthorized
+  // enforce it, so bind the page-render path too — else a leaked machine JWT could render
+  // admin pages from a disallowed IP. Absent/empty allowlist ⇒ true (no restriction).
+  if (!machineIpAllowed(claims, h as unknown as Headers)) return null;
   return claimsToSession(claims);
 }
 

@@ -456,27 +456,37 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // Guard against that misconfiguration at write time: require the allowlist to be
   // already persisted non-empty, OR to be set non-empty in this same PATCH, before
   // flipping enableMachineSession on.
-  if (body.enableMachineSession === "true") {
-    const incomingAllowlist =
+  // Evaluate the EFFECTIVE post-PATCH state, not just the case where the feature is
+  // being turned on. The original guard only fired on `enableMachineSession === "true"`,
+  // so a later PATCH that CLEARED machineSessionAllowedIps (an allowed clearable key)
+  // while the feature stayed on would silently restore the IP-unrestricted state this
+  // guard exists to prevent. Reject whenever the resulting state is feature-on +
+  // empty-allowlist, regardless of which of the two this PATCH is touching.
+  const touchesMachineSession =
+    body.enableMachineSession !== undefined || body.machineSessionAllowedIps !== undefined;
+  if (touchesMachineSession) {
+    const [enableRow, allowRow] = await Promise.all([
+      body.enableMachineSession === undefined
+        ? prisma.setting.findUnique({ where: { key: "enableMachineSession" } })
+        : Promise.resolve(null),
+      body.machineSessionAllowedIps === undefined
+        ? prisma.setting.findUnique({ where: { key: "machineSessionAllowedIps" } })
+        : Promise.resolve(null),
+    ]);
+    const effectiveEnabled =
+      body.enableMachineSession !== undefined
+        ? body.enableMachineSession === "true"
+        : enableRow?.value === "true";
+    const effectiveAllowlistNonEmpty =
       typeof body.machineSessionAllowedIps === "string"
-        ? body.machineSessionAllowedIps
-        : undefined;
-    let allowlistNonEmpty: boolean;
-    if (incomingAllowlist !== undefined) {
-      // Being set in this PATCH — empty string clears it.
-      allowlistNonEmpty = parseIpAllowlist(incomingAllowlist).length > 0;
-    } else {
-      const allowRow = await prisma.setting.findUnique({
-        where: { key: "machineSessionAllowedIps" },
-      });
-      allowlistNonEmpty = parseIpAllowlist(allowRow?.value).length > 0;
-    }
-    if (!allowlistNonEmpty) {
+        ? parseIpAllowlist(body.machineSessionAllowedIps).length > 0
+        : parseIpAllowlist(allowRow?.value).length > 0;
+    if (effectiveEnabled && !effectiveAllowlistNonEmpty) {
       return NextResponse.json(
         {
           error:
-            "Cannot enable the machine-session API without a non-empty IP allowlist. " +
-            "Set machineSessionAllowedIps first (or in the same request) so any holder " +
+            "The machine-session API cannot be enabled with an empty IP allowlist. " +
+            "Set machineSessionAllowedIps (or keep it non-empty) so any holder " +
             "of CRON_SECRET cannot mint an admin session from any IP.",
         },
         { status: 400 },
