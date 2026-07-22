@@ -189,16 +189,27 @@ function flushSqlChunk(
 const SAFE_LITERAL_RE = /^(NULL|TRUE|FALSE|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|'(?:[^']|'')*')$/;
 
 // What may legitimately follow the single VALUES tuple. The exporter emits
-// exactly one `(...)` tuple optionally followed by `ON CONFLICT DO NOTHING`
-// (whose exact shape is already pinned by ALLOWED_PATTERNS[0]). Anything else —
-// in particular a second `, (...)` tuple, which the greedy `VALUES \([\s\S]*\)`
-// regex would otherwise admit — must be rejected. validateValuesTokens used to
-// `return true` at the first tuple's closing `)`, so it never inspected a
-// smuggled second tuple like `('a'), ((SELECT ...))`.
+// exactly one `(...)` tuple optionally followed by `ON CONFLICT DO NOTHING`.
+// Anything else — in particular a second `, (...)` tuple, which the greedy
+// `VALUES \([\s\S]*\)` regex would otherwise admit — must be rejected.
+// validateValuesTokens used to `return true` at the first tuple's closing `)`,
+// so it never inspected a smuggled second tuple like `('a'), ((SELECT ...))`.
+//
+// The tail is matched WHOLE (anchored `$`), never by prefix. ALLOWED_PATTERNS[0]
+// cannot be relied on to pin it: its `VALUES \([\s\S]*\)` is greedy, so the
+// trailing `\)` happily matches the LAST `)` in the statement and the optional
+// `ON CONFLICT … DO NOTHING` group then matches empty. That let a crafted dump
+// smuggle `ON CONFLICT ("key") DO UPDATE SET "value" = (SELECT …)` past both the
+// allowlist regex and this check — arbitrary SQL expression execution (sub-SELECT
+// across any table, pg_read_file, …) as the app's DB role. The INSERT branch of
+// isStatementSafe returns before DANGEROUS_SQL_PATTERN, so this is the only gate.
+// `DO UPDATE` is never emitted by the exporter (db-export appends DO NOTHING).
+const ON_CONFLICT_TAIL_RE = /^ON CONFLICT(?:\s*\([^()]*\))?\s+DO NOTHING$/i;
+
 function remainderAfterTupleIsSafe(rest: string): boolean {
   const trimmed = rest.trim();
   if (trimmed === "") return true;
-  return /^ON CONFLICT\b/i.test(trimmed);
+  return ON_CONFLICT_TAIL_RE.test(trimmed);
 }
 
 function validateValuesTokens(valuesClause: string): boolean {

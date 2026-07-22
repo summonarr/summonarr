@@ -215,6 +215,12 @@ const [
       `INSERT INTO "public"."NotATable" ("id") VALUES ('x');`,
       `INSERT INTO "public"."User" ("id") VALUES ((SELECT 'x'));`,
       `INSERT INTO "public"."User" ("id") VALUES ('a'), ('b');`,
+      // ON CONFLICT tail must be matched WHOLE, not by an `^ON CONFLICT` prefix:
+      // ALLOWED_PATTERNS[0]'s greedy `VALUES \([\s\S]*\)` lets the trailing `\)`
+      // bind to the LAST `)` in the statement, so a `DO UPDATE SET <expr>` clause
+      // slipped past the allowlist AND the tuple validator — arbitrary SQL
+      // expression execution from a crafted dump.
+      `INSERT INTO "public"."Setting" ("key", "value") VALUES ('a', 'b') ON CONFLICT ("key") DO UPDATE SET "value" = (SELECT "passwordHash" FROM "public"."User" LIMIT 1);`,
       `${STMT.userInsert};`,
     ].join("\n"),
   ),
@@ -369,19 +375,22 @@ test("garbage text inside a validly-encrypted stream fails validation (ok:false 
   assert.equal(txCalls.length, 0);
 });
 
-test("injection defenses: DROP, non-backup table, sub-SELECT VALUES, and multi-tuple smuggles are all blocked", async () => {
+test("injection defenses: DROP, non-backup table, sub-SELECT VALUES, multi-tuple and ON CONFLICT DO UPDATE smuggles are all blocked", async () => {
   const res = expectFailure(await runImport([new Uint8Array(BADSTMTS_ENC)]));
   assert.equal(res.status, 200);
   assert.equal(res.error, "Backup failed validation");
   const reasons = res.errors ?? [];
-  assert.equal(reasons.length, 4);
+  assert.equal(reasons.length, 5);
   assert.match(reasons[0], /^Blocked disallowed statement: DROP TABLE "User"/);
   assert.match(reasons[1], /^Blocked disallowed statement: INSERT INTO "public"\."NotATable"/);
   assert.match(reasons[2], /^Blocked INSERT with non-literal VALUES: INSERT INTO "public"\."User" \("id"\) VALUES \(\(SELECT/);
   assert.match(reasons[3], /^Blocked INSERT with non-literal VALUES: INSERT INTO "public"\."User" \("id"\) VALUES \('a'\), \('b'\)/);
+  // The tuple itself is all-literal here — only the ON CONFLICT tail is hostile,
+  // so this is caught by remainderAfterTupleIsSafe's whole-match, not the tokens.
+  assert.match(reasons[4], /^Blocked INSERT with non-literal VALUES: INSERT INTO "public"\."Setting"/);
   // The one legitimate statement in the same dump must not execute anyway —
   // a partially-hostile dump is rejected wholesale.
-  assert.equal(res.summary?.total, 5);
+  assert.equal(res.summary?.total, 6);
   assert.equal(res.summary?.executed, 0);
   assert.equal(txCalls.length, 0);
 });
