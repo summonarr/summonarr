@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { Suspense } from "react";
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -24,7 +24,7 @@ export default async function VotesPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.votes");
-  const [sp, session] = await Promise.all([searchParams, auth()]);
+  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
 
   const mine = sp.mine === "1";

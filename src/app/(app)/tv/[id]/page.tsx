@@ -15,7 +15,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
 import { prisma } from "@/lib/prisma";
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
@@ -38,8 +38,8 @@ export default async function TVDetailPage({
   const { id } = await params;
   // Start the session read concurrently with the TMDB details fetch. The no-op
   // catch only marks the promise handled if notFound() fires first — the await
-  // below still rethrows an auth() failure exactly as before.
-  const sessionPromise = auth();
+  // below still rethrows a requireAppSession() redirect/failure exactly as before.
+  const sessionPromise = requireAppSession();
   sessionPromise.catch(() => {});
   let media;
   try {

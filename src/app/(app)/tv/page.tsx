@@ -5,7 +5,7 @@ import {
   type TmdbMedia, type DiscoverFilters,
 } from "@/lib/tmdb";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { isFeatureEnabled } from "@/lib/features";
@@ -45,7 +45,7 @@ export default async function TVPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session] = await Promise.all([searchParams, auth()]);
+  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;

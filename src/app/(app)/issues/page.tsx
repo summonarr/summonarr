@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -41,8 +41,7 @@ export default async function IssuesPage({
   searchParams: Promise<{ page?: string; selected?: string; status?: string; type?: string; q?: string }>;
 }) {
   await requireFeature("feature.page.issues");
-  const session = await auth();
-  if (!session) return null;
+  const session = await requireAppSession();
 
   const {
     page: pageParam,

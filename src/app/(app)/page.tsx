@@ -15,7 +15,7 @@ import { DiscoverHero } from "@/components/media/discover-hero";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { getFeatureFlags } from "@/lib/features";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
@@ -71,7 +71,7 @@ export default async function DiscoverPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session, flags] = await Promise.all([searchParams, auth(), getFeatureFlags()]);
+  const [sp, session, flags] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags()]);
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const upcomingEnabled = flags["feature.page.upcoming"];

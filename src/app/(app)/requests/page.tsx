@@ -1,4 +1,4 @@
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -27,8 +27,7 @@ export default async function RequestsPage({
 }: {
   searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string }>;
 }) {
-  const session = await auth();
-  if (!session) return null;
+  const session = await requireAppSession();
 
   const { page: pageParam, status: statusParam, sort: sortParam, q: qParam } = await searchParams;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
