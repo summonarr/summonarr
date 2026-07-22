@@ -152,10 +152,20 @@ export async function verifyAndRefreshSession(
     .update({ where: { sessionId: claims.sessionId }, data: { lastSeenAt: new Date() } })
     .catch(() => {});
 
-  // ADMIN 7d hard ceiling
+  // ADMIN 7d hard ceiling — anchored to the AuthSession row's createdAt (the stable
+  // session birth), NOT claims.iat. The re-sign below resets iat to `now` on every
+  // DB check (signSessionJwt couples exp to iat, so iat cannot simply be preserved),
+  // so an iat-based ceiling never fires for an actively-used admin token — it would
+  // ride the full rememberMe deadline (maxDuration: 30d default, up to 90d) instead
+  // of being capped at 7 days. createdAt is set once at sign-in and never updated, so
+  // it enforces the true 7d cap. The fast path above stays iat-based but is bounded by
+  // the 10s admin dbCheckedAt window, so this DB check fires within 10s of the 7d mark.
   if (dbUser.role === "ADMIN") {
-    const iat = claims.iat;
-    if (typeof iat === "number" && now >= iat + ADMIN_MAX_LIFETIME_SECONDS) {
+    // createdAt is a non-nullable @default(now()) column, so it's always a Date in
+    // production; the instanceof guard just avoids crashing auth on an unexpected row
+    // shape (fails open on the ceiling only — the session is still DB-checked/revocable).
+    const born = authSessionRow.createdAt;
+    if (born instanceof Date && now >= Math.floor(born.getTime() / 1000) + ADMIN_MAX_LIFETIME_SECONDS) {
       return null;
     }
   }
