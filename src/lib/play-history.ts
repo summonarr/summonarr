@@ -1089,6 +1089,12 @@ type PopularResult = {
 };
 
 const POPULAR_CACHE_TTL_MS = 5 * 60 * 1000;
+// A most-played list never legitimately needs more than this many pages; clamping
+// bounds both the raw-SQL OFFSET depth and the number of distinct per-page cache keys.
+const MAX_POPULAR_PAGE = 100;
+// Hard ceiling on distinct cached (mediaType, sort, page, limit) combinations so the
+// map can't grow without bound (belt-and-suspenders alongside the page/limit clamps).
+const MAX_POPULAR_CACHE_ENTRIES = 2_000;
 const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>();
 
 // Popularity counts *completed arcs*, not raw sessions. An "arc" is a run of consecutive
@@ -1099,7 +1105,13 @@ const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>
 export async function getMostPopularOnServer(
   opts: { mediaType?: "MOVIE" | "TV"; sort?: PopularSort; page?: number; limit?: number } = {},
 ): Promise<PopularResult> {
-  const { mediaType, sort = "plays", page = 1, limit = POPULAR_PER_PAGE } = opts;
+  const { mediaType, sort = "plays" } = opts;
+  // Clamp page/limit at the SOURCE so every caller is bounded — the /popular server
+  // page passes `page` straight through unclamped, which would let one user page
+  // arbitrarily deep, forcing a fresh full-table window aggregation per distinct page
+  // (defeating the 5-minute cache) and growing popularCache without limit.
+  const page = Math.min(Math.max(1, Math.floor(opts.page ?? 1) || 1), MAX_POPULAR_PAGE);
+  const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? POPULAR_PER_PAGE) || POPULAR_PER_PAGE), POPULAR_PER_PAGE);
 
   const cacheKey = JSON.stringify({ mediaType, sort, page, limit });
   const cached = popularCache.get(cacheKey);
@@ -1261,6 +1273,13 @@ export async function getMostPopularOnServer(
     page,
   };
 
+  // Evict the oldest entry when at capacity so the map can't grow unbounded from
+  // distinct cache keys (the page/limit clamps already cap the key space; this is a
+  // hard backstop). Map preserves insertion order, so the first key is the oldest.
+  if (popularCache.size >= MAX_POPULAR_CACHE_ENTRIES && !popularCache.has(cacheKey)) {
+    const oldest = popularCache.keys().next().value;
+    if (oldest !== undefined) popularCache.delete(oldest);
+  }
   popularCache.set(cacheKey, { data: result, expiresAt: Date.now() + POPULAR_CACHE_TTL_MS });
   return result;
 }

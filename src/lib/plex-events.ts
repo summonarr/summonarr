@@ -133,6 +133,16 @@ const MAX_BACKOFF_MS = 60_000;
 // a fast retry; anything shorter escalates toward MAX and becomes visible.
 const STABLE_CONNECTION_MS = MAX_BACKOFF_MS;
 
+// Hard cap on the inter-frame SSE accumulator. Plex timeline events are small JSON
+// frames (well under a KB); 4 MB is generous headroom while bounding heap growth /
+// the O(n²) rescan from a hostile upstream that never emits a `\n\n` boundary.
+const MAX_SSE_BUFFER_BYTES = 4 * 1024 * 1024;
+
+// Max play/timeline notifications processed from a single SSE frame. Each one fires
+// an unbounded `void` DB (+ HTTP) task; this bounds the per-frame fan-out against a
+// hostile upstream. Far above any real concurrent-session/timeline count.
+const MAX_NOTIFICATIONS_PER_FRAME = 256;
+
 // Plex's SSE feed has no defined upper time bound. Reconnect periodically to
 // keep the size-cap accumulator and any undici-side state fresh.
 const PERIODIC_RECYCLE_MS = 22 * 60 * 60 * 1000;
@@ -328,6 +338,16 @@ class PlexEventStreamManager {
           this.handleFrame(frame);
           boundary = buffer.indexOf("\n\n");
         }
+
+        // Bound the inter-frame buffer. Plex timeline frames are small JSON events;
+        // a (hostile/compromised) configured Plex endpoint that streams a huge blob
+        // with NO `\n\n` boundary would otherwise grow `buffer` without limit (heap
+        // exhaustion) AND force an O(n²) full-buffer rescan on every chunk. Past the
+        // cap the frame can't be legitimate — drop the connection so the backoff/
+        // reconnect path takes over instead of accumulating.
+        if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          throw new Error("SSE frame exceeded buffer cap");
+        }
       }
     } finally {
       clearTimeout(recycleTimer);
@@ -449,11 +469,14 @@ class PlexEventStreamManager {
     }
 
     const raw = parsed.PlaySessionStateNotification;
-    const notifications: PlaySessionStateNotification[] = Array.isArray(raw)
-      ? raw
-      : raw
-        ? [raw]
-        : [];
+    const notifications: PlaySessionStateNotification[] = (
+      Array.isArray(raw) ? raw : raw ? [raw] : []
+      // Cap the per-frame fan-out. Each notification fires a `void` DB query +
+      // (for stops) outbound work with no concurrency bound; a hostile/compromised
+      // configured Plex could pack one frame with thousands of notifications to
+      // saturate the DB pool. No real server has anywhere near this many concurrent
+      // sessions, so a legit frame is never truncated.
+    ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
 
     for (const n of notifications) {
       if (!n.sessionKey) continue;
@@ -481,7 +504,9 @@ class PlexEventStreamManager {
       return;
     }
     const raw = parsed.TimelineEntry;
-    const entries: PlexTimelineEntry[] = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const entries: PlexTimelineEntry[] = (
+      Array.isArray(raw) ? raw : raw ? [raw] : []
+    ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
     let materialChange = false;
     for (const e of entries) {
       // Only "created" / "updated" / "deleted" terminal states change the
