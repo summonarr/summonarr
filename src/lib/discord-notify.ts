@@ -414,7 +414,7 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
         ? { id: { not: opts.excludeUserId } }
         : {};
 
-    const rows = await (await import("@/lib/prisma")).prisma.user.findMany({
+    const rows = await prisma.user.findMany({
       where: {
         discordId: { not: null },
         notifyOnIssue: true,

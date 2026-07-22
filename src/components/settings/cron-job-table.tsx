@@ -5,6 +5,7 @@ import { Loader2, Play, CheckCircle, XCircle, Clock } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { withBasePath } from "@/lib/base-path";
 
 export interface CronJobInfo {
   name: string;
@@ -30,7 +31,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   async function triggerJob(endpoint: string, name: string) {
     setRunning((prev) => new Set(prev).add(name));
     try {
-      const res = await fetch(endpoint, { method: "POST" });
+      const res = await fetch(withBasePath(endpoint), { method: "POST" });
       const data = await res.json() as { ok?: boolean; skipped?: boolean; durationMs?: number; error?: string };
 
       setJobs((prev) =>

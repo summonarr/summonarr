@@ -26,8 +26,13 @@ export const GET = withAdmin(async (req) => {
     }
     query.day = day;
   } else {
-    const dow = Number(searchParams.get("dow"));
-    const hour = Number(searchParams.get("hour"));
+    // Reject absent/empty params before coercion — Number(null) and Number("")
+    // are both 0, which would silently resolve to the Sunday-00:00 cell instead
+    // of a 400 (the day branch already 400s on a missing day).
+    const dowRaw = searchParams.get("dow");
+    const hourRaw = searchParams.get("hour");
+    const dow = dowRaw == null || dowRaw === "" ? NaN : Number(dowRaw);
+    const hour = hourRaw == null || hourRaw === "" ? NaN : Number(hourRaw);
     if (!Number.isInteger(dow) || dow < 0 || dow > 6) {
       return NextResponse.json({ error: "dow must be 0-6" }, { status: 400 });
     }

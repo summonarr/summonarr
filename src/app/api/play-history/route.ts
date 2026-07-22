@@ -319,7 +319,10 @@ async function groupedQuery(
   //   duration / title / source / platform → latest segment value
   //
   // Sort column comes from a static whitelist (safeSortBy) so it cannot be
-  // user-injected. Direction is also pre-validated to asc/desc.
+  // user-injected. Direction is also pre-validated to asc/desc. chain_id is
+  // appended as a stable secondary sort so OFFSET pagination can't duplicate
+  // or skip chains when the primary column is non-unique (source/platform/
+  // duration/title all repeat) — mirrors the ungrouped path's `id` tiebreaker.
   const sortColumn = sortBy === "playDuration" ? "total_play_duration" : sortBy;
 
   const dataLimitBind = nextBindIndex;
@@ -363,7 +366,7 @@ async function groupedQuery(
     FROM base b
     LEFT JOIN "MediaServerUser" msu ON msu.id = b."mediaServerUserId"
     WHERE b.rn = 1
-    ORDER BY b."${sortColumn}" ${sortDir.toUpperCase()} NULLS LAST
+    ORDER BY b."${sortColumn}" ${sortDir.toUpperCase()} NULLS LAST, b.chain_id ${sortDir.toUpperCase()}
     LIMIT $${dataLimitBind} OFFSET $${dataOffsetBind}
   `;
 

@@ -55,7 +55,7 @@ function PlexCandidateRow({
 }) {
   const style   = LEVEL_STYLES[candidate.matchLevel] ?? LEVEL_STYLES.unknown;
   const thumbSrc = candidate.thumb
-    ? `/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`
+    ? withBasePath(`/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`)
     : null;
 
   return (

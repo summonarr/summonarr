@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useLiveEvents } from "@/hooks/use-live-events";
 
@@ -16,6 +16,12 @@ export function ActivityLiveRefresher() {
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => router.refresh(), 1_000);
   });
+
+  // Clear a pending refresh on unmount so navigating away within the debounce
+  // window doesn't refresh the next route.
+  useEffect(() => () => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+  }, []);
 
   return null;
 }

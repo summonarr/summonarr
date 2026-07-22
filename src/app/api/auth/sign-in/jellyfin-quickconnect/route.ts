@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { authorizeWithJellyfinQuickConnect, signInAndMintSession } from "@/lib/auth";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { buildSignInResponse } from "@/lib/sign-in-response";
-import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
+import { readJsonCapped } from "@/lib/body-size";
 import {
   buildQcFlowClearedSetCookie,
   hashQuickConnectSecret,
@@ -19,19 +19,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Jellyfin sign-in is not configured" }, { status: 503 });
   }
 
-  const headerCheck = checkBodySize(req, MAX_SIGNIN_BODY_BYTES);
-  if (headerCheck) return headerCheck;
-
-  const raw = new Uint8Array(await req.arrayBuffer());
-  const sizeCheck = assertBodyBytesUnderCap(raw, MAX_SIGNIN_BODY_BYTES);
-  if (sizeCheck) return sizeCheck;
-
-  let body: Record<string, unknown>;
-  try {
-    body = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
+  const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_SIGNIN_BODY_BYTES);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
 
   if (typeof body.secret !== "string") {
     return NextResponse.json({ error: "QuickConnect secret required" }, { status: 400 });

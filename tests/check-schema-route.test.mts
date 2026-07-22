@@ -12,19 +12,23 @@
 //      the session, requires role ADMIN. 401 (no/invalid session) or 403 (wrong
 //      role) short-circuit BEFORE the handler body.
 //   2. inline isCronAuthorized(request) — inside the body; accepts an active
-//      admin session (which additionally requires a same-origin Origin/Referer +
-//      UA-fingerprint) OR `Authorization: Bearer <CRON_SECRET>`. On failure the
-//      handler itself returns 403.
+//      admin session OR `Authorization: Bearer <CRON_SECRET>`. For a COOKIE
+//      admin session it additionally requires a same-origin Origin/Referer +
+//      UA-fingerprint (CSRF hardening for the ambient transport); a BEARER
+//      admin session skips both (guardrail 6b — a cross-origin page cannot
+//      attach a custom Authorization header to a credentialed request). On
+//      failure the handler itself returns 403.
 //
 // The load-bearing, easy-to-get-wrong consequence pinned here: because withAdmin
 // runs FIRST and resolves the Authorization header bearer-FIRST, a bare
 // `Bearer <CRON_SECRET>` is treated as a session token, fails verifySessionJwt,
 // and 401s at step 1 — it NEVER reaches the inline CRON_SECRET branch. So the
 // CRON_SECRET path is effectively shadowed for THIS route: the only way through
-// is an admin session that ALSO clears isCronAuthorized's same-origin gate. That
-// is exactly why the route requires "both an admin session AND" the inline check
-// — the inline check hardens the session path (same-origin/CSRF), it is not an
-// independent CRON_SECRET escape hatch here.
+// is an admin session — via bearer, or via a cookie that ALSO clears
+// isCronAuthorized's same-origin gate. That is exactly why the route requires
+// "both an admin session AND" the inline check — the inline check hardens the
+// cookie-session path (same-origin/CSRF), it is not an independent CRON_SECRET
+// escape hatch here.
 //
 // ── Division of labour (owned elsewhere; NOT re-pinned) ──────────────────────
 //   - tests/cron-auth.test.mts OWNS isCronAuthorized's CRON_SECRET compare
@@ -217,26 +221,45 @@ test("an admin COOKIE alongside a Bearer CRON_SECRET → still 401: bearer-first
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// Step-2 gate: inline isCronAuthorized hardens the admin-session path (same-origin)
+// Step-2 gate: inline isCronAuthorized hardens the COOKIE admin-session path
+// (same-origin CSRF gate). Bearer sessions skip it — guardrail 6b — pinned below.
+// Note: mintToken's claims carry NO uaFingerprint, which matchesStoredFingerprint
+// deliberately passes through, so the Origin/Referer check is the sole
+// discriminator in these tests (matches this file's other cookie fixtures).
 // ════════════════════════════════════════════════════════════════════════════
 
-test("an admin session WITHOUT a same-origin Origin/Referer → 403 from the inline isCronAuthorized (withAdmin passed, the inline check did not)", async () => {
-  // withAdmin admits the admin bearer, but isCronAuthorized's admin-session path
-  // requires a trusted Origin/Referer (CSRF hardening). With none present it
-  // returns false, so the handler itself returns 403 — proving the inline check
-  // is a real, additional gate stacked on top of withAdmin.
+test("a COOKIE admin session WITHOUT a same-origin Origin/Referer → 403 from the inline isCronAuthorized (withAdmin passed, the inline check did not)", async () => {
+  // withAdmin admits the admin cookie, but isCronAuthorized's cookie-session path
+  // requires a trusted Origin/Referer (CSRF hardening for the ambient transport —
+  // cron/sync routes are exempt from the proxy's Origin gate). With none present
+  // it returns false, so the handler itself returns 403 — proving the inline
+  // check is a real, additional gate stacked on top of withAdmin.
   const admin = await mintToken("ADMIN");
-  const res = await GET(req(bearer(admin.token)), undefined); // no Origin header
+  const res = await GET(req(cookie(admin.token)), undefined); // no Origin header
   assert.equal(res.status, 403);
   assert.deepEqual(await res.json(), { error: "Forbidden" });
   assert.equal(queryRawCalls, 0, "a 403 from the inline check must short-circuit before the introspection");
 });
 
-test("an admin session from an UNTRUSTED Origin → 403 (same-origin gate rejects a foreign Origin)", async () => {
+test("a COOKIE admin session from an UNTRUSTED Origin → 403 (same-origin gate rejects a foreign Origin)", async () => {
   const admin = await mintToken("ADMIN");
-  const res = await GET(req({ ...bearer(admin.token), origin: "https://evil.example.com" }), undefined);
+  const res = await GET(req({ ...cookie(admin.token), origin: "https://evil.example.com" }), undefined);
   assert.equal(res.status, 403);
   assert.equal(queryRawCalls, 0);
+});
+
+test("an admin BEARER with NO Origin header → 200 (bearer skips the same-origin gate — guardrail 6b)", async () => {
+  // A native client sends no Origin/Referer at all, and a cross-origin page
+  // cannot attach a custom Authorization header to a credentialed request —
+  // so the CSRF same-origin gate has nothing to defend on this transport and
+  // isCronAuthorized skips it (guardrail 6b). Enforcing it here locked native
+  // admins out of every dual-auth/cron route.
+  const admin = await mintToken("ADMIN");
+  schemaRows = rowsFor(EXPECTED);
+  const res = await GET(req(bearer(admin.token)), undefined); // no Origin header
+  assert.equal(res.status, 200);
+  assert.equal(queryRawCalls, 1);
+  assert.equal((await res.json() as { allOk: boolean }).allOk, true);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

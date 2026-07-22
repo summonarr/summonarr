@@ -26,6 +26,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     jellyfinLibByType,
     episodesBySource,
     topRequesters,
+    diskSpace,
   ] = await Promise.all([
     prisma.mediaRequest.count(),
     prisma.mediaRequest.count({ where: { status: "PENDING" } }),
@@ -72,9 +73,10 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
       ORDER BY 3 DESC
       LIMIT 10
     `,
+    // External Radarr/Sonarr HTTP fan-out — runs inside the batch so its
+    // latency overlaps the DB aggregates instead of adding to them serially.
+    getArrDiskSpace(),
   ]);
-
-  const diskSpace = await getArrDiskSpace();
 
   const libCount = (
     rows: { mediaType: string; _count: { _all: number } }[],

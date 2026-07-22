@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,6 +67,13 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   const [loading, setLoading] = useState(false);
   const [jellyfinMode, setJellyfinMode] = useState<JellyfinMode>("password");
   const [qcCode, setQcCode] = useState<string | null>(null);
+  // Cancels an in-flight QuickConnect poll loop (provider switch, "Use password
+  // instead", unmount) so an abandoned code can't later complete a sign-in.
+  const qcCancelledRef = useRef(false);
+
+  useEffect(() => () => {
+    qcCancelledRef.current = true;
+  }, []);
 
   const hasExternalProviders = plexEnabled || jellyfinEnabled || oidcEnabled;
 
@@ -230,16 +237,19 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   }
 
   function switchProvider(next: Provider) {
+    qcCancelledRef.current = true;
     setProvider(next);
     setError("");
     setFields({ email: "", password: "", username: "" });
     setJellyfinMode("password");
     setQcCode(null);
     setRememberMe(false);
+    setLoading(false);
   }
 
   async function handleQuickConnect() {
     // Jellyfin QuickConnect: server issues a short-lived code the user enters in another Jellyfin client
+    qcCancelledRef.current = false;
     setLoading(true);
     setError("");
     setQcCode(null);
@@ -264,6 +274,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     const deadline = Date.now() + 2 * 60 * 1000;
     let authenticated = false;
     while (Date.now() < deadline) {
+      if (qcCancelledRef.current) return;
       try {
         const poll = await fetch(
           withBasePath(`/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1`)
@@ -273,11 +284,17 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
           if (data.authenticated) { authenticated = true; break; }
         } else if (poll.status === 410) {
           break;
+        } else {
+          // Fast non-OK response (401/500/…) — pause so the loop can't hot-spin.
+          await new Promise((r) => setTimeout(r, 1000));
         }
       } catch {
-
+        // Fetch rejected immediately (network down) — same pacing guard.
+        await new Promise((r) => setTimeout(r, 1000));
       }
     }
+
+    if (qcCancelledRef.current) return;
 
     if (!authenticated) {
       setError("QuickConnect timed out. Please try again.");
@@ -415,7 +432,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
           {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
           <button
             type="button"
-            onClick={() => { setJellyfinMode("password"); setError(""); setQcCode(null); setLoading(false); }}
+            onClick={() => { qcCancelledRef.current = true; setJellyfinMode("password"); setError(""); setQcCode(null); setLoading(false); }}
             className="w-full text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
           >
             Use password instead

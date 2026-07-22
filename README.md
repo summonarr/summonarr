@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.16.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.16.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,21 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.16.3
+
+**Changed**
+
+- Docker: the runtime image is ~34% smaller (705 MB → 468 MB). The Prisma migrate tooling and unused glibc image binaries are pruned from the shipped container, so pulls and cold starts are faster with no change in behavior.
+- Performance: the admin activity page loads disk-space stats in parallel with its other data, live refresh and the admin request list debounce their refresh bursts, and the toast context is memoized.
+
+**Fixed**
+
+- Availability badges: an availability check no longer poisons the cached Radarr/Sonarr verdict for six hours (the two now use separate cache keys).
+- Ratings: newly released titles pick up the short "fresh" ratings refresh window, and MDBList list handling tolerates error-bodied 200 responses and no longer mismatches foreign-ID batch lookups.
+- Base path: fixed roughly nine links and redirects that ignored a configured `BASE_PATH` (search, cron run-now, cache warm, session terminate, audit export, fix-match thumbnails, the Plex sign-in redirect, and heatmap links).
+- Jellyfin QuickConnect: sign-in polling now cancels cleanly and backs off between attempts.
+- Auth & sync: settings connection checks return 422 on a bad token, and the Radarr/Sonarr sync routes return 403 to match the rest of the API.
+
 ### v0.16.2
 
 **Changed**
@@ -250,7 +265,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.16.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.16.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

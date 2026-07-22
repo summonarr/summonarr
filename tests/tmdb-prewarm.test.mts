@@ -11,10 +11,11 @@
 //     WITHOUT a core row is backfilled from the cached JSON with no live
 //     fetch; a missing or sub-threshold row is re-fetched from TMDB;
 //   - the cold-miss wire shape — per-type path, the per-type append_to_response
-//     list (release_dates/content_ratings ride along for the certification —
-//     the regression the source comment guards), bearer-only auth — and the
-//     cache + core writes it produces (US cert extraction, TV season
-//     filtering);
+//     list (release_dates/content_ratings ride along for the certification,
+//     videos for the trailerKey — the drop-on-rewrite regressions the source
+//     comments guard), bearer-only auth — and the cache + core writes it
+//     produces (US cert extraction, trailerKey/collection/voteCount
+//     preservation, TV season filtering);
 //   - per-item failure isolation: a rejected item counts failed and neither
 //     its batch-mates nor later batches abort; a corrupt cached blob on the
 //     backfill path counts failed the same way;
@@ -243,7 +244,16 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
     backdrop_path: "/fc-backdrop.jpg",
     release_date: "1999-10-15",
     vote_average: 8.4,
+    vote_count: 27000,
     genres: [{ id: 18, name: "Drama" }],
+    belongs_to_collection: { id: 9999, name: "Fight Club Collection" },
+    videos: {
+      results: [
+        { key: "teaser-key", site: "YouTube", type: "Teaser", official: true },
+        { key: "unofficial-key", site: "YouTube", type: "Trailer", official: false },
+        { key: "official-key", site: "YouTube", type: "Trailer", official: true },
+      ],
+    },
     release_dates: {
       results: [
         { iso_3166_1: "DE", release_dates: [{ certification: "18" }] },
@@ -261,7 +271,7 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
   assert.equal(fetchCalls.length, 1);
   const call = fetchCalls[0];
   assert.equal(call.url.origin + call.url.pathname, "https://api.themoviedb.org/3/movie/550");
-  assert.equal(call.url.searchParams.get("append_to_response"), "keywords,watch/providers,external_ids,release_dates");
+  assert.equal(call.url.searchParams.get("append_to_response"), "keywords,watch/providers,external_ids,release_dates,videos");
   assert.equal(call.url.searchParams.get("api_key"), null);
   assert.equal(call.headers.get("authorization"), `Bearer ${TMDB_TOKEN}`);
 
@@ -279,6 +289,13 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
   assert.equal(blob.releaseYear, "1999");
   assert.equal(blob.certification, "R");
   assert.deepEqual(blob.genres, ["Drama"]);
+  assert.equal(blob.voteCount, 27000);
+  // The rewrite must preserve the detail-page extras: the official YouTube
+  // trailer wins over the unofficial trailer and the teaser, and the movie's
+  // collection linkage survives.
+  assert.equal(blob.trailerKey, "official-key");
+  assert.equal(blob.collectionId, 9999);
+  assert.equal(blob.collectionName, "Fight Club Collection");
   assert.equal("seasons" in blob, false); // movies never carry a seasons array
   // A 1999 release lands in the 30-day back-catalog TTL bucket (loose window —
   // the bucket values are owned by tests/tmdb-cache-ttl.test.mts).
@@ -306,6 +323,12 @@ test("tv cold miss: tv path + tv append list, zero/empty seasons filtered, conte
       { season_number: 1, episode_count: 10, air_date: "2011-04-17", poster_path: "/s1.jpg", name: "Season 1", overview: "Winter." },
       { season_number: 2, episode_count: 0 }, // no episodes — filtered out
     ],
+    videos: {
+      results: [
+        { key: "vimeo-key", site: "Vimeo", type: "Trailer", official: true }, // non-YouTube — ignored
+        { key: "got-teaser", site: "YouTube", type: "Teaser", official: true },
+      ],
+    },
     content_ratings: {
       results: [
         { iso_3166_1: "GB", rating: "15" },
@@ -318,13 +341,14 @@ test("tv cold miss: tv path + tv append list, zero/empty seasons filtered, conte
 
   const call = fetchCalls[0];
   assert.equal(call.url.origin + call.url.pathname, "https://api.themoviedb.org/3/tv/1399");
-  assert.equal(call.url.searchParams.get("append_to_response"), "seasons,keywords,watch/providers,external_ids,content_ratings");
+  assert.equal(call.url.searchParams.get("append_to_response"), "seasons,keywords,watch/providers,external_ids,content_ratings,videos");
 
   assert.equal(cacheUpserts[0].key, "tv:1399:details");
   const blob = JSON.parse(cacheUpserts[0].data) as Record<string, unknown>;
   assert.equal(blob.title, "Game of Thrones");
   assert.equal(blob.releaseYear, "2011");
   assert.equal(blob.certification, "TV-MA"); // the US content_ratings entry, not GB
+  assert.equal(blob.trailerKey, "got-teaser"); // YouTube teaser fallback; non-YouTube ignored
   assert.deepEqual(blob.seasons, [
     { seasonNumber: 1, episodeCount: 10, airDate: "2011-04-17", posterPath: "/s1.jpg", name: "Season 1", overview: "Winter." },
   ]);

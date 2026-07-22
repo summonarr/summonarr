@@ -340,7 +340,7 @@ function ExportButton({
     if (currentUser) params.set("user", currentUser);
     if (currentTarget) params.set("target", currentTarget);
     if (currentHideCron) params.set("hideCron", "1");
-    window.open(`/api/admin/audit-log/export?${params.toString()}`, "_blank");
+    window.open(withBasePath(`/api/admin/audit-log/export?${params.toString()}`), "_blank");
     setOpen(false);
   }
 

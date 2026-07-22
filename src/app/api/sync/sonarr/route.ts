@@ -10,7 +10,7 @@ const FETCH_CONCURRENCY = 5;
 
 export async function POST(req: NextRequest) {
   if (!(await isCronAuthorized(req))) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   return withCronRunRecording("sonarr-sync", async () => {

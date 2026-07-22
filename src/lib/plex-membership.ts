@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { getPlexFriendEmails } from "@/lib/plex";
+import { normalizeEmail } from "@/lib/email-normalize";
 
 // Per-replica cache of the Plex server's shared-user allowlist, used to lock out
 // users who have been un-shared from the server without waiting for their
@@ -42,7 +43,9 @@ async function fetchAllowlist(): Promise<{ emails: Set<string>; fetchedAt: numbe
   // server isn't mistaken for a successful-but-empty fetch.)
   const emails = await getPlexFriendEmails(adminToken, serverUrl);
   if (emails.size === 0) return null;
-  if (adminEmailRow?.value) emails.add(adminEmailRow.value.toLowerCase().trim());
+  // normalizeEmail matches the sign-in gate in auth.ts (authorizeWithPlex) so
+  // both membership checks share one normalization of the admin-email Setting.
+  if (adminEmailRow?.value) emails.add(normalizeEmail(adminEmailRow.value));
   return { emails, fetchedAt: Date.now() };
 }
 

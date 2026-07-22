@@ -73,6 +73,15 @@ ENV NEXT_PUBLIC_BASE_PATH=$BASE_PATH
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
+# npm installs BOTH libc flavors of sharp's prebuilt binaries and Next's
+# standalone tracing ships them all, but this image runs on Alpine (musl) —
+# the glibc libvips/sharp variants (~17 MB per arch) can never load here.
+# The `linux-*` glob is safe: musl dirs are named `linuxmusl-*`, which the
+# literal `linux-` prefix does not match. (outputFileTracingExcludes was
+# tried first and did not actually drop these — hence the explicit rm.)
+RUN rm -rf .next/standalone/node_modules/@img/sharp-libvips-linux-* \
+           .next/standalone/node_modules/@img/sharp-linux-*
+
 # ── Stage 3: migrate-deps ─────────────────────────────────────────────────────
 # Install ONLY prisma + dotenv using exact versions from the lockfile.
 # npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
@@ -94,6 +103,31 @@ COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
 RUN node scripts/prune-lockfile.mjs --out . prisma dotenv pg
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund --prefer-offline
+
+# The Prisma 7 CLI's declared dependency tree drags ~185 MB of interactive
+# tooling (`prisma studio` UI, `prisma dev` PGlite runtime, mysql drivers,
+# typescript, react, chart.js, …) that `db push` — the only command the
+# entrypoint runs — never loads. Prune it; the script keeps the native
+# schema-engine binary (db push runs it, and re-downloads it at boot if
+# missing — a hard no for offline deployments) and the thin studio-core/dev
+# entry files the CLI require()s at module load.
+COPY scripts/prune-migrate-deps.mjs ./scripts/prune-migrate-deps.mjs
+RUN node scripts/prune-migrate-deps.mjs
+
+# Smoke-test the pruned tree with a REAL `db push` against an unreachable DB:
+# it must get all the way to P1001 (can't reach database server), which proves
+# the full CLI module graph — prisma.config.ts loading, schema parsing, native
+# engine spawn, error formatting — still loads with the pruned node_modules.
+# A missing module would surface here as a build failure instead of a boot
+# crash in user containers. PRISMA_ENGINES_MIRROR is unreachable on purpose:
+# if the CLI tries to download an engine at this point, that's a bug too.
+COPY prisma ./prisma
+COPY prisma.config.ts ./prisma.config.ts
+RUN out=$(DATABASE_URL="postgresql://smoke:smoke@127.0.0.1:9/smoke" \
+      PRISMA_ENGINES_MIRROR="http://127.0.0.1:9" \
+      node node_modules/prisma/build/index.js db push 2>&1); \
+    echo "$out" | grep -q "P1001" || { echo "$out"; \
+      echo "[migrate-deps] smoke test FAILED: pruned prisma CLI cannot reach P1001 — module graph is broken"; exit 1; }
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
 FROM node:26.5.0-alpine3.23@sha256:0473b6671ff22c8eeb570c0e1e51408595d3171e73f8002c269b763f0a943149 AS runner

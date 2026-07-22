@@ -116,7 +116,7 @@ export function SearchBar({
       abortRef.current = controller;
       setLoading(true);
       try {
-        const url = `/api/search?q=${encodeURIComponent(query)}${filter !== "all" ? `&type=${filter}` : ""}`;
+        const url = withBasePath(`/api/search?q=${encodeURIComponent(query)}${filter !== "all" ? `&type=${filter}` : ""}`);
         const res = await fetch(url, { signal: controller.signal });
         // /api/search can return { error } on 4xx/5xx — guard before .slice so a
         // non-array body doesn't blow up the debounced handler.

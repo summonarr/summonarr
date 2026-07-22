@@ -284,19 +284,30 @@ export async function fetchMdblistBatch(
       // Collect the page's cache upserts and flush them with bounded concurrency
       // below, rather than awaiting each one serially in-loop.
       const cacheWrites: Array<() => Promise<unknown>> = [];
+      // Rows that resolved to no REQUESTED item (a foreign id, or an id-less row
+      // past the page's end). They must not count toward "the response covered
+      // the full request" below, or the requested ids they displaced get a 24h
+      // NOT_FOUND sentinel MDBList never actually answered for.
+      let unmatchedRows = 0;
 
       for (let i = 0; i < arr.length; i++) {
         const raw = arr[i];
 
-        // MDBList batch responses may return items in a different order than the request; match by ID
-        // first and fall back to positional index only when the response item lacks an ID.
+        // MDBList batch responses may return items in a different order than the
+        // request; match by ID, falling back to positional index ONLY when the
+        // response item lacks an ID. A row whose id isn't in the page must NOT
+        // fall back positionally — that mis-binds it to the wrong requested item
+        // (wrong TTL, foreign id in the result map).
         const pageItem = raw.id != null
-          ? (page.find((p) => p.id === raw.id) ?? page[i])
+          ? page.find((p) => p.id === raw.id)
           : page[i];
         // MDBList can return MORE items than requested (or unmatched ids), so
         // page.find()/page[i] can be undefined — guard before any property access
         // or the whole 200-item batch throws and silently yields zero ratings.
-        if (!pageItem) continue;
+        if (!pageItem) {
+          unmatchedRows++;
+          continue;
+        }
         const tmdbId = raw.id ?? pageItem.id;
         if (!tmdbId) continue;
 
@@ -308,11 +319,14 @@ export async function fetchMdblistBatch(
         cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
       }
 
-      if (arr.length >= page.length) {
-        // Only negative-cache when the response covered the full request. MDBList normally
-        // echoes one entry per requested id (with null ratings for ones it has no data on),
-        // so a short response means a truncated/partial batch, not genuine absence — caching
-        // the omitted ids would suppress their ratings for 24h even though they exist.
+      if (arr.length >= page.length && unmatchedRows === 0) {
+        // Only negative-cache when the response covered the full request AND every
+        // row mapped to a requested id. MDBList normally echoes one entry per
+        // requested id (with null ratings for ones it has no data on), so a short
+        // response means a truncated/partial batch, not genuine absence — and a
+        // full-count response padded with unmatched rows didn't actually answer
+        // for the ids those rows displaced. Caching either case's omitted ids
+        // would suppress their ratings for 24h even though they exist.
         for (const item of page) {
           if (!result.has(item.id)) {
             const cacheKey = `mdblist:tmdb:${mediaType}:${item.id}`;
@@ -323,6 +337,8 @@ export async function fetchMdblistBatch(
         // An empty array likely means MDBList had a transient issue, not that all items are absent —
         // skip negative-caching to avoid poisoning future lookups.
         console.warn(`[mdblist] batch ${mediaType} returned empty array for ${page.length} items — skipping NOT_FOUND caching`);
+      } else if (unmatchedRows > 0) {
+        console.warn(`[mdblist] batch ${mediaType} returned ${unmatchedRows} unmatched row(s) (${arr.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
       } else {
         console.warn(`[mdblist] batch ${mediaType} returned partial response (${arr.length}/${page.length}) — skipping NOT_FOUND caching for omitted ids`);
       }
@@ -440,9 +456,23 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
     if (res.status === 429) { tripQuotaLockout("HTTP 429 on top lists"); return []; }
     if (!res.ok) return [];
 
-    const data = await res.json() as MdblistListMeta[];
-    if (data?.length > 0) await setCache(key, data, TTL.DISCOVER);
-    return data;
+    const data = await res.json() as unknown;
+    // MDBList signals quota/auth failures as HTTP 200 with an { error } object
+    // body (same shape the single-item path handles). Returning that object as
+    // a list crashed getMdblistTopRated on `lists.map` — surface the error,
+    // trip the lockout on quota messages, and only ever return an array.
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const d = data as { error?: unknown; message?: string };
+      const errMsg = typeof d.error === "string" ? d.error : d.error === true ? (d.message ?? "unknown") : null;
+      if (errMsg) {
+        if (isQuotaErrorMessage(errMsg)) tripQuotaLockout(`${errMsg} on top lists`);
+        console.warn(`[mdblist] top lists API error: ${sanitizeForLog(errMsg)}`);
+      }
+    }
+    if (!Array.isArray(data)) return [];
+    const lists = data as MdblistListMeta[];
+    if (lists.length > 0) await setCache(key, lists, TTL.DISCOVER);
+    return lists;
   } catch (err) {
     console.error("[mdblist] Failed to fetch top lists:", err);
     return [];

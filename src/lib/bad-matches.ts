@@ -70,7 +70,13 @@ function toMatchKey(rel: string, mediaType: "MOVIE" | "TV"): string {
 }
 
 async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, number>> {
-  const cacheKey = `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths`;
+  // `:name` suffix — this map keys by folder BASENAME, while the web library
+  // page (admin/library/page.tsx) caches a FULL-normalized-path map under
+  // `arr:<service>:paths`. Sharing that key let whichever surface ran first
+  // poison the other for the whole TTL.ARR_PATHS window (basename lookups
+  // against full-path keys — or vice versa — all miss, so every arrVerdict
+  // silently reads null). Keep the two keys distinct.
+  const cacheKey = `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths:name`;
   const cached = await getCache<[string, number][]>(cacheKey);
   if (cached) return new Map(cached);
 
