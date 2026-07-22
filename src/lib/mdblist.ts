@@ -170,7 +170,15 @@ export async function fetchAndCacheMdblistForTmdb(
 const MDBLIST_BATCH_SIZE = 200;
 
 export type MdblistBatchRaw = {
+  // MDBList's media object carries ITS OWN id in `id` and the TMDB id SEPARATELY
+  // (see MdblistListItem below — same API — which has both `id` and `tmdb_id` and
+  // keys off `tmdb_id`). The tmdb/{type} batch must be matched on the TMDB id, so
+  // it's resolved from whichever of these the response carries — never `id`, which
+  // is MDBList's internal id and matching on it left every row "unmatched".
   id?: number | null;
+  tmdb_id?: number | string | null;
+  tmdbid?: number | string | null;
+  ids?: { tmdb?: number | string | null } | null;
   title?: string;
   imdb_id?: string | null;
   type?: string;
@@ -180,6 +188,17 @@ export type MdblistBatchRaw = {
   released_digital?: string | null;
   ratings?: { source: string; value: number | null; score?: number | null; votes?: number | null }[];
 };
+
+// Extract the requested-namespace TMDB id from a batch row, tolerating the field
+// name/shape MDBList uses (tmdb_id / tmdbid / nested ids.tmdb) and a string-encoded
+// value. Returns null when the row carries no usable TMDB id. NEVER reads `id` —
+// that is MDBList's internal media id, not the TMDB id.
+export function batchRowTmdbId(raw: MdblistBatchRaw): number | null {
+  const candidate = raw.tmdb_id ?? raw.tmdbid ?? raw.ids?.tmdb ?? null;
+  if (candidate == null) return null;
+  const n = Number(candidate);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
 
 // Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
 export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
@@ -225,6 +244,10 @@ export async function fetchMdblistBatch(
 ): Promise<Map<number, MdblistRatings>> {
   const result = new Map<number, MdblistRatings>();
   if (items.length === 0) return result;
+
+  // Log an unresolvable row's shape at most ONCE per call (covers all internal pages),
+  // so a persistent MDBList field rename is diagnosable without spamming a line per page.
+  let loggedUnmatchedShape = false;
 
   const apiKey = await getApiKey();
   if (!apiKey) return result;
@@ -293,23 +316,34 @@ export async function fetchMdblistBatch(
       for (let i = 0; i < arr.length; i++) {
         const raw = arr[i];
 
-        // MDBList batch responses may return items in a different order than the
-        // request; match by ID, falling back to positional index ONLY when the
-        // response item lacks an ID. A row whose id isn't in the page must NOT
-        // fall back positionally — that mis-binds it to the wrong requested item
-        // (wrong TTL, foreign id in the result map).
-        const pageItem = raw.id != null
-          ? page.find((p) => p.id === raw.id)
+        // Match by the response's TMDB id (batchRowTmdbId — resolves tmdb_id/tmdbid/
+        // ids.tmdb, never MDBList's internal `id`). MDBList batch responses may return
+        // items in a different order than the request, so match by id, not position.
+        // Positional fallback applies ONLY when the row carries no TMDB id at all — a
+        // row whose TMDB id isn't in the page must NOT bind positionally (that mis-binds
+        // it to the wrong requested item: wrong TTL, foreign id in the result map).
+        const respTmdbId = batchRowTmdbId(raw);
+        const pageItem = respTmdbId != null
+          ? page.find((p) => p.id === respTmdbId)
           : page[i];
         // MDBList can return MORE items than requested (or unmatched ids), so
         // page.find()/page[i] can be undefined — guard before any property access
         // or the whole 200-item batch throws and silently yields zero ratings.
         if (!pageItem) {
           unmatchedRows++;
+          // Surface the real row shape ONCE if nothing resolves — makes a future
+          // MDBList field rename diagnosable instead of a silent zero-ratings run.
+          // Keys only (no values) so no rating/id data lands in logs.
+          if (!loggedUnmatchedShape) {
+            loggedUnmatchedShape = true;
+            console.warn(`[mdblist] batch row did not resolve to a requested TMDB id — row keys: [${Object.keys(raw ?? {}).join(",")}]`);
+          }
           continue;
         }
-        const tmdbId = raw.id ?? pageItem.id;
-        if (!tmdbId) continue;
+        // Cache/result key is the REQUESTED TMDB id (pageItem.id), never raw.id — the
+        // old code keyed on raw.id (MDBList's internal id), so even a positional match
+        // wrote the row under the wrong cache key.
+        const tmdbId = pageItem.id;
 
         const ratings = parseBatchItem(raw);
         result.set(tmdbId, ratings);

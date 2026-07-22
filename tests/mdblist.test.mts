@@ -314,11 +314,15 @@ test("a stale row is served immediately, one background revalidation refreshes i
 
 // ── fetchMdblistBatch ───────────────────────────────────────────────────────
 
-test("batch wire shape: one POST with a JSON { ids } body, and per-item releaseDates drive per-row cache TTLs", async () => {
+test("batch wire shape: one POST with a JSON { ids } body, matched on tmdb_id (NOT MDBList's internal id), per-item releaseDates drive per-row cache TTLs", async () => {
   const currentYear = new Date().getFullYear(); // mocked — 2026
+  // Real MDBList shape: each row carries its OWN internal `id` AND the TMDB id in
+  // `tmdb_id`. Matching MUST bind on tmdb_id — the internal ids here (9001/9002)
+  // deliberately don't equal any requested id, so a regression to raw.id matching
+  // yields zero matches (the production "200 unmatched" bug).
   respond = () => jsonResponse([
-    { id: 11, ratings: [{ source: "imdb", value: 7 }] },
-    { id: 22, ratings: [{ source: "imdb", value: 6 }] },
+    { id: 9001, tmdb_id: 11, ratings: [{ source: "imdb", value: 7 }] },
+    { id: 9002, tmdb_id: 22, ratings: [{ source: "imdb", value: 6 }] },
   ]);
   const map = await fetchMdblistBatch(
     [
@@ -349,7 +353,7 @@ test("batch wire shape: one POST with a JSON { ids } body, and per-item releaseD
 test("chunking: 201 ids split into a 200-page and a 1-page; a failed page warns and later pages still run", async () => {
   const items = Array.from({ length: 201 }, (_, i) => ({ id: i + 1 }));
   const echo = (call: FetchCall) =>
-    jsonResponse(bodyIds(call).map((id) => ({ id, ratings: [{ source: "imdb", value: 5 }] })));
+    jsonResponse(bodyIds(call).map((id) => ({ id: id + 900_000, tmdb_id: id, ratings: [{ source: "imdb", value: 5 }] })));
 
   // Phase 1: both pages succeed and merge into one map.
   respond = (_url, call) => echo(call);
@@ -372,25 +376,58 @@ test("chunking: 201 ids split into a 200-page and a 1-page; a failed page warns 
   assert.ok(warns.some((w) => w.includes("[mdblist] batch movie returned 500")));
 });
 
-test("response rows are matched by id (out-of-order); rows beyond the page length with unknown ids are dropped; id-less rows fall back positionally", async () => {
+test("response rows are matched by tmdb_id (out-of-order); rows beyond the page length with unknown ids are dropped; tmdb_id-less rows fall back positionally", async () => {
   // Out-of-order + one extra unknown-id row past the page length.
   respond = () => jsonResponse([
-    { id: 20, ratings: [{ source: "imdb", value: 2 }] },
-    { id: 10, ratings: [{ source: "imdb", value: 9 }] },
-    { id: 99, ratings: [{ source: "imdb", value: 5 }] }, // no page slot left → dropped
+    { tmdb_id: 20, ratings: [{ source: "imdb", value: 2 }] },
+    { tmdb_id: 10, ratings: [{ source: "imdb", value: 9 }] },
+    { tmdb_id: 99, ratings: [{ source: "imdb", value: 5 }] }, // no page slot left → dropped
   ]);
   const map = await fetchMdblistBatch([{ id: 10 }, { id: 20 }], "movie");
   assert.equal(map.size, 2);
-  assert.equal(map.get(10)?.imdbRating, "9"); // matched by id, not position
+  assert.equal(map.get(10)?.imdbRating, "9"); // matched by tmdb_id, not position
   assert.equal(map.get(20)?.imdbRating, "2");
   assert.equal(map.has(99), false);
   assert.equal(cacheRows.has("mdblist:tmdb:movie:99"), false);
 
-  // A row without an id falls back to its request position.
+  // A row without any TMDB id falls back to its request position.
   respond = () => jsonResponse([{ ratings: [{ source: "imdb", value: 4 }] }]);
   const map2 = await fetchMdblistBatch([{ id: 7 }], "movie");
   assert.equal(map2.get(7)?.imdbRating, "4");
   assert.ok(cacheRows.has("mdblist:tmdb:movie:7"));
+});
+
+test("tmdb id is resolved from tmdb_id / tmdbid / ids.tmdb and tolerates a string value; internal `id` alone never matches", async () => {
+  respond = () => jsonResponse([
+    { id: 5001, tmdbid: 10, ratings: [{ source: "imdb", value: 1 }] },        // alt flat spelling
+    { id: 5002, ids: { tmdb: 20 }, ratings: [{ source: "imdb", value: 2 }] }, // nested ids block
+    { id: 5003, tmdb_id: "30", ratings: [{ source: "imdb", value: 3 }] },     // string-encoded
+  ]);
+  const map = await fetchMdblistBatch([{ id: 10 }, { id: 20 }, { id: 30 }], "movie");
+  assert.equal(map.get(10)?.imdbRating, "1");
+  assert.equal(map.get(20)?.imdbRating, "2");
+  assert.equal(map.get(30)?.imdbRating, "3");
+  assert.ok(cacheRows.has("mdblist:tmdb:movie:30"), "cache key uses the requested TMDB id, not the internal id");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:5001"), false, "must never key on MDBList's internal id");
+});
+
+test("a row whose tmdb_id isn't in the page is unmatched (never keyed on the internal id) and logs the row shape once", async () => {
+  // Reproduces the production shape: a row that carries MDBList's internal `id` and
+  // a tmdb_id that wasn't requested. It must NOT bind (positionally or by internal
+  // id) — it's dropped, warned as unmatched, and its keys are surfaced once so a
+  // field rename is diagnosable.
+  respond = () => jsonResponse([
+    { id: 700001, tmdb_id: 999, ratings: [{ source: "imdb", value: 7 }] }, // foreign tmdb id
+  ]);
+  const map = await fetchMdblistBatch([{ id: 111 }], "movie");
+  assert.equal(map.size, 0, "a foreign tmdb id must not bind to the requested id");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:111"), false);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:700001"), false, "must never key on MDBList's internal id");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:999"), false);
+  assert.ok(
+    warns.some((w) => w.includes("row did not resolve to a requested TMDB id") && w.includes("tmdb_id")),
+    "the row-shape diagnostic must fire once with the row's keys",
+  );
 });
 
 test("a full-length response padded with an unknown id drops the foreign row and does NOT sentinel the displaced requested id", async () => {
@@ -400,8 +437,8 @@ test("a full-length response padded with an unknown id drops the foreign row and
   // actually answered for, so negative-caching it would suppress a title that
   // may exist for the full 24h TTL.
   respond = () => jsonResponse([
-    { id: 1, ratings: [{ source: "imdb", value: 8 }] },
-    { id: 42, ratings: [{ source: "imdb", value: 3 }] },
+    { tmdb_id: 1, ratings: [{ source: "imdb", value: 8 }] },
+    { tmdb_id: 42, ratings: [{ source: "imdb", value: 3 }] },
   ]);
   const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }], "movie");
   assert.deepEqual([...map.keys()], [1]);
