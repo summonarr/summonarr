@@ -14,6 +14,7 @@ import {
   ChevronRight,
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
+import { safeExternalHref } from "@/lib/safe-url";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
 
@@ -59,8 +60,12 @@ export function DiscoverHero({
 
   const detailPath =
     media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
+  // media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gate it through
+  // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
+  // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
+  // hardcoded https URL and needs no gate.
   const trailerHref =
-    media.trailerUrl ??
+    safeExternalHref(media.trailerUrl) ??
     (media.trailerKey
       ? `https://www.youtube.com/watch?v=${media.trailerKey}`
       : null);
