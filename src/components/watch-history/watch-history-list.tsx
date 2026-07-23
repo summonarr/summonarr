@@ -40,7 +40,16 @@ function mediaHref(item: MyWatchHistoryItem): string | null {
 
 type TypeFilter = "" | "MOVIE" | "TV";
 
-export function WatchHistoryList({ initial }: { initial: MyWatchHistoryPage }) {
+export function WatchHistoryList({
+  initial,
+  serverProvider,
+}: {
+  initial: MyWatchHistoryPage;
+  // True when the session's sign-in provider is Plex/Jellyfin — the account IS
+  // a media-server identity, so an unlinked-empty state must never tell them
+  // to "get linked"; there is simply no recorded history yet.
+  serverProvider: boolean;
+}) {
   const mounted = useHasMounted();
 
   const [items, setItems] = useState<MyWatchHistoryItem[]>(initial.items);
@@ -120,9 +129,9 @@ export function WatchHistoryList({ initial }: { initial: MyWatchHistoryPage }) {
   if (!initial.linked) {
     return (
       <EmptyState>
-        No watch history yet. Activity appears here once your account is linked to a
-        Plex or Jellyfin user — linking happens automatically when the media-server
-        account uses the same email address, or an admin can link it manually.
+        {serverProvider
+          ? "No watch history yet — what you watch on the server will show up here."
+          : "No watch history yet. Activity appears here once your account is linked to a Plex or Jellyfin user — linking happens automatically when the media-server account uses the same email address, or an admin can link it manually."}
       </EmptyState>
     );
   }

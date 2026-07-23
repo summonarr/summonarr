@@ -12,6 +12,12 @@ export const dynamic = "force-dynamic";
 export default async function WatchHistoryPage() {
   const session = await requireAppSession();
   const initial = await getMyWatchHistory(session.user.id);
+  // Plex/Jellyfin sign-ins ARE media-server identities — never show them the
+  // "get your account linked" explainer; their history simply hasn't been
+  // recorded yet. Only local/OIDC accounts can genuinely need linking.
+  const provider = session.user.provider ?? "";
+  const serverProvider =
+    provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
 
   return (
     <div>
@@ -20,7 +26,7 @@ export default async function WatchHistoryPage() {
         subtitle="What you've watched on the server"
       />
       <div style={{ marginTop: 16 }}>
-        <WatchHistoryList initial={initial} />
+        <WatchHistoryList initial={initial} serverProvider={serverProvider} />
       </div>
     </div>
   );

@@ -7,7 +7,11 @@
 //   1. SCOPE: results come exclusively from the MediaServerUser rows linked to
 //      the SESSION user — another user's rows never appear, and soft-deleted
 //      (active:false) linked rows stay included (guardrail 28: history
-//      surfaces don't filter on `active`).
+//      surfaces don't filter on `active`). Linkage is the UNION of the
+//      explicit userId FK and the caller's own provider identity
+//      (User.plexUserId/jellyfinUserId ↔ MediaServerUser (source,
+//      sourceUserId)) — a Jellyfin sign-in with no email never FK-links, but
+//      their provider subject IS their media-server identity.
 //   2. NO USER PIVOT: there is deliberately no userId parameter. Sending
 //      ?userId=/&mediaServerUserId= pointing at another user changes nothing.
 //   3. UNLINKED ⇒ EMPTY, DB-FREE: an account with no linked MediaServerUser
@@ -67,8 +71,10 @@ type DbUser = {
   email: string | null;
   notificationEmail: string | null;
   passwordHash: string | null;
+  plexUserId: string | null;
+  jellyfinUserId: string | null;
 };
-type MsuRow = { id: string; userId: string | null; active: boolean };
+type MsuRow = { id: string; userId: string | null; active: boolean; source: string; sourceUserId: string };
 // Full-width history rows INCLUDING admin-only columns, so the select-trimming
 // pin is real: the data is there and must not reach the response.
 type HistoryRow = {
@@ -85,6 +91,7 @@ type HistoryRow = {
   mediaType: "MOVIE" | "TV" | null;
   title: string;
   year: string | null;
+  posterPath: string | null;
   seasonNumber: number | null;
   episodeNumber: number | null;
   episodeTitle: string | null;
@@ -116,11 +123,19 @@ shadowPrismaModel(prisma, "user", {
   update: async () => ({}),
 });
 
+// Interprets the lib's identity-union query: { OR: [{ userId }, { source,
+// sourceUserId }...] }. Each branch is a conjunction of scalar equalities.
 shadowPrismaModel(prisma, "mediaServerUser", {
-  findMany: async (args: { where: { userId: string }; select: unknown }) => {
+  findMany: async (args: { where: { OR: Record<string, string>[] }; select: unknown }) => {
     rec("mediaServerUser.findMany", args);
     return msuRows
-      .filter((r) => r.userId === args.where.userId)
+      .filter((r) =>
+        args.where.OR.some((branch) =>
+          Object.entries(branch).every(
+            ([key, value]) => (r as unknown as Record<string, unknown>)[key] === value,
+          ),
+        ),
+      )
       .map((r) => ({ id: r.id }));
   },
 });
@@ -223,7 +238,9 @@ shadowPrismaModel(prisma, "tmdbCache", {
 
 // ── session + seed helpers ───────────────────────────────────────────────────
 let seq = 0;
-async function mintSession(): Promise<{ userId: string; token: string }> {
+async function mintSession(
+  identity: { plexUserId?: string; jellyfinUserId?: string } = {},
+): Promise<{ userId: string; token: string }> {
   seq++;
   const userId = `user-${seq}`;
   const sessionId = `sess-${seq}`;
@@ -237,6 +254,8 @@ async function mintSession(): Promise<{ userId: string; token: string }> {
     email: `user-${seq}@example.com`,
     notificationEmail: null,
     passwordHash: null,
+    plexUserId: identity.plexUserId ?? null,
+    jellyfinUserId: identity.jellyfinUserId ?? null,
   });
   authSessions.set(sessionId, { sessionId, userId, expiresAt: new Date(Date.now() + 86_400_000) });
   const iat = Math.floor(Date.now() / 1000);
@@ -247,8 +266,19 @@ async function mintSession(): Promise<{ userId: string; token: string }> {
   return { userId, token };
 }
 
-function addMsu(id: string, userId: string | null, active = true): void {
-  msuRows.push({ id, userId, active });
+function addMsu(
+  id: string,
+  userId: string | null,
+  active = true,
+  over: { source?: string; sourceUserId?: string } = {},
+): void {
+  msuRows.push({
+    id,
+    userId,
+    active,
+    source: over.source ?? "plex",
+    sourceUserId: over.sourceUserId ?? `src-${id}`,
+  });
 }
 
 let rowSeq = 0;
@@ -268,6 +298,7 @@ function addPlay(msuId: string, over: Partial<HistoryRow> = {}): HistoryRow {
     mediaType: "MOVIE",
     title: `Title ${rowSeq}`,
     year: "2020",
+    posterPath: null,
     seasonNumber: null,
     episodeNumber: null,
     episodeTitle: null,
@@ -359,10 +390,11 @@ test("returns ONLY the caller's linked history — other users' rows never appea
   assert.equal(body.stats.plays, 3);
   assert.equal(body.stats.playSeconds, 6000 + 3000 + 1500);
 
-  // Structural pin: linkage was resolved for the SESSION user, and the history
-  // where-clause is the linked-id set (not a caller-supplied value).
-  const msuCall = opsOf("mediaServerUser.findMany")[0]!.args as { where: { userId: string } };
-  assert.equal(msuCall.where.userId, alice.userId);
+  // Structural pin: linkage was resolved for the SESSION user (FK branch of
+  // the identity union), and the history where-clause is the linked-id set
+  // (not a caller-supplied value).
+  const msuCall = opsOf("mediaServerUser.findMany")[0]!.args as { where: { OR: { userId?: string }[] } };
+  assert.deepEqual(msuCall.where.OR, [{ userId: alice.userId }]);
   const phCall = opsOf("playHistory.findMany")[0]!.args as { where: { mediaServerUserId?: { in: string[] } } };
   assert.deepEqual(new Set(phCall.where.mediaServerUserId?.in), new Set(["msu-a1", "msu-a2"]));
 });
@@ -400,10 +432,45 @@ test("unlinked account gets linked:false and PlayHistory is never queried", asyn
   assert.equal(opsOf("playHistory.aggregate").length, 0);
 });
 
+test("a Jellyfin sign-in sees history for its provider identity even with no FK link (no-email accounts)", async () => {
+  // jf-alice signed in via Jellyfin: User.jellyfinUserId is bound, but the
+  // MediaServerUser row was created by the poller with NO email → userId FK
+  // never linked. The provider-identity branch of the union must still scope
+  // her rows in — and never anyone else's.
+  const jfAlice = await mintSession({ jellyfinUserId: "jf-uuid-alice" });
+  await mintSession({ jellyfinUserId: "jf-uuid-bob" }); // bob exists; his identity must not bleed
+  addMsu("msu-jf-alice", null, true, { source: "jellyfin", sourceUserId: "jf-uuid-alice" });
+  addMsu("msu-jf-bob", null, true, { source: "jellyfin", sourceUserId: "jf-uuid-bob" });
+  // Same sourceUserId string on the WRONG source must not match either.
+  addMsu("msu-plex-decoy", null, true, { source: "plex", sourceUserId: "jf-uuid-alice" });
+  const mine = addPlay("msu-jf-alice", { source: "jellyfin", title: "Jellyfin Watch" });
+  addPlay("msu-jf-bob", { source: "jellyfin", title: "Bob Jellyfin Watch" });
+  addPlay("msu-plex-decoy", { title: "Decoy Plex Watch" });
+
+  const { status, body } = await fetchMine(jfAlice.token);
+  assert.equal(status, 200);
+  assert.equal(body.linked, true);
+  assert.deepEqual(body.items.map((i) => i.id), [mine.id]);
+});
+
+test("a Plex sign-in unions its provider identity with FK-linked rows, deduplicated", async () => {
+  const alice = await mintSession({ plexUserId: "11111" });
+  // One row linked BOTH ways (FK + identity), one FK-only, one identity-only.
+  addMsu("msu-both", alice.userId, true, { source: "plex", sourceUserId: "11111" });
+  addMsu("msu-fk-only", alice.userId, true, { source: "jellyfin", sourceUserId: "jf-other" });
+  const both = addPlay("msu-both", { title: "Both Paths" });
+  const fkOnly = addPlay("msu-fk-only", { source: "jellyfin", title: "FK Only" });
+
+  const { body } = await fetchMine(alice.token);
+  assert.deepEqual(new Set(body.items.map((i) => i.id)), new Set([both.id, fkOnly.id]));
+  assert.equal(body.total, 2);
+  assert.equal(body.stats.plays, 2);
+});
+
 test("payload is the lean self-view: admin forensics columns never serialize; posters resolve by tmdbId", async () => {
   const alice = await mintSession();
   addMsu("msu-a1", alice.userId);
-  addPlay("msu-a1", { tmdbId: 603, title: "The MATRIX" });
+  addPlay("msu-a1", { tmdbId: 603, title: "The MATRIX", posterPath: "/matrix-row.jpg" });
 
   const { body } = await fetchMine(alice.token);
   const item = body.items[0]!;
@@ -412,6 +479,9 @@ test("payload is the lean self-view: admin forensics columns never serialize; po
   }
   assert.equal(item.title, "The MATRIX");
   assert.equal(item.posterUrl, "https://image.tmdb.org/t/p/w342/matrix.jpg");
+  // The row's raw TMDB path rides along for native clients, which build their
+  // own image URLs at smaller sizes than the web's w342 posterUrl.
+  assert.equal(item.posterPath, "/matrix-row.jpg");
   assert.equal(typeof item.startedAt, "string"); // ISO-serialized for the client
 });
 

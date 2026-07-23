@@ -30,6 +30,9 @@ const SELECT = {
   mediaType: true,
   title: true,
   year: true,
+  // Raw TMDB poster path captured at finalize time. Native clients build their
+  // own image URL from it (smaller sizes than the web's w342 posterUrl).
+  posterPath: true,
   seasonNumber: true,
   episodeNumber: true,
   episodeTitle: true,
@@ -52,6 +55,7 @@ export interface MyWatchHistoryItem {
   mediaType: "MOVIE" | "TV" | null;
   title: string;
   year: string | null;
+  posterPath: string | null;
   seasonNumber: number | null;
   episodeNumber: number | null;
   episodeTitle: string | null;
@@ -95,11 +99,31 @@ export async function getMyWatchHistory(
   opts: { cursor?: string | null; mediaType?: string | null; search?: string | null } = {},
 ): Promise<MyWatchHistoryPage> {
   // Scope resolution: which media-server identities belong to the caller.
+  // Two sources of truth, unioned:
+  //   1. The explicit MediaServerUser.userId FK (email-matched at ingest, or
+  //      linked manually by an admin).
+  //   2. The caller's OWN provider identity (User.plexUserId/jellyfinUserId,
+  //      bound at Plex/Jellyfin sign-in) matched against the MediaServerUser
+  //      (source, sourceUserId) key. Jellyfin accounts frequently have no
+  //      email, so a Jellyfin-signin user would otherwise never email-match —
+  //      but their provider subject IS the media-server identity they signed
+  //      in with, which is a stronger claim than an email match.
   // Inactive (soft-deleted) server users stay INCLUDED — history outlives a
   // user's removal from the media server (guardrail 28), and it is still the
   // caller's own history.
+  const me = await prisma.user.findUnique({
+    where: { id: summonarrUserId },
+    select: { plexUserId: true, jellyfinUserId: true },
+  });
+  const identityOr: Prisma.MediaServerUserWhereInput[] = [{ userId: summonarrUserId }];
+  if (me?.plexUserId) {
+    identityOr.push({ source: "plex", sourceUserId: me.plexUserId });
+  }
+  if (me?.jellyfinUserId) {
+    identityOr.push({ source: "jellyfin", sourceUserId: me.jellyfinUserId });
+  }
   const linked = await prisma.mediaServerUser.findMany({
-    where: { userId: summonarrUserId },
+    where: { OR: identityOr },
     select: { id: true },
   });
   const ids = linked.map((r) => r.id);
@@ -174,6 +198,7 @@ export async function getMyWatchHistory(
     mediaType: r.mediaType,
     title: r.title,
     year: r.year,
+    posterPath: r.posterPath,
     seasonNumber: r.seasonNumber,
     episodeNumber: r.episodeNumber,
     episodeTitle: r.episodeTitle,
