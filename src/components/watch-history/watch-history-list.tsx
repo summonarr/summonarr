@@ -221,9 +221,12 @@ export function WatchHistoryList({
           {items.map((item) => {
             const href = mediaHref(item);
             const episode = episodeLine(item);
+            // Consolidated entries: progress and the duration figure reflect
+            // the whole group's play time, not just the latest session.
+            const groupSeconds = item.totalPlaySeconds ?? item.playDuration;
             const pct =
               item.duration > 0
-                ? Math.min(100, Math.round((item.playDuration / item.duration) * 100))
+                ? Math.min(100, Math.round((groupSeconds / item.duration) * 100))
                 : 0;
             const meta = item.platform ?? item.player ?? item.device;
             const row = (
@@ -273,6 +276,25 @@ export function WatchHistoryList({
                         {item.year}
                       </span>
                     )}
+                    {(item.playCount ?? 1) > 1 && (
+                      <span
+                        className="ds-mono"
+                        title={`Watched ${item.playCount} times — showing the latest play`}
+                        style={{
+                          fontSize: 9.5,
+                          fontWeight: 400,
+                          padding: "2px 6px",
+                          borderRadius: 999,
+                          background: "oklch(1 0 0 / 0.06)",
+                          color: "var(--ds-fg-subtle)",
+                          letterSpacing: "0.04em",
+                          whiteSpace: "nowrap",
+                          flexShrink: 0,
+                        }}
+                      >
+                        {item.playCount}×
+                      </span>
+                    )}
                   </span>
                   {episode && (
                     <span
@@ -320,7 +342,7 @@ export function WatchHistoryList({
                     {mounted ? formatRelativeTime(item.startedAt) : ""}
                   </span>
                   <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-muted)" }}>
-                    {fmtDuration(item.playDuration)}
+                    {fmtDuration(groupSeconds)}
                   </span>
                   {item.watched ? (
                     <span

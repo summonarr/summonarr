@@ -18,15 +18,23 @@
 //      gets { linked:false, items:[] } and PlayHistory is never queried.
 //   4. LEAN SELECT: the payload excludes the admin forensics surface
 //      (ipAddress, codecs, network fields) even though the rows carry them.
-//   5. Filters (mediaType, sanitized search) and the keyset cursor page within
-//      the caller's scope; all-time stats ignore filters.
+//   5. CONSOLIDATION: repeat plays of the same movie/episode collapse into one
+//      entry (latest play + playCount/totalPlaySeconds, group-wide watched),
+//      keyed by tmdb identity → sourceItemId → per-row; distinct unmatched
+//      titles never merge just because their ids are null.
+//   6. Filters (mediaType, ILIKE-escaped literal search) and the keyset cursor
+//      page within the caller's scope; all-time stats ignore both filters AND
+//      consolidation (raw play counts).
 //
 // Harness: the sessions-routes idiom — real signed session JWTs (bearer
 // transport, which skips the UA-fingerprint binding per guardrail 6b) against
-// in-memory authSession/user/mediaServerUser/playHistory prisma stubs. The
-// playHistory stub honors `where`/`select`/`orderBy`/`take` via a mini matcher
-// so filter + cursor behavior is exercised, not just recorded. No DB, no
-// network.
+// in-memory prisma stubs. The lib's grouped page/count queries are raw SQL
+// ($queryRawUnsafe), so the stub is a JS MIRROR of the query contract: it
+// parses the bind positions out of the SQL shape (IN list, CAST, ILIKE,
+// cursor, LIMIT) and evaluates scoping/filtering/grouping over the in-memory
+// rows. That keeps these tests behavioral for the wire contract; the SQL
+// itself is proven against a real Postgres in live verification, not here.
+// No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -49,7 +57,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Dynamic imports so the env/global stubs above precede the module-graph load.
 const { NextRequest } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaModel } = await import("./_helpers.mts");
+const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 
 // ── recording op log ─────────────────────────────────────────────────────────
@@ -95,6 +103,7 @@ type HistoryRow = {
   seasonNumber: number | null;
   episodeNumber: number | null;
   episodeTitle: string | null;
+  sourceItemId: string | null;
   platform: string | null;
   player: string | null;
   device: string | null;
@@ -140,86 +149,119 @@ shadowPrismaModel(prisma, "mediaServerUser", {
   },
 });
 
-// Minimal Prisma-where interpreter covering exactly the shapes the lib emits:
-// AND arrays, OR arrays, `in` lists, scalar equality, `contains` (insensitive),
-// and `lt` on startedAt/id (the keyset cursor).
-type Where = Record<string, unknown>;
-function matches(row: HistoryRow, where: Where): boolean {
-  for (const [key, cond] of Object.entries(where)) {
-    if (key === "AND") {
-      if (!(cond as Where[]).every((w) => matches(row, w))) return false;
-      continue;
-    }
-    if (key === "OR") {
-      if (!(cond as Where[]).some((w) => matches(row, w))) return false;
-      continue;
-    }
-    const value = (row as unknown as Record<string, unknown>)[key];
-    if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
-      const c = cond as { in?: unknown[]; contains?: string; lt?: unknown };
-      if ("in" in c) {
-        if (!c.in!.includes(value)) return false;
-        continue;
-      }
-      if ("contains" in c) {
-        if (typeof value !== "string") return false;
-        if (!value.toLowerCase().includes(String(c.contains).toLowerCase())) return false;
-        continue;
-      }
-      if ("lt" in c) {
-        if (value instanceof Date && c.lt instanceof Date) {
-          if (!(value.getTime() < c.lt.getTime())) return false;
-        } else if (!(String(value) < String(c.lt))) {
-          return false;
-        }
-        continue;
-      }
-      throw new Error(`watch-history test matcher: unsupported condition on ${key}: ${JSON.stringify(cond)}`);
-    }
-    if (cond instanceof Date) {
-      if (!(value instanceof Date) || value.getTime() !== cond.getTime()) return false;
-      continue;
-    }
-    if (value !== cond) return false;
-  }
-  return true;
-}
-
-function sortDesc(a: HistoryRow, b: HistoryRow): number {
-  const t = b.startedAt.getTime() - a.startedAt.getTime();
-  if (t !== 0) return t;
-  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
-}
-
-function pick(row: HistoryRow, select: Record<string, true>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(select)) {
-    out[key] = (row as unknown as Record<string, unknown>)[key];
-  }
-  return out;
-}
-
+// The all-time stats aggregate is the one Prisma query the lib still issues
+// against PlayHistory; keep it behavioral. findMany/count are deliberately NOT
+// stubbed — if the lib regresses to them, the missing method throws loudly
+// instead of hanging on a real DB.
 shadowPrismaModel(prisma, "playHistory", {
-  findMany: async (args: { where: Where; select: Record<string, true>; take: number }) => {
-    rec("playHistory.findMany", args);
-    return historyRows
-      .filter((r) => matches(r, args.where))
-      .sort(sortDesc)
-      .slice(0, args.take)
-      .map((r) => pick(r, args.select));
-  },
-  count: async (args: { where: Where }) => {
-    rec("playHistory.count", args);
-    return historyRows.filter((r) => matches(r, args.where)).length;
-  },
-  aggregate: async (args: { where: Where }) => {
+  aggregate: async (args: { where: { mediaServerUserId: { in: string[] } } }) => {
     rec("playHistory.aggregate", args);
-    const rows = historyRows.filter((r) => matches(r, args.where));
+    const rows = historyRows.filter((r) => args.where.mediaServerUserId.in.includes(r.mediaServerUserId));
     return {
       _count: { _all: rows.length },
       _sum: { playDuration: rows.reduce((s, r) => s + r.playDuration, 0) || null },
     };
   },
+});
+
+// ── raw-SQL mirror ───────────────────────────────────────────────────────────
+// Evaluates the grouped page/count queries over the in-memory rows by parsing
+// bind positions out of the SQL shape the lib emits. Mirrors the identity
+// ladder exactly; divergence between this mirror and the real SQL is what the
+// live-Postgres verification exists to catch.
+
+function groupKey(r: HistoryRow): string {
+  if (r.tmdbId != null) {
+    return `tmdb:${r.tmdbId}:${r.mediaType ?? ""}:${r.seasonNumber ?? -1}:${r.episodeNumber ?? -1}`;
+  }
+  if (r.sourceItemId != null) return `item:${r.source}:${r.sourceItemId}`;
+  return `row:${r.id}`;
+}
+
+function repSortDesc(a: { startedAt: Date; id: string }, b: { startedAt: Date; id: string }): number {
+  const t = b.startedAt.getTime() - a.startedAt.getTime();
+  if (t !== 0) return t;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+// The page query's SELECT list — the lean self-view columns.
+function lean(r: HistoryRow) {
+  return {
+    id: r.id, source: r.source, startedAt: r.startedAt, stoppedAt: r.stoppedAt,
+    duration: r.duration, playDuration: r.playDuration, tmdbId: r.tmdbId,
+    mediaType: r.mediaType, title: r.title, year: r.year, posterPath: r.posterPath,
+    seasonNumber: r.seasonNumber, episodeNumber: r.episodeNumber,
+    episodeTitle: r.episodeTitle, platform: r.platform, player: r.player,
+    device: r.device, playMethod: r.playMethod,
+  };
+}
+
+function filteredRows(sql: string, binds: unknown[]): HistoryRow[] {
+  const inMatch = sql.match(/"mediaServerUserId" IN \(([^)]*)\)/);
+  assert.ok(inMatch, "page/count SQL must scope by mediaServerUserId IN (…)");
+  const idCount = (inMatch![1]!.match(/\$\d+/g) ?? []).length;
+  const msuIds = binds.slice(0, idCount) as string[];
+  let rows = historyRows.filter((r) => msuIds.includes(r.mediaServerUserId));
+
+  const castMatch = sql.match(/"mediaType" = CAST\(\$(\d+) AS "MediaType"\)/);
+  if (castMatch) {
+    const want = binds[Number(castMatch[1]) - 1];
+    rows = rows.filter((r) => r.mediaType === want);
+  }
+  const ilikeMatch = sql.match(/ILIKE \$(\d+) ESCAPE/);
+  if (ilikeMatch) {
+    const pattern = binds[Number(ilikeMatch[1]) - 1] as string; // "%<escaped>%"
+    const needle = pattern.slice(1, -1).replace(/\\([\\%_])/g, "$1").toLowerCase();
+    rows = rows.filter(
+      (r) =>
+        r.title.toLowerCase().includes(needle) ||
+        (r.episodeTitle ?? "").toLowerCase().includes(needle),
+    );
+  }
+  return rows;
+}
+
+function groupedReps(rows: HistoryRow[]) {
+  const groups = new Map<string, HistoryRow[]>();
+  for (const r of rows) {
+    const k = groupKey(r);
+    const bucket = groups.get(k);
+    if (bucket) bucket.push(r);
+    else groups.set(k, [r]);
+  }
+  return [...groups.values()].map((g) => {
+    const rep = [...g].sort(repSortDesc)[0]!;
+    return {
+      ...lean(rep),
+      play_count: g.length,
+      total_play_duration: g.reduce((s, r) => s + r.playDuration, 0),
+      group_watched: g.some((r) => r.watched),
+      group_completed: g.some((r) => r.completed),
+    };
+  });
+}
+
+shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async (sql: string, ...binds: unknown[]) => {
+  rec("$queryRawUnsafe", { sql, binds });
+  if (sql.includes("COUNT(DISTINCT")) {
+    const keys = new Set(filteredRows(sql, binds).map(groupKey));
+    return [{ total: keys.size }];
+  }
+  let reps = groupedReps(filteredRows(sql, binds));
+  const cursorMatch = sql.match(/"startedAt" < \$(\d+)/);
+  if (cursorMatch) {
+    const at = binds[Number(cursorMatch[1]) - 1] as Date;
+    const cid = binds[Number(cursorMatch[1])] as string;
+    reps = reps.filter(
+      (r) =>
+        r.startedAt.getTime() < at.getTime() ||
+        (r.startedAt.getTime() === at.getTime() && r.id < cid),
+    );
+  }
+  const limitMatch = sql.match(/LIMIT \$(\d+)/);
+  assert.ok(limitMatch, "page SQL must carry a bound LIMIT");
+  const limit = binds[Number(limitMatch![1]) - 1] as number;
+  return reps.sort(repSortDesc).slice(0, limit);
 });
 
 // resolvePosterMap backing tables: one core row proves the tmdbId→poster
@@ -302,6 +344,7 @@ function addPlay(msuId: string, over: Partial<HistoryRow> = {}): HistoryRow {
     seasonNumber: null,
     episodeNumber: null,
     episodeTitle: null,
+    sourceItemId: null,
     platform: "Apple TV",
     player: "Living Room",
     device: "tvOS",
@@ -334,6 +377,9 @@ interface MineItem {
   id: string;
   title: string;
   posterUrl: string | null;
+  playCount: number;
+  totalPlaySeconds: number;
+  watched: boolean;
   [key: string]: unknown;
 }
 interface MineBody {
@@ -362,7 +408,7 @@ beforeEach(() => {
 test("unauthenticated request is 401 and never touches PlayHistory", async () => {
   const res = await getMine(mineReq(null), undefined);
   assert.equal(res.status, 401);
-  assert.equal(opsOf("playHistory.findMany").length, 0);
+  assert.equal(opsOf("$queryRawUnsafe").length, 0);
   assert.equal(opsOf("mediaServerUser.findMany").length, 0);
 });
 
@@ -390,13 +436,13 @@ test("returns ONLY the caller's linked history — other users' rows never appea
   assert.equal(body.stats.plays, 3);
   assert.equal(body.stats.playSeconds, 6000 + 3000 + 1500);
 
-  // Structural pin: linkage was resolved for the SESSION user (FK branch of
-  // the identity union), and the history where-clause is the linked-id set
-  // (not a caller-supplied value).
+  // Structural pins: linkage was resolved for the SESSION user (FK branch of
+  // the identity union), and the raw page query's scope binds are exactly the
+  // linked-id set (not a caller-supplied value).
   const msuCall = opsOf("mediaServerUser.findMany")[0]!.args as { where: { OR: { userId?: string }[] } };
   assert.deepEqual(msuCall.where.OR, [{ userId: alice.userId }]);
-  const phCall = opsOf("playHistory.findMany")[0]!.args as { where: { mediaServerUserId?: { in: string[] } } };
-  assert.deepEqual(new Set(phCall.where.mediaServerUserId?.in), new Set(["msu-a1", "msu-a2"]));
+  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  assert.deepEqual(new Set(raw.binds.slice(0, 2)), new Set(["msu-a1", "msu-a2"]));
 });
 
 test("userId-shaped query params are ignored — no parameter can widen the scope", async () => {
@@ -415,6 +461,9 @@ test("userId-shaped query params are ignored — no parameter can widen the scop
   assert.equal(status, 200);
   assert.deepEqual(body.items.map((i) => i.id), [mine.id]);
   assert.ok(!body.items.some((i) => i.title === "Bob Secret Movie"));
+  // The scope bind is still alice's linked id — nothing from the query string.
+  const raw = opsOf("$queryRawUnsafe")[0]!.args as { binds: unknown[] };
+  assert.equal(raw.binds[0], "msu-a1");
 });
 
 test("unlinked account gets linked:false and PlayHistory is never queried", async () => {
@@ -427,8 +476,7 @@ test("unlinked account gets linked:false and PlayHistory is never queried", asyn
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
   assert.deepEqual(body.stats, { plays: 0, playSeconds: 0 });
-  assert.equal(opsOf("playHistory.findMany").length, 0);
-  assert.equal(opsOf("playHistory.count").length, 0);
+  assert.equal(opsOf("$queryRawUnsafe").length, 0);
   assert.equal(opsOf("playHistory.aggregate").length, 0);
 });
 
@@ -474,7 +522,7 @@ test("payload is the lean self-view: admin forensics columns never serialize; po
 
   const { body } = await fetchMine(alice.token);
   const item = body.items[0]!;
-  for (const leaked of ["ipAddress", "videoCodec", "bitrate", "mediaServerUserId", "sourceSessionId"]) {
+  for (const leaked of ["ipAddress", "videoCodec", "bitrate", "mediaServerUserId", "sourceSessionId", "sourceItemId"]) {
     assert.ok(!(leaked in item), `expected ${leaked} to be excluded from the self view`);
   }
   assert.equal(item.title, "The MATRIX");
@@ -483,9 +531,68 @@ test("payload is the lean self-view: admin forensics columns never serialize; po
   // own image URLs at smaller sizes than the web's w342 posterUrl.
   assert.equal(item.posterPath, "/matrix-row.jpg");
   assert.equal(typeof item.startedAt, "string"); // ISO-serialized for the client
+  // The page SQL itself must never select the forensics columns.
+  const sql = (opsOf("$queryRawUnsafe")[0]!.args as { sql: string }).sql;
+  for (const col of ["ipAddress", "videoCodec", "bitrate", "location", "bandwidth"]) {
+    assert.ok(!sql.includes(`"${col}"`), `page SQL must not select ${col}`);
+  }
 });
 
-test("mediaType filter narrows items but all-time stats ignore it", async () => {
+test("repeat plays of the same episode/movie consolidate into one entry with aggregates", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  // Same episode three times (two partial, one watched) — latest is play 3.
+  addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, episodeTitle: "Half Loop", playDuration: 1000, watched: false, completed: false });
+  addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, episodeTitle: "Half Loop", playDuration: 2000, watched: true, completed: true });
+  const epLatest = addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, episodeTitle: "Half Loop", playDuration: 500, watched: false, completed: false, platform: "iOS" });
+  // A DIFFERENT episode of the same show must stay its own entry.
+  const otherEp = addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 3, playDuration: 3000 });
+  // Same movie twice.
+  addPlay("msu-a1", { tmdbId: 603, title: "The Matrix", playDuration: 4000 });
+  const movieLatest = addPlay("msu-a1", { tmdbId: 603, title: "The Matrix", playDuration: 4500 });
+
+  const { body } = await fetchMine(alice.token);
+  assert.equal(body.items.length, 3);
+  assert.equal(body.total, 3);
+
+  const ep = body.items.find((i) => i.id === epLatest.id)!;
+  assert.ok(ep, "episode entry must be represented by its LATEST play");
+  assert.equal(ep.playCount, 3);
+  assert.equal(ep.totalPlaySeconds, 1000 + 2000 + 500);
+  // Group-wide watched: one qualifying play marks the consolidated entry.
+  assert.equal(ep.watched, true);
+
+  const movie = body.items.find((i) => i.id === movieLatest.id)!;
+  assert.equal(movie.playCount, 2);
+  assert.equal(movie.totalPlaySeconds, 8500);
+
+  const single = body.items.find((i) => i.id === otherEp.id)!;
+  assert.equal(single.playCount, 1);
+
+  // Consolidation never inflates the all-time totals: stats stay RAW plays.
+  assert.equal(body.stats.plays, 6);
+});
+
+test("unmatched rows consolidate by library item, and distinct unmatched titles never merge", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  // No tmdbId, same source item → one entry.
+  addPlay("msu-a1", { title: "Home Video", sourceItemId: "plex-item-9", playDuration: 100 });
+  const itemLatest = addPlay("msu-a1", { title: "Home Video", sourceItemId: "plex-item-9", playDuration: 200 });
+  // No tmdbId, no sourceItemId — two different titles must stay two entries.
+  const loose1 = addPlay("msu-a1", { title: "Loose Row A" });
+  const loose2 = addPlay("msu-a1", { title: "Loose Row B" });
+
+  const { body } = await fetchMine(alice.token);
+  assert.equal(body.items.length, 3);
+  const item = body.items.find((i) => i.id === itemLatest.id)!;
+  assert.equal(item.playCount, 2);
+  assert.equal(item.totalPlaySeconds, 300);
+  assert.ok(body.items.some((i) => i.id === loose1.id));
+  assert.ok(body.items.some((i) => i.id === loose2.id));
+});
+
+test("mediaType filter narrows entries but all-time stats ignore it", async () => {
   const alice = await mintSession();
   addMsu("msu-a1", alice.userId);
   addPlay("msu-a1", { mediaType: "MOVIE", title: "A Movie", playDuration: 100 });
@@ -498,22 +605,33 @@ test("mediaType filter narrows items but all-time stats ignore it", async () => 
   assert.equal(body.stats.playSeconds, 300);
 });
 
-test("search matches title/episode case-insensitively with LIKE metacharacters stripped", async () => {
+test("search matches title/episode case-insensitively; LIKE metacharacters are LITERAL, not wildcards", async () => {
   const alice = await mintSession();
   addMsu("msu-a1", alice.userId);
   const movie = addPlay("msu-a1", { title: "The MATRIX" });
   const ep = addPlay("msu-a1", { mediaType: "TV", title: "Severance", episodeTitle: "The Matrix Within" });
+  const literal = addPlay("msu-a1", { title: "100% Wolf" });
   addPlay("msu-a1", { title: "Unrelated" });
 
-  // "ma%trix" — the `%` wildcard is stripped, leaving a literal "matrix" match.
-  const { body } = await fetchMine(alice.token, { search: "ma%trix" });
+  const plain = await fetchMine(alice.token, { search: "matrix" });
   assert.deepEqual(
-    new Set(body.items.map((i) => i.id)),
+    new Set(plain.body.items.map((i) => i.id)),
     new Set([movie.id, ep.id]),
   );
+
+  // "ma%trix" carries a LITERAL percent — escaped, so it matches nothing
+  // (rather than acting as a wildcard bridging "ma…trix").
+  const wildcard = await fetchMine(alice.token, { search: "ma%trix" });
+  assert.deepEqual(wildcard.body.items, []);
+  // …and a literal % still finds titles that actually contain one.
+  const percent = await fetchMine(alice.token, { search: "100%" });
+  assert.deepEqual(percent.body.items.map((i) => i.id), [literal.id]);
+  // The bind itself must be the escaped pattern, ready for ESCAPE '\'.
+  const lastRaw = opsOf("$queryRawUnsafe").at(-2)!.args as { binds: unknown[] };
+  assert.ok(lastRaw.binds.includes("%100\\%%"), "search bind must be ILIKE-escaped");
 });
 
-test("keyset cursor pages the caller's history without overlap (same-timestamp id tiebreak)", async () => {
+test("keyset cursor pages the caller's entries without overlap (same-timestamp id tiebreak)", async () => {
   const alice = await mintSession();
   addMsu("msu-a1", alice.userId);
   const sameInstant = new Date(Date.UTC(2026, 5, 10, 20, 0, 0));

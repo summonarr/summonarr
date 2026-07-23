@@ -708,7 +708,7 @@ const spec = {
         responses: {
           "200": {
             description:
-              "History page ({ linked, items, total, nextCursor, pageSize, stats }); linked=false when the account has no linked media-server user yet",
+              "History page ({ linked, items, total, nextCursor, pageSize, stats }). Entries are consolidated — repeat plays of the same movie/episode collapse into one item (latest play + playCount/totalPlaySeconds aggregates); linked=false when the account has no linked media-server user yet",
           },
         },
       },
