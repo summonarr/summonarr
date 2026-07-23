@@ -713,6 +713,18 @@ const spec = {
         },
       },
     },
+    "/play-history/mine/{id}": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "Play-by-play breakdown of ONE consolidated entry from the caller's own history. `id` is any play id in the entry; a row outside the caller's scope 404s like a missing one.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ item, plays (capped at 100, newest first), firstStartedAt, lastStartedAt }" },
+          "404": { description: "Unknown id, or a play outside the caller's linked media-server users" },
+        },
+      },
+    },
     "/play-history/sessions": {
       get: {
         tags: ["Sessions"],

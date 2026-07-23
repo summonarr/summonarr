@@ -149,17 +149,66 @@ shadowPrismaModel(prisma, "mediaServerUser", {
   },
 });
 
-// The all-time stats aggregate is the one Prisma query the lib still issues
-// against PlayHistory; keep it behavioral. findMany/count are deliberately NOT
-// stubbed — if the lib regresses to them, the missing method throws loudly
-// instead of hanging on a real DB.
+// Structured-where matcher for the Prisma queries the lib issues (the list
+// path's stats aggregate + the entry-detail findFirst/findMany/aggregate):
+// AND arrays, `in` lists, and scalar/null equality — Prisma translates a null
+// equality to IS NULL, which plain `===` mirrors here.
+type PWhere = Record<string, unknown>;
+function rowMatches(row: HistoryRow, where: PWhere): boolean {
+  for (const [key, cond] of Object.entries(where)) {
+    if (key === "AND") {
+      if (!(cond as PWhere[]).every((w) => rowMatches(row, w))) return false;
+      continue;
+    }
+    const value = (row as unknown as Record<string, unknown>)[key];
+    if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
+      const c = cond as { in?: unknown[] };
+      if ("in" in c) {
+        if (!c.in!.includes(value)) return false;
+        continue;
+      }
+      throw new Error(`watch-history test matcher: unsupported condition on ${key}: ${JSON.stringify(cond)}`);
+    }
+    if (value !== cond) return false;
+  }
+  return true;
+}
+
+function pickSelect(row: HistoryRow, select: Record<string, true>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(select)) {
+    out[key] = (row as unknown as Record<string, unknown>)[key];
+  }
+  return out;
+}
+
+// The list path's grouped page/count ride $queryRawUnsafe (mirrored below);
+// these delegate methods serve the stats aggregate + the entry-detail queries.
+// count is deliberately NOT stubbed — a regression to Prisma count throws
+// loudly instead of hanging on a real DB.
 shadowPrismaModel(prisma, "playHistory", {
-  aggregate: async (args: { where: { mediaServerUserId: { in: string[] } } }) => {
+  findFirst: async (args: { where: PWhere; select: Record<string, true> }) => {
+    rec("playHistory.findFirst", args);
+    const row = historyRows.find((r) => rowMatches(r, args.where));
+    return row ? pickSelect(row, args.select) : null;
+  },
+  findMany: async (args: { where: PWhere; select: Record<string, true>; take: number }) => {
+    rec("playHistory.findMany", args);
+    return historyRows
+      .filter((r) => rowMatches(r, args.where))
+      .sort(repSortDesc)
+      .slice(0, args.take)
+      .map((r) => pickSelect(r, args.select));
+  },
+  aggregate: async (args: { where: PWhere }) => {
     rec("playHistory.aggregate", args);
-    const rows = historyRows.filter((r) => args.where.mediaServerUserId.in.includes(r.mediaServerUserId));
+    const rows = historyRows.filter((r) => rowMatches(r, args.where));
+    const times = rows.map((r) => r.startedAt.getTime());
     return {
       _count: { _all: rows.length },
       _sum: { playDuration: rows.reduce((s, r) => s + r.playDuration, 0) || null },
+      _min: { startedAt: times.length ? new Date(Math.min(...times)) : null },
+      _max: { startedAt: times.length ? new Date(Math.max(...times)) : null },
     };
   },
 });
@@ -370,8 +419,9 @@ function mineReq(token: string | null, query: Record<string, string> = {}): Req 
   });
 }
 
-// Route handler (imported AFTER every stub is in place).
+// Route handlers (imported AFTER every stub is in place).
 const { GET: getMine } = await import("../src/app/api/play-history/mine/route.ts");
+const { GET: getMineEntry } = await import("../src/app/api/play-history/mine/[id]/route.ts");
 
 interface MineItem {
   id: string;
@@ -393,6 +443,24 @@ interface MineBody {
 async function fetchMine(token: string | null, query: Record<string, string> = {}): Promise<{ status: number; body: MineBody }> {
   const res = await getMine(mineReq(token, query), undefined);
   return { status: res.status, body: (await res.json()) as MineBody };
+}
+
+interface EntryBody {
+  item: MineItem;
+  plays: { id: string; playDuration: number; [key: string]: unknown }[];
+  firstStartedAt: string;
+  lastStartedAt: string;
+}
+async function fetchEntry(token: string | null, id: string): Promise<{ status: number; body: EntryBody }> {
+  const req = new NextRequest(`http://localhost:3000/api/play-history/mine/${id}`, {
+    method: "GET",
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      "x-forwarded-for": "203.0.113.99",
+    },
+  });
+  const res = await getMineEntry(req, { params: Promise.resolve({ id }) });
+  return { status: res.status, body: (await res.json()) as EntryBody };
 }
 
 beforeEach(() => {
@@ -663,4 +731,63 @@ test("a malformed cursor fails soft to the first page", async () => {
   const { status, body } = await fetchMine(alice.token, { cursor: "not|a-real-cursor|at-all" });
   assert.equal(status, 200);
   assert.deepEqual(body.items.map((i) => i.id), [row.id]);
+});
+
+// ── entry detail (GET /api/play-history/mine/[id]) ───────────────────────────
+
+test("entry detail expands the whole group from ANY play id; foreign rows 404 like missing ones", async () => {
+  const alice = await mintSession();
+  const bob = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  addMsu("msu-b1", bob.userId);
+  const p1 = addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, playDuration: 1000, watched: false, completed: false, platform: "tvOS" });
+  const p2 = addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, playDuration: 2000, watched: true, completed: true, platform: "iOS" });
+  const p3 = addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2, playDuration: 500, watched: false, completed: false, platform: "Chrome" });
+  // Neighbours that must NOT leak into the group: a different episode, and
+  // BOB's play of the very same episode.
+  addPlay("msu-a1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 3 });
+  addPlay("msu-b1", { tmdbId: 95396, mediaType: "TV", title: "Severance", seasonNumber: 1, episodeNumber: 2 });
+
+  // Anchor by an OLDER play's id — the contract is "any play id in the entry".
+  const { status, body } = await fetchEntry(alice.token, p1.id);
+  assert.equal(status, 200);
+  assert.deepEqual(body.plays.map((p) => p.id), [p3.id, p2.id, p1.id]); // newest first
+  assert.equal(body.item.id, p3.id); // representative = latest play
+  assert.equal(body.item.playCount, 3);
+  assert.equal(body.item.totalPlaySeconds, 3500);
+  assert.equal(body.item.watched, true); // group-wide bool
+  assert.equal(body.firstStartedAt, p1.startedAt.toISOString());
+  assert.equal(body.lastStartedAt, p3.startedAt.toISOString());
+  // Per-play payload stays lean.
+  for (const leaked of ["ipAddress", "videoCodec", "bitrate", "mediaServerUserId"]) {
+    assert.ok(!(leaked in body.plays[0]!), `expected ${leaked} to be excluded from plays`);
+  }
+
+  // Bob probing alice's row id gets a 404 indistinguishable from a bad id.
+  const foreign = await fetchEntry(bob.token, p1.id);
+  assert.equal(foreign.status, 404);
+  const missing = await fetchEntry(alice.token, "no-such-row");
+  assert.equal(missing.status, 404);
+  // Unauthenticated is 401 before any lookup.
+  const unauth = await fetchEntry(null, p1.id);
+  assert.equal(unauth.status, 401);
+});
+
+test("entry detail groups unmatched rows by library item, and a bare row stands alone", async () => {
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+  const i1 = addPlay("msu-a1", { title: "Home Video", sourceItemId: "jf-item-9", playDuration: 100 });
+  const i2 = addPlay("msu-a1", { title: "Home Video", sourceItemId: "jf-item-9", playDuration: 200 });
+  const loose = addPlay("msu-a1", { title: "Loose Row" });
+
+  const grouped = await fetchEntry(alice.token, i1.id);
+  assert.equal(grouped.status, 200);
+  assert.deepEqual(new Set(grouped.body.plays.map((p) => p.id)), new Set([i1.id, i2.id]));
+  assert.equal(grouped.body.item.playCount, 2);
+  assert.equal(grouped.body.item.totalPlaySeconds, 300);
+
+  const single = await fetchEntry(alice.token, loose.id);
+  assert.equal(single.status, 200);
+  assert.deepEqual(single.body.plays.map((p) => p.id), [loose.id]);
+  assert.equal(single.body.item.playCount, 1);
 });

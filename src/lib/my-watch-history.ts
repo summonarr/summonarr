@@ -113,23 +113,20 @@ interface RawGroupedRow {
   group_completed: boolean;
 }
 
-export async function getMyWatchHistory(
-  summonarrUserId: string,
-  opts: { cursor?: string | null; mediaType?: string | null; search?: string | null } = {},
-): Promise<MyWatchHistoryPage> {
-  // Scope resolution: which media-server identities belong to the caller.
-  // Two sources of truth, unioned:
-  //   1. The explicit MediaServerUser.userId FK (email-matched at ingest, or
-  //      linked manually by an admin).
-  //   2. The caller's OWN provider identity (User.plexUserId/jellyfinUserId,
-  //      bound at Plex/Jellyfin sign-in) matched against the MediaServerUser
-  //      (source, sourceUserId) key. Jellyfin accounts frequently have no
-  //      email, so a Jellyfin-signin user would otherwise never email-match —
-  //      but their provider subject IS the media-server identity they signed
-  //      in with, which is a stronger claim than an email match.
-  // Inactive (soft-deleted) server users stay INCLUDED — history outlives a
-  // user's removal from the media server (guardrail 28), and it is still the
-  // caller's own history.
+// Scope resolution: which media-server identities belong to the caller.
+// Two sources of truth, unioned:
+//   1. The explicit MediaServerUser.userId FK (email-matched at ingest, or
+//      linked manually by an admin).
+//   2. The caller's OWN provider identity (User.plexUserId/jellyfinUserId,
+//      bound at Plex/Jellyfin sign-in) matched against the MediaServerUser
+//      (source, sourceUserId) key. Jellyfin accounts frequently have no
+//      email, so a Jellyfin-signin user would otherwise never email-match —
+//      but their provider subject IS the media-server identity they signed
+//      in with, which is a stronger claim than an email match.
+// Inactive (soft-deleted) server users stay INCLUDED — history outlives a
+// user's removal from the media server (guardrail 28), and it is still the
+// caller's own history.
+async function resolveLinkedMediaServerUserIds(summonarrUserId: string): Promise<string[]> {
   const me = await prisma.user.findUnique({
     where: { id: summonarrUserId },
     select: { plexUserId: true, jellyfinUserId: true },
@@ -145,7 +142,14 @@ export async function getMyWatchHistory(
     where: { OR: identityOr },
     select: { id: true },
   });
-  const ids = linked.map((r) => r.id);
+  return linked.map((r) => r.id);
+}
+
+export async function getMyWatchHistory(
+  summonarrUserId: string,
+  opts: { cursor?: string | null; mediaType?: string | null; search?: string | null } = {},
+): Promise<MyWatchHistoryPage> {
+  const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
   if (ids.length === 0) {
     return {
       linked: false,
@@ -297,5 +301,185 @@ export async function getMyWatchHistory(
     nextCursor: last ? `${last.startedAt.toISOString()}|${last.id}` : null,
     pageSize: MY_HISTORY_PAGE_SIZE,
     stats: { plays: agg._count._all, playSeconds: agg._sum.playDuration ?? 0 },
+  };
+}
+
+// ── Entry detail (per-consolidated-entry play breakdown) ─────────────────────
+
+// One session inside a consolidated entry — the per-play subset of the lean
+// field set (the shared title/episode identity lives on the entry, not here).
+export interface MyWatchHistoryPlay {
+  id: string;
+  source: string;
+  startedAt: string;
+  stoppedAt: string;
+  duration: number;
+  playDuration: number;
+  watched: boolean;
+  completed: boolean;
+  platform: string | null;
+  player: string | null;
+  device: string | null;
+  playMethod: string | null;
+}
+
+export interface MyWatchHistoryEntryDetail {
+  // The consolidated entry (same shape as the list items — latest play as the
+  // representative, group aggregates included).
+  item: MyWatchHistoryItem;
+  // Every play in the group, newest first, capped at MY_ENTRY_PLAYS_CAP. The
+  // aggregates on `item` are exact even when this list is truncated.
+  plays: MyWatchHistoryPlay[];
+  firstStartedAt: string;
+  lastStartedAt: string;
+}
+
+export const MY_ENTRY_PLAYS_CAP = 100;
+
+// Fields needed to (a) rebuild the group key and (b) serve as the
+// representative row. sourceItemId is key-input only — it never serializes.
+const ANCHOR_SELECT = {
+  id: true,
+  source: true,
+  startedAt: true,
+  stoppedAt: true,
+  duration: true,
+  playDuration: true,
+  watched: true,
+  completed: true,
+  tmdbId: true,
+  mediaType: true,
+  title: true,
+  year: true,
+  posterPath: true,
+  seasonNumber: true,
+  episodeNumber: true,
+  episodeTitle: true,
+  sourceItemId: true,
+  platform: true,
+  player: true,
+  device: true,
+  playMethod: true,
+} as const;
+
+/**
+ * Expand one consolidated entry into its full play-by-play breakdown. `rowId`
+ * is any play id from the entry (clients pass the representative row's id).
+ * Returns null — surfaced as 404 — when the row doesn't exist OR belongs to a
+ * media-server user outside the caller's linked set, so foreign row ids are
+ * indistinguishable from missing ones.
+ *
+ * The group membership mirrors the list query's identity ladder exactly:
+ * tmdb identity (null-safe season/episode/mediaType equality, source-agnostic),
+ * else same library item (source + sourceItemId), else the row alone.
+ */
+export async function getMyWatchHistoryEntry(
+  summonarrUserId: string,
+  rowId: string,
+): Promise<MyWatchHistoryEntryDetail | null> {
+  const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
+  if (ids.length === 0) return null;
+
+  const anchor = await prisma.playHistory.findFirst({
+    where: { id: rowId, mediaServerUserId: { in: ids } },
+    select: ANCHOR_SELECT,
+  });
+  if (!anchor) return null;
+
+  let groupWhere: Prisma.PlayHistoryWhereInput;
+  if (anchor.tmdbId != null) {
+    groupWhere = {
+      tmdbId: anchor.tmdbId,
+      mediaType: anchor.mediaType,
+      seasonNumber: anchor.seasonNumber,
+      episodeNumber: anchor.episodeNumber,
+    };
+  } else if (anchor.sourceItemId != null) {
+    groupWhere = { tmdbId: null, source: anchor.source, sourceItemId: anchor.sourceItemId };
+  } else {
+    groupWhere = { id: anchor.id };
+  }
+  const scopedGroup: Prisma.PlayHistoryWhereInput = {
+    AND: [{ mediaServerUserId: { in: ids } }, groupWhere],
+  };
+
+  const [playRows, agg] = await Promise.all([
+    prisma.playHistory.findMany({
+      where: scopedGroup,
+      select: {
+        id: true,
+        source: true,
+        startedAt: true,
+        stoppedAt: true,
+        duration: true,
+        playDuration: true,
+        watched: true,
+        completed: true,
+        platform: true,
+        player: true,
+        device: true,
+        playMethod: true,
+      },
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+      take: MY_ENTRY_PLAYS_CAP,
+    }),
+    // Exact aggregates even when the play list is capped.
+    prisma.playHistory.aggregate({
+      where: scopedGroup,
+      _count: { _all: true },
+      _sum: { playDuration: true },
+      _min: { startedAt: true },
+      _max: { startedAt: true },
+    }),
+  ]);
+
+  const newest = playRows[0];
+  if (!newest) return null;
+
+  const posters = anchor.tmdbId != null ? await resolvePosterMap([anchor]) : {};
+  const item: MyWatchHistoryItem = {
+    id: newest.id,
+    source: newest.source,
+    startedAt: newest.startedAt.toISOString(),
+    stoppedAt: newest.stoppedAt.toISOString(),
+    duration: newest.duration,
+    playDuration: newest.playDuration,
+    watched: playRows.some((p) => p.watched),
+    completed: playRows.some((p) => p.completed),
+    tmdbId: anchor.tmdbId,
+    mediaType: anchor.mediaType,
+    title: anchor.title,
+    year: anchor.year,
+    posterPath: anchor.posterPath,
+    seasonNumber: anchor.seasonNumber,
+    episodeNumber: anchor.episodeNumber,
+    episodeTitle: anchor.episodeTitle,
+    platform: newest.platform,
+    player: newest.player,
+    device: newest.device,
+    playMethod: newest.playMethod,
+    posterUrl: anchor.tmdbId != null ? posters[anchor.tmdbId] ?? null : null,
+    playCount: agg._count._all,
+    totalPlaySeconds: agg._sum.playDuration ?? 0,
+  };
+
+  return {
+    item,
+    plays: playRows.map((p) => ({
+      id: p.id,
+      source: p.source,
+      startedAt: p.startedAt.toISOString(),
+      stoppedAt: p.stoppedAt.toISOString(),
+      duration: p.duration,
+      playDuration: p.playDuration,
+      watched: p.watched,
+      completed: p.completed,
+      platform: p.platform,
+      player: p.player,
+      device: p.device,
+      playMethod: p.playMethod,
+    })),
+    firstStartedAt: (agg._min.startedAt ?? newest.startedAt).toISOString(),
+    lastStartedAt: (agg._max.startedAt ?? newest.startedAt).toISOString(),
   };
 }

@@ -14,6 +14,7 @@ import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { EmptyState } from "@/components/ui/empty-state";
+import { ReportIssueButton } from "@/components/media/report-issue-button";
 import type { MyWatchHistoryItem, MyWatchHistoryPage } from "@/lib/my-watch-history";
 
 // Local copy of the tiny duration formatter (activity-ui's fmtDuration) so the
@@ -43,12 +44,15 @@ type TypeFilter = "" | "MOVIE" | "TV";
 export function WatchHistoryList({
   initial,
   serverProvider,
+  issuesEnabled,
 }: {
   initial: MyWatchHistoryPage;
   // True when the session's sign-in provider is Plex/Jellyfin — the account IS
   // a media-server identity, so an unlinked-empty state must never tell them
   // to "get linked"; there is simply no recorded history yet.
   serverProvider: boolean;
+  // Row-level "Report issue" buttons render only when the issues feature is on.
+  issuesEnabled: boolean;
 }) {
   const mounted = useHasMounted();
 
@@ -365,18 +369,38 @@ export function WatchHistoryList({
               background: "var(--ds-bg-1)",
               border: "1px solid var(--ds-border)",
             } as const;
-            return href ? (
-              <Link
-                key={item.id}
-                href={href}
-                className="flex gap-3 items-center"
-                style={{ ...rowStyle, textDecoration: "none" }}
-              >
-                {row}
-              </Link>
-            ) : (
+            // Report button sits OUTSIDE the row link (a button inside an
+            // anchor would navigate on click). Prefilled to the exact episode
+            // for TV entries; unmatched rows (no tmdbId) can't be reported.
+            const report =
+              issuesEnabled && item.tmdbId != null && item.mediaType != null ? (
+                <ReportIssueButton
+                  compact
+                  tmdbId={item.tmdbId}
+                  mediaType={item.mediaType}
+                  title={item.title}
+                  posterPath={item.posterPath}
+                  initialScope={
+                    item.mediaType === "TV" && item.seasonNumber != null ? "EPISODE" : "FULL"
+                  }
+                  initialSeasonNumber={item.seasonNumber}
+                  initialEpisodeNumber={item.episodeNumber}
+                />
+              ) : null;
+            return (
               <div key={item.id} className="flex gap-3 items-center" style={rowStyle}>
-                {row}
+                {href ? (
+                  <Link
+                    href={href}
+                    className="flex gap-3 items-center min-w-0 flex-1"
+                    style={{ textDecoration: "none" }}
+                  >
+                    {row}
+                  </Link>
+                ) : (
+                  <span className="flex gap-3 items-center min-w-0 flex-1">{row}</span>
+                )}
+                {report}
               </div>
             );
           })}
