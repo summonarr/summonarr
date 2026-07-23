@@ -9,6 +9,7 @@ import {
 } from "@/lib/oidc";
 import { serializeSessionCookie } from "@/lib/session-cookie";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { safeInternalPath } from "@/lib/safe-url";
 
 function readStateCookie(req: NextRequest): string | null {
   const header = req.headers.get("cookie");
@@ -113,13 +114,13 @@ export async function GET(req: NextRequest) {
 
   // AUTH_URL is guaranteed non-empty by the early guard at the top of GET.
   const base = authUrl;
-  // returnTo was already validated at /start (must start with "/", not "//")
-  // and signed into the state cookie, so re-validating here is belt-and-
-  // suspenders — defends against a future regression in /start.
-  const safeReturn =
-    flowState.returnTo && flowState.returnTo.startsWith("/") && !flowState.returnTo.startsWith("//")
-      ? flowState.returnTo
-      : "/";
+  // returnTo was already validated at /start and signed into the state cookie,
+  // so re-validating here is belt-and-suspenders — defends against a future
+  // regression in /start. Must use the SAME validator: this redirect also
+  // carries the freshly-minted session cookie, so an off-origin target here is
+  // a post-authentication open redirect (phishing hand-off), and the previous
+  // `startsWith("/") && !startsWith("//")` test let `/\t/evil.com` through.
+  const safeReturn = safeInternalPath(flowState.returnTo) ?? "/";
   const res = NextResponse.redirect(new URL(safeReturn, base).toString());
   res.headers.append(
     "Set-Cookie",

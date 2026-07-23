@@ -212,6 +212,13 @@ export interface JellyfinLibraryItemData {
 }
 
 const LIBRARY_PAGE_SIZE   = 5_000;
+// Upper bound on the upstream-reported TotalRecordCount used for page fan-out.
+// `total` is attacker-influenceable (a hostile/compromised configured Jellyfin can
+// return any TotalRecordCount); without a cap, `for (s=pageSize; s<total; …)` pushes
+// total/pageSize entries into startIndexes — a 10^15 total → a ~10^11-element array →
+// OOM. 10M items is far beyond any real library (episodes included) yet bounds the
+// pre-allocation to ≤2000 page indexes.
+const MAX_LIBRARY_ITEMS   = 10_000_000;
 // 60 s per page — Jellyfin can be slow on large libraries over slow connections
 const PAGE_TIMEOUT_MS     = 60_000;
 // Response cap per page. safe-fetch's default is 10 MB of DECOMPRESSED bytes —
@@ -275,7 +282,9 @@ async function fetchJellyfinPages<T>(
   const first = await fetchPage<T>(baseQuery, apiKey, 0, pageSize);
   processItems(first.items);
 
-  const total = first.total;
+  // Cap the upstream-reported total before deriving page indexes — a hostile
+  // TotalRecordCount would otherwise pre-allocate an unbounded startIndexes array.
+  const total = Math.min(first.total, MAX_LIBRARY_ITEMS);
   const startIndexes: number[] = [];
   for (let s = pageSize; s < total; s += pageSize) startIndexes.push(s);
   if (startIndexes.length === 0) return;

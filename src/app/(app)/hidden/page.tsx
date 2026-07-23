@@ -1,15 +1,16 @@
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { HiddenGrid } from "@/components/hidden/hidden-grid";
 
 export const dynamic = "force-dynamic";
 
-// Manage the caller's "not interested" list. The (app) layout DB-gates login for
-// the subtree (guardrail 29); auth() here is a personalization read of the
-// caller's own id, not an authorization decision.
+// Manage the caller's "not interested" list. requireAppSession() is the per-page
+// DB-checked login gate — the (app) layout's gate can be skipped via a client-supplied
+// RSC router state tree, so each page enforces the login wall itself (guardrail 29,
+// src/lib/require-app-session.ts). The returned session also supplies the caller's own id.
 export default async function HiddenPage() {
-  const session = await auth();
+  const session = await requireAppSession();
   const items = session
     ? await prisma.hiddenItem.findMany({
         where: { userId: session.user.id },

@@ -42,19 +42,21 @@ function DrawerPopup({
   ...props
 }: React.ComponentPropsWithoutRef<typeof DrawerPrimitive.Popup>) {
   return (
-    <DrawerPrimitive.Popup
-      data-slot="drawer-popup"
-      className={cn(
-        "fixed bottom-0 inset-x-0 z-50 flex flex-col max-h-[85vh] rounded-t-2xl bg-zinc-900 border-t border-zinc-800 shadow-2xl outline-none transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full",
-        className
-      )}
-      {...props}
-    >
-      <div className="flex justify-center pt-3 pb-1 shrink-0">
-        <div className="w-12 h-1 rounded-full bg-zinc-600" />
-      </div>
-      {children}
-    </DrawerPrimitive.Popup>
+    <DrawerPrimitive.Viewport>
+      <DrawerPrimitive.Popup
+        data-slot="drawer-popup"
+        className={cn(
+          "fixed bottom-0 inset-x-0 z-50 flex flex-col max-h-[85vh] rounded-t-2xl bg-zinc-900 border-t border-zinc-800 shadow-2xl outline-none transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full",
+          className
+        )}
+        {...props}
+      >
+        <div className="flex justify-center pt-3 pb-1 shrink-0">
+          <div className="w-12 h-1 rounded-full bg-zinc-600" />
+        </div>
+        {children}
+      </DrawerPrimitive.Popup>
+    </DrawerPrimitive.Viewport>
   );
 }
 

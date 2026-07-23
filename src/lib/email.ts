@@ -276,7 +276,7 @@ function richEmailHtml(opts: TemplateOpts): string {
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%">
         <tr>
           <td valign="top" width="130" style="padding:0 20px 0 0">
-            <img src="${poster}" width="120" alt="${esc(mediaAltText(opts.mediaType))}"
+            <img src="${esc(poster)}" width="120" alt="${esc(mediaAltText(opts.mediaType))}"
               style="display:block;width:120px;max-width:120px;height:auto;border-radius:8px;border:1px solid #3f3f46" />
           </td>
           <td valign="top" style="min-width:0">

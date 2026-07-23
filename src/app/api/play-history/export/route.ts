@@ -27,7 +27,11 @@ function escapeCSV(value: unknown): string {
   if (/^[=+\-@|%\t\r\n]/.test(str)) {
     str = "\t" + str;
   }
-  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\t")) {
+  // `\r` MUST be in the quoting test: an embedded (non-leading) carriage return in an
+  // UNquoted field is a record separator to Excel/most CSV parsers, so `foo\r=cmd` would
+  // split into a second row whose `=cmd` bypasses the leading-char formula prefix above.
+  // Quoting keeps the CR as literal field data.
+  if (str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r") || str.includes("\t")) {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;

@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.16.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.16.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,14 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.16.4
+
+**Fixed**
+
+- **Security hardening — upgrading is recommended.** Closed an authentication bypass that could expose the browse/discovery pages to an unauthenticated visitor, an open redirect in the login/OIDC sign-in flow, a server-side request forgery in the admin fix-match thumbnail proxy, and a request-permission check that could be sidestepped by leaving the target instance unspecified. Also tightened admin session lifetime and machine-session IP enforcement, escaped several notification/email/CSV/link output paths, blocked a crafted backup from running arbitrary SQL during a restore, and bounded a number of reads and fan-outs against denial-of-service.
+- MDBList ratings populate again — bulk lookups were matched against MDBList's internal id instead of the TMDB id, so no MDBList ratings were being cached.
+- The mobile **More** navigation menu no longer crashes the app when opened.
+
 ### v0.16.3
 
 **Changed**
@@ -265,7 +273,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.16.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.16.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

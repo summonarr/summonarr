@@ -3,6 +3,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { parseBearerToken } from "@/lib/mobile-auth";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
+import { machineIpAllowed } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
@@ -78,6 +79,15 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
       // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
       if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
     }
+    // A machine session carries a mint-time IP allowlist as a claim; the withAuth/
+    // requireAuth guards re-check it on /api/* but this cron/sync path is the machine
+    // session's PRIMARY target, so enforce it here too — otherwise a leaked machine
+    // JWT could drive the orchestrator from any IP, defeating the allowlist binding.
+    // Enforced for BOTH transports (bearer + cookie): unlike the CSRF/fingerprint
+    // gates above, the IP allowlist binds the token regardless of how it's presented
+    // (parity with api-auth.ts, where the bearer skip covers only the fingerprint).
+    // Absent/empty allowlist ⇒ machineIpAllowed returns true (no restriction).
+    if (!machineIpAllowed(claims, request.headers)) return false;
     return true;
   }
 

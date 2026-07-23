@@ -88,6 +88,9 @@ type DbUser = {
 
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
+// Backing AuthSession.createdAt per sessionId — the ADMIN 7d ceiling anchors on it
+// (session birth), not the re-signed iat. Defaults to the token's iat in mint().
+const sessionCreatedAt = new Map<string, Date>();
 let dbReads = 0;
 let settingReads = 0;
 let throwOnDb = false; // fast-path proof: any model read throws
@@ -99,7 +102,11 @@ shadowPrismaModel(prisma, "authSession", {
     dbReads++;
     if (throwOnDb) throw new Error("unit-test: DB must not be touched on this path");
     return sessionRows.has(args.where.sessionId)
-      ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId }
+      ? {
+          id: `row-${args.where.sessionId}`,
+          sessionId: args.where.sessionId,
+          createdAt: sessionCreatedAt.get(args.where.sessionId) ?? new Date(),
+        }
       : null;
   },
   // lastSeenAt fire-and-forget touch — no-op.
@@ -138,8 +145,12 @@ const txStub = {
         ? { id: `row-${args.where.sessionId}` }
         : null,
     update: async (args: { where: { sessionId: string }; data: { sessionId: string } }) => {
+      // sessionId rotation preserves session identity → carry createdAt forward.
+      const born = sessionCreatedAt.get(args.where.sessionId);
       sessionRows.delete(args.where.sessionId);
+      sessionCreatedAt.delete(args.where.sessionId);
       sessionRows.add(args.data.sessionId);
+      if (born) sessionCreatedAt.set(args.data.sessionId, born);
       return {};
     },
   },
@@ -174,6 +185,7 @@ type MintOpts = {
   sessionsRevokedAt?: Date | null;
   passwordChangedAt?: Date | null;
   iat?: number; // absolute seconds; default now
+  createdAt?: Date; // AuthSession row birth; default new Date(iat * 1000)
   expiresInSeconds?: number; // JWT exp − iat; default 7200
   expiresAt?: number; // absolute session deadline claim; default iat + 1d
   dbCheckedAt?: number; // absolute; embedded as the fast-path claim when set
@@ -204,6 +216,9 @@ async function mint(opts: MintOpts = {}): Promise<{
   });
   sessionRows.add(sessionId);
   const iat = opts.iat ?? Math.floor(Date.now() / 1000);
+  // AuthSession.createdAt defaults to the token's iat — the ADMIN 7d ceiling reads
+  // this stable birth timestamp, so a token minted with an old iat models an old session.
+  sessionCreatedAt.set(sessionId, opts.createdAt ?? new Date(iat * 1000));
   const expiresAt = opts.expiresAt ?? iat + DAY;
   const token = await signSessionJwt(
     {
@@ -421,6 +436,38 @@ test("the ADMIN 7d hard ceiling rejects on the slow path even with a future exp 
   });
   assert.equal(await verifyAndRefreshSession(token), null);
   assert.ok(dbReads >= 2, "the slow-path ceiling fires after the DB reconciliation");
+});
+
+test("the ADMIN 7d ceiling anchors on session birth (createdAt), not the re-signed iat", async () => {
+  // The re-sign resets iat to now on every DB check, so a recent-iat token whose
+  // SESSION was born >7d ago must still be rejected — otherwise an actively-used
+  // admin token rides its full rememberMe deadline instead of the 7d cap.
+  const now0 = nowSec();
+  const { token } = await mint({
+    role: "ADMIN",
+    iat: now0 - 30, // freshly re-signed moments ago
+    createdAt: new Date((now0 - (SEVEN_DAYS + 120)) * 1000), // but the session is 7d+ old
+    expiresInSeconds: 8 * DAY,
+    expiresAt: now0 + 30 * DAY,
+  });
+  assert.equal(
+    await verifyAndRefreshSession(token),
+    null,
+    "a >7d-old admin session must be rejected regardless of a fresh iat",
+  );
+
+  // Control: same fresh iat, but the session was genuinely born recently → survives.
+  const fresh = await mint({
+    role: "ADMIN",
+    iat: now0 - 30,
+    createdAt: new Date((now0 - 60) * 1000),
+    expiresInSeconds: 8 * DAY,
+    expiresAt: now0 + 30 * DAY,
+  });
+  assert.ok(
+    await verifyAndRefreshSession(fresh.token),
+    "a recently-born admin session must survive the ceiling",
+  );
 });
 
 // ── sessionsRevokedAt / passwordChangedAt cutoffs ───────────────────────────

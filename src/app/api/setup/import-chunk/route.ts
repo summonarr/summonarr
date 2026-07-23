@@ -12,6 +12,7 @@ import {
   appendChunk,
   getSessionStream,
   clearSession,
+  hasActiveUploadSession,
 } from "@/lib/import-session";
 
 export const dynamic = "force-dynamic";
@@ -93,6 +94,15 @@ export async function POST(req: NextRequest) {
   // per-chunk limiter would burn the whole bucket and 429 the restore partway through.
   if (chunkIndex === 0 && !checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
+  }
+
+  // A non-zero chunk with no matching active session is bogus (no rate-limited
+  // chunk-0 opened it). Reject it HERE, before gate() takes Postgres advisory-lock
+  // 43 and runs DB reads — otherwise an unauthenticated flood of junk chunk-N
+  // requests skips the chunk-0 limiter yet amplifies into advisory-lock contention
+  // (shared with /api/auth/register) and DB load. Legit chunk-N always has a session.
+  if (chunkIndex !== 0 && !hasActiveUploadSession(uploadId)) {
+    return NextResponse.json({ error: "No active upload session — start at chunk 0." }, { status: 409 });
   }
 
   const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);

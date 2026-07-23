@@ -225,6 +225,14 @@ export async function appendChunk(
   }
 }
 
+// Cheap, side-effect-free check for whether `uploadId` owns the current active,
+// non-expired session. Lets a caller reject a bogus non-zero-index chunk (one with
+// no prior chunk-0) BEFORE doing any expensive work (advisory lock, DB reads), so an
+// unauthenticated flood of junk chunks can't amplify into lock contention / DB load.
+export function hasActiveUploadSession(uploadId: string): boolean {
+  return !!active && active.uploadId === uploadId && !isExpired(active);
+}
+
 export function getSessionStream(uploadId: string): ReadableStream<Uint8Array> | null {
   if (!active || active.uploadId !== uploadId) return null;
   // Mark the slot as importing so a concurrent startSession can't reclaim + rm

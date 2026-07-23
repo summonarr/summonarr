@@ -57,6 +57,11 @@ export class SmtpError extends Error {
 }
 
 const READ_TIMEOUT_MS = 30_000;
+// Hard cap on a single buffered SMTP reply. Real replies (incl. an EHLO capability
+// list) are a few KB; without a cap a hostile/compromised relay can flood bytes with
+// no final-line CRLF and grow `buffer` unbounded (heap) + force an O(n²) rescan on
+// every chunk before the 30s read timeout would fire. 1 MB is generous headroom.
+const MAX_SMTP_REPLY_BYTES = 1024 * 1024;
 const NUL = Buffer.from([0]);
 
 // ─── Address helpers ────────────────────────────────────────────────────────
@@ -231,6 +236,19 @@ class SmtpConnection {
   private attachListeners(): void {
     this.dataListener = (chunk: Buffer) => {
       this.buffer += chunk.toString("utf8");
+      // Bound the reply buffer — a hostile relay can't grow it without limit or
+      // force an unbounded O(n²) rescan (findCompleteReplyEnd runs per chunk).
+      if (this.buffer.length > MAX_SMTP_REPLY_BYTES) {
+        this.closed = true;
+        const err = new SmtpError("SMTP reply exceeded buffer cap");
+        if (this.pending) {
+          const p = this.pending;
+          this.pending = null;
+          p(err);
+        }
+        try { this.socket.destroy(err); } catch { /* already destroyed */ }
+        return;
+      }
       this.tryResolve();
     };
     this.errorListener = (err: Error) => {

@@ -674,6 +674,24 @@ test("auto-routing: an anime-genre TMDB payload (cache-served, zero fetches) rou
   assert.equal(createdData().arrInstance, "");
 });
 
+test("auto-route fallback still enforces the BASE request permission — a request-revoked user can't bypass it by omitting the instance target", async () => {
+  seedAnimeInstance();
+  seedMovieDetails(603, { genreList: [{ id: 16, name: "Animation" }], originalLanguage: "ja" });
+
+  // A user whose base REQUEST bit was cleared. permissions must be NON-ZERO or it's
+  // the "unseeded ⇒ USER preset" sentinel (which restores REQUEST). MANAGE_ISSUES is a
+  // non-request bit, so effectivePermissions() carries it authoritatively with no REQUEST.
+  const revoked = await mintSession({ permissions: String(Permission.MANAGE_ISSUES) });
+  ops.length = 0;
+  // No arrInstance / is4k → auto-route. The anime instance denies (no grant AND no base
+  // perm); the fallback to the DEFAULT instance must re-check the base permission rather
+  // than silently create the request — otherwise omitting the target bypasses revocation.
+  const res = await post(revoked.token, requestBody(revoked.userId));
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "You don't have permission to request this" });
+  assert.equal(ops.length, 0, "no MediaRequest row may be created for a request-revoked user");
+});
+
 test("the legacy is4k:true shorthand maps to the '4k' instance, skips the shared-library check, and gates on the REQUEST_4K bits", async () => {
   seedFourKInstance();
   plexHas = true; // in the shared library — must NOT suppress a 4K request

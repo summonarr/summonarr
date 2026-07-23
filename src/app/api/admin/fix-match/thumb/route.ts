@@ -73,15 +73,30 @@ export async function GET(request: NextRequest) {
       headers: { "User-Agent": "Summonarr/1.0 (Node.js)" },
     }).catch(() => null);
   } else {
-    // Plex-relative path — join with the configured Plex server URL.
+    // Plex-relative path — join with the configured Plex server URL. Require a
+    // genuine absolute path and pin the FULL ORIGIN (scheme+host+port), not just
+    // the hostname: a leading `:9999/…` concatenated onto a port-less serverUrl
+    // (e.g. "http://plex.local") re-parses to "http://plex.local:9999/…" — same
+    // hostname, attacker-chosen port — so the old hostname-only check let a
+    // MANAGE_ISSUES caller redirect the X-Plex-Token'd fetch to any TCP port on
+    // the Plex host (SSRF / internal port scan). The `//` reject stops a
+    // protocol-relative authority from smuggling a different host past the join.
+    if (!thumbPath.startsWith("/") || thumbPath.startsWith("//")) {
+      return new NextResponse("Invalid path", { status: 400 });
+    }
     const plexConfig = await getPlexConfig();
     if (!plexConfig.url || !plexConfig.token) return new NextResponse("Plex not configured", { status: 500 });
 
     const serverUrl = plexConfig.url.replace(/\/$/, "");
-    const url = new URL(`${serverUrl}${thumbPath}`);
-
-    const expectedHostname = new URL(serverUrl).hostname;
-    if (url.hostname !== expectedHostname) {
+    let url: URL;
+    let expectedOrigin: string;
+    try {
+      url = new URL(`${serverUrl}${thumbPath}`);
+      expectedOrigin = new URL(serverUrl).origin;
+    } catch {
+      return new NextResponse("Invalid path", { status: 400 });
+    }
+    if (url.origin !== expectedOrigin) {
       return new NextResponse("Invalid path", { status: 400 });
     }
 

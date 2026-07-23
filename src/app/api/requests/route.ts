@@ -233,8 +233,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
       return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
     }
     const defaultInstance = instances.find((i) => i.slug === "");
-    if (!defaultInstance) {
-      return NextResponse.json({ error: "That instance isn't available for requests" }, { status: 400 });
+    // Re-check against the DEFAULT instance before falling back. canRequestInstance
+    // gates on the base REQUEST/REQUEST_{MOVIE,TV} bit FIRST (permissions.ts) — a user
+    // who lacks it fails for EVERY instance, default included. Without this re-check a
+    // request-revoked user could bypass the base capability entirely by omitting the
+    // instance target: the auto-route sends them to a named instance they can't access,
+    // and the unconditional default fallback then created the request anyway. The
+    // fallback exists only for a *base requester* who merely lacks a NAMED-instance grant.
+    if (
+      !defaultInstance ||
+      !canRequestInstance(session.user.permissions, defaultInstance, grants, mediaType, settings.request4kAll === "true")
+    ) {
+      return NextResponse.json({ error: "You don't have permission to request this" }, { status: 403 });
     }
     instanceSlug = "";
     instance = defaultInstance;

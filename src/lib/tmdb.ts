@@ -909,13 +909,19 @@ export async function getTVGenres(): Promise<Genre[]> {
 }
 
 export async function getWatchProviders(type: "movie" | "tv", region = "US"): Promise<WatchProvider[]> {
-  const key = `watchproviders:${type}:${region}`;
+  // Canonicalize region to a 2-letter ISO code (uppercased) at the source. The
+  // movies/tv pages pass sp.watchRegion straight through here (unlike the discover
+  // path, which routes through sanitizeDiscoverFilters), so an unvalidated value
+  // would otherwise mint unbounded `watchproviders:*:<region>` cache rows + TMDB
+  // calls and land raw in the watch_region query param. Junk → default "US".
+  const canonRegion = /^[A-Za-z]{2}$/.test(region) ? region.toUpperCase() : "US";
+  const key = `watchproviders:${type}:${canonRegion}`;
   const cached = await getCache<WatchProvider[]>(key);
   if (cached) return cached;
 
   const r = await tmdbFetch<{ results: WatchProvider[] }>(
     `/watch/providers/${type}`,
-    { watch_region: region },
+    { watch_region: canonRegion },
     86400,
   );
   const providers = r.results

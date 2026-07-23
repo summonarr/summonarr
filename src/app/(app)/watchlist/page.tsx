@@ -1,15 +1,15 @@
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { WatchlistGrid } from "@/components/watchlist/watchlist-grid";
 
 export const dynamic = "force-dynamic";
 
-// Personal watchlist page. The (app) layout DB-gates login for the whole subtree
-// (guardrail 29); `auth()` here is a personalization read (the caller's own id),
-// not an authorization decision, so JWT-only auth() is appropriate.
+// Personal watchlist page. requireAppSession() is the per-page DB-checked login
+// gate — the (app) layout's gate can be skipped via a client-supplied RSC router
+// state tree, so each page enforces the login wall itself (see src/lib/require-app-session.ts).
 export default async function WatchlistPage() {
-  const session = await auth();
+  const session = await requireAppSession();
   const items = session
     ? await prisma.watchlistItem.findMany({
         where: { userId: session.user.id },

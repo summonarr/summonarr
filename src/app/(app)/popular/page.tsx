@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
-import { auth } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -44,7 +44,7 @@ export default async function PopularOnServerPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.popular");
-  const [sp, session] = await Promise.all([searchParams, auth()]);
+  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const [show4k, playHistoryEnabled] = await Promise.all([

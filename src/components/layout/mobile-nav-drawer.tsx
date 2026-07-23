@@ -152,7 +152,9 @@ export function MobileNavDrawer({
                 </span>
                 <PushNotifications />
               </div>
-              <AppearanceMenu />
+              {/* standalone: the drawer is a Drawer, not a base-ui Menu — the
+                  menuitemradio form throws "MenuRootContext is missing". */}
+              <AppearanceMenu standalone />
               <button
                 type="button"
                 onClick={() => signOutAndRedirect("/login")}
