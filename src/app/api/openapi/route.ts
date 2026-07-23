@@ -695,6 +695,24 @@ const spec = {
         responses: { "200": { description: "Paginated play history rows" }, "403": { description: "Forbidden" } },
       },
     },
+    "/play-history/mine": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN watch history. Scoped server-side to the media-server users linked to the session account — no parameter can select another user.",
+        parameters: [
+          { name: "cursor", in: "query", schema: { type: "string" }, description: "Keyset cursor from the previous response's nextCursor" },
+          { name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "search", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": {
+            description:
+              "History page ({ linked, items, total, nextCursor, pageSize, stats }); linked=false when the account has no linked media-server user yet",
+          },
+        },
+      },
+    },
     "/play-history/sessions": {
       get: {
         tags: ["Sessions"],
