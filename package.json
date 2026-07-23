@@ -27,7 +27,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "jose": "^6.2.3",
-    "next": "16.2.10",
+    "next": "16.2.11",
     "openid-client": "^6.8.4",
     "pg": "^8.22.0",
     "prisma": "^7.8.0",
@@ -37,10 +37,11 @@
   "overrides": {
     "@babel/core": "^7.29.6",
     "defu": ">=6.1.5",
-    "@hono/node-server": "^1.19.14",
-    "brace-expansion@5": "^5.0.6",
-    "hono": "^4.12.25",
-    "postcss": "^8.5.10"
+    "@hono/node-server": "^2.0.5",
+    "brace-expansion@5": "^5.0.7",
+    "hono": "^4.12.27",
+    "postcss": "^8.5.10",
+    "sharp": "^0.35.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.2",
@@ -49,7 +50,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^10.7.0",
-    "eslint-config-next": "16.2.10",
+    "eslint-config-next": "16.2.11",
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.61.1",
     "tailwindcss": "^4.3.1",
