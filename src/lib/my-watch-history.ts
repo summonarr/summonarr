@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { resolvePosterMap } from "@/lib/poster-cache";
+import { getPlayStatsForServerUsers } from "@/lib/play-history";
 import type { Prisma } from "@/generated/prisma";
 
 // Self-service watch history — the ONE scoping chokepoint for a user reading
@@ -482,4 +483,26 @@ export async function getMyWatchHistoryEntry(
     firstStartedAt: (agg._min.startedAt ?? newest.startedAt).toISOString(),
     lastStartedAt: (agg._max.startedAt ?? newest.startedAt).toISOString(),
   };
+}
+
+// ── Personal play stats ──────────────────────────────────────────────────────
+
+// The caller's OWN aggregate stats bundle, scoped through the SAME linked-
+// identity resolution as getMyWatchHistory (the one chokepoint) — so a user's
+// Plex + Jellyfin + email-matched history is unioned, and no request input can
+// widen the scope (there is deliberately no userId param, exactly like
+// GET /api/play-history/mine). Returns `linked: false` when the account has no
+// linked media-server users yet, so the page can explain WHY it's empty instead
+// of rendering a bare dashboard. When linked, `stats` is the full
+// getPlayStatsForServerUsers bundle (totals, top media, 90-day series,
+// platform/device mixes, day×hour heatmap, 365-day calendar).
+export async function getMyPlayStats(
+  summonarrUserId: string,
+): Promise<{
+  linked: boolean;
+  stats: Awaited<ReturnType<typeof getPlayStatsForServerUsers>> | null;
+}> {
+  const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
+  if (ids.length === 0) return { linked: false, stats: null };
+  return { linked: true, stats: await getPlayStatsForServerUsers(ids) };
 }

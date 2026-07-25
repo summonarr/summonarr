@@ -88,6 +88,7 @@ export const userNavItems: NavItem[] = [
   { href: "/requests", label: "Requests", icon: ClipboardList, mobileBottomBar: true, section: "personal" },
   { href: "/watchlist", label: "Watchlist", icon: Bookmark, section: "personal" },
   { href: "/watch-history", label: "Watch History", icon: Clock, section: "personal" },
+  { href: "/my-stats", label: "My Stats", icon: BarChart3, section: "personal" },
   { href: "/hidden", label: "Hidden", icon: EyeOff, section: "personal" },
   { href: "/issues", label: "My Issues", icon: MessageSquare, section: "personal" },
   { href: "/votes", label: "Vote to Delete", icon: Trash2, section: "personal" },

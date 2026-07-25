@@ -749,9 +749,13 @@ export async function purgeOldHistory(): Promise<number> {
 
 // Aggregate the full per-user stats bundle (totals, recent plays, top media,
 // daily/heatmap series, codec/resolution/device breakdowns) for one MediaServerUser.
-export async function getUserPlayStats(mediaServerUserId: string) {
+export async function getPlayStatsForServerUsers(ids: string[]) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+  // Bind every id as its own $N placeholder; the optional date filter takes the
+  // slot right after the id list — same IN-list discipline as my-watch-history.
+  const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
+  const dateBind = `$${ids.length + 1}`;
 
   const [
     totalPlays,
@@ -769,13 +773,13 @@ export async function getUserPlayStats(mediaServerUserId: string) {
   ] = await Promise.all([
     // "plays" surfaces filter watched=true (sessions that crossed the configured threshold).
     // Raw counts are reserved for technical/resource analytics (codec, transcode, bitrate, avg session).
-    prisma.playHistory.count({ where: { mediaServerUserId, watched: true } }),
+    prisma.playHistory.count({ where: { mediaServerUserId: { in: ids }, watched: true } }),
     prisma.$queryRawUnsafe<{ hours: number | null }[]>(
-      `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours FROM "PlayHistory" WHERE "mediaServerUserId" = $1`,
-      mediaServerUserId,
+      `SELECT (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn})`,
+      ...ids,
     ),
     prisma.playHistory.findMany({
-      where: { mediaServerUserId },
+      where: { mediaServerUserId: { in: ids } },
       orderBy: { startedAt: "desc" },
       take: 50,
     }),
@@ -785,67 +789,67 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     // appeared twice when one source resolved tmdbId and the other didn't.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; count: bigint }[]>(
       `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
+       FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true
        GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
-      mediaServerUserId,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint; hours: number }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(*) FILTER (WHERE "watched" = true)::bigint AS count,
               (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "startedAt" >= $2
+       WHERE "mediaServerUserId" IN (${idIn}) AND "startedAt" >= ${dateBind}
        GROUP BY day ORDER BY day`,
-      mediaServerUserId,
+      ...ids,
       ninetyDaysAgo,
     ),
     prisma.$queryRawUnsafe<{ platform: string | null; count: bigint }[]>(
       `SELECT "platform", COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
+       FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true
        GROUP BY "platform" ORDER BY count DESC`,
-      mediaServerUserId,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "watched" = true AND "startedAt" >= $2
+       WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true AND "startedAt" >= ${dateBind}
        GROUP BY day ORDER BY day`,
-      mediaServerUserId,
+      ...ids,
       oneYearAgo,
     ),
     prisma.$queryRawUnsafe<{ avg_secs: number | null }[]>(
-      `SELECT AVG("playDuration")::float8 AS avg_secs FROM "PlayHistory" WHERE "mediaServerUserId" = $1`,
-      mediaServerUserId,
+      `SELECT AVG("playDuration")::float8 AS avg_secs FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn})`,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ method: string | null; count: bigint }[]>(
       `SELECT "playMethod" AS method, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1
+       FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn})
        GROUP BY "playMethod" ORDER BY count DESC`,
-      mediaServerUserId,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ resolution: string | null; count: bigint }[]>(
       `SELECT ${RESOLUTION_BUCKET_SQL} AS resolution, COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "resolution" IS NOT NULL
+       WHERE "mediaServerUserId" IN (${idIn}) AND "resolution" IS NOT NULL
        GROUP BY resolution ORDER BY count DESC LIMIT 8`,
-      mediaServerUserId,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ dow: number; hour: number; count: bigint }[]>(
       `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow,
               EXTRACT(HOUR FROM "startedAt")::int AS hour,
               COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "mediaServerUserId" = $1 AND "watched" = true
+       FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true
        GROUP BY dow, hour ORDER BY dow, hour`,
-      mediaServerUserId,
+      ...ids,
     ),
     prisma.$queryRawUnsafe<{ device: string | null; count: bigint }[]>(
       `SELECT "device", COUNT(*)::bigint AS count
        FROM "PlayHistory"
-       WHERE "mediaServerUserId" = $1 AND "watched" = true AND "device" IS NOT NULL
+       WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true AND "device" IS NOT NULL
        GROUP BY "device" ORDER BY count DESC LIMIT 6`,
-      mediaServerUserId,
+      ...ids,
     ),
   ]);
 
@@ -867,6 +871,12 @@ export async function getUserPlayStats(mediaServerUserId: string) {
     userHeatmap: userHeatmapRaw.map((r) => ({ dow: r.dow, hour: r.hour, count: Number(r.count) })),
     deviceList: deviceListRaw.map((r) => ({ device: r.device!, count: Number(r.count) })),
   };
+}
+
+// Back-compat single-identity wrapper for the admin per-user activity page; the
+// bundle shape is unchanged from when this function held the query body.
+export async function getUserPlayStats(mediaServerUserId: string) {
+  return getPlayStatsForServerUsers([mediaServerUserId]);
 }
 
 // Aggregate the per-title stats bundle (totals, unique/top viewers, completion,
