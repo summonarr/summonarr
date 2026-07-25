@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.16.4 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.17.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,14 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.17.0
+
+**Added**
+
+- Watch stats: a personal **My Stats** page showing your own viewing at a glance — total plays and watch time, your most-watched titles, a 365-day activity calendar, a day-by-hour viewing heatmap, and your platform and device breakdowns. Every user sees only their own history; requires play-history tracking to be enabled.
+- Year in Review: a personal "Wrapped"-style recap linked from **My Stats** — your headline hours, plays and titles for the year, your #1 title, biggest binge day, prime-time day and hour, longest single sitting, finish rate, busiest month, and go-to device, with a year picker to revisit previous years.
+- iOS: your personal watch stats are now available to the Summonarr iOS app.
+
 ### v0.16.4
 
 **Fixed**
@@ -273,7 +281,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.16.4 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.17.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
