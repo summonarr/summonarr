@@ -178,6 +178,10 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 - Year in Review: a personal "Wrapped"-style recap linked from **My Stats** — your headline hours, plays and titles for the year, your #1 title, biggest binge day, prime-time day and hour, longest single sitting, finish rate, busiest month, and go-to device, with a year picker to revisit previous years.
 - iOS: your personal watch stats are now available to the Summonarr iOS app.
 
+**Fixed**
+
+- Plex sign-in errors now show the real cause — an expired sign-in flow, a server error, or a Plex connection that needs re-authorizing — instead of a blanket "you don't have access". A network failure while finishing sign-in also no longer leaves the page stuck on a spinner.
+
 ### v0.16.4
 
 **Fixed**
