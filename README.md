@@ -177,6 +177,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 - Watch stats: a personal **My Stats** page showing your own viewing at a glance — total plays and watch time, your most-watched titles, a 365-day activity calendar, a day-by-hour viewing heatmap, and your platform and device breakdowns. Every user sees only their own history; requires play-history tracking to be enabled.
 - Year in Review: a personal "Wrapped"-style recap linked from **My Stats** — your headline hours, plays and titles for the year, your #1 title, biggest binge day, prime-time day and hour, longest single sitting, finish rate, busiest month, and go-to device, with a year picker to revisit previous years.
 - iOS: your personal watch stats are now available to the Summonarr iOS app.
+- Cast & people: tapping a cast member now opens a full, shareable **person page** — their photo, bio, and filmography with availability badges and one-tap requesting — replacing the old in-place popup.
 
 **Fixed**
 
