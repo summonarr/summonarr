@@ -879,6 +879,173 @@ export async function getUserPlayStats(mediaServerUserId: string) {
   return getPlayStatsForServerUsers([mediaServerUserId]);
 }
 
+// ── "Wrapped" — personal year-in-review ──────────────────────────────────────
+
+export interface WrappedBundle {
+  totals: { plays: number; hours: number; titles: number };
+  movies: { titles: number; hours: number };
+  tv: { shows: number; episodes: number; hours: number };
+  topTitles: {
+    title: string;
+    tmdbId: number | null;
+    mediaType: string | null;
+    posterPath: string | null;
+    count: number;
+    hours: number;
+  }[];
+  biggestDay: { day: string; plays: number; hours: number } | null;
+  busiestMonth: { month: string; plays: number } | null;
+  primeDow: number | null;
+  primeHour: number | null;
+  longestSitting: {
+    title: string;
+    tmdbId: number | null;
+    mediaType: string | null;
+    posterPath: string | null;
+    seconds: number;
+    startedAt: string;
+  } | null;
+  // completion = watched / total plays ("how often you saw it through").
+  completion: { watched: number; total: number };
+  topPlatform: string | null;
+  topDevice: string | null;
+}
+
+// Distinct calendar years (UTC) that have a watched play for the id set, newest
+// first — drives the year picker. `watched` only, so a year of aborted starts
+// with no real watch doesn't offer an empty review.
+export async function getPlayYearsForServerUsers(ids: string[]): Promise<number[]> {
+  if (ids.length === 0) return [];
+  const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
+  const rows = await prisma.$queryRawUnsafe<{ y: number }[]>(
+    `SELECT DISTINCT EXTRACT(YEAR FROM "startedAt")::int AS y
+     FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND watched
+     ORDER BY y DESC`,
+    ...ids,
+  );
+  return rows.map((r) => r.y);
+}
+
+// Year-in-review aggregates for the id SET, bounded to one UTC calendar year.
+// Same IN(...) + bind discipline as getPlayStatsForServerUsers; every query is
+// scoped by the shared `scope` predicate ($ids…, then $yearStart, $yearEnd).
+export async function getWrappedForServerUsers(ids: string[], year: number): Promise<WrappedBundle> {
+  const yearStart = new Date(Date.UTC(year, 0, 1));
+  const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
+  const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
+  const y1 = `$${ids.length + 1}`;
+  const y2 = `$${ids.length + 2}`;
+  const scope = `"mediaServerUserId" IN (${idIn}) AND "startedAt" >= ${y1} AND "startedAt" < ${y2}`;
+  const binds = [...ids, yearStart, yearEnd];
+
+  const [totalsR, splitR, topR, dayR, monthR, dowR, hourR, longR, compR, platR, devR] = await Promise.all([
+    prisma.$queryRawUnsafe<{ plays: number; hours: number; titles: number }[]>(
+      `SELECT COUNT(*) FILTER (WHERE watched)::int AS plays,
+              (COALESCE(SUM("playDuration") FILTER (WHERE watched), 0) / 3600.0)::float8 AS hours,
+              COUNT(DISTINCT COALESCE("tmdbId"::text, lower("title"))) FILTER (WHERE watched)::int AS titles
+       FROM "PlayHistory" WHERE ${scope}`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ movie_titles: number; movie_hours: number; shows: number; episodes: number; tv_hours: number }[]>(
+      `SELECT COUNT(DISTINCT "tmdbId") FILTER (WHERE "mediaType" = 'MOVIE' AND watched)::int AS movie_titles,
+              (COALESCE(SUM("playDuration") FILTER (WHERE "mediaType" = 'MOVIE' AND watched), 0) / 3600.0)::float8 AS movie_hours,
+              COUNT(DISTINCT "tmdbId") FILTER (WHERE "mediaType" = 'TV' AND watched)::int AS shows,
+              COUNT(*) FILTER (WHERE "mediaType" = 'TV' AND watched)::int AS episodes,
+              (COALESCE(SUM("playDuration") FILTER (WHERE "mediaType" = 'TV' AND watched), 0) / 3600.0)::float8 AS tv_hours
+       FROM "PlayHistory" WHERE ${scope}`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; cnt: number; hours: number }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath",
+              COUNT(*)::int AS cnt, (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
+       FROM "PlayHistory" WHERE ${scope} AND watched
+       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN lower("title") ELSE NULL END
+       ORDER BY cnt DESC, hours DESC LIMIT 5`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ day: string; plays: number; hours: number }[]>(
+      `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
+              COUNT(*) FILTER (WHERE watched)::int AS plays,
+              (COALESCE(SUM("playDuration") FILTER (WHERE watched), 0) / 3600.0)::float8 AS hours
+       FROM "PlayHistory" WHERE ${scope}
+       GROUP BY day ORDER BY plays DESC, hours DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ month: string; plays: number }[]>(
+      `SELECT to_char(date_trunc('month', "startedAt"), 'YYYY-MM') AS month, COUNT(*) FILTER (WHERE watched)::int AS plays
+       FROM "PlayHistory" WHERE ${scope} GROUP BY month ORDER BY plays DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ dow: number; c: number }[]>(
+      `SELECT EXTRACT(DOW FROM "startedAt")::int AS dow, COUNT(*)::int AS c
+       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY dow ORDER BY c DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ hour: number; c: number }[]>(
+      `SELECT EXTRACT(HOUR FROM "startedAt")::int AS hour, COUNT(*)::int AS c
+       FROM "PlayHistory" WHERE ${scope} AND watched GROUP BY hour ORDER BY c DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; secs: number; startedAt: Date }[]>(
+      `SELECT "title", "tmdbId", "mediaType"::text AS "mediaType", "posterPath", "playDuration" AS secs, "startedAt"
+       FROM "PlayHistory" WHERE ${scope} AND watched ORDER BY "playDuration" DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ watched: number; total: number }[]>(
+      `SELECT COUNT(*) FILTER (WHERE watched)::int AS watched, COUNT(*)::int AS total FROM "PlayHistory" WHERE ${scope}`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ v: string; c: number }[]>(
+      `SELECT "platform" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND "platform" IS NOT NULL
+       GROUP BY v ORDER BY c DESC LIMIT 1`,
+      ...binds,
+    ),
+    prisma.$queryRawUnsafe<{ v: string; c: number }[]>(
+      `SELECT "device" AS v, COUNT(*)::int AS c FROM "PlayHistory" WHERE ${scope} AND watched AND "device" IS NOT NULL
+       GROUP BY v ORDER BY c DESC LIMIT 1`,
+      ...binds,
+    ),
+  ]);
+
+  const r1 = (n: number) => Math.round(n * 10) / 10;
+  const split = splitR[0];
+  const long = longR[0];
+  return {
+    totals: {
+      plays: totalsR[0]?.plays ?? 0,
+      hours: r1(totalsR[0]?.hours ?? 0),
+      titles: totalsR[0]?.titles ?? 0,
+    },
+    movies: { titles: split?.movie_titles ?? 0, hours: r1(split?.movie_hours ?? 0) },
+    tv: { shows: split?.shows ?? 0, episodes: split?.episodes ?? 0, hours: r1(split?.tv_hours ?? 0) },
+    topTitles: topR.map((t) => ({
+      title: t.title,
+      tmdbId: t.tmdbId,
+      mediaType: t.mediaType,
+      posterPath: t.posterPath,
+      count: t.cnt,
+      hours: r1(t.hours),
+    })),
+    biggestDay: dayR[0] ? { day: dayR[0].day, plays: dayR[0].plays, hours: r1(dayR[0].hours) } : null,
+    busiestMonth: monthR[0] ? { month: monthR[0].month, plays: monthR[0].plays } : null,
+    primeDow: dowR[0]?.dow ?? null,
+    primeHour: hourR[0]?.hour ?? null,
+    longestSitting: long
+      ? {
+          title: long.title,
+          tmdbId: long.tmdbId,
+          mediaType: long.mediaType,
+          posterPath: long.posterPath,
+          seconds: long.secs,
+          startedAt: long.startedAt.toISOString(),
+        }
+      : null,
+    completion: { watched: compR[0]?.watched ?? 0, total: compR[0]?.total ?? 0 },
+    topPlatform: platR[0]?.v ?? null,
+    topDevice: devR[0]?.v ?? null,
+  };
+}
+
 // Aggregate the per-title stats bundle (totals, unique/top viewers, completion,
 // recent plays, daily series, transcode/resolution breakdowns) for one tmdbId.
 export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {

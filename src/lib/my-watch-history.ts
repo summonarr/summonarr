@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { resolvePosterMap } from "@/lib/poster-cache";
-import { getPlayStatsForServerUsers } from "@/lib/play-history";
+import {
+  getPlayStatsForServerUsers,
+  getPlayYearsForServerUsers,
+  getWrappedForServerUsers,
+} from "@/lib/play-history";
 import type { Prisma } from "@/generated/prisma";
 
 // Self-service watch history — the ONE scoping chokepoint for a user reading
@@ -505,4 +509,28 @@ export async function getMyPlayStats(
   const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
   if (ids.length === 0) return { linked: false, stats: null };
   return { linked: true, stats: await getPlayStatsForServerUsers(ids) };
+}
+
+// The caller's OWN "Wrapped" year-in-review, scoped through the same linked-
+// identity chokepoint. Returns the list of years that have data (for the year
+// picker) alongside the chosen year's bundle. `linked: false` when the account
+// has no linked media-server users; `year: null` (with data: null) when it's
+// linked but has no watched plays in any year yet. The requested year is honored
+// only if it appears in `years`, so a hand-typed `?year=` can't scope to a year
+// with no data — it falls back to the most recent year on record.
+export async function getMyWrapped(
+  summonarrUserId: string,
+  requestedYear?: number,
+): Promise<{
+  linked: boolean;
+  years: number[];
+  year: number | null;
+  data: Awaited<ReturnType<typeof getWrappedForServerUsers>> | null;
+}> {
+  const ids = await resolveLinkedMediaServerUserIds(summonarrUserId);
+  if (ids.length === 0) return { linked: false, years: [], year: null, data: null };
+  const years = await getPlayYearsForServerUsers(ids);
+  if (years.length === 0) return { linked: true, years: [], year: null, data: null };
+  const year = requestedYear && years.includes(requestedYear) ? requestedYear : years[0];
+  return { linked: true, years, year, data: await getWrappedForServerUsers(ids, year) };
 }
