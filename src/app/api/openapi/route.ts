@@ -725,6 +725,19 @@ const spec = {
         },
       },
     },
+    "/play-history/mine/stats": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN aggregate play stats — a lean projection for native clients (the same fields the /my-stats dashboard renders). Scoped server-side to the media-server users linked to the session account; no parameter can select another user.",
+        responses: {
+          "200": {
+            description:
+              "{ linked, stats }. stats carries totals (plays, watch hours, avg session), lastActiveIso, the 365-day activityCalendar, playsByDay, the day×hour userHeatmap, platform/device breakdowns, and topMedia. linked=false when the account has no linked media-server user yet",
+          },
+        },
+      },
+    },
     "/play-history/sessions": {
       get: {
         tags: ["Sessions"],
