@@ -5,6 +5,8 @@
 // bytes / "Trojan Source" glyphs).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { sanitizeText, sanitizeOptional, sanitizeForLog } from "../src/lib/sanitize.ts";
 
 const RTL_OVERRIDE = String.fromCharCode(0x202e); // U+202E, a bidi override
@@ -25,9 +27,12 @@ test("sanitizeOptional maps empty/whitespace/null to null", () => {
   assert.equal(sanitizeOptional("  keep me  "), "keep me");
 });
 
-test("sanitizeForLog collapses CR/LF (log-injection) and stringifies", () => {
-  assert.equal(sanitizeForLog("line1\r\nFAKE LOG LINE"), "line1  FAKE LOG LINE");
-  assert.equal(sanitizeForLog("a\nb"), "a b");
+test("sanitizeForLog removes CR/LF (log-injection) and stringifies", () => {
+  // Removed, NOT replaced with a space. CodeQL's log-injection barrier is
+  // `replaces(s, "") and s.regexpMatch("\\n")` - it matches only when the
+  // replacement is the EMPTY string, so a space here reopens seven alerts.
+  assert.equal(sanitizeForLog("line1\r\nFAKE LOG LINE"), "line1FAKE LOG LINE");
+  assert.equal(sanitizeForLog("a\nb"), "ab");
   assert.equal(sanitizeForLog(42), "42");
   assert.equal(sanitizeForLog(null), "null");
 });
@@ -88,9 +93,9 @@ test("sanitizeForLog strips NUL, DEL and the C1 controls", () => {
   assert.equal(sanitizeForLog(`a${String.fromCharCode(0x85)}b`), "ab");
 });
 
-test("sanitizeForLog collapses the Unicode line/paragraph separators to a space", () => {
-  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2028)}b`), "a b");
-  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2029)}b`), "a b");
+test("sanitizeForLog removes the Unicode line/paragraph separators", () => {
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2028)}b`), "ab");
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2029)}b`), "ab");
 });
 
 test("sanitizeForLog strips bidi overrides and isolates", () => {
@@ -107,6 +112,39 @@ test("sanitizeForLog leaves ordinary unicode text intact", () => {
 
 // Pin the String() coercion contract log callsites rely on for
 // non-string values.
+// Source-level pin on the CodeQL contract. The barrier in
+// javascript/ql/lib/semmle/javascript/security/dataflow/LogInjectionQuery.qll is:
+//
+//   this.(StringReplaceCall).replaces(s, "") and s.regexpMatch("\\n")
+//
+// `replaces(old, new)` resolves `new` from the literal second argument, so the
+// replacement must be the EMPTY string and the pattern must be a plain `\n`.
+// The pre-v0.17.2 code used `/[\r\n]/g -> " "` and failed BOTH clauses, which
+// is why seven js/log-injection alerts stayed open on already-sanitised
+// callsites. Verified locally with CodeQL 2.26.1: 11 results -> 0.
+// Asserting on the source text because a behavioural test cannot distinguish
+// "removed" from "removed via a form CodeQL recognises".
+test("sanitizeForLog keeps the exact replace form CodeQL's barrier matches", () => {
+  const src = readFileSync(join(process.cwd(), "src", "lib", "sanitize.ts"), "utf-8");
+  const body = src.slice(src.indexOf("export function sanitizeForLog"));
+  assert.match(
+    body,
+    /\.replace\(\/\\n\/g, ""\)/,
+    'sanitizeForLog must contain a literal `.replace(/\\n/g, "")` - an empty-string '
+      + "replacement of a bare newline is what CodeQL's log-injection barrier matches",
+  );
+  // A character class such as `[\r\n]` is NOT a constant pattern, so
+  // getAReplacedString() cannot resolve it back to "\n".
+  for (const bad of ["[\\r\\n]", "[\\n\\r]"]) {
+    assert.equal(
+      body.includes(bad),
+      false,
+      `sanitizeForLog must not fold CR/LF into the character class ${bad} - CodeQL `
+        + "resolves the replaced string only from a constant pattern",
+    );
+  }
+});
+
 test("sanitizeForLog stringifies undefined and plain objects", () => {
   assert.equal(sanitizeForLog(undefined), "undefined");
   assert.equal(sanitizeForLog({}), "[object Object]");

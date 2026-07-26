@@ -20,20 +20,25 @@ export function sanitizeOptional(input: string | undefined | null): string | nul
 // Neutralise anything an interpolated value could use to forge extra log lines
 // or repaint an operator's terminal (log-injection defence).
 //
-// CR and LF are stripped via two separate *constant* patterns instead of a
-// single `/[\r\n]/g` character class. That is load-bearing for static
-// analysis, not style: CodeQL's log-injection sanitiser model only recognises a
-// replace whose pattern is a regexp constant, so the character-class form read
-// as "unsanitised" and left seven `js/log-injection` alerts open on callsites
-// that were in fact already sanitised.
+// Everything here is removed, never substituted, and CR/LF are removed by two
+// separate single-character constant patterns. Both details are load-bearing
+// for static analysis, not style. CodeQL's log-injection barrier is:
+//
+//   this.(StringReplaceCall).replaces(s, "") and s.regexpMatch("\\n")
+//
+// so it matches ONLY a replace whose replaced string is exactly a newline AND
+// whose replacement is the EMPTY string. The earlier `/[\r\n]/g -> " "`
+// form failed on the replacement (a space, not ""), which is why seven
+// js/log-injection alerts stayed open on callsites that were already sanitised.
+// Substituting a space here again will silently reopen all of them.
 export function sanitizeForLog(value: unknown): string {
   return String(value)
-    .replace(/\r/g, " ")
-    .replace(/\n/g, " ")
+    .replace(/\r/g, "")
+    .replace(/\n/g, "")
     // The Unicode line/paragraph separators are line breaks to plenty of log
     // viewers, so they forge lines just like LF does. (NEL, U+0085, is covered
     // by the C1 range below.)
-    .replace(/[\u2028\u2029]/g, " ")
+    .replace(/[\u2028\u2029]/g, "")
     // Remaining C0/C1 controls and DEL. ESC (\x1B) is the important one:
     // ANSI sequences let a value colour, erase or reposition text in an
     // operator's terminal, faking log content without ever emitting a newline.
