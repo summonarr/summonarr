@@ -25,6 +25,14 @@ import { normalizeEmail } from "./email-normalize";
 // ones that will ACTUALLY be locked out without a backfill; local/Jellyfin/
 // OIDC users whose plexUserId happens to be null have another way in and
 // shouldn't generate noise on every boot.
+//
+// `deactivatedAt: null` is part of that same rule: a deleted account is
+// anonymized in place (see anonymize-user.ts) — passwordHash/plexUserId/
+// jellyfinUserId nulled, Account rows dropped, email rewritten to
+// deleted-<id>@deleted.invalid — which matches the Plex-only shape exactly. Such
+// a row can never sign in (it is deactivated, and no plex.tv account will ever
+// report that .invalid address), so every boot warned "REFUSED on next Plex
+// sign-in" for a user that no longer exists.
 
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {
@@ -33,6 +41,7 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
         plexUserId: null,
         jellyfinUserId: null,
         passwordHash: null,
+        deactivatedAt: null,
         accounts: { none: { provider: "oidc" } },
         NOT: { email: { endsWith: "@jellyfin.local" } },
       },

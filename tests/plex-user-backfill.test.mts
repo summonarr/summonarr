@@ -4,8 +4,9 @@
 // refuse them. The contracts pinned here are the ones a wrong refactor would
 // turn into a lockout, a wrong-account bind, or boot noise:
 //   - the "IfNeeded" gate is CANDIDATE-DRIVEN: the exact Plex-only where-filter
-//     (null plexUserId/jellyfinUserId/passwordHash, no oidc Account, no
-//     @jellyfin.local synthetic email) runs first, and an empty result is a
+//     (null plexUserId/jellyfinUserId/passwordHash/deactivatedAt, no oidc
+//     Account, no @jellyfin.local synthetic email) runs first, and an empty
+//     result is a
 //     complete no-op — no Setting reads, no plex.tv traffic, no writes. There
 //     is deliberately NO module-level once-guard and the ranAt marker is
 //     write-only (never read): once-per-boot lives in instrumentation.ts;
@@ -176,18 +177,53 @@ test("no Plex-only candidates → complete no-op: no Setting reads, no network, 
 test("the candidate query pins the Plex-only definition (who would ACTUALLY be locked out)", async () => {
   // Local (passwordHash), Jellyfin (jellyfinUserId or synthetic email), and
   // OIDC users have another way in — they must not be candidates, or every
-  // boot spams REFUSED warnings for users that are fine.
+  // boot spams REFUSED warnings for users that are fine. `deactivatedAt: null`
+  // is the same rule for DELETED users: anonymizeUserInTx nulls passwordHash /
+  // plexUserId / jellyfinUserId and drops the Account rows, so a deleted
+  // account matches the Plex-only shape exactly — see the dedicated test below.
   await runPlexUserBackfillIfNeeded();
   assert.deepEqual(userFindManyCalls[0], {
     where: {
       plexUserId: null,
       jellyfinUserId: null,
       passwordHash: null,
+      deactivatedAt: null,
       accounts: { none: { provider: "oidc" } },
       NOT: { email: { endsWith: "@jellyfin.local" } },
     },
     select: { id: true, email: true },
   });
+});
+
+test("a deleted (anonymized) user is excluded — the row shape anonymizeUserInTx leaves behind IS the Plex-only shape", async () => {
+  // Regression: every boot warned "1 Plex-only user(s) could NOT be bound …
+  // REFUSED on next Plex sign-in" naming deleted-<id>@deleted.invalid. The row
+  // is deactivated and its .invalid email can never appear in plex.tv's account
+  // list, so it can neither be bound nor ever sign in — pure boot noise that
+  // also re-printed the deleted user's id on every restart.
+  //
+  // Assert against the where-clause (the in-memory stub does not filter): the
+  // deactivatedAt term must be present, so the DB never returns such a row.
+  const anonymizedShape = {
+    // exactly what anonymize-user.ts writes, minus the fields it leaves alone
+    passwordHash: null,
+    plexUserId: null,
+    jellyfinUserId: null,
+    email: "deleted-x6we5f10j4qbt74jpn7mto1f@deleted.invalid",
+    deactivatedAt: new Date("2026-07-26T00:00:00.000Z"),
+  };
+  await runPlexUserBackfillIfNeeded();
+  const where = (userFindManyCalls[0] as { where: Record<string, unknown> }).where;
+
+  // Every other candidate term matches the anonymized row — only deactivatedAt
+  // rejects it, so dropping that term silently restores the warning.
+  assert.equal(anonymizedShape.plexUserId, where.plexUserId);
+  assert.equal(anonymizedShape.jellyfinUserId, where.jellyfinUserId);
+  assert.equal(anonymizedShape.passwordHash, where.passwordHash);
+  assert.ok(!anonymizedShape.email.endsWith("@jellyfin.local"));
+  assert.ok("deactivatedAt" in where, "candidate filter must exclude deactivated (deleted) users");
+  assert.equal(where.deactivatedAt, null);
+  assert.notEqual(anonymizedShape.deactivatedAt, null);
 });
 
 test("Plex unconfigured: missing or empty plexAdminToken returns before any network or write", async () => {
