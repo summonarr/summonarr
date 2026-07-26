@@ -197,6 +197,17 @@ async function lookupHostCached(host: string, bypassCache = false): Promise<stri
     .lookup(host, { all: true, verbatim: true })
     .catch(() => [] as { address: string }[]);
   const addrs = results.map((r) => r.address);
+  // NEVER cache a failed lookup. An empty result means "resolution failed", not
+  // "this host has no safe addresses" — but every caller treats an empty set as a
+  // hard block (resolveToSafeUrlWithAddrs returns null → SafeFetchError
+  // "ssrf-blocked"). Caching it pinned a single transient DNS blip into a FULL
+  // DNS_CACHE_TTL_MS outage for that host: TMDB browse/search, the *arr syncs and
+  // web push would all keep failing for five minutes after DNS had recovered,
+  // behind an error message that blames the SSRF policy and sends the operator
+  // hunting the wrong thing. Re-querying on the next call costs one getaddrinfo,
+  // which is what an uncached host already pays, and the OS resolver caches
+  // NXDOMAIN itself so a genuinely-dead host is still cheap.
+  if (addrs.length === 0) return addrs;
   // Evict by insertion order (Map iteration is ordered) when the cache is full
   if (dnsCache.size >= DNS_CACHE_MAX) {
     const oldestKey = dnsCache.keys().next().value;
