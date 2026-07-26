@@ -33,6 +33,23 @@ updates:
       # update-types filter alone did not stop the grouped "across 1
       # directory" PR (#165 ignored, #173 still opened), so pin the version
       # range explicitly.
+      #
+      # Neither ignore held either: #189 still grouped "typescript": "^6" -> "^7"
+      # and failed CI on the typescript-eslint load crash.
+      #
+      # ROOT CAUSE: this whole file was failing to parse. The github-actions and
+      # docker blocks carried npm-only `cooldown.semver-*-days` keys, so
+      # Dependabot rejected the config outright ("Your .github/dependabot.yml
+      # contained invalid details") and fell back to defaults — which is why the
+      # ignores, the cooldowns and the labels all silently did nothing across
+      # #165, #173 and #189. Those keys are removed below. Nothing in the config
+      # was ever in effect, so treat any past "Dependabot ignored X" reasoning
+      # here as unverified.
+      #
+      # Belt and braces regardless: the group excludes both compilers (below),
+      # and tests/typescript-major-pin.test.mts fails `npm test` if either range
+      # drifts, so no dependency PR can merge past it even if the config is
+      # wrong again.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
       - dependency-name: "typescript"
@@ -41,6 +58,12 @@ updates:
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
         dependency-type: "development"
+        # See the typescript `ignore` entries above: grouped PRs bypassed them
+        # three times (#165, #173, #189). Keep both compilers out of the group
+        # so each is only ever proposed as a standalone, reviewable PR.
+        exclude-patterns:
+          - "typescript"
+          - "tsgo"
       # Bundle tiny patches to keep noise down
       patch-updates:
         update-types:
@@ -58,11 +81,12 @@ updates:
     # Action bumps are pinned-by-SHA so we re-verify each release.
     # 7 days catches "tag was rewritten" attacks.
     # (zizmor:dependabot-cooldown)
+    #
+    # `default-days` ONLY: the semver-*-days keys are npm-style and Dependabot
+    # rejects them for this ecosystem. See the npm block's cooldown for the
+    # graded version.
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 7
-      semver-patch-days: 5
 
   # Docker base image bumps (node:22-alpine, postgres:17-alpine)
   - package-ecosystem: "docker"
@@ -77,8 +101,9 @@ updates:
     # ships a new alpine variant). 7 days gives the community time to
     # surface breakage and satisfies zizmor's >= 7-day floor.
     # (zizmor:dependabot-cooldown)
+    #
+    # `default-days` ONLY: the semver-*-days keys are npm-style and Dependabot
+    # rejects them for this ecosystem. See the npm block's cooldown for the
+    # graded version.
     cooldown:
       default-days: 7
-      semver-major-days: 14
-      semver-minor-days: 5
-      semver-patch-days: 3

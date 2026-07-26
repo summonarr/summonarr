@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.17.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.17.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,12 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.17.1
+
+**Fixed**
+
+- **Security hardening — upgrading is recommended.** Patched two vulnerable dependencies that ship inside the container image: a path-traversal issue in the CSS build toolchain, and a validation bug in a Prisma dependency that is loaded during container startup. Also hardened server-side logging so a value coming back from Plex, Jellyfin, Radarr, Sonarr or Discord can no longer forge extra log lines, smuggle terminal escape sequences into an operator's console, or reverse displayed text.
+
 ### v0.17.0
 
 **Added**
@@ -286,7 +292,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.17.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.17.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

@@ -71,12 +71,38 @@ test("sanitizeText passes DEL and C1 controls through (current behavior)", () =>
   assert.equal(sanitizeText(`a${c1Start}${nel}${c1End}b`), `a${c1Start}${nel}${c1End}b`);
 });
 
-// Pin CURRENT behavior: sanitizeForLog's scope is deliberately CR/LF-only
-// (line-forging defence). ESC (\x1B) — and thus ANSI colour/escape sequences —
-// pass through to the log sink untouched.
-test("sanitizeForLog leaves ESC / ANSI sequences intact (current behavior)", () => {
+// sanitizeForLog's scope was deliberately widened past CR/LF: a value that
+// reaches an operator's terminal can forge log content with ANSI escapes, with
+// the C1/Unicode line separators, or with bidi overrides, none of which emit a
+// newline. Each block below pins a distinct forging vector — dropping any one
+// range from the implementation must fail here.
+test("sanitizeForLog strips ESC / ANSI sequences", () => {
   const esc = String.fromCharCode(0x1b);
-  assert.equal(sanitizeForLog(`a${esc}[31mb`), `a${esc}[31mb`);
+  assert.equal(sanitizeForLog(`a${esc}[31mb`), "a[31mb");
+});
+
+test("sanitizeForLog strips NUL, DEL and the C1 controls", () => {
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x00)}b`), "ab");
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x7f)}b`), "ab");
+  // U+0085 NEL is a line break to many log viewers.
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x85)}b`), "ab");
+});
+
+test("sanitizeForLog collapses the Unicode line/paragraph separators to a space", () => {
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2028)}b`), "a b");
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2029)}b`), "a b");
+});
+
+test("sanitizeForLog strips bidi overrides and isolates", () => {
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x202e)}b`), "ab");
+  assert.equal(sanitizeForLog(`a${String.fromCharCode(0x2066)}b`), "ab");
+});
+
+// Legitimate non-ASCII text must survive — the strip targets control and
+// formatting codepoints, not accents or punctuation.
+test("sanitizeForLog leaves ordinary unicode text intact", () => {
+  const s = "Dune: Part Two — café";
+  assert.equal(sanitizeForLog(s), s);
 });
 
 // Pin the String() coercion contract log callsites rely on for
