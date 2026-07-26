@@ -83,15 +83,38 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
     const adminRoleId = userRole === "ADMIN" ? cfg.discordAdminRoleId : userRole === "ISSUE_ADMIN" ? cfg.discordIssueAdminRoleId : undefined;
 
     const roleIds = [cfg.discordLinkedRoleId, serverRoleId, adminRoleId].filter((id): id is string => isValidSnowflake(id));
-    if (roleIds.length === 0) return;
 
-    await Promise.allSettled(
-      roleIds.map((roleId) =>
+    // Sync is a DIFF, not an add-only pass. Without the removal half, a user
+    // demoted from ADMIN to USER kept their Discord admin role forever — the
+    // re-sync re-added the linked/server roles and simply never mentioned the
+    // admin one — and a Plex→Jellyfin switch accumulated both server roles.
+    //
+    // The removal set is deliberately scoped to roles SUMMONARR ITSELF manages
+    // (the five configured ids). Anything an operator granted by hand is not in
+    // that set and is never touched, so this can only ever revoke a role that
+    // Summonarr granted and that the user no longer qualifies for.
+    const desired = new Set(roleIds);
+    const managed = [
+      cfg.discordLinkedRoleId,
+      cfg.discordPlexRoleId,
+      cfg.discordJellyfinRoleId,
+      cfg.discordAdminRoleId,
+      cfg.discordIssueAdminRoleId,
+    ].filter((id): id is string => isValidSnowflake(id));
+    const stale = [...new Set(managed)].filter((id) => !desired.has(id));
 
-        safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
+    if (roleIds.length === 0 && stale.length === 0) return;
+
+    const memberRoleUrl = (roleId: string) =>
+      `${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`;
+    const auth = { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" };
+
+    await Promise.allSettled([
+      ...roleIds.map((roleId) =>
+        safeFetchTrusted(memberRoleUrl(roleId), {
           allowedHosts: DISCORD_HOSTS,
           method: "PUT",
-          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+          headers: auth,
           timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
         }).then(async (res) => {
           if (!res.ok) {
@@ -99,8 +122,22 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
             console.error(`[discord-notify] Failed to assign role ${roleId} (${res.status}): ${text}`);
           }
         })
-      )
-    );
+      ),
+      ...stale.map((roleId) =>
+        safeFetchTrusted(memberRoleUrl(roleId), {
+          allowedHosts: DISCORD_HOSTS,
+          method: "DELETE",
+          headers: auth,
+          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
+        }).then(async (res) => {
+          // 404 is the common, benign case: the member never had the role.
+          if (!res.ok && res.status !== 404) {
+            const text = await res.text();
+            console.error(`[discord-notify] Failed to revoke role ${roleId} (${res.status}): ${text}`);
+          }
+        })
+      ),
+    ]);
   } catch (err) {
     console.error("[discord-notify] assignDiscordRolesOnLink failed:", err);
   }

@@ -452,6 +452,34 @@ test("paging: TotalRecordCount fans out parallel pages at 5000-item StartIndex s
   assert.deepEqual([...items.keys()].sort((x, y) => x - y), [1, 2, 3]);
 });
 
+test("paging: a response with NO TotalRecordCount walks pages until a short one, instead of stopping after the first", async () => {
+  // Some Jellyfin versions/endpoints omit TotalRecordCount entirely. The old
+  // `?? 0` read that as "zero items", so the fan-out derived an EMPTY page list
+  // and returned after page 0 — the sync then wrote a library truncated to one
+  // page and reported success, and the next full sync's deleteMany+repopulate
+  // (guardrail 13) made that truncation durable. Absent must mean "unknown", so
+  // we fall back to walking until a short page ends the results.
+  const B = nextBase();
+  const page = (from: number, n: number) => ({
+    Items: Array.from({ length: n }, (_, i) => ({
+      Id: `x${from + i}`,
+      ProviderIds: { Tmdb: String(from + i + 1) },
+    })),
+    // NOTE: no TotalRecordCount key at all — that is the whole point.
+  });
+  respond = (url) => {
+    const start = new URL(url).searchParams.get("StartIndex");
+    if (start === "0") return okJson(page(0, 5000)); // exactly full ⇒ keep going
+    if (start === "5000") return okJson(page(5000, 2)); // short ⇒ end of results
+    throw new Error(`unexpected StartIndex in ${url}`);
+  };
+
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  const starts = sent.map((s) => new URL(s.url).searchParams.get("StartIndex")).sort();
+  assert.deepEqual(starts, ["0", "5000"], "the walk must continue past the first page");
+  assert.equal(items.size, 5002, "every item from both pages survives the merge");
+});
+
 test("library scoping: each libraryId becomes a ParentId-scoped query and the per-library results merge", async () => {
   const B = nextBase();
   respond = (url) => {

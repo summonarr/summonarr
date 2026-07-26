@@ -454,18 +454,28 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
     discordIssueAdminRoleId: "900000000000000006",
   };
 
-  // Plex account (real email), plain USER → linked + plex roles only.
+  // Role sync is a DIFF over the roles Summonarr manages: the roles the user
+  // should have are PUT, and any OTHER managed role is DELETEd. Add-only sync
+  // left a demoted admin holding their Discord admin role forever. Roles the
+  // operator granted by hand are not in the managed set and are never touched.
+  const byMethod = (m: string) =>
+    sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
+
+  // Plex account (real email), plain USER → linked + plex granted; the jellyfin,
+  // admin and issue-admin roles are managed-but-not-desired, so they are revoked.
   setSettings(roleCfg);
   await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
   assert.deepEqual(
-    sent.map((s) => s.url),
+    sent.filter((s) => s.method === "PUT").map((s) => s.url),
     [
       `${API}/guilds/${guild}/members/${DID}/roles/900000000000000002`,
       `${API}/guilds/${guild}/members/${DID}/roles/900000000000000003`,
     ],
   );
   for (const s of sent) {
-    assert.equal(s.method, "PUT");
+    assert.ok(s.method === "PUT" || s.method === "DELETE");
     assert.equal(s.headers.get("authorization"), AUTH);
   }
 
@@ -473,17 +483,20 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   // linked + jellyfin + issue-admin roles.
   sent.length = 0;
   await assignDiscordRolesOnLink(DID, "bob@jellyfin.local", "ISSUE_ADMIN");
-  assert.deepEqual(
-    sent.map((s) => s.url.split("/roles/")[1]),
-    ["900000000000000002", "900000000000000004", "900000000000000006"],
-  );
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004", "900000000000000006"]);
+  // The plex role is revoked on a Plex→Jellyfin switch, and the full-admin role
+  // is revoked for an ISSUE_ADMIN — both previously accumulated silently.
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000003", "900000000000000005"]);
 
   // A non-snowflake configured role id is filtered out instead of sent to Discord.
   sent.length = 0;
   setSettings({ ...roleCfg, discordPlexRoleId: "plex-members" });
   invalidateFeatureFlagCache();
   await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
-  assert.deepEqual(sent.map((s) => s.url.split("/roles/")[1]), ["900000000000000002"]);
+  // The non-snowflake plex id is filtered out of BOTH sets — it is never granted
+  // and never revoked, so a malformed config value can't produce a Discord call.
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
 });
 
 test("role assignment: no guild config or invalid member id → zero fetches; a failed PUT only logs", async () => {
