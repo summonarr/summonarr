@@ -134,6 +134,10 @@ export interface PersonCredit {
   mdblistScore?: string | null;
   malRating?: string | null;
   rogerEbertRating?: string | null;
+  imdbId?: string | null;
+  imdbVotes?: string | null;
+  // Set by getEnrichedPerson so a filmography card can request without a token round-trip.
+  requestToken?: string;
 }
 
 export interface PersonDetails {
@@ -141,6 +145,10 @@ export interface PersonDetails {
   name: string;
   profilePath: string | null;
   knownForDepartment: string;
+  biography: string;
+  birthday: string | null;
+  deathday: string | null;
+  placeOfBirth: string | null;
   credits: PersonCredit[];
 }
 

@@ -30,11 +30,29 @@ interface ReportIssueButtonProps {
   mediaType: "MOVIE" | "TV";
   title: string;
   posterPath?: string | null;
+  // Optional prefill — used by watch-history rows to open the dialog already
+  // scoped to the episode the entry represents. Ignored for movies; falls back
+  // to the library-availability defaults when the values aren't in the lists.
+  initialScope?: IssueScope;
+  initialSeasonNumber?: number | null;
+  initialEpisodeNumber?: number | null;
+  // Icon-only trigger for dense row layouts (full labelled button otherwise).
+  compact?: boolean;
 }
 
 type DialogState = "idle" | "loading" | "open" | "submitting" | "submitted" | "error";
 
-export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath }: ReportIssueButtonProps) {
+export function ReportIssueButton({
+  tmdbId,
+  tvdbId,
+  mediaType,
+  title,
+  posterPath,
+  initialScope,
+  initialSeasonNumber,
+  initialEpisodeNumber,
+  compact,
+}: ReportIssueButtonProps) {
   const [dialogState, setDialogState] = useState<DialogState>("idle");
   const { toast } = useToast();
   const [issueType, setIssueType] = useState<IssueType>("BAD_VIDEO");
@@ -65,15 +83,23 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
   const useManualInputs = isTV && (availabilityFailed || (dialogState === "open" && tvSeasons.length === 0));
 
   async function openDialog() {
+    // Prefill seeds (watch-history rows pass the entry's episode). prevScope
+    // must be seeded too, or the render-time scope-change reset clobbers the
+    // seeded season/episode on the first render after opening.
+    const seedScope: IssueScope = isTV ? initialScope ?? "FULL" : "FULL";
+    const seedSeason = isTV && seedScope !== "FULL" ? initialSeasonNumber ?? null : null;
+    const seedEpisode = isTV && seedScope === "EPISODE" ? initialEpisodeNumber ?? null : null;
+
     setDialogState("loading");
     setIssueType("BAD_VIDEO");
-    setScope("FULL");
+    setScope(seedScope);
+    setPrevScope(seedScope);
     setNote("");
     setErrorMsg("");
-    setSelectedSeason(null);
-    setSelectedEpisode(null);
-    setManualSeason("");
-    setManualEpisode("");
+    setSelectedSeason(seedSeason);
+    setSelectedEpisode(seedEpisode);
+    setManualSeason(seedSeason != null ? String(seedSeason) : "");
+    setManualEpisode(seedEpisode != null ? String(seedEpisode) : "");
     setAvailabilityFailed(false);
 
     if (isTV) {
@@ -84,8 +110,19 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
           setTvSeasons(data.seasons);
           setAvailabilitySource(data.source);
           if (data.seasons.length > 0) {
-            setSelectedSeason(data.seasons[0].seasonNumber);
-            setSelectedEpisode(data.seasons[0].episodes[0] ?? null);
+            // Honor the seeded season/episode when the library lists actually
+            // contain them; otherwise fall back to the first available.
+            const seededSeason =
+              seedSeason != null
+                ? data.seasons.find((s) => s.seasonNumber === seedSeason)
+                : undefined;
+            const season = seededSeason ?? data.seasons[0];
+            setSelectedSeason(season.seasonNumber);
+            setSelectedEpisode(
+              seededSeason && seedEpisode != null && seededSeason.episodes.includes(seedEpisode)
+                ? seedEpisode
+                : season.episodes[0] ?? null,
+            );
           }
         } else {
           setAvailabilityFailed(true);
@@ -181,28 +218,43 @@ export function ReportIssueButton({ tmdbId, tvdbId, mediaType, title, posterPath
       <button
         type="button"
         onClick={openDialog}
+        aria-label={compact ? `Report an issue with ${title}` : undefined}
+        title={compact ? "Report an issue" : undefined}
         className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
-        style={{
-          padding: "6px 12px",
-          height: 32,
-          borderRadius: 6,
-          fontSize: 12,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg-muted)",
-          border: "1px solid var(--ds-border)",
-        }}
+        style={
+          compact
+            ? {
+                width: 28,
+                height: 28,
+                borderRadius: 6,
+                justifyContent: "center",
+                background: "transparent",
+                color: "var(--ds-fg-subtle)",
+                border: "1px solid transparent",
+                flexShrink: 0,
+              }
+            : {
+                padding: "6px 12px",
+                height: 32,
+                borderRadius: 6,
+                fontSize: 12,
+                background: "var(--ds-bg-2)",
+                color: "var(--ds-fg-muted)",
+                border: "1px solid var(--ds-border)",
+              }
+        }
         onMouseEnter={(e) => {
           e.currentTarget.style.color = "var(--ds-warning)";
           e.currentTarget.style.borderColor =
             "color-mix(in oklab, var(--ds-warning) 40%, transparent)";
         }}
         onMouseLeave={(e) => {
-          e.currentTarget.style.color = "var(--ds-fg-muted)";
-          e.currentTarget.style.borderColor = "var(--ds-border)";
+          e.currentTarget.style.color = compact ? "var(--ds-fg-subtle)" : "var(--ds-fg-muted)";
+          e.currentTarget.style.borderColor = compact ? "transparent" : "var(--ds-border)";
         }}
       >
         <AlertTriangle style={{ width: 14, height: 14 }} />
-        Report Issue
+        {!compact && "Report Issue"}
       </button>
 
       {dialogState !== "idle" && (

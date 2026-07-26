@@ -695,6 +695,49 @@ const spec = {
         responses: { "200": { description: "Paginated play history rows" }, "403": { description: "Forbidden" } },
       },
     },
+    "/play-history/mine": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN watch history. Scoped server-side to the media-server users linked to the session account — no parameter can select another user.",
+        parameters: [
+          { name: "cursor", in: "query", schema: { type: "string" }, description: "Keyset cursor from the previous response's nextCursor" },
+          { name: "mediaType", in: "query", schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "search", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": {
+            description:
+              "History page ({ linked, items, total, nextCursor, pageSize, stats }). Entries are consolidated — repeat plays of the same movie/episode collapse into one item (latest play + playCount/totalPlaySeconds aggregates); linked=false when the account has no linked media-server user yet",
+          },
+        },
+      },
+    },
+    "/play-history/mine/{id}": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "Play-by-play breakdown of ONE consolidated entry from the caller's own history. `id` is any play id in the entry; a row outside the caller's scope 404s like a missing one.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "{ item, plays (capped at 100, newest first), firstStartedAt, lastStartedAt }" },
+          "404": { description: "Unknown id, or a play outside the caller's linked media-server users" },
+        },
+      },
+    },
+    "/play-history/mine/stats": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN aggregate play stats — a lean projection for native clients (the same fields the /my-stats dashboard renders). Scoped server-side to the media-server users linked to the session account; no parameter can select another user.",
+        responses: {
+          "200": {
+            description:
+              "{ linked, stats }. stats carries totals (plays, watch hours, avg session), lastActiveIso, the 365-day activityCalendar, playsByDay, the day×hour userHeatmap, platform/device breakdowns, and topMedia. linked=false when the account has no linked media-server user yet",
+          },
+        },
+      },
+    },
     "/play-history/sessions": {
       get: {
         tags: ["Sessions"],

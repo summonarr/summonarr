@@ -844,12 +844,15 @@ export async function getTVSeasonEpisodes(
 }
 
 export async function getPersonDetails(id: number): Promise<PersonDetails> {
-  const key = `person:${id}`;
+  // v2: shape grew (biography/birth/death/placeOfBirth + a larger credit cap) —
+  // bump the key so pre-existing cached rows don't serve the old shape.
+  const key = `person:v2:${id}`;
   const cached = await getCache<PersonDetails>(key);
   if (cached) return cached;
 
   const r = await tmdbFetch<{
     id: number; name: string; profile_path: string | null; known_for_department: string;
+    biography?: string; birthday?: string | null; deathday?: string | null; place_of_birth?: string | null;
     // Optional in the type to match reality: append_to_response payloads can be
     // absent on edge responses; the guard below degrades to an empty list.
     combined_credits?: {
@@ -870,7 +873,7 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
       const bDate = b.release_date ?? b.first_air_date ?? "";
       return bDate.localeCompare(aDate);
     })
-    .slice(0, 20)
+    .slice(0, 40)
     .map((c) => ({
       id: c.id, mediaType: c.media_type as MediaType,
       title: c.title ?? c.name ?? "",
@@ -881,7 +884,12 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
 
   const result: PersonDetails = {
     id: r.id, name: r.name, profilePath: r.profile_path,
-    knownForDepartment: r.known_for_department, credits,
+    knownForDepartment: r.known_for_department,
+    biography: r.biography ?? "",
+    birthday: r.birthday ?? null,
+    deathday: r.deathday ?? null,
+    placeOfBirth: r.place_of_birth ?? null,
+    credits,
   };
 
   await setCache(key, result, TTL.PERSON);

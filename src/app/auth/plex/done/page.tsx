@@ -23,6 +23,35 @@ interface SettingsAuth {
 
 type RedirectAuth = LoginAuth | SettingsAuth;
 
+// Turn a failed POST /api/auth/sign-in/plex into a message that reflects the
+// ACTUAL failure class, instead of a blanket "you don't have access". The route
+// returns { error } with a meaningful status:
+//   400 → the sign-in flow expired or didn't match — per-user and retry-able.
+//   401 → the membership/credential gate rejected it: EITHER this Plex account
+//         isn't shared on the server, OR the server's Plex connection (admin
+//         token / server URL) is broken — which locks out every Plex user at
+//         once. Point at the server owner, not the individual.
+//   5xx → the server errored while completing sign-in.
+async function describePlexSignInFailure(res: Response): Promise<string> {
+  let detail = "";
+  try {
+    const data: { error?: unknown } = await res.json();
+    if (typeof data.error === "string") detail = data.error;
+  } catch {
+    // Non-JSON body (e.g. a reverse-proxy 502 HTML page) — use the status alone.
+  }
+  if (res.status === 400) {
+    return "Your Plex sign-in session expired or was invalid. Please go back and try again.";
+  }
+  if (res.status === 401) {
+    return "Plex sign-in was rejected. Either your Plex account isn't shared on this server, or the server's Plex connection needs to be re-authorized — contact the server owner.";
+  }
+  if (res.status >= 500) {
+    return "The server hit an error finishing sign-in. Please try again, or contact the server owner if it keeps happening.";
+  }
+  return `Plex sign-in failed (${res.status}${detail ? ` — ${detail}` : ""}). Contact the server owner if this persists.`;
+}
+
 // Landing page for the Plex PIN-based OAuth redirect; polls plex.tv until the PIN is claimed
 export default function PlexDonePage() {
   const [message, setMessage] = useState("Completing Plex sign-in…");
@@ -57,20 +86,28 @@ export default function PlexDonePage() {
     }
 
     setMessage("Signing in…");
-    const result = await fetch(withBasePath("/api/auth/sign-in/plex"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        plexToken: authToken,
-        plexClientId: auth.clientId,
-        pinId: auth.pinId,
-        rememberMe: String(auth.rememberMe),
-      }),
-    });
+    let result: Response;
+    try {
+      result = await fetch(withBasePath("/api/auth/sign-in/plex"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          plexToken: authToken,
+          plexClientId: auth.clientId,
+          pinId: auth.pinId,
+          rememberMe: String(auth.rememberMe),
+        }),
+      });
+    } catch {
+      // The request never reached the server (offline, DNS/TLS, proxy down).
+      // Without this the thrown fetch would leave the user on the spinner forever.
+      setMessage("Couldn't reach the server to finish sign-in. Check your connection and try again.");
+      return;
+    }
 
     if (!result.ok) {
-      setMessage("You don't have access. Contact the server owner.");
+      setMessage(await describePlexSignInFailure(result));
       return;
     }
 
