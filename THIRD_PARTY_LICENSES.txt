@@ -1012,63 +1012,63 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ------------------------------------------------------------------------------
 
-@next/env@16.2.11
+@next/env@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.2.11
+@next/swc-darwin-arm64@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.2.11
+@next/swc-darwin-x64@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.2.11
+@next/swc-linux-arm64-gnu@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.2.11
+@next/swc-linux-arm64-musl@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.2.11
+@next/swc-linux-x64-gnu@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.2.11
+@next/swc-linux-x64-musl@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.2.11
+@next/swc-win32-arm64-msvc@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.2.11
+@next/swc-win32-x64-msvc@16.2.12
 License: MIT
 
 (No license file shipped in the package.)
@@ -6708,7 +6708,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-nanoid@3.3.11
+nanoid@3.3.16
 License: MIT
 
 The MIT License (MIT)
@@ -6734,7 +6734,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.2.11
+next@16.2.12
 License: MIT
 
 The MIT License (MIT)
@@ -7179,7 +7179,7 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-postcss@8.5.12
+postcss@8.5.23
 License: MIT
 
 The MIT License (MIT)
@@ -8222,7 +8222,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-valibot@1.2.0
+valibot@1.4.2
 License: MIT
 
 MIT License
