@@ -57,6 +57,14 @@ export class SmtpError extends Error {
 }
 
 const READ_TIMEOUT_MS = 30_000;
+// READ_TIMEOUT_MS only arms once we are already connected, so a relay that
+// black-holes SYNs (firewall change, host down with no ICMP) leaves the connect
+// promise — and its socket, fd and retained closures — pending for the kernel's
+// TCP retry budget (~130s on Linux), far past the 30s the rest of the flow
+// budgets. Every notifier caller is fire-and-forget and sendMany fans out one
+// connection per admin, so a rolling window of half-open sockets accumulates
+// with nothing logged until the first one finally errors.
+const CONNECT_TIMEOUT_MS = 30_000;
 // Hard cap on a single buffered SMTP reply. Real replies (incl. an EHLO capability
 // list) are a few KB; without a cap a hostile/compromised relay can flood bytes with
 // no final-line CRLF and grow `buffer` unbounded (heap) + force an O(n²) rescan on
@@ -429,6 +437,26 @@ function buildAuthPlainToken(user: string, pass: string): string {
 
 // ─── Connect ────────────────────────────────────────────────────────────────
 
+// Arms the CONNECT deadline and returns the disarm fn. Mirrors readReply's
+// timer shape: destroy the socket so the fd is released, then reject.
+function armConnectDeadline(socket: net.Socket, reject: (err: Error) => void): () => void {
+  let timer: NodeJS.Timeout | null = setTimeout(() => {
+    timer = null;
+    try {
+      socket.destroy();
+    } catch {
+      // socket may already be destroyed
+    }
+    reject(new SmtpError(`SMTP connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+  }, CONNECT_TIMEOUT_MS);
+  return () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+}
+
 async function connectSocket(config: SmtpConfig): Promise<net.Socket | tls.TLSSocket> {
   if (config.secure) {
     // Implicit TLS (port 465). TCP target is the pre-validated IP; cert
@@ -437,20 +465,34 @@ async function connectSocket(config: SmtpConfig): Promise<net.Socket | tls.TLSSo
       const socket = tls.connect(
         { host: config.resolvedAddress, port: config.port, servername: config.host },
         () => {
+          clearConnectDeadline();
           socket.off("error", onError);
           resolve(socket);
         },
       );
-      const onError = (err: Error) => reject(err);
+      const onError = (err: Error) => {
+        clearConnectDeadline();
+        reject(err);
+      };
+      // A standalone timer rather than the socket's own `timeout` option: that
+      // option stays armed as an IDLE timer after the handshake and would kill
+      // a healthy session mid-conversation. `onError` stays attached so a
+      // post-destroy error event still has a listener (reject is then a no-op).
+      const clearConnectDeadline = armConnectDeadline(socket, reject);
       socket.once("error", onError);
     });
   }
   return new Promise<net.Socket>((resolve, reject) => {
     const socket = net.connect({ host: config.resolvedAddress, port: config.port }, () => {
+      clearConnectDeadline();
       socket.off("error", onError);
       resolve(socket);
     });
-    const onError = (err: Error) => reject(err);
+    const onError = (err: Error) => {
+      clearConnectDeadline();
+      reject(err);
+    };
+    const clearConnectDeadline = armConnectDeadline(socket, reject);
     socket.once("error", onError);
   });
 }

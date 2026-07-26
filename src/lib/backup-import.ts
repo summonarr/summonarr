@@ -30,13 +30,36 @@ const tableAlt = BACKUP_TABLES.map((t) => `"${t.replace(/"/g, '""')}"`).join("|"
 const enumAlt = BACKUP_ENUMS.map((e) => e.replace(/'/g, "''")).join("|");
 
 const ALLOWED_PATTERNS = [
+  // Group 1 = column list, group 2 = VALUES tuple + optional ON CONFLICT tail.
+  // Both are captured (rather than re-located with a second, weaker `indexOf`
+  // scan) so the validator can never inspect a different clause than the one
+  // Postgres will execute: `indexOf(") VALUES (")` is blind to double quotes,
+  // so a column identifier containing that byte sequence made the validator
+  // check a decoy tuple. The column-list group is LAZY on purpose — greedy
+  // would resolve to the LAST `) VALUES (`, which for a legitimate dump can sit
+  // inside row data (a Setting value containing the text `) VALUES (`) and
+  // would then reject a valid backup.
   new RegExp(
-    `^INSERT INTO "public"\\.(?:${tableAlt}) \\([\\s\\S]*\\) VALUES \\([\\s\\S]*\\)(?:\\s+ON CONFLICT(?:\\s*\\([^)]*\\))?\\s+DO NOTHING)?$`,
+    `^INSERT INTO "public"\\.(?:${tableAlt}) \\(([\\s\\S]*?)\\) VALUES (\\([\\s\\S]*\\)(?:\\s+ON CONFLICT(?:\\s*\\([^)]*\\))?\\s+DO NOTHING)?)$`,
   ),
+  // The enum-label list used to be `\([^)]+\)` — "anything but `)`", which
+  // admits newlines, `;`, `--` and `'`, i.e. arbitrary text smuggled into a
+  // block that is executed verbatim as plpgsql. Pin it to exactly what
+  // db-export emits: single-quoted labels (with `''` escapes) joined by `, `.
   new RegExp(
-    `^DO \\$\\$ BEGIN IF NOT EXISTS \\(\\s*SELECT 1 FROM pg_type WHERE typname = '(?:${enumAlt})'\\) THEN CREATE TYPE "(?:${enumAlt})" AS ENUM \\([^)]+\\); END IF; END \\$\\$$`,
+    `^DO \\$\\$ BEGIN IF NOT EXISTS \\(\\s*SELECT 1 FROM pg_type WHERE typname = '(?:${enumAlt})'\\) THEN CREATE TYPE "(?:${enumAlt})" AS ENUM \\('(?:[^']|'')*'(?:, ?'(?:[^']|'')*')*\\); END IF; END \\$\\$$`,
   ),
 ];
+
+// The INSERT column list is the one region ALLOWED_PATTERNS[0] leaves free-form,
+// and it is a grammatical expression position in Postgres (`ColId opt_indirection`
+// admits `[ a_expr ]` subscripts), so it must be validated like the VALUES tuple
+// is. db-export already refuses any column name outside /^[A-Za-z0-9_]{1,63}$/ and
+// joins them with ", " — require exactly that shape. As a side effect the split
+// above becomes unambiguous: a list of quoted identifiers contains no parens and
+// no unbalanced quote, so the `)` the regex stopped at is the same one Postgres's
+// lexer ends the column list on.
+const COLUMN_LIST_RE = /^"[A-Za-z0-9_]{1,63}"(?:, ?"[A-Za-z0-9_]{1,63}")*$/;
 
 const DANGEROUS_SQL_PATTERN = /\b(SELECT|UPDATE|DELETE|DROP|ALTER|EXECUTE|COPY|CREATE\s+FUNCTION|SET\s+SESSION|SET\s+ROLE|GRANT|REVOKE|TRUNCATE|pg_read_file|pg_write_file|lo_import|lo_export|pg_execute_server_program|dblink|LOAD|pg_lo_import|pg_lo_export|current_setting|set_config)\b/i;
 
@@ -206,6 +229,11 @@ const SAFE_LITERAL_RE = /^(NULL|TRUE|FALSE|-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9
 // `DO UPDATE` is never emitted by the exporter (db-export appends DO NOTHING).
 const ON_CONFLICT_TAIL_RE = /^ON CONFLICT(?:\s*\([^()]*\))?\s+DO NOTHING$/i;
 
+// Same shape, anchored to the END of a whole statement — used by the restore
+// loop to decide whether a conflict clause is already present, so row data
+// containing the words "ON CONFLICT" can't be mistaken for one.
+const HAS_CONFLICT_TAIL_RE = /\)\s+ON CONFLICT(?:\s*\([^()]*\))?\s+DO NOTHING$/i;
+
 function remainderAfterTupleIsSafe(rest: string): boolean {
   const trimmed = rest.trim();
   if (trimmed === "") return true;
@@ -254,7 +282,8 @@ function validateValuesTokens(valuesClause: string): boolean {
 }
 
 function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: string } {
-  if (ALLOWED_PATTERNS[0].test(stmt)) {
+  const insertMatch = ALLOWED_PATTERNS[0].exec(stmt);
+  if (insertMatch) {
     // INSERT — verify VALUES clause contains only literals so a malicious
     // dump can't smuggle a sub-SELECT or function call past the allowlist.
     // Extra belt-and-suspenders: extract the table and require it to be in the
@@ -264,12 +293,13 @@ function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: stri
       return { ok: false, reason: `Blocked INSERT for table not in BACKUP_TABLES: ${tableMatch[1]}` };
     }
 
-    const valuesIdx = stmt.indexOf(") VALUES (");
-    if (valuesIdx !== -1) {
-      const valuesClause = stmt.slice(valuesIdx + 9);
-      if (!validateValuesTokens(valuesClause)) {
-        return { ok: false, reason: `Blocked INSERT with non-literal VALUES: ${stmt.slice(0, 80)}...` };
-      }
+    if (!COLUMN_LIST_RE.test(insertMatch[1])) {
+      return { ok: false, reason: `Blocked INSERT with non-identifier column list: ${stmt.slice(0, 80)}...` };
+    }
+    // Both clauses come from the allowlist match itself, so validator and
+    // executor agree on where the VALUES tuple starts.
+    if (!validateValuesTokens(insertMatch[2])) {
+      return { ok: false, reason: `Blocked INSERT with non-literal VALUES: ${stmt.slice(0, 80)}...` };
     }
     return { ok: true };
   }
@@ -615,7 +645,13 @@ export async function processBackupImport(
         // NOTHING so the restore tolerates those dumps instead of aborting
         // on the first collision. The TRUNCATE above guarantees the only
         // duplicates possible are within the dump itself.
-        const safeStmt = stmt.startsWith("INSERT") && !/ON CONFLICT/i.test(stmt)
+        // The "already has a conflict clause" test must be anchored at the end
+        // of the statement: an unanchored /ON CONFLICT/i also matches that text
+        // inside row data (an issue message quoting a Postgres error, a cached
+        // TMDB overview), which silently skipped the append for exactly the rows
+        // it protects — the duplicate then raised 23505 and rolled the whole
+        // restore back. Validation already pins the tail to this shape.
+        const safeStmt = stmt.startsWith("INSERT") && !HAS_CONFLICT_TAIL_RE.test(stmt)
           ? `${stmt} ON CONFLICT DO NOTHING`
           : stmt;
         const affected = await tx.$executeRawUnsafe(safeStmt);

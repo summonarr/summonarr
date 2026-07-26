@@ -49,6 +49,40 @@ function decryptAccountTokensInPlace(row: Record<string, unknown> | null | undef
   }
 }
 
+// createMany-shaped payloads apply to many rows at once, so the extension can't
+// encrypt them reliably — reject any that carry an OAuth token column and funnel
+// the caller to create/update/upsert. Shared by createMany and createManyAndReturn.
+function assertNoAccountTokensInCreateMany(args: unknown, op: string): void {
+  const rows = (args as { data?: Record<string, unknown> | Record<string, unknown>[] }).data;
+  const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
+  for (const row of list) {
+    if (row && ACCOUNT_TOKEN_FIELDS.some((f) => row[f] !== undefined)) {
+      throw new Error(
+        `[prisma] account.${op} with access_token/refresh_token/id_token is forbidden — use account.create or account.upsert so the encryption extension runs`,
+      );
+    }
+  }
+}
+
+// Encrypt the `value` of every sensitive Setting row in a create-shaped payload
+// (single object or array). Shared by createMany and createManyAndReturn so the
+// two can't drift.
+function encryptSettingRowsInPlace(data: unknown): void {
+  const list = Array.isArray(data) ? data : data ? [data] : [];
+  for (const row of list) {
+    if (
+      row &&
+      typeof row === "object" &&
+      typeof (row as { key?: unknown }).key === "string" &&
+      isSensitiveKey((row as { key: string }).key) &&
+      typeof (row as { value?: unknown }).value === "string" &&
+      (row as { value: string }).value.length > 0
+    ) {
+      (row as { value: string }).value = encryptToken((row as { value: string }).value);
+    }
+  }
+}
+
 // Process-level set of Setting keys that have failed to decrypt at least once and
 // haven't been successfully read since. The settings page reads this via
 // getSettingDecryptFailures() to render a banner. Entries are cleared on the next
@@ -127,6 +161,20 @@ function createPrismaClient() {
           if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
           return row;
         },
+        // The *OrThrow twins are separate Prisma operations, NOT aliases — an
+        // uncovered one hands the caller raw `enc:v1:…` ciphertext, which then goes
+        // out as a Radarr/Sonarr API key and fails auth (the guardrail-7a failure
+        // class). Kept in lockstep with findUnique/findFirst above.
+        async findUniqueOrThrow({ args, query }) {
+          const row = await query(args);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          return row;
+        },
+        async findFirstOrThrow({ args, query }) {
+          const row = await query(args);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          return row;
+        },
         async findMany({ args, query }) {
           const rows = await query(args);
           for (const r of rows) {
@@ -186,31 +234,20 @@ function createPrismaClient() {
           return query(args);
         },
         async createMany({ args, query }) {
-          const data = args.data as unknown;
-          if (Array.isArray(data)) {
-            for (const row of data) {
-              if (
-                row &&
-                typeof row === "object" &&
-                typeof (row as { key?: unknown }).key === "string" &&
-                isSensitiveKey((row as { key: string }).key) &&
-                typeof (row as { value?: unknown }).value === "string" &&
-                ((row as { value: string }).value.length > 0)
-              ) {
-                (row as { value: string }).value = encryptToken((row as { value: string }).value);
-              }
-            }
-          } else if (
-            data &&
-            typeof data === "object" &&
-            typeof (data as { key?: unknown }).key === "string" &&
-            isSensitiveKey((data as { key: string }).key) &&
-            typeof (data as { value?: unknown }).value === "string" &&
-            ((data as { value: string }).value.length > 0)
-          ) {
-            (data as { value: string }).value = encryptToken((data as { value: string }).value);
-          }
+          encryptSettingRowsInPlace(args.data as unknown);
           return query(args);
+        },
+        // …AndReturn is a distinct operation from createMany/updateMany: uncovered,
+        // it BOTH writes the secret in plaintext and hands the caller an
+        // un-decrypted row. Same encrypt-on-write / decrypt-on-read contract as the
+        // pair above.
+        async createManyAndReturn({ args, query }) {
+          encryptSettingRowsInPlace((args as { data?: unknown }).data);
+          const rows = await query(args);
+          for (const r of rows) {
+            if (typeof r.value === "string") r.value = safeDecryptSettingValue(r.key, r.value);
+          }
+          return rows;
         },
         async updateMany({ args, query }) {
           // updateMany sets the same `data` on every matching row, so we can't know the
@@ -224,6 +261,21 @@ function createPrismaClient() {
           }
           return query(args);
         },
+        async updateManyAndReturn({ args, query }) {
+          // Same per-row-key blindness as updateMany — forbid `value` writes; the
+          // returned rows still need decrypting for the non-`value` update case.
+          const data = (args as { data?: { value?: unknown } }).data;
+          if (data && data.value !== undefined) {
+            throw new Error(
+              "[prisma] setting.updateManyAndReturn with `value` is forbidden — use setting.update or setting.upsert so the encryption extension runs",
+            );
+          }
+          const rows = await query(args);
+          for (const r of rows) {
+            if (typeof r.value === "string") r.value = safeDecryptSettingValue(r.key, r.value);
+          }
+          return rows;
+        },
         async deleteMany({ args, query }) {
           return query(args);
         },
@@ -235,6 +287,17 @@ function createPrismaClient() {
           return row;
         },
         async findFirst({ args, query }) {
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        // Separate operations, not aliases — see the setting.*OrThrow note above.
+        async findUniqueOrThrow({ args, query }) {
+          const row = await query(args);
+          decryptAccountTokensInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirstOrThrow({ args, query }) {
           const row = await query(args);
           decryptAccountTokensInPlace(row as Record<string, unknown> | null);
           return row;
@@ -272,16 +335,27 @@ function createPrismaClient() {
           return query(args);
         },
         async createMany({ args, query }) {
-          const rows = (args as { data?: Record<string, unknown> | Record<string, unknown>[] }).data;
-          const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
-          for (const row of list) {
-            if (row && (row.access_token !== undefined || row.refresh_token !== undefined || row.id_token !== undefined)) {
-              throw new Error(
-                "[prisma] account.createMany with access_token/refresh_token/id_token is forbidden — use account.create or account.upsert so the encryption extension runs",
-              );
-            }
-          }
+          assertNoAccountTokensInCreateMany(args, "createMany");
           return query(args);
+        },
+        // …AndReturn variants: same forbid-the-bypass rule as their pairs, plus a
+        // decrypt of the rows they hand back.
+        async updateManyAndReturn({ args, query }) {
+          const data = (args as { data?: Record<string, unknown> }).data;
+          if (data && (data.access_token !== undefined || data.refresh_token !== undefined || data.id_token !== undefined)) {
+            throw new Error(
+              "[prisma] account.updateManyAndReturn with access_token/refresh_token/id_token is forbidden — use account.update or account.upsert so the encryption extension runs",
+            );
+          }
+          const rows = await query(args);
+          for (const r of rows) decryptAccountTokensInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async createManyAndReturn({ args, query }) {
+          assertNoAccountTokensInCreateMany(args, "createManyAndReturn");
+          const rows = await query(args);
+          for (const r of rows) decryptAccountTokensInPlace(r as Record<string, unknown>);
+          return rows;
         },
         async deleteMany({ args, query }) {
           return query(args);

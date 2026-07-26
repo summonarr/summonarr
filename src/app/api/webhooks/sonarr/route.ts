@@ -368,10 +368,17 @@ export async function POST(req: NextRequest) {
 
   // arrInstance-scoped: one instance's Download must not claim (and notify off)
   // a grab that was fired at a sibling instance.
-  const grabWhere = safeMdbId
-    ? { tmdbId: safeMdbId, mediaType: "TV" as const, arrInstance, notifiedAt: null }
-    : safeVdbId
-    ? { tvdbId: safeVdbId, mediaType: "TV" as const, arrInstance, notifiedAt: null }
+  // Match on EITHER id the payload carries, not tmdbId-first: a grab is recorded with
+  // the issue's tmdbId (+ tvdbId when known), and Sonarr's Download payload can carry
+  // a stale/mismapped tmdbId alongside the correct tvdbId — exactly the case the
+  // request flip above falls back to. A tmdbId-only lookup then misses the grab, and
+  // since notifiedAt is written nowhere else the completion push is lost permanently.
+  const grabIdFilters = [
+    ...(safeMdbId ? [{ tmdbId: safeMdbId }] : []),
+    ...(safeVdbId ? [{ tvdbId: safeVdbId }] : []),
+  ];
+  const grabWhere = grabIdFilters.length > 0
+    ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, notifiedAt: null }
     : null;
   if (grabWhere) {
     const pendingGrabs = await prisma.issueGrab.findMany({ where: grabWhere });

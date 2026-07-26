@@ -3,6 +3,7 @@ import {
   buildOidcAuthorization,
   isOidcConfigured,
   OIDC_STATE_COOKIE,
+  OIDC_STATE_COOKIE_PATH,
   signOidcStateCookie,
 } from "@/lib/oidc";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
@@ -55,7 +56,11 @@ export async function GET(req: NextRequest) {
   const secure = isSecureCookieContext();
   const attrs = [
     `${OIDC_STATE_COOKIE}=${cookieValue}`,
-    "Path=/api/auth/oidc",
+    // Must include BASE_PATH — a cookie scoped to "/api/auth/oidc" is never sent
+    // back to `${BASE_PATH}/api/auth/oidc/callback`, so the callback reads no state
+    // and every OIDC sign-in fails. Kept in lockstep with clearStateCookieHeader()
+    // in ../callback/route.ts. No-op when BASE_PATH is unset.
+    `Path=${OIDC_STATE_COOKIE_PATH}`,
     "HttpOnly",
     "SameSite=Lax",
     "Max-Age=300",

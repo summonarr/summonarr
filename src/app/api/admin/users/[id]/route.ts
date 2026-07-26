@@ -10,6 +10,10 @@ import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissi
 import { isValidContentRatingCap } from "@/lib/content-rating";
 import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
 
+// Thrown by the DELETE tx when the in-transaction role re-read shows the target became
+// ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
+class TargetBecameAdminError extends Error {}
+
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
@@ -116,6 +120,14 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
     }
 
+    // MANAGE_USERS delegates managing OTHER accounts. Without this, a delegate could
+    // PATCH their own row with any non-ADMIN mask (AUTO_APPROVE, QUOTA_UNLIMITED,
+    // MANAGE_REQUESTS, …) — session-refresh re-signs the JWT from the DB column, so the
+    // self-grant lands on their very next request. Mirrors the role branch's isSelf gate.
+    if (!callerIsAdmin && isSelf) {
+      return NextResponse.json({ error: "Cannot change your own permissions" }, { status: 403 });
+    }
+
     // Never let the editor strip the ADMIN bit from a role=ADMIN user — demote the
     // role first (which routes through the last-admin CAS below). Keeps the
     // "never lock out the last admin" invariant on a single code path.
@@ -174,6 +186,21 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const val = body[quotaField];
     if (val !== null && val !== undefined && (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 100_000)) {
       return NextResponse.json({ error: `${quotaField} must be a non-negative integer or null` }, { status: 400 });
+    }
+    // A per-user LIMIT of 0 is a footgun that does the OPPOSITE of what it reads as.
+    // resolveUserQuota() returns `{ limit: 0 }` for it, every enforcement site gates on
+    // `limit > 0`, and the override branch returns before the global quota is consulted —
+    // so "0" silently means "unlimited AND exempt from the global quota", not "blocked".
+    // Reject it rather than guess: to stop someone requesting, clear their REQUEST bits.
+    // (0 stays valid for the *Days fields, where it falls back to the 7-day window.)
+    if ((quotaField === "movieQuotaLimit" || quotaField === "tvQuotaLimit") && val === 0) {
+      return NextResponse.json(
+        {
+          error:
+            `${quotaField} of 0 would mean "unlimited", not "blocked". Leave it empty to use the global quota, set 1 or more for a limit, or clear the user's request permission to stop them requesting.`,
+        },
+        { status: 400 },
+      );
     }
     const nextVal = val ?? null;
     const prevQuota = await prisma.user.findUnique({
@@ -309,11 +336,26 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   try {
     await prisma.$transaction(async (tx) => {
-      await anonymizeUserInTx(tx, id, target.role, now);
+      // The role read above is three DB round-trips stale by the time the tx opens, and
+      // anonymizeUserInTx only arms the advisory lock + last-admin CAS when the role it is
+      // HANDED is ADMIN. A promotion landing in that window would otherwise slip past both
+      // that CAS and the caller-authority gate, letting a non-admin MANAGE_USERS holder
+      // deactivate the instance's last admin. Re-resolve the role inside the tx, under the
+      // same lock 42 the role-change CAS takes, and decide on that value.
+      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
+      const freshRole = fresh?.role ?? target.role;
+      if (freshRole === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+        throw new TargetBecameAdminError();
+      }
+      await anonymizeUserInTx(tx, id, freshRole, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
       return NextResponse.json({ error: "Cannot delete the last admin" }, { status: 400 });
+    }
+    if (err instanceof TargetBecameAdminError) {
+      return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
     }
     throw err;
   }

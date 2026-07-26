@@ -20,11 +20,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
-  const parsed = await readJsonCapped<{ deviceToken?: string; label?: string; publicKey?: string }>(req, 16384);
+  const parsed = await readJsonCapped<{ deviceToken?: string; label?: string; publicKey?: string | null }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim() : "";
+  // Lowercased because the hex regex accepts either case and `endpoint` is the
+  // unique key the cross-account 409 guard below keys off: without this, the
+  // same physical device token re-sent uppercased misses the findUnique, skips
+  // the ownership check, and lands a SECOND row owned by the caller — every push
+  // that row is entitled to then goes to the original owner's device. It also
+  // keeps a case-shifted re-registration from duplicating instead of updating
+  // (which would leave the stale row pushing to a signed-out device).
+  const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
   if (!DEVICE_TOKEN_RE.test(deviceToken)) {
     return NextResponse.json({ error: "deviceToken must be a hex APNs token" }, { status: 400 });
   }
@@ -56,6 +63,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     const buf = Buffer.from(body.publicKey, "base64");
     if (buf.length === 65 && buf[0] === 0x04) validPublicKey = body.publicKey;
   }
+  // "Absent" must not mean "clear it" on the update branch. A re-POST on an APNs
+  // token refresh (or relaunch) while the device is locked can't read its
+  // Keychain P-256 key and omits publicKey — writing that null through would
+  // NULL an existing row's key, and sendApns then skips its encrypt branch
+  // forever, permanently downgrading that device to content-free pushes with no
+  // error anywhere. Only an explicit `publicKey: null` clears it.
+  const clearPublicKey = body.publicKey === null;
 
   const capRow = await prisma.setting.findUnique({ where: { key: "maxPushSubscriptions" } });
   const cap = parseRateLimit(capRow?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
@@ -84,7 +98,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       update: {
         platform: "ios",
         deviceToken: encryptToken(deviceToken),
-        publicKey: validPublicKey,
+        ...((validPublicKey !== null || clearPublicKey) && { publicKey: validPublicKey }),
         ...(sanitizedLabel !== undefined && { label: sanitizedLabel }),
       },
       create: {
@@ -106,7 +120,10 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim() : "";
+  // Same lowercase normalization as POST — the endpoint key is stored lowercased,
+  // so a case-shifted token here would match nothing and leave the row pushing to
+  // a signed-out device.
+  const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
   if (!deviceToken) {
     return NextResponse.json({ error: "deviceToken is required" }, { status: 400 });
   }

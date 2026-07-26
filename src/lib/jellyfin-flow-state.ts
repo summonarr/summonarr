@@ -66,10 +66,15 @@ export function readQcFlowCookie(cookieHeader: string | null): string | null {
   return null;
 }
 
+// See the identical note in plex-flow-state.ts: a Path missing BASE_PATH is never
+// sent back to `${BASE_PATH}/api/auth/...`, which breaks QuickConnect sign-in
+// outright on a subpath deployment. SET and CLEAR must stay identical.
+const FLOW_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth`;
+
 export function buildQcFlowSetCookie(value: string, secure: boolean): string {
   const attrs = [
     `${QC_FLOW_COOKIE}=${value}`,
-    "Path=/api/auth",
+    `Path=${FLOW_COOKIE_PATH}`,
     "HttpOnly",
     "SameSite=Lax",
     `Max-Age=${QC_FLOW_TTL_SECONDS}`,
@@ -79,5 +84,5 @@ export function buildQcFlowSetCookie(value: string, secure: boolean): string {
 }
 
 export function buildQcFlowClearedSetCookie(): string {
-  return `${QC_FLOW_COOKIE}=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Lax`;
+  return `${QC_FLOW_COOKIE}=; Path=${FLOW_COOKIE_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`;
 }

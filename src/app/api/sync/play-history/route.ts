@@ -354,7 +354,11 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           year: s.year ?? null,
           seasonNumber: s.parentIndex ?? null,
           episodeNumber: s.index ?? null,
-          episodeTitle: s.type === "episode" ? (s.title.split(" — ")[1] ?? null) : null,
+          // getPlexSessions composes an episode title as `${grandparentTitle} — ${title}`.
+          // Taking only [1] truncated at the first separator, so an episode (or show) name
+          // containing " — " stored a fragment — permanently, since episodeTitle is
+          // write-once here and copied verbatim into PlayHistory. Mirror the Jellyfin form.
+          episodeTitle: s.type === "episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
           sourceItemId: s.ratingKey,
           posterPath,
           progressPercent,
@@ -489,10 +493,17 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       return { msUserId: userIds[i], itemId: s.itemId };
     })
     .filter((p): p is { msUserId: string; itemId: string } => !!p && !!p.itemId);
+  // notIn allIds: never hand a row that ANOTHER session in this same snapshot already owns
+  // by id to the fallback. Same account + same item on a second device (living-room TV and
+  // tablet) otherwise resolves the tablet's new PlaySessionId onto the TV's live row, which
+  // rewrites that row instead of creating one — so the second stream never gets an
+  // ActiveSession, is never finalized, and (poller being the sole Jellyfin writer, guardrail
+  // 19) its watch is unrecoverable.
   const fallbackRows = fallbackPairs.length > 0
     ? await prisma.activeSession.findMany({
         where: {
           source: "jellyfin",
+          id: { notIn: allIds },
           OR: fallbackPairs.map((p) => ({ mediaServerUserId: p.msUserId, sourceItemId: p.itemId })),
         },
       })
@@ -573,10 +584,18 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       // so we update the existing webhook row instead of creating a duplicate. After a match,
       // rewrite the row's sessionKey to the API's playSessionId so subsequent polls find it directly
       // and finalization tracking (seenSessionKeys.has(sessionKey)) stays consistent.
-      const existing =
+      // The fallback row is single-use: two brand-new streams of the same item by the same
+      // account in one tick would otherwise both adopt the one prior row, and the loser
+      // would never create its own — losing that watch entirely. The lookup below runs in
+      // the synchronous prefix of each mapped callback, so the delete is seen by the next
+      // callback before it looks up.
+      const idMatch =
         idRowMap.get(sessionId) ??
-        (altSessionId ? idRowMap.get(altSessionId) : undefined) ??
-        fallbackMap.get(`${msUserId}:${s.itemId ?? ""}`);
+        (altSessionId ? idRowMap.get(altSessionId) : undefined);
+      const fallbackKey = `${msUserId}:${s.itemId ?? ""}`;
+      const fallbackRow = idMatch ? undefined : fallbackMap.get(fallbackKey);
+      if (fallbackRow) fallbackMap.delete(fallbackKey);
+      const existing = idMatch ?? fallbackRow;
 
       if (existing) {
         // Auto-play next episode: a Jellyfin client advancing to the next item can

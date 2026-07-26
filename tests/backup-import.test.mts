@@ -206,6 +206,7 @@ const [
   NO_FP_ENC,
   TEK_MISMATCH_ENC,
   COMMENTS_ONLY_ENC,
+  TIGHTENED_ENC,
 ] = await Promise.all([
   encrypt(HAPPY_SQL),
   encrypt("this is definitely not a sql dump"), // no trailing `;` — exercises the flush path
@@ -231,6 +232,14 @@ const [
     `-- Schema-Fingerprint: ${FP}\n-- Token-Encryption-Key-Fingerprint: ffffffffffffffff\n${STMT.userInsert};\n`,
   ),
   encrypt(`-- Schema-Fingerprint: ${FP}\n-- Table: User (0 rows)\n;\n  ;\n`),
+  // Two regions the allowlist used to leave free-form. Both are structurally
+  // pinned now; see the test that consumes this fixture.
+  encrypt(
+    [
+      `INSERT INTO "public"."User" ("id"[(SELECT 1)]) VALUES ('x');`,
+      `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'Role') THEN CREATE TYPE "Role" AS ENUM ('a'; DROP TABLE "User"; --'); END IF; END $$;`,
+    ].join("\n"),
+  ),
 ]);
 
 beforeEach(() => {
@@ -393,6 +402,28 @@ test("injection defenses: DROP, non-backup table, sub-SELECT VALUES, multi-tuple
   assert.equal(res.summary?.total, 6);
   assert.equal(res.summary?.executed, 0);
   assert.equal(txCalls.length, 0);
+});
+
+test("injection defenses: the INSERT column list and the enum label list are structurally pinned, not free-form", async () => {
+  const res = expectFailure(await runImport([new Uint8Array(TIGHTENED_ENC)]));
+  assert.equal(res.status, 200);
+  const reasons = res.errors ?? [];
+  assert.equal(reasons.length, 2);
+
+  // (a) The column list is a grammatical EXPRESSION position in Postgres
+  // (`ColId opt_indirection` admits `[ a_expr ]` subscripts) and the allowlist
+  // used to model it as a bare `[\s\S]*` with nothing inspecting it before
+  // $executeRawUnsafe. db-export only ever emits quoted plain identifiers joined
+  // by ", ", so anything else is a smuggle attempt.
+  assert.match(reasons[0], /^Blocked INSERT with non-identifier column list: INSERT INTO "public"\."User"/);
+
+  // (b) The enum label list used to be `\([^)]+\)` — "anything but a close paren",
+  // which admits `;`, `--`, newlines and quotes inside a block executed verbatim
+  // as plpgsql. Only a `'label'` list joined by ", " is accepted now.
+  assert.match(reasons[1], /^Blocked disallowed statement: DO \$\$ BEGIN IF NOT EXISTS/);
+
+  assert.equal(res.summary?.executed, 0);
+  assert.equal(txCalls.length, 0, "a hostile dump must execute nothing");
 });
 
 test("validation aborts at the 20-error cap and still drains the stream (tag verified, no crypto error)", async () => {

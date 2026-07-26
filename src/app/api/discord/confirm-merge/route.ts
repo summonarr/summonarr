@@ -43,7 +43,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
       { status: 400 }
     );
   }
-  if (code.length !== record.code.length || !timingSafeEqual(Buffer.from(record.code), Buffer.from(code))) {
+  // Length-guard on BYTES, not UTF-16 code units: `code` is unvalidated user text, so a
+  // 12-character multibyte submission passes a `.length` comparison against the 12-char
+  // stored code while producing a 24-byte Buffer — timingSafeEqual then throws RangeError
+  // out of this un-try'd expression, turning "Incorrect code" into a 500 (and still burning
+  // one of the 5 rate-limit slots that wipe the pending code).
+  const expected = Buffer.from(record.code, "utf8");
+  const supplied = Buffer.from(code, "utf8");
+  if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
     return NextResponse.json({ error: "Incorrect code." }, { status: 400 });
   }
 

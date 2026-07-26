@@ -564,7 +564,7 @@ async function handleComponent(interaction: any): Promise<void> {
           // admin's per-user permission edits aren't clobbered on every Discord interaction.
           // Legacy rows with permissions=0 stay correct via the effectivePermissions(role, …)
           // fallback below; don't "fix" this by adding permissions to `update`.
-          update: { name: liveUsername },
+          update: {},
           create: {
             discordId: discordUserId,
             name: liveUsername,
@@ -572,11 +572,30 @@ async function handleComponent(interaction: any): Promise<void> {
             permissions: defaultPermissionsForRole("USER"),
           },
         });
+        // Refresh the display name for SHADOW rows only. `/link` puts the same discordId on
+        // the user's REAL row (mergeDiscordIntoWebAccount), so an unconditional
+        // `update: { name }` rewrote a provider-provisioned name (Plex/OIDC/registration)
+        // with the Discord handle on every result click — and nothing in the UI sets it back.
+        if (dbUser.email.endsWith("@discord.local") && dbUser.name !== liveUsername) {
+          dbUser = await prisma.user.update({ where: { id: dbUser.id }, data: { name: liveUsername } });
+        }
       }
 
       const confirmEmbed: Record<string, unknown> = { title: selected.title };
       if (selected.posterPath) {
         confirmEmbed.thumbnail = { url: `${TMDB_POSTER_BASE}${selected.posterPath}` };
+      }
+
+      // Deactivation gate. A deactivated (banned) account keeps its role, permissions and
+      // discordId fully intact — only `deactivatedAt` is set — so every permission check
+      // below still passes for it. Session-backed transports hard-fail these users in
+      // verifyAndRefreshSession; Discord is not session-backed, so without this the banned
+      // user keeps creating (and, with an auto-approve role, auto-approving) requests.
+      if (dbUser.deactivatedAt) {
+        confirmEmbed.color = 0xed4245;
+        confirmEmbed.description = `(${selected.releaseYear}) — Your account has been deactivated.`;
+        await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
+        return;
       }
 
       // Effective permissions (ADMIN superbit / unseeded → role preset). Drives
@@ -762,7 +781,11 @@ async function handleComponent(interaction: any): Promise<void> {
 
       // Clear the requester's own delete-vote for this title — a request and a deletion
       // vote are contradictory, and the vote route already blocks the reverse.
-      void prisma.deletionVote.deleteMany({ where: { userId: dbUser.id, tmdbId: selected.id, mediaType } });
+      // `.catch` (not bare `void`): a detached promise's rejection escapes the enclosing
+      // try/catch and surfaces as an unhandledRejection on the long-lived Node server.
+      prisma.deletionVote
+        .deleteMany({ where: { userId: dbUser.id, tmdbId: selected.id, mediaType } })
+        .catch((err) => console.error("[interactions] deletion-vote cleanup failed:", err));
 
       let note: string;
       try {
@@ -970,9 +993,12 @@ async function handleComponent(interaction: any): Promise<void> {
       // anyone holding the MANAGE_REQUESTS permission bit (ADMIN superbit, ISSUE_ADMIN+,
       // or a custom mask) can approve/decline — not just role=ADMIN. Look up by discordId,
       // then resolve the effective permission mask (ADMIN superbit / legacy-unseeded → role
-      // preset) before checking the bit.
+      // preset) before checking the bit. `deactivatedAt: null` is load-bearing: deactivation
+      // leaves role/permissions/discordId intact, so a banned admin would still pass the
+      // MANAGE_REQUESTS check here and push approvals to the ARR instances — every
+      // session-backed transport already hard-fails them (verifyAndRefreshSession).
       const adminUser = await prisma.user.findFirst({
-        where: { discordId: discordUserId },
+        where: { discordId: discordUserId, deactivatedAt: null },
         select: { id: true, name: true, email: true, role: true, permissions: true },
       });
       const adminPerms = adminUser

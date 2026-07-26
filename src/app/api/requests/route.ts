@@ -365,6 +365,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
     where: { tmdbId, mediaType, requestedBy: session.user.id, arrInstance: instanceSlug },
   });
 
+  // Deferred until the create actually happens (inside the tx below) — deleting here
+  // destroyed the row (and the admin's adminNote) on every path that then aborts without
+  // creating a replacement: alreadyAvailable (deterministic once the title lands in the
+  // library), the in-tx quota re-check 429, and the P2002 409.
+  let staleDeclinedId: string | null = null;
+
   if (existing) {
     if (existing.permanentlyDeclined) {
       return NextResponse.json({ error: "This request has been permanently denied" }, { status: 403 });
@@ -373,15 +379,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // re-request: delete the stale DECLINED row and fall through to a fresh
     // create. APPROVED/AVAILABLE/PENDING still block with a 409.
     if (existing.status === "DECLINED") {
-      // deleteMany (not delete) — on a concurrent double re-request the second
-      // delete would throw P2025 (500); deleteMany no-ops, and the create below
-      // then surfaces a clean 409 via its P2002 catch instead.
-      //
-      // CAS on status + permanentlyDeclined: if an admin re-approved or made the decline
-      // permanent between the read and here, the predicate no-ops the delete — the create
-      // below then 409s on the surviving row rather than orphaning an APPROVED row's ARR
-      // grab or evading a fresh permanent ban.
-      await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
+      staleDeclinedId = existing.id;
     } else {
       return NextResponse.json({ error: "Already requested" }, { status: 409 });
     }
@@ -435,6 +433,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
       if (alreadyAvailable) {
         return;
+      }
+
+      // Clear the stale DECLINED row only now that a create is guaranteed to follow, in
+      // the same tx — an abort past this point rolls the delete back with it.
+      //
+      // deleteMany (not delete) — on a concurrent double re-request the second
+      // delete would throw P2025 (500); deleteMany no-ops, and the create below
+      // then surfaces a clean 409 via its P2002 catch instead. (It cannot swallow a
+      // write error mid-tx either, so guardrail 23 is satisfied.)
+      //
+      // CAS on status + permanentlyDeclined: if an admin re-approved or made the decline
+      // permanent between the read and here, the predicate no-ops the delete — the create
+      // below then 409s on the surviving row rather than orphaning an APPROVED row's ARR
+      // grab or evading a fresh permanent ban.
+      if (staleDeclinedId) {
+        await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
       }
 
       if (isAutoApprove) {
@@ -506,6 +520,45 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const request = createdRequest as MediaRequest;
 
+  // Admin fan-out for a row that ends up PENDING. Shared by the normal pending branch
+  // below and the auto-approve rollback — a failed ARR push leaves a PENDING request that
+  // otherwise reached admins through no out-of-band channel at all (the earlier
+  // request:new SSE only lands for admins with the web app already open).
+  //
+  // Suppress duplicate admin alerts for a title that's still pending review: only
+  // the EARLIEST pending request for (tmdbId, mediaType, arrInstance) fires the admin
+  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
+  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
+  // and alerts; the rest find this row and skip.
+  const meta = verified;
+  const announcePendingToAdmins = async () => {
+    const earlierPending = await prisma.mediaRequest.findFirst({
+      where: {
+        tmdbId,
+        mediaType,
+        arrInstance: instanceSlug,
+        status: "PENDING",
+        id: { not: request.id },
+        OR: [
+          { createdAt: { lt: request.createdAt } },
+          { createdAt: request.createdAt, id: { lt: request.id } },
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (!earlierPending) {
+      const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
+      after(async () => {
+        await Promise.allSettled([
+          notifyAdminsNewRequest({ title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath, tmdbId, releaseYear: meta.releaseYear, excludeUserId: session.user.id }),
+          notifyAdminsNewRequestPush({ title: meta.title, mediaType, requestedBy, tmdbId, excludeUserId: session.user.id }),
+          notifyAdminsNewRequestDiscord({ requestId: request.id, title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath }),
+        ]);
+      });
+    }
+  };
+
   // A request and a deletion vote for the same title are contradictory. The vote route
   // already blocks voting when you've requested; mirror it here by clearing the caller's
   // own delete-vote on request, so a vote-then-request can't leave both rows persisting.
@@ -514,12 +567,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (createdBranch === "auto-approve") {
     emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
+    let pushedTvdbId: number | null = null;
     try {
       if (mediaType === "MOVIE") {
         await addMovieToRadarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
       } else {
-        const tvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
-        await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
+        pushedTvdbId = await addSeriesToSonarr(tmdbId, instanceSlug, chosenQualityProfileId, session.user.id);
       }
     } catch (err) {
       console.error(`[arr] Auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
@@ -532,7 +585,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // update so it reflects the rolled-back PENDING state, and return the PENDING
       // shape rather than the stale APPROVED row (mirrors the PATCH rollback path).
       emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: session.user.id });
+      // The row now sits in the admin queue exactly like a normal pending request, so it
+      // must be announced like one — and it can't rely on the pendingNotifyAt backstop
+      // (cleared just above), leaving this the only alert admins get.
+      await announcePendingToAdmins();
       return NextResponse.json({ ...request, status: "PENDING" }, { status: 201 });
+    }
+
+    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
+    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
+    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
+    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
+    if (pushedTvdbId !== null) {
+      await prisma.mediaRequest.updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } });
     }
 
     return NextResponse.json(request, { status: 201 });
@@ -549,35 +614,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });
 
-  // Suppress duplicate admin alerts for a title that's still pending review: only
-  // the EARLIEST pending request for (tmdbId, mediaType, arrInstance) fires the admin
-  // notifications. Total ordering by (createdAt, id) makes this race-safe — among
-  // concurrent duplicate requests exactly one (the earliest) has no earlier peer
-  // and alerts; the rest find this row and skip.
-  const earlierPending = await prisma.mediaRequest.findFirst({
-    where: {
-      tmdbId,
-      mediaType,
-      arrInstance: instanceSlug,
-      status: "PENDING",
-      id: { not: request.id },
-      OR: [
-        { createdAt: { lt: request.createdAt } },
-        { createdAt: request.createdAt, id: { lt: request.id } },
-      ],
-    },
-    select: { id: true },
-  });
-
-  if (!earlierPending) {
-    const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
-    after(async () => {
-      await Promise.allSettled([
-        notifyAdminsNewRequest({ title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, tmdbId, releaseYear: verified.releaseYear, excludeUserId: session.user.id }),
-        notifyAdminsNewRequestPush({ title: verified.title, mediaType, requestedBy, tmdbId, excludeUserId: session.user.id }),
-        notifyAdminsNewRequestDiscord({ requestId: request.id, title: verified.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
-      ]);
-    });
-  }
+  await announcePendingToAdmins();
   return NextResponse.json(request, { status: 201 });
 });

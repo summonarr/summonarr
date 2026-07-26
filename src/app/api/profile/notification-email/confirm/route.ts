@@ -66,7 +66,13 @@ export async function GET(req: Request) {
 
   // The token is opaque hex, but escape into the action URL defensively; the
   // email is reflected as text content and MUST be HTML-escaped.
-  const action = `/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
+  //
+  // BASE_PATH: a root-absolute action posts to the ORIGIN root, so on a subpath
+  // deployment (BASE_PATH=/request) the Confirm button 404s and the address can
+  // never be verified. Prefix it the same way proxy.ts builds its redirects.
+  // No-op when BASE_PATH is unset (the default).
+  const basePath = process.env.BASE_PATH ?? "";
+  const action = `${basePath}/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
   const html = `${PAGE_HEAD}<title>Confirm notification email</title></head>
 ${BODY_OPEN}
 <div style="font-size:34px;line-height:1;margin-bottom:12px">✉</div>

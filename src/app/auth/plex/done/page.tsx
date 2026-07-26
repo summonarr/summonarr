@@ -125,8 +125,14 @@ export default function PlexDonePage() {
       }
     };
 
+    // callbackUrl is the base-path-STRIPPED in-app path (proxy.ts writes
+    // req.nextUrl.pathname; login-form re-validates it with safeInternalPath), and
+    // window.location does NOT apply Next's basePath the way router.push does — so
+    // it must go through withBasePath or a subpath deployment lands at the origin
+    // root. siteUrl is admin-configured and already absolute; withBasePath passes
+    // absolute URLs through untouched.
     window.location.href =
-      safeRedirect(auth.siteUrl) ?? safeRedirect(auth.callbackUrl) ?? withBasePath("/");
+      safeRedirect(auth.siteUrl) ?? safeRedirect(withBasePath(auth.callbackUrl)) ?? withBasePath("/");
   }
 
   async function completeSettings(auth: SettingsAuth) {

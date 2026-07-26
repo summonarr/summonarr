@@ -152,8 +152,19 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         instance,
       );
     }
+  } catch (err) {
+    console.error("[releases] Grab failed:", err);
+    return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
+  }
 
-    // Issue already claimed IN_PROGRESS above; record the grab attempt for audit.
+  // Bookkeeping runs OUTSIDE the arr catch: the grab above is a fired-and-accepted *arr
+  // download, so a failure here must not report 502. IssueGrab.issueId is a required FK,
+  // and the grab is a multi-second HTTP call — a concurrent DELETE /api/issues/[id] makes
+  // this create fail P2003, which previously ran a Prisma error through arrErrorMessage and
+  // told the admin the grab failed. They retry, *arr grabs the same release twice, and no
+  // IssueGrab row exists either time so the completion webhook never matches.
+  let grabId: string | null = null;
+  try {
     const grab = await prisma.issueGrab.create({
       data: {
         issueId: id,
@@ -168,24 +179,24 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         arrInstance: instance,
       },
     });
-
-    void logAudit({
-      userId: session.user.id,
-      userName: session.user.name ?? session.user.email ?? null,
-      action: "ISSUE_STATUS_CHANGE",
-      target: `issue:${id}`,
-      details: {
-        trigger: "grab",
-        grabId: grab.id,
-        scope: issue.scope,
-        ...(statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
-      },
-      ...auditContext(req, session),
-    });
-
-    return NextResponse.json({ ok: true });
+    grabId = grab.id;
   } catch (err) {
-    console.error("[releases] Grab failed:", err);
-    return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
+    console.warn("[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):", err);
   }
+
+  void logAudit({
+    userId: session.user.id,
+    userName: session.user.name ?? session.user.email ?? null,
+    action: "ISSUE_STATUS_CHANGE",
+    target: `issue:${id}`,
+    details: {
+      trigger: "grab",
+      ...(grabId ? { grabId } : {}),
+      scope: issue.scope,
+      ...(statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
+    },
+    ...auditContext(req, session),
+  });
+
+  return NextResponse.json({ ok: true });
 });

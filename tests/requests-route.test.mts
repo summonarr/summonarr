@@ -885,7 +885,13 @@ test("auto-approve creates APPROVED with the 90s pendingNotifyAt backstop; a fai
   );
   assert.equal((sseEvents[1] as { status?: string }).status, "PENDING");
   assert.ok(errors.some((e) => e.includes("[arr] Auto-approve push failed")));
-  assert.equal(afterTasks.length, 0, "auto-approve never fires the admin new-request alert");
+  // A SUCCESSFUL auto-approve fires no admin alert (nothing to review). This is the
+  // ROLLBACK path though: the ARR push failed, the row is back to PENDING, and
+  // `pendingNotifyAt` was cleared — so the orchestrator's overdue scan (which only
+  // looks at rows with it set) will never surface it either. Without an admin alert
+  // here the request is orphaned: the user got a 201 and nothing was created in
+  // Radarr/Sonarr. The alert is the only thing that tells an admin it needs picking up.
+  assert.equal(afterTasks.length, 1, "a rolled-back auto-approve must alert admins like any other PENDING request");
 });
 
 test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also stamps availableAt — and admins are never re-alerted", async () => {

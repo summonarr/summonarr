@@ -139,6 +139,25 @@ test("resolveSingleTvdbToTmdb returns null for invalid ids without touching cach
 // Guardrail 5 pin — 50 MB response cap + 30s timeout, wired into arrFetch
 // ---------------------------------------------------------------------------
 
+test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId against each other", () => {
+  // isSeriesDownloadedInSonarr is the webhook's anti-forgery gate, but it does DB
+  // (getArrCfg) and network (arrFetch) I/O, so pin the source the same way the
+  // guardrail-5 test below does.
+  //
+  // The hazard: the guard RESOLVES and verifies the tvdbId, while the Sonarr
+  // webhook's status flip keys on the tmdbId. Whoever holds the webhook secret —
+  // the threat the guard's own comment names — could pair a tvdbId they really did
+  // download (so the check passes) with an arbitrary tmdbId, and an unrelated
+  // APPROVED request would flip to AVAILABLE, lose its wanted row, and notify its
+  // requester. Two ids naming different series is never legitimate, so it must
+  // return false (skip the flip), not fall through to the tvdb-only verdict.
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const fn = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.match(body, /resolved !== tvdbId/, "the two ids must be compared, not just the tvdbId resolved");
+  assert.match(body, /return false;/, "disagreeing ids must return false (skip the flip), not null/true");
+});
+
 test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFetch", () => {
   // The constants are module-private and arrFetch does real network I/O, so a
   // runtime assertion isn't possible here. Pin the source text instead: this

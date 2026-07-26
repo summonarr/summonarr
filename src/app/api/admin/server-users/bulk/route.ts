@@ -38,11 +38,18 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   const where = { isServerAdmin: false, source: "jellyfin", active: true };
 
-  const updated = await prisma.mediaServerUser.updateMany({ where, data: { downloadsEnabled } });
-
+  // Read the target snapshot FIRST and drive the update off those exact ids. Re-running the
+  // `where` for the push list would pick up rows the concurrent Jellyfin sync inserted after the
+  // updateMany — those users get the policy pushed to Jellyfin while their Summonarr row keeps the
+  // old value, and nothing reconciles it (policy is only pushed on an explicit admin action).
   const targets = await prisma.mediaServerUser.findMany({
     where,
-    select: { sourceUserId: true, username: true },
+    select: { id: true, sourceUserId: true, username: true },
+  });
+
+  const updated = await prisma.mediaServerUser.updateMany({
+    where: { id: { in: targets.map((t) => t.id) } },
+    data: { downloadsEnabled },
   });
 
   const { url: jellyfinUrl, apiKey: jellyfinApiKey } = await getJellyfinConfig();

@@ -38,30 +38,46 @@ export const GET = withAuth(async (req, _ctx, session) => {
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
 
+  // `tmdbId` is the tiebreaker on both sorts: without it, groups tied on
+  // _count (very common — most titles sit at 1-2 votes) have no total order, so
+  // Postgres may return them in a different sequence for the page=1 and page=2
+  // queries and a row gets duplicated onto one page while another is skipped.
+  const orderBy: Prisma.DeletionVoteOrderByWithAggregationInput[] =
+    sort === "recent"
+      ? [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }]
+      : [{ _count: { id: "desc" } }, { tmdbId: "asc" }];
+
   const [grouped, totalItems] = await Promise.all([
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
       where,
       _count: { id: true },
       _max: { createdAt: true },
-      orderBy: sort === "recent" ? { _max: { createdAt: "desc" } } : { _count: { id: "desc" } },
+      orderBy,
       skip: (page - 1) * PAGE_SIZE,
       take: PAGE_SIZE,
     }),
+    // NOTE: this second groupBy transports one row per voted title just to read
+    // `.length`. A `SELECT COUNT(*) FROM (… GROUP BY …)` would be cheaper, but it
+    // has to be raw SQL, and every route test stubs the prisma MODEL methods
+    // in-memory — a `$queryRaw` escapes the stub and tries to open a real
+    // connection, failing the suite. Keep the groupBy unless the tests grow a
+    // raw-SQL stub; the row count is bounded by the number of voted titles.
     prisma.deletionVote.groupBy({
       by: ["tmdbId", "mediaType"],
       where,
       _count: { id: true },
     }),
   ]);
+  const total = totalItems.length;
 
   if (grouped.length === 0) {
-    return NextResponse.json({ items: [], total: totalItems.length, page, pageSize: PAGE_SIZE });
+    return NextResponse.json({ items: [], total, page, pageSize: PAGE_SIZE });
   }
 
   const pairsFilter = grouped.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
 
-  const [reps, userVotes, otherReasons] = await Promise.all([
+  const [reps, userVotes, otherReasons, mineCounts] = await Promise.all([
     prisma.deletionVote.findMany({
       where: { OR: pairsFilter },
       select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
@@ -88,7 +104,18 @@ export const GET = withAuth(async (req, _ctx, session) => {
       orderBy: { createdAt: "desc" },
       take: PAGE_SIZE * 6,
     }),
+    // Under `mine`, the paging `where` also scopes the aggregate — and
+    // @@unique([tmdbId, mediaType, userId]) means the caller owns exactly one row
+    // per group, so `g._count.id` would always be 1. That shipped a "1 vote"
+    // badge next to three reasons written by three other users, hiding titles
+    // already past the deletion threshold. Recount the page's pairs unscoped.
+    mine
+      ? prisma.deletionVote.groupBy({ by: ["tmdbId", "mediaType"], where: { OR: pairsFilter }, _count: { id: true } })
+      : Promise.resolve(null),
   ]);
+  const mineCountMap = new Map<string, number>(
+    mineCounts?.map((g) => [`${g.tmdbId}:${g.mediaType}`, g._count.id]) ?? [],
+  );
 
   const repMap = new Map(reps.map((r) => [`${r.tmdbId}:${r.mediaType}`, r]));
   const userVoteMap = new Map(userVotes.map((v) => [`${v.tmdbId}:${v.mediaType}`, v]));
@@ -114,14 +141,14 @@ export const GET = withAuth(async (req, _ctx, session) => {
       mediaType: g.mediaType,
       title: rep?.title ?? "",
       posterPath: rep?.posterPath ?? null,
-      voteCount: g._count.id,
+      voteCount: mineCountMap.get(key) ?? g._count.id,
       userVoted: !!userVote,
       userReason: userVote?.reason ?? null,
       reasons: reasonsMap.get(key) ?? [],
     };
   });
 
-  return NextResponse.json({ items, total: totalItems.length, page, pageSize: PAGE_SIZE });
+  return NextResponse.json({ items, total, page, pageSize: PAGE_SIZE });
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {

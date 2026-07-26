@@ -64,10 +64,18 @@ export function readPlexFlowCookie(cookieHeader: string | null): string | null {
   return null;
 }
 
+// Cookie Path must include BASE_PATH. On a subpath deployment the sign-in routes
+// live at `${BASE_PATH}/api/auth/...`, and a cookie scoped to "/api/auth" is never
+// sent back to them — the flow state silently vanishes and Plex sign-in fails with
+// a state mismatch on every attempt. The SET and CLEAR forms must stay identical or
+// the clear won't match the cookie it's trying to expire. No-op when BASE_PATH is
+// unset (the default).
+const FLOW_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth`;
+
 export function buildPlexFlowSetCookie(value: string, secure: boolean): string {
   const attrs = [
     `${PLEX_FLOW_COOKIE}=${value}`,
-    "Path=/api/auth",
+    `Path=${FLOW_COOKIE_PATH}`,
     "HttpOnly",
     "SameSite=Lax",
     `Max-Age=${PLEX_FLOW_TTL_SECONDS}`,
@@ -77,5 +85,5 @@ export function buildPlexFlowSetCookie(value: string, secure: boolean): string {
 }
 
 export function buildPlexFlowClearedSetCookie(): string {
-  return `${PLEX_FLOW_COOKIE}=; Path=/api/auth; Max-Age=0; HttpOnly; SameSite=Lax`;
+  return `${PLEX_FLOW_COOKIE}=; Path=${FLOW_COOKIE_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`;
 }

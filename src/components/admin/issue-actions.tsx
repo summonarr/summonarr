@@ -71,6 +71,11 @@ export function IssueActions({
   const [showRejected, setShowRejected] = useState(false);
   const [releaseFilter, setReleaseFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
+  // Sequence token for the interactive-search fetch. Two instance switches leave two searches in
+  // flight (indexer latency differs wildly per instance), and without this the LAST one to resolve
+  // wins the release list regardless of which instance is selected — grabRelease() would then send
+  // one instance's guid/indexerId to another instance, whose indexer ids are a different numbering.
+  const releaseReqRef = useRef(0);
 
   async function triggerRefetch() {
     setLoading("refetch");
@@ -132,6 +137,7 @@ export function IssueActions({
   }
 
   async function loadReleases(targetInstance: string) {
+    const reqId = ++releaseReqRef.current;
     setLoading("releases");
     setArrError(null);
     setReleases([]);
@@ -141,18 +147,24 @@ export function IssueActions({
     setReleaseFilter("");
     try {
       const res = await fetch(withBasePath(`/api/issues/${issueId}/releases?instance=${encodeURIComponent(targetInstance)}`));
+      // A superseded search must not write back — neither its list nor its error.
+      if (reqId !== releaseReqRef.current) return;
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (reqId !== releaseReqRef.current) return;
         setArrError(data.error ?? "Failed to fetch releases");
         setPanel(null);
       } else {
         const data: ArrRelease[] = await res.json();
+        if (reqId !== releaseReqRef.current) return;
         setReleases(data);
         const first = data.find((r) => !r.rejected) ?? data[0];
         if (first) setSelectedGuid(first.guid);
       }
     } finally {
-      setLoading(null);
+      // Guarded too: a stale request clearing the spinner makes the UI read "done" while the
+      // current search is still running.
+      if (reqId === releaseReqRef.current) setLoading(null);
     }
   }
 

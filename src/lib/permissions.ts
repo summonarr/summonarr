@@ -183,11 +183,20 @@ export interface InstanceAccess {
   serverAll: boolean;
 }
 
+// Slugs that must never be written into the grant map. `JSON.parse` makes
+// `__proto__` an OWN property, so `out[slug] = …` would hit Object.prototype's
+// `__proto__` setter and re-point the map's prototype instead of adding a key.
+// No current lookup escalates through that (every read is `grants[slug]?.request`
+// against a registry slug), but the write is silent and the shape is one refactor
+// away from mattering — reject the keys instead of relying on that.
+const UNSAFE_GRANT_SLUGS = new Set(["__proto__", "constructor", "prototype"]);
+
 // Parse the untrusted User.instanceGrants JSON into a well-formed grant map.
 export function parseInstanceGrants(raw: unknown): InstanceGrants {
   if (!raw || typeof raw !== "object") return {};
   const out: InstanceGrants = {};
   for (const [slug, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (UNSAFE_GRANT_SLUGS.has(slug)) continue;
     if (v && typeof v === "object") {
       const g = v as Record<string, unknown>;
       out[slug] = { request: g.request === true, autoApprove: g.autoApprove === true };
@@ -201,6 +210,9 @@ export function parseInstanceGrants(raw: unknown): InstanceGrants {
 export function serializeInstanceGrants(grants: InstanceGrants): InstanceGrants {
   const out: InstanceGrants = {};
   for (const [slug, g] of Object.entries(grants)) {
+    // Same prototype-key rejection as parseInstanceGrants — this is the write side,
+    // so it also keeps such a key from ever reaching the stored JSON.
+    if (UNSAFE_GRANT_SLUGS.has(slug)) continue;
     if (g && (g.request || g.autoApprove)) {
       out[slug] = { ...(g.request ? { request: true } : {}), ...(g.autoApprove ? { autoApprove: true } : {}) };
     }

@@ -15,8 +15,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
   let discordId: string | null = null;
   const body = await readJsonCappedOr<{ discordId?: unknown }>(req, 16 * 1024, {});
   if (body instanceof NextResponse) return body;
-  if (typeof body.discordId === "string" && DISCORD_SNOWFLAKE.test(body.discordId)) {
-    discordId = body.discordId;
+  // Fail CLOSED on a malformed snowflake. `discordId` is the binding the /link consumer
+  // enforces (interactions/route.ts: `row.discordId && row.discordId !== discordUserId`),
+  // so a dropped binding silently downgrades the token to bearer — any Discord account that
+  // sees it can redeem it and pull the victim's request/issue/vote history across. Falling
+  // through to null on a JSON number or a stray-whitespace paste did exactly that, with a
+  // 200 telling the caller the token was account-bound. Omitting the field entirely is still
+  // valid (the web UI POSTs no body) and keeps the null binding.
+  const rawDiscordId = body.discordId === undefined || body.discordId === null ? "" : String(body.discordId).trim();
+  if (rawDiscordId.length > 0) {
+    if (!DISCORD_SNOWFLAKE.test(rawDiscordId)) {
+      return NextResponse.json({ error: "Invalid discordId" }, { status: 400 });
+    }
+    discordId = rawDiscordId;
   }
 
   // 128-bit entropy (32 hex chars) — bumped from 80-bit to resist offline guessing

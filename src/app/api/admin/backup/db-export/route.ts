@@ -60,6 +60,24 @@ function buildSqlStream(
         write(`-- Exported at: ${new Date().toISOString()}\n`);
         write(`-- Exported by: admin (${exportedBy})\n\n`);
 
+        // Resolve which BACKUP_TABLES actually exist BEFORE the snapshot transaction.
+        //
+        // This used to be discovered inside the tx by letting the per-table SELECT
+        // throw and catching it ("table does not exist"). That silently truncated the
+        // backup: in Postgres ANY statement error — including a failed SELECT — aborts
+        // the whole transaction, and a top-level interactive Prisma tx emits no
+        // SAVEPOINT (guardrail 23), so every subsequent statement fails with 25P02
+        // "current transaction is aborted". Those errors hit the same catch, so ONE
+        // missing table (schema drift after a downgrade, or a `db push` not yet run)
+        // marked EVERY remaining table "does not exist" and exported it as zero rows —
+        // a 200 OK download containing partial data, whose restore TRUNCATEs and then
+        // repopulates only the tables before the failure. Failing loudly beats that, so
+        // nothing inside the tx swallows query errors any more.
+        const existingRows = await prisma.$queryRawUnsafe<{ t: string }[]>(
+          `SELECT tablename AS t FROM pg_tables WHERE schemaname = 'public'`,
+        );
+        const existingTables = new Set(existingRows.map((r) => r.t));
+
         await prisma.$transaction(
           async (tx) => {
             // REPEATABLE READ pins every paginated SELECT to the same MVCC
@@ -81,49 +99,48 @@ function buildSqlStream(
             write("\n");
 
             for (const table of BACKUP_TABLES) {
+              // Pre-resolved above, outside the tx — see the note there.
+              if (!existingTables.has(table)) {
+                write(`-- Skipped "${table}" (table does not exist)\n\n`);
+                continue;
+              }
+
               let totalRows = 0;
               let offset = 0;
               let columns: string[] | null = null;
               let colList = "";
-              let tableExists = true;
               let orderClause: string | null = null;
 
               while (true) {
-                let rows: Record<string, unknown>[];
-                try {
-                  if (orderClause === null) {
-                    const pkRows = await tx.$queryRawUnsafe<{ attname: string }[]>(
-                      `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY array_position(i.indkey, a.attnum)`,
-                      `"public"."${table}"`,
-                    );
-                    // Identifiers come from pg_attribute (DB-owner trusted), but
-                    // pattern-match what could go wrong if that trust boundary
-                    // ever loosens: reject anything that's not a sane Postgres
-                    // identifier and double-quote-escape what remains. This
-                    // closes any future SQL-injection regression at the source.
-                    const safeIdents: string[] = [];
-                    for (const r of pkRows) {
-                      if (!/^[A-Za-z0-9_]{1,63}$/.test(r.attname)) {
-                        throw new Error(`[db-export] refusing unsafe PK column name: ${JSON.stringify(r.attname)}`);
-                      }
-                      safeIdents.push(`"${r.attname.replace(/"/g, '""')}"`);
-                    }
-                    // No primary key (e.g. VerificationToken, DiscordMergeCode) →
-                    // OFFSET pagination needs a stable total order or it can skip or
-                    // duplicate rows across pages. ctid is a unique system column,
-                    // stable within this REPEATABLE READ snapshot, and needs no
-                    // schema knowledge.
-                    orderClause = safeIdents.length > 0
-                      ? "ORDER BY " + safeIdents.join(", ")
-                      : "ORDER BY ctid";
-                  }
-                  rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
-                    `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
+                if (orderClause === null) {
+                  const pkRows = await tx.$queryRawUnsafe<{ attname: string }[]>(
+                    `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY array_position(i.indkey, a.attnum)`,
+                    `"public"."${table}"`,
                   );
-                } catch {
-                  tableExists = false;
-                  break;
+                  // Identifiers come from pg_attribute (DB-owner trusted), but
+                  // pattern-match what could go wrong if that trust boundary
+                  // ever loosens: reject anything that's not a sane Postgres
+                  // identifier and double-quote-escape what remains. This
+                  // closes any future SQL-injection regression at the source.
+                  const safeIdents: string[] = [];
+                  for (const r of pkRows) {
+                    if (!/^[A-Za-z0-9_]{1,63}$/.test(r.attname)) {
+                      throw new Error(`[db-export] refusing unsafe PK column name: ${JSON.stringify(r.attname)}`);
+                    }
+                    safeIdents.push(`"${r.attname.replace(/"/g, '""')}"`);
+                  }
+                  // No primary key (e.g. VerificationToken, DiscordMergeCode) →
+                  // OFFSET pagination needs a stable total order or it can skip or
+                  // duplicate rows across pages. ctid is a unique system column,
+                  // stable within this REPEATABLE READ snapshot, and needs no
+                  // schema knowledge.
+                  orderClause = safeIdents.length > 0
+                    ? "ORDER BY " + safeIdents.join(", ")
+                    : "ORDER BY ctid";
                 }
+                const rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+                  `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
+                );
                 if (rows.length === 0) break;
 
                 if (columns === null) {
@@ -155,11 +172,6 @@ function buildSqlStream(
 
                 if (rows.length < CHUNK_SIZE) break;
                 offset += CHUNK_SIZE;
-              }
-
-              if (!tableExists) {
-                write(`-- Skipped "${table}" (table does not exist)\n\n`);
-                continue;
               }
 
               write(`-- Table: ${table} (${totalRows} rows)\n\n`);

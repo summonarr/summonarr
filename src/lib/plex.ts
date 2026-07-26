@@ -149,24 +149,9 @@ function plexFetch(url: string, token: string): Promise<Response> {
   });
 }
 
-// Plex exposes two GUID shapes: modern items use the Guid[] array; older library agents use a single guid string
-function extractTmdbId(item: PlexMetadataItem): number | null {
-  if (item.Guid) {
-    for (const g of item.Guid) {
-      if (g.id.startsWith("tmdb://")) {
-        const n = parseInt(g.id.slice(7), 10);
-        if (!isNaN(n)) return n;
-      }
-    }
-  }
-
-  if (item.guid) {
-    const m = item.guid.match(/themoviedb:\/\/(\d+)/);
-    if (m) return parseInt(m[1], 10);
-  }
-  return null;
-}
-
+// Plex exposes two GUID shapes: modern items use the Guid[] array; older library agents use a single guid string.
+// Returns EVERY tmdb id on the item — a merged show carries one per merged entry, and both the availability
+// and the episode-cache paths must agree on the full set (a first-match-only twin left merged ids episode-less).
 function extractAllTmdbIds(item: PlexMetadataItem): number[] {
   const ids: number[] = [];
   if (item.Guid) {
@@ -344,14 +329,18 @@ export async function getPlexTVEpisodes(
   );
 
   const sectionResults = await Promise.all(showSections.map(async (section) => {
-    const ratingKeyToTmdb = new Map<string, number>();
+    // Multi-valued to match the availability path (getPlexSectionTmdbIds uses extractAllTmdbIds):
+    // a Plex-merged show carries several tmdb:// GUIDs, and taking only the first one marked the
+    // other id "available" at show level while its TVEpisodeCache stayed empty — every season/episode
+    // rendered missing and users re-requested content already on disk.
+    const ratingKeyToTmdb = new Map<string, number[]>();
     await plexFetchAllPages<PlexShowMeta>(
       `${serverUrl}/library/sections/${section.key}/all?type=2&includeGuids=1`,
       token,
       (batch) => {
         for (const show of batch) {
-          const tmdbId = extractTmdbId(show);
-          if (tmdbId !== null) ratingKeyToTmdb.set(show.ratingKey, tmdbId);
+          const tmdbIds = extractAllTmdbIds(show);
+          if (tmdbIds.length > 0) ratingKeyToTmdb.set(show.ratingKey, tmdbIds);
         }
       },
     );
@@ -364,11 +353,13 @@ export async function getPlexTVEpisodes(
       token,
       (batch) => {
         for (const ep of batch) {
-          const tmdbId = ratingKeyToTmdb.get(ep.grandparentRatingKey);
-          if (tmdbId == null) continue;
+          const tmdbIds = ratingKeyToTmdb.get(ep.grandparentRatingKey);
+          if (!tmdbIds) continue;
           if (!Number.isInteger(ep.parentIndex) || ep.parentIndex < 1) continue;
           if (!Number.isInteger(ep.index) || ep.index < 1) continue;
-          episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index });
+          for (const tmdbId of tmdbIds) {
+            episodes.push({ tmdbId, seasonNumber: ep.parentIndex, episodeNumber: ep.index });
+          }
         }
       },
     );
