@@ -82,6 +82,7 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const {
   assignDiscordRolesOnLink,
+  revokeDiscordRolesOnUnlink,
   notifyAdminsNewRequestDiscord,
   notifyAdminsNewIssueDiscord,
   notifyAdminsIssueMessage,
@@ -497,6 +498,54 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   // and never revoked, so a malformed config value can't produce a Discord call.
   assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
   assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
+});
+
+test("unlink revokes every managed role — and only the managed ones", async () => {
+  const guild = "900000000000000001";
+  setSettings({
+    discordBotToken: BOT,
+    discordGuildId: guild,
+    discordLinkedRoleId: "900000000000000002",
+    discordPlexRoleId: "900000000000000003",
+    discordJellyfinRoleId: "900000000000000004",
+    discordAdminRoleId: "900000000000000005",
+    discordIssueAdminRoleId: "900000000000000006",
+  });
+  invalidateFeatureFlagCache();
+
+  await revokeDiscordRolesOnUnlink(DID);
+
+  // The role diff in assignDiscordRolesOnLink only runs while an account is
+  // LINKED, so without this an unlinked user kept every role Summonarr ever
+  // granted — the admin role included — with no way to lose it.
+  assert.deepEqual(
+    sent.map((s) => s.url.split("/roles/")[1]).sort(),
+    [
+      "900000000000000002",
+      "900000000000000003",
+      "900000000000000004",
+      "900000000000000005",
+      "900000000000000006",
+    ],
+  );
+  for (const s of sent) {
+    assert.equal(s.method, "DELETE");
+    assert.equal(s.headers.get("authorization"), AUTH);
+  }
+
+  // A non-snowflake configured id is filtered out rather than sent to Discord,
+  // and an unconfigured guild is a pure no-op.
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT, discordGuildId: guild, discordAdminRoleId: "not-a-snowflake" });
+  invalidateFeatureFlagCache();
+  await revokeDiscordRolesOnUnlink(DID);
+  assert.equal(sent.length, 0, "no managed role ids are valid → nothing to revoke");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT, discordLinkedRoleId: "900000000000000002" });
+  invalidateFeatureFlagCache();
+  await revokeDiscordRolesOnUnlink(DID);
+  assert.equal(sent.length, 0, "no guild configured → zero fetches");
 });
 
 test("role assignment: no guild config or invalid member id → zero fetches; a failed PUT only logs", async () => {

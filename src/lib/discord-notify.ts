@@ -143,6 +143,56 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
   }
 }
 
+// Revoke every Summonarr-managed role from a member who is no longer linked.
+//
+// assignDiscordRolesOnLink's diff only runs while an account IS linked, so
+// without this an unlinked user kept every role Summonarr ever granted them —
+// including the admin role — with no path back short of an operator editing the
+// guild by hand. Scoped to the five configured ids for the same reason the sync
+// diff is: a role the operator granted independently must never be touched.
+//
+// Best-effort and self-swallowing (mirrors assignDiscordRolesOnLink): losing the
+// Discord side must never fail the unlink itself, which has already committed.
+export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise<void> {
+  try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] } },
+    });
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (!cfg.discordBotToken || !cfg.discordGuildId) return;
+    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return;
+
+    const managed = [...new Set([
+      cfg.discordLinkedRoleId,
+      cfg.discordPlexRoleId,
+      cfg.discordJellyfinRoleId,
+      cfg.discordAdminRoleId,
+      cfg.discordIssueAdminRoleId,
+    ].filter((id): id is string => isValidSnowflake(id)))];
+    if (managed.length === 0) return;
+
+    await Promise.allSettled(
+      managed.map((roleId) =>
+        safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
+          allowedHosts: DISCORD_HOSTS,
+          method: "DELETE",
+          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
+        }).then(async (res) => {
+          // 404 = the member never had the role (or already left the guild).
+          if (!res.ok && res.status !== 404) {
+            const text = await res.text();
+            console.error(`[discord-notify] Failed to revoke role ${roleId} on unlink (${res.status}): ${text}`);
+          }
+        })
+      )
+    );
+  } catch (err) {
+    console.error("[discord-notify] revokeDiscordRolesOnUnlink failed:", err);
+  }
+}
+
 export async function notifyAdminsNewRequestDiscord(data: {
   requestId: string;
   title: string;
