@@ -7062,7 +7062,7 @@ The complete list of contributors can be found at:
 
 ------------------------------------------------------------------------------
 
-find-my-way@9.6.0
+find-my-way@9.7.0
 License: MIT
 
 MIT License
