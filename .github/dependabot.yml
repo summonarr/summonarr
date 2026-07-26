@@ -33,6 +33,15 @@ updates:
       # update-types filter alone did not stop the grouped "across 1
       # directory" PR (#165 ignored, #173 still opened), so pin the version
       # range explicitly.
+      #
+      # Neither ignore held either: #189 still grouped "typescript": "^6" -> "^7"
+      # and failed CI on the typescript-eslint load crash. The `ignore` list is
+      # evidently not applied to this dependency inside a group — most likely
+      # because `tsgo` is an alias of the SAME underlying package at ^7, so the
+      # group resolves "typescript" to the alias's target. The group now
+      # excludes it outright (below), and tests/typescript-major-pin.test.mts
+      # fails `npm test` if either range ever drifts, so no dependency PR can
+      # merge past it regardless of what Dependabot decides to do next.
       - dependency-name: "typescript"
         update-types: ["version-update:semver-major"]
       - dependency-name: "typescript"
@@ -41,6 +50,12 @@ updates:
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
         dependency-type: "development"
+        # See the typescript `ignore` entries above: grouped PRs bypassed them
+        # three times (#165, #173, #189). Keep both compilers out of the group
+        # so each is only ever proposed as a standalone, reviewable PR.
+        exclude-patterns:
+          - "typescript"
+          - "tsgo"
       # Bundle tiny patches to keep noise down
       patch-updates:
         update-types:
