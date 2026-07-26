@@ -55,6 +55,22 @@ updates:
       - dependency-name: "typescript"
         versions: [">=7.0.0"]
     groups:
+      # Prisma ships the CLI (`prisma`), the client and the driver adapters as
+      # separate packages that MUST move in lockstep. `src/generated/prisma/`
+      # is NOT committed - it is generated at build time BY THE CLI and stamps
+      # the CLI's version - so bumping `@prisma/client` alone ships generated
+      # 7.8.0 code running against a 7.9.0 runtime, which Prisma does not
+      # support. Dependabot proved the point by opening #192 (@prisma/client)
+      # and #193 (@prisma/adapter-pg) as separate PRs, each leaving `prisma`
+      # behind at 7.8.0.
+      #
+      # Listed FIRST: a dependency joins the first group it matches, and the
+      # `patch-updates` group below would otherwise swallow Prisma patch bumps
+      # and split the family again.
+      prisma:
+        patterns:
+          - "prisma"
+          - "@prisma/*"
       # Bundle dev-only bumps into a single PR
       dev-dependencies:
         dependency-type: "development"

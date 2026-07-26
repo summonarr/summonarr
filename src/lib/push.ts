@@ -41,7 +41,14 @@ async function getVapidKeysRaw(): Promise<VapidKeys | null> {
   });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   if (!cfg.vapidPublicKey || !cfg.vapidPrivateKey) return null;
-  const contact = `mailto:${cfg.smtpFrom || cfg.smtpUser || "admin@localhost"}`;
+  // RFC 8292 requires `sub` to be a URI. smtpFrom legitimately holds an RFC 5322
+  // header value (`Summonarr <noreply@host>` — email.ts consumes it as one), and
+  // concatenating that raw into `mailto:` produces an unparseable URI: push services
+  // that validate it reject the signed JWT, so every web push fails with nothing in
+  // the log pointing at the From address. Take the bracketed address when present.
+  const rawContact = (cfg.smtpFrom || cfg.smtpUser || "").trim();
+  const contactAddr = rawContact.match(/<([^>]+)>/)?.[1]?.trim() || rawContact;
+  const contact = `mailto:${contactAddr || "admin@localhost"}`;
   return { publicKey: cfg.vapidPublicKey, privateKey: cfg.vapidPrivateKey, contact };
 }
 
@@ -199,8 +206,9 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
     });
     if (!res.ok) {
       // Non-200 is not retried and the token is kept (5xx / timeouts are
-      // transient; unregistered pruning happens on the 200 path below). Parse
-      // the relay's JSON error body when present so the log says WHY.
+      // transient; the usual unregistered pruning happens on the 200 path
+      // below). Parse the relay's JSON error body when present so the log says
+      // WHY — and so an explicitly-permanent APNs reason can still prune.
       const errBody = (await res.json().catch(() => null)) as
         | { error?: string; reason?: string; apnsReason?: string }
         | null;
@@ -218,6 +226,14 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
         );
       } else {
         console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+      }
+      // APNs Unregistered / BadDeviceToken is permanent — the install is gone. If the
+      // relay surfaces it on a non-2xx instead of the 200 + reason path, keeping the
+      // row means every later fan-out burns a relay round-trip on a dead token AND the
+      // dead row keeps consuming the per-user subscription cap, evicting a live device.
+      // Only these two explicit reasons prune; any other failure stays transient.
+      if (/unregistered|baddevicetoken/i.test(`${errBody?.apnsReason ?? ""} ${errBody?.reason ?? ""}`)) {
+        await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
       }
       return false;
     }

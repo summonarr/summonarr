@@ -704,6 +704,34 @@ test("machine-session mint: a valid request mints an admin-provider JWT delivere
   assert.ok(claims.sessionId && authSessions.has(claims.sessionId), "the AuthSession row must be created");
 });
 
+test("machine-session mint carries the admin's `permissions` claim — omitting it self-revokes every session of the impersonated admin", async () => {
+  settings.set("enableMachineSession", "true");
+  // A real admin's column is seeded to defaultPermissionsForRole("ADMIN") === 1n
+  // by /api/auth/register and runFirstAdminPromotion, never left at 0.
+  seedUser({ id: "admin-1", role: "ADMIN", permissions: 1n });
+
+  const res = await machineSessionPost(machineReq({ bearer: CRON_SECRET }));
+  assert.equal(res.status, 200);
+  const token = res.headers.getSetCookie()[0].slice(COOKIE.length + 1).split(";")[0];
+  const claims = await verifySessionJwt(token);
+  assert.ok(claims);
+
+  // THE regression pin. verifyAndRefreshSession computes
+  // `claimPermsStr = typeof claims.permissions === "string" ? claims.permissions : "0"`
+  // and compares it to the DB mask; any difference is treated as a privilege change,
+  // which (a) rotates AuthSession.sessionId — 401ing the caller, whose token still
+  // names the OLD sessionId — and (b) bumps the impersonated admin's
+  // `sessionsRevokedAt` past every existing token's iat, logging that admin out of
+  // every device. Because a machine token carries no `dbCheckedAt`, its very first
+  // request always takes that slow path, so an absent claim broke the feature AND
+  // nuked the admin's real sessions on first use. Every mint path must set this.
+  assert.equal(
+    claims.permissions,
+    "1",
+    "the machine JWT must carry the admin's DB permission mask, or its first use rotates the session and revokes the admin everywhere",
+  );
+});
+
 test("machine-session target resolution: no admin → 404; a non-admin requestedUserId → 403", async () => {
   settings.set("enableMachineSession", "true");
 

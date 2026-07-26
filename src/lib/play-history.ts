@@ -597,21 +597,30 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
     },
   });
 
-  const sessionPosterMap: Record<number, string | null> = {};
-  const tmdbIds = [...new Set(allSessions.map((s) => s.tmdbId).filter((id): id is number => id != null))];
-  if (tmdbIds.length > 0) {
-    const cacheKeys = tmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
+  // Keyed by "<movie|tv>:<id>", not the bare numeric id: TMDB namespaces movie and TV ids
+  // separately, and the bare key made this first-writer-wins across the two cache rows — a
+  // session on TV id 1399 was served the poster cached for MOVIE id 1399 whenever both rows
+  // existed. An unknown mediaType still consults both, preserving the old lenient behaviour.
+  const sessionPosterMap: Record<string, string | null> = {};
+  const posterKeysFor = (id: number, mediaType: string | null): string[] =>
+    mediaType === "TV" ? [`tv:${id}`] : mediaType === "MOVIE" ? [`movie:${id}`] : [`movie:${id}`, `tv:${id}`];
+  const posterKeys = [...new Set(
+    allSessions
+      .filter((s): s is typeof s & { tmdbId: number } => s.tmdbId != null)
+      .flatMap((s) => posterKeysFor(s.tmdbId, s.mediaType)),
+  )];
+  if (posterKeys.length > 0) {
     const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: cacheKeys } },
+      where: { key: { in: posterKeys.map((k) => `${k}:details`) } },
       select: { key: true, data: true },
     });
     for (const row of cacheRows) {
       try {
         const parsed = JSON.parse(row.data) as { posterPath?: string | null };
         if (parsed.posterPath) {
-          const id = parseInt(row.key.split(":")[1] ?? "", 10);
-          if (Number.isFinite(id) && id > 0 && !sessionPosterMap[id]) {
-            sessionPosterMap[id] = posterUrl(parsed.posterPath, "w342");
+          const key = row.key.slice(0, -":details".length);
+          if (!sessionPosterMap[key]) {
+            sessionPosterMap[key] = posterUrl(parsed.posterPath, "w342");
           }
         }
       } catch { }
@@ -657,7 +666,9 @@ export async function emitActiveSessionsSnapshot(): Promise<void> {
       introEndMs: s.introEndMs,
       creditsStartMs: s.creditsStartMs,
       creditsEndMs: s.creditsEndMs,
-      posterUrl: s.tmdbId ? sessionPosterMap[s.tmdbId] ?? null : null,
+      posterUrl: s.tmdbId
+        ? posterKeysFor(s.tmdbId, s.mediaType).map((k) => sessionPosterMap[k]).find((v) => !!v) ?? null
+        : null,
     })),
   });
 }

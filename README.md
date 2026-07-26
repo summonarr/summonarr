@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.17.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.17.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,22 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.17.3
+
+**Fixed**
+
+- Machine sessions (Admin → Settings → "Machine session API") were both broken and destructive: the very first request using one failed, and it silently signed the admin it impersonates out of every device. Minting one is now safe.
+- Bulk "Request all" could be used to escalate privileges. A user granted "request on behalf of" — without being an admin — could file requests as an admin and thereby skip the approval queue, reach 4K and other restricted instances, and bypass their own content-rating cap and request quota. On-behalf requests are now limited to users no more privileged than the requester.
+- A Sonarr "Download" webhook whose two ids disagreed could mark the wrong request Available, notifying a user their show was ready when nothing had downloaded.
+- Database backups could silently come out incomplete: a single table the backup couldn't read made every remaining table export as empty, while the download still looked successful. Restoring such a file would have lost data. A backup that can't be taken completely now fails loudly instead.
+- Hardened the encrypted-backup restore against a tampered backup file.
+- Plex, Jellyfin QuickConnect and OIDC sign-in were all impossible when Summonarr is hosted under a subpath (`BASE_PATH`), along with the notification-email confirmation link and several post-login redirects.
+- Setting a user's request quota to `0` silently meant "unlimited" and also removed the global quota for them. It's now rejected with an explanation — clear the user's request permission to stop them requesting.
+- An admin declining a request while a library sync was running could have that decline silently reverted.
+- Saving Settings when a connection test failed could leave the Discord bot using a rolled-back public key until the app restarted.
+- An auto-approved request whose push to Radarr/Sonarr failed no longer goes silently missing — admins are notified so it can be picked up.
+- Assorted fixes to ratings caching, notification delivery, per-instance scoping, and rate limiting.
+
 ### v0.17.2
 
 **Fixed**
@@ -298,7 +314,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.17.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.17.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

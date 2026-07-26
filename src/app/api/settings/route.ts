@@ -306,8 +306,28 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 
   for (const [key, value] of Object.entries(body)) {
-    if (typeof value !== "string" || value === MASKED_VALUE || value.length === 0) continue;
     if (!(ALLOWED_KEYS as readonly string[]).includes(key)) continue;
+
+    // Reject a type/length violation here instead of letting the `entries` filter
+    // below silently drop the key: a dropped key never reaches the upsert loop,
+    // never lands in `changedKeys` or the audit row, yet the route still answered
+    // 200 {ok:true} — an over-cap MOTD or a scripted boolean `maintenanceEnabled`
+    // looked "Saved" in the UI while nothing was written anywhere.
+    if (typeof value !== "string") {
+      return NextResponse.json(
+        { error: `Setting "${key}" must be a string` },
+        { status: 400 },
+      );
+    }
+    const maxLen = MAX_LENGTHS[key as AllowedKey] ?? DEFAULT_MAX_LENGTH;
+    if (value.length > maxLen) {
+      return NextResponse.json(
+        { error: `Setting "${key}" must be ${maxLen} characters or fewer` },
+        { status: 400 },
+      );
+    }
+
+    if (value === MASKED_VALUE || value.length === 0) continue;
 
     if (URL_KEYS.has(key)) {
       try {
@@ -656,53 +676,6 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
   if (updated.discordBotToken || updated.discordClientId || updated.discordGuildId || updated.discordPublicKey) {
     invalidatePublicKeyCache();
-
-    void (async () => {
-      try {
-        const rows = await prisma.setting.findMany({
-          where: { key: { in: ["discordBotToken", "discordClientId", "discordGuildId"] } },
-        });
-        const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-        if (!cfg.discordBotToken || !cfg.discordClientId) return;
-
-        const DISCORD_SNOWFLAKE = /^\d{1,20}$/;
-        if (!DISCORD_SNOWFLAKE.test(cfg.discordClientId)) {
-          console.error("[discord] Invalid discordClientId — must be a numeric snowflake");
-          return;
-        }
-        if (cfg.discordGuildId && !DISCORD_SNOWFLAKE.test(cfg.discordGuildId)) {
-          console.error("[discord] Invalid discordGuildId — must be a numeric snowflake");
-          return;
-        }
-
-        const DISCORD_API = "https://discord.com/api/v10";
-        const SLASH_COMMANDS = [
-          { name: "request", description: "Request a movie or TV show to be added to the library", options: [
-            { name: "type", description: "Movie or TV show", type: 3, required: true, choices: [{ name: "Movie", value: "movie" }, { name: "TV Show", value: "tv" }] },
-            { name: "query", description: "Title to search for", type: 3, required: true, min_length: 1, max_length: 200 },
-          ]},
-          { name: "status", description: "Check the status of your recent media requests" },
-          { name: "link", description: "Link your Discord account to your Summonarr account", options: [
-            { name: "token", description: "Link token from your Profile page", type: 3, required: true, min_length: 1, max_length: 20 },
-          ]},
-        ];
-        const url = cfg.discordGuildId
-          ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
-          : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
-        const res = await safeFetchTrusted(url, {
-          method: "PUT",
-          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify(SLASH_COMMANDS),
-          allowedHosts: ["discord.com"],
-          timeoutMs: 15_000,
-        });
-        if (!res.ok) {
-          console.error(`[discord] Command re-registration failed: ${res.status} ${await res.text()}`);
-        }
-      } catch (err) {
-        console.error("[discord] Command re-registration error:", err);
-      }
-    })();
   }
 
   if (updated.smtpHost || updated.smtpPassword || updated.resendApiKey || updated.emailBackend) {
@@ -762,6 +735,72 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
+    // Same for the Discord public key and the session-duration TTLs: both memos were
+    // dropped BEFORE the connectivity tests ran, so anything that repopulated them
+    // during the test window (a Discord interaction, a sign-in) cached the value this
+    // rollback just reverted. cachedPublicKey in /api/interactions has no TTL at all,
+    // so that divergence would survive until process restart and every Ed25519
+    // signature check would fail against a key the DB no longer holds.
+    invalidatePublicKeyCache();
+    invalidateSessionDurationsCache();
+  }
+
+  // Re-register the slash commands only once the write is DURABLE. This used to fire
+  // (unawaited) before the connectivity tests, and the rollback restores Setting rows
+  // only — it has no compensating Discord call, so a failed SMTP test left commands
+  // installed on a guild the persisted config no longer references. The task also
+  // re-reads the DB, so its findMany could land either side of the rollback tx and the
+  // same request could produce two different remote states.
+  if (
+    !testFailed &&
+    (updated.discordBotToken || updated.discordClientId || updated.discordGuildId || updated.discordPublicKey)
+  ) {
+    void (async () => {
+      try {
+        const rows = await prisma.setting.findMany({
+          where: { key: { in: ["discordBotToken", "discordClientId", "discordGuildId"] } },
+        });
+        const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+        if (!cfg.discordBotToken || !cfg.discordClientId) return;
+
+        const DISCORD_SNOWFLAKE = /^\d{1,20}$/;
+        if (!DISCORD_SNOWFLAKE.test(cfg.discordClientId)) {
+          console.error("[discord] Invalid discordClientId — must be a numeric snowflake");
+          return;
+        }
+        if (cfg.discordGuildId && !DISCORD_SNOWFLAKE.test(cfg.discordGuildId)) {
+          console.error("[discord] Invalid discordGuildId — must be a numeric snowflake");
+          return;
+        }
+
+        const DISCORD_API = "https://discord.com/api/v10";
+        const SLASH_COMMANDS = [
+          { name: "request", description: "Request a movie or TV show to be added to the library", options: [
+            { name: "type", description: "Movie or TV show", type: 3, required: true, choices: [{ name: "Movie", value: "movie" }, { name: "TV Show", value: "tv" }] },
+            { name: "query", description: "Title to search for", type: 3, required: true, min_length: 1, max_length: 200 },
+          ]},
+          { name: "status", description: "Check the status of your recent media requests" },
+          { name: "link", description: "Link your Discord account to your Summonarr account", options: [
+            { name: "token", description: "Link token from your Profile page", type: 3, required: true, min_length: 1, max_length: 20 },
+          ]},
+        ];
+        const url = cfg.discordGuildId
+          ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
+          : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
+        const res = await safeFetchTrusted(url, {
+          method: "PUT",
+          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(SLASH_COMMANDS),
+          allowedHosts: ["discord.com"],
+          timeoutMs: 15_000,
+        });
+        if (!res.ok) {
+          console.error(`[discord] Command re-registration failed: ${res.status} ${await res.text()}`);
+        }
+      } catch (err) {
+        console.error("[discord] Command re-registration error:", err);
+      }
+    })();
   }
 
   return NextResponse.json(

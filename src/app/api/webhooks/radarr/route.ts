@@ -158,10 +158,26 @@ export async function POST(req: NextRequest) {
       shouldNotify = claim.count === 1;
     }
     if (shouldNotify) {
-      after(() =>
-        notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
-          .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err)),
-      );
+      after(async () => {
+        await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
+          .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err));
+        // Bound the one-shot marker table: a Setting row is inserted per distinct stuck
+        // movie and never removed. The identical prune lives in the Sonarr twin, but it
+        // only runs on a Sonarr fresh claim — a Radarr-only deployment (or one whose
+        // Sonarr never parks an import) never fires it, so these rows grew for the life
+        // of the install. Prefix-scoped, so whichever service is deployed cleans both.
+        // ISO-8601 values sort lexically = chronologically; an item still stuck past the
+        // 30d window simply re-notifies. Chained onto the push's task rather than a second
+        // after() so a fresh claim still schedules exactly one deferred unit of work.
+        await prisma.setting
+          .deleteMany({
+            where: {
+              key: { startsWith: "manualInteractionNotified:" },
+              value: { lt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString() },
+            },
+          })
+          .catch((err) => console.warn("[webhook/radarr] manual-interaction marker prune failed:", err));
+      });
     }
     syncCompleted = true;
     return NextResponse.json({ ok: true, manualInteraction: true });

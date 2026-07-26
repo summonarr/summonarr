@@ -160,11 +160,17 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = ""): P
   });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   if (!map[urlKey] || !map[keyKey]) return null;
+  // A non-numeric stored value (nothing validates it on the write side) must read
+  // as "unset", not NaN. NaN is falsy — so the `needProfiles` guards fetch a
+  // fallback profile — but it survives `??`, so the fetched fallback is skipped
+  // and the add POSTs `"qualityProfileId": null`, hard-failing every request
+  // routed to that instance with a Radarr/Sonarr 400.
+  const storedProfileId = map[profileKey] ? Number(map[profileKey]) : NaN;
   return {
     url: map[urlKey].replace(/\/$/, ""),
     apiKey: map[keyKey],
     rootFolder: map[folderKey],
-    qualityProfileId: map[profileKey] ? Number(map[profileKey]) : undefined,
+    qualityProfileId: Number.isInteger(storedProfileId) && storedProfileId > 0 ? storedProfileId : undefined,
   };
 }
 
@@ -396,7 +402,13 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
   const tagIds = await resolveRequesterTagIds(cfg, requesterUserId);
 
-  const movie = movies[0];
+  // Radarr's `tmdb:` lookup degrades to a fuzzy *title* search when the term
+  // isn't recognized as an id form, so a non-empty result list can be entirely
+  // unrelated films — taking [0] blindly adds the wrong movie to the library.
+  // Match on the requested id (every read path in this file already does) and
+  // fall back to the single row only when the lookup returned exactly one.
+  const movie = movies.find((m) => m.tmdbId === tmdbId) ?? (movies.length === 1 ? movies[0] : undefined);
+  if (!movie) throw new Error(`Radarr: lookup for tmdbId ${tmdbId} returned no matching movie`);
   const now = new Date();
   const releaseDates = [movie.digitalRelease, movie.physicalRelease]
     .filter(Boolean)
@@ -659,11 +671,29 @@ export async function isSeriesDownloadedInSonarr(
   try {
     let tvdbId =
       Number.isInteger(ids.tvdbId) && (ids.tvdbId as number) > 0 ? (ids.tvdbId as number) : null;
-    if (tvdbId === null && Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0) {
+    const claimedTmdbId =
+      Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0 ? (ids.tmdbId as number) : null;
+    if (claimedTmdbId !== null) {
       const lookup = await arrFetch<{ tvdbId: number }[]>(
-        cfg, `/api/v3/series/lookup?term=tmdb:${ids.tmdbId}`,
+        cfg, `/api/v3/series/lookup?term=tmdb:${claimedTmdbId}`,
       );
-      tvdbId = lookup.length ? lookup[0].tvdbId : null;
+      const resolved = lookup.length ? lookup[0].tvdbId : null;
+      if (tvdbId === null) {
+        tvdbId = resolved;
+      } else if (resolved !== null && resolved !== tvdbId) {
+        // The payload's two ids name DIFFERENT series. This is the forgery shape the
+        // webhook guard exists to catch: the caller (who holds the webhook secret)
+        // supplies a tvdbId they really did download so the download check passes,
+        // paired with an arbitrary tmdbId — and the Sonarr webhook's status flip keys
+        // on the tmdbId, so an unrelated APPROVED request would be marked AVAILABLE,
+        // its wanted row evicted, and its requester told it's ready. Verifying only
+        // the tvdbId left that path unchecked. Disagreeing ids are never legitimate.
+        console.warn(
+          "[arr] Sonarr download check: payload ids disagree (tvdbId=%s resolves tmdbId=%s to tvdbId=%s); treating as not downloaded.",
+          tvdbId, claimedTmdbId, resolved,
+        );
+        return false;
+      }
     }
     if (tvdbId === null) return null;
     const library = await arrFetch<{ tvdbId: number; status?: string; statistics?: { episodeFileCount: number; totalEpisodeCount: number } }[]>(
@@ -919,7 +949,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   // configured default; only fetch the instance's profiles when neither is set.
   const needProfiles = !qualityProfileIdOverride && !cfg.qualityProfileId;
   const [results, rootFolders, profiles] = await Promise.all([
-    arrFetch<{ title: string; tvdbId: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string }[]>(
+    arrFetch<{ title: string; tvdbId: number; tmdbId?: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string }[]>(
       cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
     ),
     cfg.rootFolder
@@ -934,7 +964,14 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   if (!cfg.rootFolder && !rootFolders.length) throw new Error("Sonarr: no root folders configured");
   if (needProfiles && !profiles.length) throw new Error("Sonarr: no quality profiles configured");
 
-  const series = results[0];
+  // Same fuzzy-title-search hazard as the Radarr add: an unmapped tmdb id makes
+  // Sonarr fall back to a SkyHook title search, so results[0] can be an unrelated
+  // show — which would be added to the library AND returned as this request's
+  // tvdbId, so the webhook later marks the wrong download AVAILABLE. Prefer the
+  // row whose tmdbId matches; accept [0] only when the lookup returned exactly
+  // one candidate (what a recognized id lookup always yields).
+  const series = results.find((s) => s.tmdbId === tmdbId) ?? (results.length === 1 ? results[0] : undefined);
+  if (!series) throw new Error(`Sonarr: lookup for tmdbId ${tmdbId} returned no matching series`);
   const seriesReleased = series.firstAired
     ? new Date(series.firstAired) <= new Date()
     : series.year < new Date().getFullYear();

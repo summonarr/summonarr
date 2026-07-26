@@ -154,6 +154,31 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
 
   const targetPerms = effectivePermissions(target.role, target.permissions);
 
+  // REQUEST_ON_BEHALF must not become a privilege-escalation primitive. Every gate
+  // below (canRequestInstance, canAutoApproveInstance, maxContentRating, quota) is
+  // evaluated against targetPerms — the TARGET's rights — so without this check a
+  // plain user holding only REQUEST_ON_BEHALF could name an ADMIN as the target
+  // (their id is freely readable from GET /api/requests/users, which is gated on the
+  // same bit) and thereby auto-approve arbitrary titles past the review queue, reach
+  // restricted/4K instances they hold no grant for, and bypass their own content-rating
+  // cap and quota — with the requests attributed to that admin.
+  //
+  // Rule: a non-ADMIN actor may only act on behalf of a user whose effective rights are
+  // a SUBSET of their own — you can never do by proxy what you cannot do yourself. Real
+  // admins short-circuit (they already hold every bit), so the delegated-admin flow is
+  // unchanged. Mirrors the "only an admin can modify an admin" gate in
+  // /api/admin/users/[id].
+  if (
+    isOnBehalf &&
+    !hasPermission(session.user.permissions, Permission.ADMIN) &&
+    (targetPerms & ~session.user.permissions) !== 0n
+  ) {
+    return NextResponse.json(
+      { error: "You can't request on behalf of a user with more permissions than you" },
+      { status: 403 },
+    );
+  }
+
   // discordRequireLinkedAccountSite only gates SELF requests — an admin acting on
   // behalf is trusted and shouldn't be blocked by the target's link state.
   if (!isOnBehalf) {
@@ -344,17 +369,6 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     for (const b of ratingBlocked) staleDeclinedIdByKey.delete(keyOf(b.tmdbId, b.mediaType));
   }
 
-  // Drop stale declined rows before the create transaction so their fresh
-  // replacements don't collide on the unique (tmdbId, mediaType, requestedBy, arrInstance).
-  const staleDeclinedIds = [...staleDeclinedIdByKey.values()];
-  if (staleDeclinedIds.length > 0) {
-    // CAS on status + permanentlyDeclined: an admin who re-approved or made the decline
-    // permanent between the snapshot and here leaves that row intact. The createMany
-    // below skipDuplicates, so a surviving row is simply not recreated rather than
-    // orphaning its ARR grab or evading a permanent ban.
-    await prisma.mediaRequest.deleteMany({ where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false } });
-  }
-
   if (toCreate.length === 0) {
     return NextResponse.json({ results: [...skipped, ...ratingBlocked], created: 0 }, { status: 200 });
   }
@@ -386,6 +400,14 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   const metaFailed = resolved
     .filter((r) => !r.meta)
     .map((r): CreateOutcome => ({ tmdbId: r.it.tmdbId, mediaType: r.it.mediaType, result: "error" }));
+  // A meta-failed title is NOT being (re)created — keep its stale DECLINED row (same
+  // compensation the rating gate applies above).
+  for (const m of metaFailed) staleDeclinedIdByKey.delete(keyOf(m.tmdbId, m.mediaType));
+  // Deleted INSIDE the transaction below, never before it: the delete has to roll back
+  // with the inserts. Committed up front, a QuotaExceeded throw (429) or a P2034
+  // retry-exhaustion would erase the admin's decline + adminNote with no replacement
+  // row created, and the title would read as never-requested.
+  const staleDeclinedIds = [...staleDeclinedIdByKey.values()];
 
   // Phase 2 — quota re-check + insert, atomic under Serializable. This closes the
   // TOCTOU: a concurrent batch (or a single POST /api/requests) for the same target
@@ -413,6 +435,18 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       createdRows = await runWithSerializableRetry(() =>
         prisma.$transaction(
           async (tx) => {
+            // First statement: drop the stale, non-permanent DECLINED rows the inserts
+            // below would otherwise collide with on the unique
+            // (tmdbId, mediaType, requestedBy, arrInstance). CAS on status +
+            // permanentlyDeclined so an admin who re-approved or made the decline
+            // permanent since the snapshot keeps that row intact — createMany
+            // skipDuplicates then simply doesn't recreate it, rather than orphaning
+            // its ARR grab or evading a permanent ban.
+            if (staleDeclinedIds.length > 0) {
+              await tx.mediaRequest.deleteMany({
+                where: { id: { in: staleDeclinedIds }, status: "DECLINED", permanentlyDeclined: false },
+              });
+            }
             if (enforceQuota) {
               for (const mt of ["MOVIE", "TV"] as MediaType[]) {
                 const n = prepared.filter((p) => p.mediaType === mt).length;
@@ -506,7 +540,17 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     // Clear the target user's own delete-votes for the titles they just requested —
     // a request and a deletion vote are contradictory, and the vote route already
     // blocks the reverse direction.
-    void prisma.deletionVote.deleteMany({ where: { userId: targetUserId, OR: pairs } });
+    // .catch is required, not decorative: this is detached after the response is
+    // sent, so an unhandled rejection (pool timeout under a concurrent sync) has no
+    // request context to surface in and escapes as a process-level unhandledRejection.
+    // Every other fire-and-forget call in this route already terminates in a catch.
+    void prisma.deletionVote
+      .deleteMany({ where: { userId: targetUserId, OR: pairs } })
+      .catch((err) =>
+        console.error(
+          `[requests/bulk] deletionVote cleanup failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
+        ),
+      );
   }
 
   // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back

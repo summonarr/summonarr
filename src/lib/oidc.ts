@@ -18,6 +18,14 @@ import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 // Authelia/Keycloak on the operator's LAN are a common deployment.
 
 export const OIDC_STATE_COOKIE = "summonarr-oidc-flow";
+
+// Cookie Path for the OIDC state cookie. MUST include BASE_PATH: on a subpath
+// deployment the callback lives at `${BASE_PATH}/api/auth/oidc/callback`, and a
+// cookie scoped to the bare "/api/auth/oidc" is never sent back to it — the
+// callback then reads no state and every OIDC sign-in fails. Shared by the
+// set (oidc/start) and clear (oidc/callback) sites so the two can never drift;
+// a mismatched Path silently fails to expire the cookie. No-op when unset.
+export const OIDC_STATE_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth/oidc`;
 const OIDC_STATE_TTL_SECONDS = 5 * 60;
 
 export function isOidcConfigured(): boolean {

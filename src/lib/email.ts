@@ -7,6 +7,7 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { isSafeAddrForAdmin } from "@/lib/ssrf";
 import { sendMail, type SmtpConfig } from "@/lib/smtp";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { settleLimit } from "@/lib/concurrency";
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
 //   - "resend" → Resend HTTP API (direct POST to api.resend.com via safeFetchTrusted)
@@ -117,7 +118,13 @@ async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
     // "Port should be >= 0 and < 65536" deep in a fire-and-forget notifier.
     throw new Error(`Invalid SMTP port: ${cfg.smtpPort}`);
   }
-  const isLocalhost = /^localhost$/i.test(cfg.smtpHost);
+  // Key the plaintext carve-out off the address we actually CONNECT to, never the
+  // name the admin typed. `isSafeAddrForAdmin` deliberately permits RFC1918/ULA, so
+  // an /etc/hosts entry or a resolver search domain can make "localhost" resolve
+  // off-box; a name-based check would then hand `AUTH PLAIN <base64>` to a remote
+  // relay over an unencrypted socket. Anything we can't prove is loopback keeps TLS.
+  const connectAddr = resolved.address.replace(/^::ffff:/i, "");
+  const isLoopback = connectAddr === "::1" || /^127\./.test(connectAddr);
   return {
     // Hand TLS the original hostname for SNI + certificate-name validation, while the TCP layer
     // connects to the validated IP. This closes the DNS-rebind window between resolveSafeSmtpHost
@@ -126,13 +133,13 @@ async function buildSmtpConfig(cfg: EmailConfig): Promise<SmtpConfig> {
     resolvedAddress: resolved.address,
     port,
     secure: port === 465,
-    // requireTLS enforces STARTTLS on port 587 but must be skipped for localhost (plaintext dev/test relay)
-    requireTLS: !isLocalhost && port === 587,
-    // The localhost carve-out is the ONLY place plaintext AUTH is permitted.
+    // requireTLS enforces STARTTLS on port 587 but must be skipped for a loopback relay (plaintext dev/test)
+    requireTLS: !isLoopback && port === 587,
+    // The loopback carve-out is the ONLY place plaintext AUTH is permitted.
     // On any other host, sendMail refuses to transmit credentials unless the
     // channel is TLS (implicit 465 or a successful STARTTLS) — covers custom
     // ports (25/2525) where requireTLS above doesn't apply.
-    allowPlaintextAuth: isLocalhost,
+    allowPlaintextAuth: isLoopback,
     auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPassword ?? "" } : undefined,
   };
 }
@@ -168,8 +175,23 @@ async function sendOne(cfg: EmailConfig, to: string, subject: string, html: stri
   await sendMail(smtpConfig, { from, to: safeTo, subject: safeSubjectText, html });
 }
 
+// Bounded fan-out (guardrail 31): on the SMTP backend every sendOne is a fresh
+// DNS lookup + TCP/TLS connect + EHLO/STARTTLS/AUTH handshake, and relays cap
+// concurrent connections per client IP (~10) — a bare Promise.all over every
+// admin trips `421 Too many concurrent connections` on larger installs. Settle
+// instead of race, too: Promise.all surfaces only the FIRST rejection, so a relay
+// refusing most recipients looked like a single transient error in the log.
+// The first failure is still rethrown so callers keep their throw-on-failure contract.
 async function sendMany(cfg: EmailConfig, recipients: string[], subject: string, html: string): Promise<void> {
-  await Promise.all(recipients.map((addr) => sendOne(cfg, addr, subject, html)));
+  const results = await settleLimit(recipients, 3, (addr) => sendOne(cfg, addr, subject, html));
+  const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failures.length > 1) {
+    // Only the first reason reaches the caller's catch, so a relay refusing most
+    // recipients would otherwise read as a single transient error. Count only —
+    // recipient addresses stay out of the logs.
+    console.error(`[email] ${failures.length}/${recipients.length} recipients failed to send`);
+  }
+  if (failures.length > 0) throw failures[0].reason;
 }
 
 // CRLF injection in email headers can forge From/Subject — strip newlines from any value that goes into a header

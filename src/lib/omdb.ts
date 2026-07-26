@@ -226,6 +226,14 @@ export async function fetchAndCacheOmdbForTmdb(
       headers: auth.headers,
       timeoutMs: OMDB_FETCH_TIMEOUT_MS,
     });
+    // A 404 is authoritative: the tmdbId doesn't exist for this media type, so it can never
+    // resolve to an IMDb id. Left in the transient branch it cached nothing, and a blocking
+    // ratings batch of bogus ids could be replayed indefinitely — 200 TMDB lookups per request,
+    // every request, on the instance's shared read token.
+    if (extRes.status === 404) {
+      await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
+      return { found: false, keyConfigured: true };
+    }
     if (!extRes.ok) {
       console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
       return { found: false, keyConfigured: true, transient: true };

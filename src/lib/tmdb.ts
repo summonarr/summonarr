@@ -416,12 +416,19 @@ export async function getTrending(): Promise<TmdbMedia[]> {
       "/trending/all/week", { page: String(page) }, 86400
     ),
   );
-  const seen = new Set<number>();
+  // /trending/all is the only mixed-type list here, and TMDB movie ids and TV ids are
+  // independent namespaces (movie 1399 ≠ tv 1399) — a bare-id Set would drop the second
+  // title of a colliding pair from the rail for the whole 12h cache TTL. Key on the
+  // composite identity, as every other dedupe in the tree does.
+  const seen = new Set<string>();
   const result = pages
     .flatMap((r) => (r.status === "fulfilled" ? r.value.results : []))
     .filter((r) => r.media_type === "movie" || r.media_type === "tv")
     .filter((r) => r.id != null && r.id > 0)
-    .filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)))
+    .filter((r) => {
+      const k = `${r.media_type}:${r.id}`;
+      return seen.has(k) ? false : (seen.add(k), true);
+    })
     .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
 
   if (pages.every((p) => p.status === "fulfilled") && result.length > 0) await setCache(key, result, TTL.DISCOVER);
@@ -702,7 +709,10 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
     // A cached TV entry without a seasons field is from before the schema added seasons; bust it
     // so the next request fetches a fresh response that includes seasons.
     if (cached.seasons === undefined) {
-      prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
+      // Awaited on purpose: fire-and-forget, this unpredicated delete can land AFTER the
+      // setCache upsert at the bottom of this function (or one from tmdb-prewarm) and
+      // wipe the freshly written row, forcing another full detail+ratings fetch.
+      await prisma.tmdbCache.delete({ where: { key } }).catch(() => {});
     } else {
       let needsWrite = migrateKeywordShape(cached);
       // `mdblistScore === undefined` also catches rows cached before the unified
@@ -1125,7 +1135,12 @@ function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
   const keywordId = filters.keywordId && /^[\d|,]+$/.test(filters.keywordId) ? filters.keywordId : undefined;
   const minVoteCount = filters.minVoteCount && /^\d+$/.test(filters.minVoteCount) ? filters.minVoteCount : undefined;
   const watchProvider = filters.watchProvider && /^[\d|]+$/.test(filters.watchProvider) ? filters.watchProvider : undefined;
-  const watchRegion = filters.watchRegion && /^[A-Za-z]{2}$/.test(filters.watchRegion) ? filters.watchRegion.toUpperCase() : undefined;
+  // watch_region only reaches TMDB inside the `if (filters.watchProvider)` branch below,
+  // so without a provider the region is a pure cache-key input — 676 accepted codes would
+  // each mint a distinct TmdbCache row (and an identical upstream call) for the same
+  // response. Drop it when there is no provider so they collapse to one canonical key.
+  const rawRegion = filters.watchRegion && /^[A-Za-z]{2}$/.test(filters.watchRegion) ? filters.watchRegion.toUpperCase() : undefined;
+  const watchRegion = watchProvider ? rawRegion : undefined;
   // Clamp minRating to its canonical numeric form here so distinct junk strings ("abc",
   // "xyz") collapse to one cache key instead of minting a new TmdbCache row each.
   let minRating: string | undefined;

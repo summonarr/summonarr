@@ -5,6 +5,7 @@ import {
   exchangeOidcCode,
   isOidcConfigured,
   OIDC_STATE_COOKIE,
+  OIDC_STATE_COOKIE_PATH,
   verifyOidcStateCookie,
 } from "@/lib/oidc";
 import { serializeSessionCookie } from "@/lib/session-cookie";
@@ -23,8 +24,15 @@ function readStateCookie(req: NextRequest): string | null {
 }
 
 function clearStateCookieHeader(): string {
-  return `${OIDC_STATE_COOKIE}=; Path=/api/auth/oidc; Max-Age=0; HttpOnly; SameSite=Lax`;
+  return `${OIDC_STATE_COOKIE}=; Path=${OIDC_STATE_COOKIE_PATH}; Max-Age=0; HttpOnly; SameSite=Lax`;
 }
+
+// Subpath deployments (BASE_PATH=/request): a root-absolute path resolved against
+// AUTH_URL — `new URL("/login", "https://host/request")` — yields
+// "https://host/login" and DROPS the base path, so every OIDC redirect lands on a
+// 404 outside the app. Prefix in-app targets exactly like proxy.ts's
+// buildLoginRedirect does. No-op when BASE_PATH is unset (the default).
+const basePath = process.env.BASE_PATH ?? "";
 
 function loginErrorRedirect(_req: NextRequest, code: string): NextResponse {
   // AUTH_URL is guaranteed set by the early guard in GET; fail closed otherwise
@@ -33,7 +41,7 @@ function loginErrorRedirect(_req: NextRequest, code: string): NextResponse {
   if (!base) {
     return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
   }
-  const url = new URL("/login", base);
+  const url = new URL(`${basePath}/login`, base);
   url.searchParams.set("error", code);
   const res = NextResponse.redirect(url.toString());
   res.headers.append("Set-Cookie", clearStateCookieHeader());
@@ -121,7 +129,9 @@ export async function GET(req: NextRequest) {
   // a post-authentication open redirect (phishing hand-off), and the previous
   // `startsWith("/") && !startsWith("//")` test let `/\t/evil.com` through.
   const safeReturn = safeInternalPath(flowState.returnTo) ?? "/";
-  const res = NextResponse.redirect(new URL(safeReturn, base).toString());
+  // safeInternalPath always returns a root-absolute path, so the BASE_PATH prefix
+  // is a plain concatenation (see the note on `basePath` above).
+  const res = NextResponse.redirect(new URL(`${basePath}${safeReturn}`, base).toString());
   res.headers.append(
     "Set-Cookie",
     serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),

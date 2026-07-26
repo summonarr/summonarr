@@ -150,9 +150,11 @@ export async function attachRatingsUnified(
     && !warm.byMdblist.has(mdblistKey(item)));
 
   if (!blocking) {
+    // Only the MDBList side of the sentinel gate applies here — see the blocking path's
+    // note below: an OMDB _notFound must not exclude the item from the MDBList batch.
     const uncached = items.filter((item) =>
       !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item))
-      && !warm.negativeKeys.has(mdblistKey(item)) && !warm.negativeKeys.has(omdbKey(item)));
+      && !warm.negativeKeys.has(mdblistKey(item)));
     if (uncached.length > 0 || staleMdblist.length > 0 || staleOmdb.length > 0) {
       // Non-blocking path: fire background fetches after the response is sent so the user isn't
       // held waiting; the next page load will hit the warm cache. Stale-served entries
@@ -185,7 +187,8 @@ export async function attachRatingsUnified(
             // Fall back to OMDB whenever MDBList can't serve the item (no key, genuine miss,
             // or mid-batch quota trip), not only when the MDBList key is absent.
             const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate).catch(() => null);
-            if (!probe || !probe.found) {
+            // `found` alone is not a usable signal — see the blocking path's note.
+            if (!probe || !probe.found || !hasAnyMdblistRating(probe.data)) {
               await mapLimit(stillMissing, OMDB_FALLBACK_CONCURRENCY, (item) =>
                 getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
             }
@@ -219,9 +222,15 @@ export async function attachRatingsUnified(
     // re-fetching it every call would burn MDBList/OMDB quota on titles known to be absent.
     // Stale value rows likewise serve from the warm maps rather than re-entering the miss
     // fan-out; they revalidate post-response below. Mirrors the non-blocking path's exclusion.
+    // Only the MDBList sentinel gates the miss: misses feed the MDBList batch — the primary
+    // source — so an OMDB sentinel written while MDBList was unconfigured or quota-locked
+    // would otherwise exclude the title from that batch permanently (nothing re-admits it:
+    // staleMdblist needs an MDBList row that never existed, while the stale OMDB sentinel is
+    // re-pinned for another 24h on every revalidation). Re-admitting costs one extra id in a
+    // batch POST; the OMDB fallback still serves that sentinel from cache, without a fetch.
     if (
       !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item)) &&
-      !warm.negativeKeys.has(mdblistKey(item)) && !warm.negativeKeys.has(omdbKey(item))
+      !warm.negativeKeys.has(mdblistKey(item))
     ) misses.push(item);
   }
 
@@ -250,7 +259,11 @@ export async function attachRatingsUnified(
         // quota trip — not only when the key is absent. A single source being unavailable
         // must not leave the title with no ratings.
         const probe = await getMdblistRatingsForTmdb(mdbMisses[0].id, mdbMisses[0].mediaType, mdbMisses[0].releaseDate).catch(() => null);
-        const useFallback = !probe || !probe.found;
+        // A bare `found` is not enough: fetchMdblistBatch awaits its cache flush, so an
+        // indexed-but-unscored (all-null) row it just wrote reads back here as found —
+        // one such title at the head of mdbMisses would disable the OMDB fallback for the
+        // whole page, which is exactly what the hasAnyMdblistRating gate above prevents.
+        const useFallback = !probe || !probe.found || !hasAnyMdblistRating(probe.data);
         if (useFallback) {
           await mapLimit(mdbMisses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
             const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
@@ -365,10 +378,25 @@ export function hasAnyMdblistRating(d: MdblistRatings): boolean {
   );
 }
 
+// MDBList wins per FIELD, not per source, when both rows are warm. hasAnyMdblistRating
+// passes on any one of nine fields, so a row carrying only mdblistScore/Trakt would
+// otherwise be applied wholesale and blank the IMDb/RT/Metacritic badges whose values are
+// sitting in the OMDB row read in the very same call.
+function overlayOmdb(mdb: MdblistRatings, omdb: OmdbRatings): MdblistRatings {
+  return {
+    ...mdb,
+    imdbId:         mdb.imdbId ?? omdb.imdbId,
+    imdbRating:     mdb.imdbRating ?? omdb.imdbRating,
+    imdbVotes:      mdb.imdbVotes ?? omdb.imdbVotes,
+    rottenTomatoes: mdb.rottenTomatoes ?? omdb.rottenTomatoes,
+    metacritic:     mdb.metacritic ?? omdb.metacritic,
+  };
+}
+
 function mergeWarm(item: TmdbMedia, warm: WarmCache): TmdbMedia {
   const mdb  = warm.byMdblist.get(mdblistKey(item));
   const omdb = warm.byOmdb.get(omdbKey(item));
-  if (mdb && (hasAnyMdblistRating(mdb) || !omdb)) return applyMdblist(item, mdb);
+  if (mdb && (hasAnyMdblistRating(mdb) || !omdb)) return applyMdblist(item, omdb ? overlayOmdb(mdb, omdb) : mdb);
   if (omdb) return applyOmdb(item, omdb);
   if (mdb)  return applyMdblist(item, mdb);
   return item;

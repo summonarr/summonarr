@@ -658,8 +658,16 @@ export async function authorizeWithCredentials(
   const accountLimit = 50;
   const accountWindowMs = 15 * 60 * 1000;
 
-  const ipKey = ip === "unknown" ? "login-ip:unknown" : `login-ip:${ip}`;
-  const ipLimit = ip === "unknown" ? 100 : 20;
+  // NOTE: there is deliberately no special case for an indeterminate client IP.
+  // getClientIp never returns the bare string "unknown" — when the address can't be
+  // trusted it returns `unknown:<uaHash>`, a per-User-Agent bucket (see
+  // untrustedBucket in rate-limit.ts). The old `ip === "unknown"` test was therefore
+  // dead: it was meant to widen the limit to 100 for a single shared bucket, but the
+  // bucket is already per-UA, so the standard limit applies per bucket and no group
+  // of users shares one counter. Don't reintroduce a widened limit here — that would
+  // loosen the throttle without the shared-bucket problem it was written for.
+  const ipKey = `login-ip:${ip}`;
+  const ipLimit = 20;
   const ipAllowed = checkRateLimit(ipKey, ipLimit, 5 * 60 * 1000);
   const accountAllowed = peekRateLimit(accountKey, accountLimit, accountWindowMs);
 

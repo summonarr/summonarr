@@ -7,6 +7,7 @@ import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { parseIpAllowlist, isIpAllowed } from "@/lib/ip-allowlist";
 import { signSessionJwt } from "@/lib/session-jwt";
 import { serializeSessionCookie } from "@/lib/session-cookie";
+import { serializePermissions } from "@/lib/permissions";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -73,14 +74,16 @@ export async function POST(req: NextRequest) {
   const requestedUserId =
     typeof body?.userId === "string" && body.userId.length > 0 ? body.userId : null;
 
+  // `permissions` MUST be selected and carried into the JWT below — see the note
+  // at the signSessionJwt call.
   const user = requestedUserId
     ? await prisma.user.findUnique({
         where: { id: requestedUserId },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true },
       })
     : await prisma.user.findFirst({
         where: { role: "ADMIN" },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true },
         orderBy: { createdAt: "asc" },
       });
 
@@ -119,10 +122,20 @@ export async function POST(req: NextRequest) {
     },
   });
 
+  // The `permissions` claim is REQUIRED, not optional. verifyAndRefreshSession
+  // compares the claim against the DB mask and treats any difference as a
+  // privilege change: it rotates AuthSession.sessionId AND bumps the user's
+  // `sessionsRevokedAt` to iat+1. Omitting the claim made it read as "0" while a
+  // real admin's column is 1 (defaultPermissionsForRole("ADMIN")), so EVERY
+  // machine session tripped that path on its very first use — which (a) 401'd the
+  // caller, because the token still names the pre-rotation sessionId, and (b) set
+  // sessionsRevokedAt past every existing token's iat, silently logging the
+  // impersonated admin out of every other device. Mirrors signInAndMintSession.
   const token = await signSessionJwt(
     {
       id: user.id,
       role: user.role,
+      permissions: serializePermissions(user.permissions),
       email: user.email,
       name: user.name,
       provider: "machine",

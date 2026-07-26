@@ -208,7 +208,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const catchupIds = arrUnpinned.filter((r) => !winnerIds.has(r.id)).map((r) => r.id);
     if (catchupIds.length > 0) {
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: catchupIds }, notifiedAvailable: true, status: { not: "AVAILABLE" } },
+        // Guard on the SOURCE states, not `not: AVAILABLE`. `approved` is a snapshot
+        // taken at the top of the run, so an admin who DECLINES one of these rows
+        // mid-run would otherwise be matched by `not: AVAILABLE` and have their
+        // decline silently reverted to AVAILABLE. Matches the PENDING/APPROVED guard
+        // every sibling flip in this file uses.
+        where: { id: { in: catchupIds }, notifiedAvailable: true, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
     }
@@ -870,8 +875,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
   if (pendingAvailableNotify.length > 0) {
-    const plexConfigured = !!(plexConfig.url && plexConfig.token);
-    const jellyfinConfigured = !!(jellyfinConfig.url && jellyfinConfig.apiKey);
+    // Reuse the demote gate's enabled+configured predicate: a source whose integration
+    // flag is OFF will never sync, so counting it as "configured" here starves every user
+    // pinned to it forever — the same failure mode the stale fallback below exists to fix.
+    const plexConfigured = plexConfiguredEnabled;
+    const jellyfinConfigured = jellyfinConfiguredEnabled;
 
     // Fallback for notification starvation: if a per-source sync has been failing for more than
     // STALE_SYNC_FALLBACK_MS, treat that source's data as "valid" so the *other* source can
@@ -909,16 +917,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       const ms = userMediaServer.get(req.requestedBy) ?? null;
       const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
       const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
-      // Use sync success flags rather than configured flags so a failed sync doesn't trigger false notifications.
-      // 24h-stale fallback (above) also flips dataValid TRUE so the other source can satisfy alone.
-      const plexDataValid = plexSyncSucceeded || !plexConfigured || plexStale;
-      const jellyfinDataValid = jellyfinSyncSucceeded || !jellyfinConfigured || jellyfinStale;
+      // "Unusable" = this source cannot prove presence either way: not configured/enabled
+      // at all, OR its sync has been failing past the 24h stale window. A source that
+      // synced fine this run is NOT unusable, so its empty result still blocks a false
+      // notify. The gate used to AND a `plexDataValid` term with `!plexConfigured`, where
+      // plexDataValid is implied true — so plexStale (which requires plexConfigured) could
+      // never contribute and a permanently-broken Plex starved every plex-pinned user's
+      // "now available" notification forever, which is exactly what the fallback above
+      // was written to prevent.
+      const plexUnusable = !plexConfigured || plexStale;
+      const jellyfinUnusable = !jellyfinConfigured || jellyfinStale;
       const shouldNotify = !ms
-        ? inPlex || inJellyfin || (plexDataValid && jellyfinDataValid && !plexConfigured && !jellyfinConfigured)
+        ? inPlex || inJellyfin || (plexUnusable && jellyfinUnusable)
         : ms === "plex"
-        ? inPlex || (plexDataValid && !plexConfigured && (inJellyfin || (jellyfinDataValid && !jellyfinConfigured)))
+        ? inPlex || (plexUnusable && (inJellyfin || jellyfinUnusable))
         : ms === "jellyfin"
-        ? inJellyfin || (jellyfinDataValid && !jellyfinConfigured && (inPlex || (plexDataValid && !plexConfigured)))
+        ? inJellyfin || (jellyfinUnusable && (inPlex || plexUnusable))
         : false;
       if (shouldNotify) toNotify.push(req);
     }
