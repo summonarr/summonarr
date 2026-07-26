@@ -872,7 +872,9 @@ async function handleComponent(interaction: any): Promise<void> {
                     .filter((d): d is string => !!d && new Date(d) <= now);
                   if (pastDates.length === 0 && futureDates.length > 0) {
                     released = false;
-                    soonestReleaseDate = futureDates.sort()[0];
+                    // Chronological, not lexicographic — see the identical fix in
+                    // /api/requests/[id] and the comparator in the sync orchestrator.
+                    soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
                   }
                 }
               } else {
