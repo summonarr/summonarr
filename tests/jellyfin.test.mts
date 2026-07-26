@@ -619,6 +619,89 @@ test("sequential episode paging advances StartIndex by items served and stops on
   assert.equal(episodes.length, 1500);
 });
 
+// A body of 1000 index-less items: every one is skipped by processEpisodes, so
+// these walk-bound tests measure ONLY the paging loop and accumulate nothing
+// across 10k pages. Built once — restringifying per page dominates the runtime.
+const FULL_PAGE_ITEMS = Array.from({ length: 1000 }, () => ({}));
+const fullPageBody = (extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ Items: FULL_PAGE_ITEMS, ...extra });
+const rawJson = (body: string) =>
+  new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+
+test("sequential paging: NO TotalRecordCount + never-short pages terminates at the item cap instead of looping forever", async () => {
+  // Regression. fetchJellyfinPagesSequential seeded `total = Infinity` when the
+  // server omitted TotalRecordCount, which left the short-page break as the ONLY
+  // loop exit. A server that ignores StartIndex — or otherwise always returns a
+  // full page — then spun forever: the sync's advisory lock stayed held, no later
+  // sync could run, and processItems accumulated every page in memory. The
+  // fan-out paginator has always bounded its own no-total walk; this is the
+  // sequential twin, and the bound is MAX_LIBRARY_ITEMS / pageSize pages.
+  const B = nextBase();
+  let calls = 0;
+  const body = fullPageBody(); // NOTE: no TotalRecordCount key at all
+  respond = () => {
+    calls++;
+    // Escape hatch: past the expected cap, serve a SHORT page so the walk ends
+    // naturally and the assertion below reports the overrun. Throwing here would
+    // instead be swallowed by fetchPage's retry/backoff and hang the suite —
+    // which is exactly what the unbounded version did.
+    if (calls > 10_000) return okJson({ Items: [] });
+    return rawJson(body);
+  };
+
+  const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-1", 7);
+  assert.equal(calls, 10_000, "MAX_LIBRARY_ITEMS(10_000_000) / EPISODE_PAGE_SIZE(1000) pages, then stop");
+  assert.deepEqual(episodes, []);
+  assert.ok(
+    warns.some((w) => w.includes("[jellyfin] sequential page walk hit the 10000000-item cap")),
+    "a capped walk is an INCOMPLETE result — it must warn, not report success silently",
+  );
+});
+
+test("sequential paging: a hostile TotalRecordCount is clamped to the item cap", async () => {
+  // `total = page.total` was taken verbatim, so a server reporting 5e9 drove a
+  // five-million-page walk. The fan-out path has always applied Math.min against
+  // MAX_LIBRARY_ITEMS before deriving page indexes; the sequential path now does
+  // the same.
+  const B = nextBase();
+  let calls = 0;
+  const body = fullPageBody({ TotalRecordCount: 5_000_000_000 });
+  respond = () => {
+    calls++;
+    // Same clean-failure escape hatch as the test above.
+    if (calls > 10_000) return okJson({ Items: [] });
+    return rawJson(body);
+  };
+
+  await getJellyfinEpisodesForShow(B, "k", "ser-1", 7);
+  assert.equal(calls, 10_000, "5e9 clamps to the 10M cap → 10k pages, not 5M");
+  assert.ok(warns.some((w) => w.includes("sequential page walk hit the")), "truncation must warn");
+});
+
+test("sequential paging: an exact-multiple-of-pageSize library completes WITHOUT a truncation warning", async () => {
+  // The false-positive guard on the warn above. A 2000-item library ends via the
+  // `startIndex < total` bound with no short page, which is a complete walk —
+  // warning there would cry wolf on every correctly-sized library.
+  const B = nextBase();
+  const items = (from: number, n: number) =>
+    Array.from({ length: n }, (_, i) => ({ ParentIndexNumber: 1, IndexNumber: from + i + 1 }));
+  respond = (url) => {
+    const start = new URL(url).searchParams.get("StartIndex");
+    if (start === "0")    return okJson({ Items: items(0, 1000),    TotalRecordCount: 2000 });
+    if (start === "1000") return okJson({ Items: items(1000, 1000), TotalRecordCount: 2000 });
+    throw new Error(`unexpected StartIndex in ${url} — the walk must stop at the reported total`);
+  };
+
+  const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-1", 7);
+  assert.equal(sent.length, 2, "exactly the two pages the total calls for");
+  assert.equal(episodes.length, 2000, "every episode from both pages is served");
+  assert.equal(
+    warns.filter((w) => w.includes("sequential page walk hit the")).length,
+    0,
+    "a complete walk must not warn",
+  );
+});
+
 test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbId, and drops invalid indices", async () => {
   const B = nextBase();
   respond = () => okJson({
