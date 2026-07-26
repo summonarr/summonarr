@@ -26,13 +26,13 @@
     "@base-ui/react": "^1.6.0",
     "@prisma/adapter-pg": "^7.9.0",
     "@prisma/client": "^7.9.0",
-    "jose": "^6.2.3",
+    "jose": "^6.2.4",
     "next": "16.2.12",
     "openid-client": "^6.8.4",
     "pg": "^8.22.0",
     "prisma": "^7.9.0",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "overrides": {
     "@babel/core": "^7.29.6",
