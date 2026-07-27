@@ -20,6 +20,9 @@ interface ServerUser {
   // An admin pinned this row's account binding by hand, so the automatic
   // linkers (the 5s poll and the hourly Jellyfin sync) leave it alone.
   manualUserLink: boolean;
+  // false = departed from the media server (soft-deleted). Listed anyway when it
+  // still holds play history, so that history stays attributable.
+  active: boolean;
   user: { name: string | null; email: string } | null;
 }
 
@@ -384,6 +387,14 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                   <span className="text-sm font-medium text-white truncate">{u.username}</span>
                   {u.isServerAdmin && (
                     <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label="Server admin" />
+                  )}
+                  {!u.active && (
+                    <Badge
+                      className="border-zinc-700 bg-zinc-800 text-zinc-400 text-[10px] shrink-0"
+                      title="No longer on the media server. Listed because their watch history is still here and can be attributed."
+                    >
+                      departed
+                    </Badge>
                   )}
                 </div>
                 {u.email && (

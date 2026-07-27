@@ -62,15 +62,16 @@ export const PATCH = withAdmin(async (
       manualUserLink: true,
     },
   });
-  // Soft-deleted (active: false) rows are departed users hidden from every
-  // management surface; treat them as absent so policy can't be pushed to them.
-  if (!record || !record.active) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!record) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   // ── Account linking ───────────────────────────────────────────────────────
-  // Deliberately NOT gated on isServerAdmin or source: the download-policy
-  // restrictions below are Jellyfin/non-admin concerns, while every identity —
-  // Plex or Jellyfin, admin or not — owns watch history that has to land on the
-  // right account.
+  // Deliberately NOT gated on isServerAdmin, source, or `active`: those are
+  // download-policy concerns (below). Every identity — Plex or Jellyfin, admin
+  // or not, still on the server or long departed — owns watch history that has
+  // to land on the right account. A DEPARTED row is in fact the likeliest one to
+  // need re-attaching by hand: its history outlives the user's removal from the
+  // media server (guardrail 28), so refusing to link it would strand that
+  // history with no way to reach it.
   if (wantsLink || wantsAutoLink) {
     let nextUserId: string | null = null;
 
@@ -130,6 +131,10 @@ export const PATCH = withAdmin(async (
   if (typeof body.downloadsEnabled !== "boolean") {
     return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
   }
+  // Soft-deleted (active: false) rows are departed users hidden from the active
+  // management surfaces; treat them as absent so policy can't be pushed to an
+  // account that no longer exists on the server.
+  if (!record.active) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (record.isServerAdmin) {
     return NextResponse.json({ error: "Cannot change download policy for server admins" }, { status: 400 });
   }

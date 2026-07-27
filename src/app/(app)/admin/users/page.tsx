@@ -56,7 +56,12 @@ export default async function UsersPage() {
       select: { id: true },
     }),
     prisma.mediaServerUser.findMany({
-      where: { active: true }, // hide soft-deleted (departed) server users
+      // Active users, PLUS departed (soft-deleted) ones that still hold play
+      // history. A departed row's history outlives their removal from the server
+      // (guardrail 28), so it still needs to be attributable — hiding it here
+      // strands that history with no UI able to re-link it. A departed row with
+      // no history is genuinely irrelevant and stays hidden.
+      where: { OR: [{ active: true }, { playHistory: { some: {} } }] },
       select: {
         id: true,
         source: true,
@@ -68,6 +73,7 @@ export default async function UsersPage() {
         isServerAdmin: true,
         userId: true,
         manualUserLink: true, // admin pinned this binding — automatic linking skips the row
+        active: true,
         user: { select: { name: true, email: true } },
       },
       orderBy: [{ source: "asc" }, { username: "asc" }],

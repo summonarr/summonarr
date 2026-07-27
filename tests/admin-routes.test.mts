@@ -860,20 +860,39 @@ test("link works for a PLEX row and for a server admin — the download-policy g
   assert.equal(policy.status, 400, "download policy is still refused for a server admin");
 });
 
-test("link: unknown target → 404, soft-deleted server user → 404, empty body → 400", async () => {
+test("link: unknown target → 404, unknown server user → 404, empty body → 400", async () => {
   const admin = await mintSession("ADMIN");
   const msuId = seedServerUser();
   const unknown = await serverUserPatch(linkReq(msuId, { userId: "nope" }, admin.header), ctxFor(msuId));
   assert.equal(unknown.status, 404);
 
-  const departed = seedServerUser({ active: false });
-  const gone = await serverUserPatch(linkReq(departed, { userId: seedUser("USER") }, admin.header), ctxFor(departed));
-  assert.equal(gone.status, 404);
+  const missing = await serverUserPatch(linkReq("no-such-msu", { userId: seedUser("USER") }, admin.header), ctxFor("no-such-msu"));
+  assert.equal(missing.status, 404);
 
   const empty = await serverUserPatch(linkReq(msuId, {}, admin.header), ctxFor(msuId));
   assert.equal(empty.status, 400);
   await flush();
   assert.equal(auditAttempts.length, 0, "no rejected request may audit a link that didn't happen");
+});
+
+test("a DEPARTED server user can still be linked — its history outlives the account", async () => {
+  // The likeliest row to need a hand-set binding: the person left the media
+  // server (or was pruned), their MediaServerUser was soft-deleted, and their
+  // play history is still here (guardrail 28) with no automatic path back to an
+  // account. Refusing to link it would strand that history permanently.
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const departed = seedServerUser({ active: false });
+
+  const linked = await serverUserPatch(linkReq(departed, { userId: targetId }, admin.header), ctxFor(departed));
+  assert.equal(linked.status, 200);
+  assert.equal(serverUsersById.get(departed)?.userId, targetId);
+  assert.equal(serverUsersById.get(departed)?.manualUserLink, true);
+
+  // Download policy is still refused — that account no longer exists on the
+  // server, so there is nothing to push a policy to.
+  const policy = await serverUserPatch(linkReq(departed, { downloadsEnabled: false }, admin.header), ctxFor(departed));
+  assert.equal(policy.status, 404);
 });
 
 test("link: no session → 401, non-admin → 403, and the binding is untouched", async () => {
