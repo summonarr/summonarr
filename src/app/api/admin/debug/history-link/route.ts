@@ -74,6 +74,23 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const visible = rows.filter((r) => r.visibleToUser);
   const orphaned = rows.filter((r) => !r.visibleToUser && r.playHistoryRows > 0);
 
+  // An empty candidate set is the hardest case to read: it means no row matched
+  // ANY key, so the targeted query above shows nothing at all and there is
+  // nothing to reason from. Dump every server identity holding history so the
+  // row that should have matched is visible — Plex reports the server OWNER's
+  // sessions under a server-local account id (typically "1"), NOT their plex.tv
+  // id, so the owner's row can carry a sourceUserId that no User.plexUserId will
+  // ever equal. Bounded and read-only.
+  const allIdentities = await prisma.mediaServerUser.findMany({
+    take: 200,
+    select: {
+      id: true, source: true, sourceUserId: true, username: true, email: true,
+      userId: true, manualUserLink: true, active: true, isServerAdmin: true,
+      _count: { select: { playHistory: true } },
+    },
+    orderBy: [{ source: "asc" }, { username: "asc" }],
+  });
+
   return NextResponse.json({
     user: {
       id: user.id,
@@ -110,5 +127,23 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       linkedToOtherUserId: r.userId,
       emailWouldRelink: r.emailWouldRelink,
     })),
+    // Shown only when nothing matched — otherwise it's noise. Whichever of these
+    // is the caller's identity is the one to hand to
+    // PATCH /api/admin/server-users/<id> with { userId }.
+    allServerIdentities:
+      rows.length > 0
+        ? undefined
+        : allIdentities.map((r) => ({
+            mediaServerUserId: r.id,
+            source: r.source,
+            sourceUserId: r.sourceUserId,
+            username: r.username,
+            email: r.email,
+            isServerAdmin: r.isServerAdmin,
+            active: r.active,
+            linkedToUserId: r.userId,
+            manualUserLink: r.manualUserLink,
+            playHistoryRows: r._count.playHistory,
+          })),
   });
 });
