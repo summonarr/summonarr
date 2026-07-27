@@ -79,11 +79,14 @@ export async function POST(req: NextRequest) {
   const user = requestedUserId
     ? await prisma.user.findUnique({
         where: { id: requestedUserId },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true, deactivatedAt: true },
       })
     : await prisma.user.findFirst({
-        where: { role: "ADMIN" },
-        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true },
+        // A disabled admin must never back a machine session — account removal
+        // keeps `role` intact (see account-lifecycle.ts), so without this filter
+        // the fallback could impersonate an admin who has been turned off.
+        where: { role: "ADMIN", deactivatedAt: null },
+        select: { id: true, name: true, email: true, role: true, mediaServer: true, permissions: true, deactivatedAt: true },
         orderBy: { createdAt: "asc" },
       });
 
@@ -98,6 +101,9 @@ export async function POST(req: NextRequest) {
       { error: "Requested user is not an admin" },
       { status: 403 },
     );
+  }
+  if (user.deactivatedAt) {
+    return NextResponse.json({ error: "Account is disabled" }, { status: 403 });
   }
 
   const sessionId = randomUUID();

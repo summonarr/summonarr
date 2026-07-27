@@ -25,6 +25,8 @@ export default async function UsersPage() {
         email: true,
         role: true,
         createdAt: true,
+        deactivatedAt: true,
+        purgedAt: true,
         discordId: true,
         permissions: true,
         movieQuotaLimit: true,
@@ -65,6 +67,7 @@ export default async function UsersPage() {
         downloadsEnabled: true,
         isServerAdmin: true,
         userId: true,
+        manualUserLink: true, // admin pinned this binding — automatic linking skips the row
         user: { select: { name: true, email: true } },
       },
       orderBy: [{ source: "asc" }, { username: "asc" }],
@@ -120,6 +123,8 @@ export default async function UsersPage() {
             email: u.email,
             role: u.role,
             createdAt: u.createdAt.toISOString(),
+            disabled: u.deactivatedAt != null,
+            purged: u.purgedAt != null,
             discordId: u.discordId,
             permissions: u.permissions.toString(),
             movieQuotaLimit: u.movieQuotaLimit,
@@ -164,6 +169,12 @@ export default async function UsersPage() {
             users={serverUsers}
             hasJellyfin={hasJellyfin}
             autoDisableNew={autoDisableNew}
+            // Link targets for the manual account picker. Purged accounts are
+            // excluded — they have no identity left to attribute history to
+            // (the route rejects them too).
+            accounts={users
+              .filter((u) => u.purgedAt == null)
+              .map((u) => ({ id: u.id, name: u.name, email: u.email }))}
           />
         </div>
       )}

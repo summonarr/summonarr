@@ -1073,10 +1073,12 @@ const spec = {
     "/profile": {
       delete: {
         tags: ["Profile"],
-        summary: "Delete (deactivate + anonymize) the caller's own account",
+        summary: "Close (disable) the caller's own account",
+        description:
+          "Revokes every session and blocks sign-in from then on. Nothing is scrubbed and nothing is cascade-deleted — an admin can re-enable the account, and the irreversible personal-data scrub is a separate admin action (POST /admin/users/{id}/purge).",
         responses: {
-          "200": { description: "Account deactivated and anonymized (idempotent)" },
-          "400": { description: "Cannot delete the last admin" },
+          "200": { description: "Account disabled (idempotent)" },
+          "400": { description: "Cannot disable the last admin, or a missing/incorrect password on a local account" },
         },
       },
     },
@@ -1149,11 +1151,42 @@ const spec = {
       },
       delete: {
         tags: ["Admin – Users"],
-        summary: "Delete a user (ADMIN)",
+        summary: "Disable a user (MANAGE_USERS)",
+        description:
+          "Revokes every session and blocks sign-in. Reversible — nothing is scrubbed, the account's requests/issues/votes stay attached, and its Plex/Jellyfin link stays intact so play history keeps being attributed. Re-enable with POST /admin/users/{id}/reactivate; erase with POST /admin/users/{id}/purge.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "User deleted" },
-          "400": { description: "Cannot delete last admin" },
+          "200": { description: "User disabled (idempotent)" },
+          "400": { description: "Cannot disable the last admin" },
+          "403": { description: "Forbidden" },
+        },
+      },
+    },
+    "/admin/users/{id}/reactivate": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "Re-enable a disabled user (MANAGE_USERS)",
+        description:
+          "Clears the disabled flag so the account can sign in again. Prior sessions stay revoked — the user signs in fresh. Refused for a purged account, which has no identity left to sign in with.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "User re-enabled (idempotent)" },
+          "400": { description: "Account was purged and cannot be re-enabled" },
+          "403": { description: "Forbidden" },
+          "409": { description: "Account state changed concurrently" },
+        },
+      },
+    },
+    "/admin/users/{id}/purge": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "IRREVERSIBLY scrub a disabled user's personal data (MANAGE_USERS)",
+        description:
+          "Anonymizes the account in place: name, email, password, image, Discord, notification email, provider-subject keys, OAuth rows, push subscriptions, watchlist/hidden/notifications, and the Plex/Jellyfin identity link. Requests, votes and issues survive on a de-identified row. Requires the account to be disabled first, and cannot be undone — this is the action that services a 'delete my data' request.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Personal data purged (idempotent)" },
+          "400": { description: "Account must be disabled before it can be purged" },
           "403": { description: "Forbidden" },
         },
       },

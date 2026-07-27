@@ -249,6 +249,27 @@ export function notifyRequestStatusChange(
   status: "APPROVED" | "AVAILABLE" | "DECLINED",
   request: RequestInfo,
 ): void {
+  const { requestedBy } = request;
+
+  // Never notify a DISABLED account. Account removal disables rather than scrubs
+  // (see account-lifecycle.ts), so the row keeps a live notification email,
+  // Discord link and push subscriptions — without this gate an admin approving
+  // or declining a removed user's leftover request would still ping them. One
+  // lookup covers all four channels; the batch "now available" path has its own
+  // chokepoint in claimAvailableNotificationWinners.
+  void prisma.user
+    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
+    .then((u) => {
+      if (u?.deactivatedAt) return;
+      dispatchRequestStatusChange(status, request);
+    })
+    .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+}
+
+function dispatchRequestStatusChange(
+  status: "APPROVED" | "AVAILABLE" | "DECLINED",
+  request: RequestInfo,
+): void {
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
   if (status === "APPROVED") {

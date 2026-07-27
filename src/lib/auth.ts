@@ -1070,11 +1070,40 @@ async function runFirstAdminPromotion(
   });
 }
 
+// Refusal for a DISABLED account (User.deactivatedAt set). Account removal
+// disables rather than scrubs (see account-lifecycle.ts), so the row keeps its
+// email, plexUserId/jellyfinUserId and OAuth rows — every provider's lookup still
+// MATCHES it. Thrown by signInAndMintSession and surfaced as a 403 by each
+// sign-in route.
+export class AccountDeactivatedError extends Error {
+  constructor() {
+    super("This account has been disabled.");
+    this.name = "AccountDeactivatedError";
+  }
+}
+
 export async function signInAndMintSession(params: {
   user: Record<string, unknown>;
   providerId: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect" | "oidc";
 }): Promise<SignInResult> {
   const { user, providerId } = params;
+  const userId = user.id as string | undefined;
+
+  // Single chokepoint for every provider (credentials / plex / jellyfin /
+  // jellyfin-quickconnect / oidc): refuse a disabled account BEFORE
+  // initializeTokenOnSignIn mints a JWT and writes an AuthSession row.
+  // verifyAndRefreshSession would reject the resulting token on the very next
+  // request anyway, but only after handing the client a session it can't use and
+  // leaving a live AuthSession row behind. The check runs post-authorization, so
+  // "disabled" is only ever disclosed to someone who already proved the
+  // credential — it leaks nothing to a stranger probing addresses.
+  if (userId) {
+    const state = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { deactivatedAt: true },
+    });
+    if (state?.deactivatedAt) throw new AccountDeactivatedError();
+  }
 
   // Build the same token shape next-auth's jwt callback (auth.config.ts) would build.
   const token: Record<string, unknown> = {
@@ -1104,7 +1133,6 @@ export async function signInAndMintSession(params: {
   // AuthSession row.
   await initializeTokenOnSignIn(token, user);
 
-  const userId = user.id as string | undefined;
   if (userId) {
     const promoted = await runFirstAdminPromotion(userId, providerId);
     if (promoted) token.role = "ADMIN";

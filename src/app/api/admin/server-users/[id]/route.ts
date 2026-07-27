@@ -2,30 +2,134 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
 
+// PATCH /api/admin/server-users/[id] — two independent admin actions on one
+// media-server identity:
+//
+//   { downloadsEnabled }        Jellyfin download policy (pushed to the server).
+//   { userId } | { autoLink }   Which Summonarr account this identity's watch
+//                               history is attributed to.
+//
+// The linking half exists because automatic resolution can't always be right:
+// it matches on the provider subject id first and the email second, so an
+// identity whose email collided with the wrong account — or that matches nothing
+// at all — needs a hand correction. Setting it by hand pins `manualUserLink`, and
+// BOTH automatic linkers (resolveMediaServerUser on every 5s poll, and the hourly
+// Jellyfin user sync) skip a pinned row. Without that pin a manual fix would be
+// overwritten within seconds.
 export const PATCH = withAdmin(async (
   req,
   { params }: { params: Promise<{ id: string }> },
-  _session,
+  session,
 ) => {
   const { id } = await params;
 
-  const parsed = await readJsonCapped<{ downloadsEnabled?: boolean }>(req, 16384);
+  const parsed = await readJsonCapped<{
+    downloadsEnabled?: boolean;
+    userId?: string | null;
+    autoLink?: boolean;
+  }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  if (typeof body.downloadsEnabled !== "boolean") {
-    return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
+  const wantsLink = "userId" in body;
+  const wantsAutoLink = body.autoLink === true;
+  const wantsPolicy = body.downloadsEnabled !== undefined;
+
+  if (!wantsLink && !wantsAutoLink && !wantsPolicy) {
+    return NextResponse.json(
+      { error: "Provide downloadsEnabled, userId, or autoLink" },
+      { status: 400 },
+    );
+  }
+  if (wantsLink && wantsAutoLink) {
+    return NextResponse.json(
+      { error: "Provide either userId or autoLink, not both" },
+      { status: 400 },
+    );
   }
 
   const record = await prisma.mediaServerUser.findUnique({
     where: { id },
-    select: { isServerAdmin: true, source: true, active: true },
+    select: {
+      isServerAdmin: true,
+      source: true,
+      active: true,
+      username: true,
+      userId: true,
+      manualUserLink: true,
+    },
   });
   // Soft-deleted (active: false) rows are departed users hidden from every
   // management surface; treat them as absent so policy can't be pushed to them.
   if (!record || !record.active) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  // ── Account linking ───────────────────────────────────────────────────────
+  // Deliberately NOT gated on isServerAdmin or source: the download-policy
+  // restrictions below are Jellyfin/non-admin concerns, while every identity —
+  // Plex or Jellyfin, admin or not — owns watch history that has to land on the
+  // right account.
+  if (wantsLink || wantsAutoLink) {
+    let nextUserId: string | null = null;
+
+    if (wantsLink && body.userId !== null) {
+      if (typeof body.userId !== "string" || body.userId.length === 0) {
+        return NextResponse.json({ error: "userId must be a user id or null" }, { status: 400 });
+      }
+      const target = await prisma.user.findUnique({
+        where: { id: body.userId },
+        select: { id: true, name: true, email: true, purgedAt: true },
+      });
+      if (!target) return NextResponse.json({ error: "User not found" }, { status: 404 });
+      // A purged account has had its identity scrubbed — attributing watch
+      // history to it would re-attach data to a row that exists only as a
+      // de-identified tombstone. A merely DISABLED account is fine and is the
+      // common case: it still owns its history (see account-lifecycle.ts).
+      if (target.purgedAt) {
+        return NextResponse.json(
+          { error: "That account's data was purged and it can no longer be linked." },
+          { status: 400 },
+        );
+      }
+      nextUserId = target.id;
+    }
+
+    const before = record.userId;
+    await prisma.mediaServerUser.update({
+      where: { id },
+      data: wantsAutoLink
+        // Hand the row back to automatic resolution. `userId` is left as-is —
+        // the next poll/sync re-derives it (and clears a stale value only if it
+        // resolves to someone else; an unresolvable row simply keeps what it has).
+        ? { manualUserLink: false }
+        : { userId: nextUserId, manualUserLink: true },
+    });
+
+    // Already committed — a failed audit write must not 500 it (guardrail 26).
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email,
+      action: "SERVER_USER_LINK",
+      target: `mediaServerUser:${id}`,
+      details: {
+        serverUser: record.username,
+        source: record.source,
+        mode: wantsAutoLink ? "auto" : nextUserId ? "manual-link" : "manual-unlink",
+        before,
+        after: wantsAutoLink ? before : nextUserId,
+      },
+      ...auditContext(req, session),
+    });
+
+    return NextResponse.json({ ok: true });
+  }
+
+  // ── Download policy (Jellyfin only) ───────────────────────────────────────
+  if (typeof body.downloadsEnabled !== "boolean") {
+    return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
+  }
   if (record.isServerAdmin) {
     return NextResponse.json({ error: "Cannot change download policy for server admins" }, { status: 400 });
   }

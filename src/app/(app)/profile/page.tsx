@@ -138,8 +138,8 @@ export default async function ProfilePage() {
           </ProfileCard>
 
           <ProfileCard
-            title="Delete Account"
-            description="Permanently delete your account and personal data."
+            title="Close Account"
+            description="Close your account and block sign-in. Only an administrator can restore it."
           >
             <DeleteAccount requiresPassword={hasPassword} />
           </ProfileCard>

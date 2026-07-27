@@ -26,13 +26,13 @@ import { normalizeEmail } from "./email-normalize";
 // OIDC users whose plexUserId happens to be null have another way in and
 // shouldn't generate noise on every boot.
 //
-// `deactivatedAt: null` is part of that same rule: a deleted account is
-// anonymized in place (see anonymize-user.ts) — passwordHash/plexUserId/
-// jellyfinUserId nulled, Account rows dropped, email rewritten to
-// deleted-<id>@deleted.invalid — which matches the Plex-only shape exactly. Such
-// a row can never sign in (it is deactivated, and no plex.tv account will ever
-// report that .invalid address), so every boot warned "REFUSED on next Plex
-// sign-in" for a user that no longer exists.
+// `deactivatedAt: null` is part of that same rule: a removed account is disabled
+// (see account-lifecycle.ts) and sign-in is refused for it outright, so
+// backfilling a plexUserId it can never use is pointless — and every boot warned
+// "REFUSED on next Plex sign-in" for an account nobody is trying to sign into. A
+// PURGED row additionally has passwordHash/plexUserId/jellyfinUserId nulled and
+// its email rewritten to deleted-<id>@deleted.invalid, which matches the
+// Plex-only candidate shape exactly; this same filter excludes it.
 
 export async function runPlexUserBackfillIfNeeded(): Promise<void> {
   try {

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { authorizeWithJellyfin, signInAndMintSession } from "@/lib/auth";
+import { AccountDeactivatedError, authorizeWithJellyfin, signInAndMintSession } from "@/lib/auth";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { buildSignInResponse } from "@/lib/sign-in-response";
+import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
 
 // Jellyfin sign-in body carries username/password/rememberMe — 16 KB cap
@@ -33,6 +33,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid Jellyfin credentials" }, { status: 401 });
   }
 
-  const result = await signInAndMintSession({ user, providerId: "jellyfin" });
+  let result;
+  try {
+    result = await signInAndMintSession({ user, providerId: "jellyfin" });
+  } catch (err) {
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    throw err;
+  }
   return buildSignInResponse(req, result);
 }

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { authorizeWithJellyfinQuickConnect, signInAndMintSession } from "@/lib/auth";
+import { AccountDeactivatedError, authorizeWithJellyfinQuickConnect, signInAndMintSession } from "@/lib/auth";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { buildSignInResponse } from "@/lib/sign-in-response";
+import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
 import {
   buildQcFlowClearedSetCookie,
@@ -59,7 +59,17 @@ export async function POST(req: NextRequest) {
     return failRes;
   }
 
-  const result = await signInAndMintSession({ user, providerId: "jellyfin-quickconnect" });
+  let result;
+  try {
+    result = await signInAndMintSession({ user, providerId: "jellyfin-quickconnect" });
+  } catch (err) {
+    if (err instanceof AccountDeactivatedError) {
+      const disabled = disabledAccountResponse();
+      disabled.headers.append("Set-Cookie", buildQcFlowClearedSetCookie());
+      return disabled;
+    }
+    throw err;
+  }
   // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
   // a client that ignores the Set-Cookie can resubmit until the 10-min TTL. True
   // single-use is enforced one layer up: Jellyfin invalidates the QuickConnect

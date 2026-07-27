@@ -22,6 +22,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
         downloadsEnabled: true,
         isServerAdmin: true,
         userId: true,
+        manualUserLink: true, // admin pinned this binding — automatic linking skips the row
         user: { select: { name: true, email: true } },
       },
       orderBy: [{ source: "asc" }, { username: "asc" }],

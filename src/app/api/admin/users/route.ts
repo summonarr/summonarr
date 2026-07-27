@@ -19,6 +19,8 @@ const USER_SELECT = {
   email: true,
   role: true,
   createdAt: true,
+  deactivatedAt: true,
+  purgedAt: true,
   mediaServer: true,
   maxContentRating: true,
   passwordHash: true, // not serialized — only to derive `source` (local vs OAuth)
@@ -49,6 +51,11 @@ function serializeUser(u: UserRow) {
     email: u.email,
     role: u.role,
     createdAt: u.createdAt,
+    // Account lifecycle: deactivatedAt set ⇒ disabled (sign-in refused, an admin
+    // can re-enable); purgedAt set ⇒ personal data was scrubbed and the row can
+    // never be re-enabled. See src/lib/account-lifecycle.ts.
+    deactivatedAt: u.deactivatedAt,
+    purgedAt: u.purgedAt,
     mediaServer: u.mediaServer,
     maxContentRating: u.maxContentRating,
     // Derive auth source (mirrors the web admin page): a passwordHash means a

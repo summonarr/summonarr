@@ -84,29 +84,47 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   const [existingRows, linkedUsers] = await Promise.all([
     prisma.mediaServerUser.findMany({
       where: { source: "jellyfin" },
-      select: { sourceUserId: true, downloadsEnabled: true, active: true },
+      select: { sourceUserId: true, downloadsEnabled: true, active: true, manualUserLink: true },
     }),
     prisma.user.findMany({
       where: {
-        email: {
-          in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])),
-        },
+        OR: [
+          // Jellyfin's user id is what sign-in pins to User.jellyfinUserId, so it
+          // is the authoritative link. Email alone misses every Jellyfin account
+          // with no email set on the server (Jellyfin doesn't require one) and
+          // every Summonarr row carrying the synthetic jellyfin-<id>@jellyfin.local
+          // login address — those users would never be attributed at all.
+          { jellyfinUserId: { in: users.map((u) => u.id) } },
+          { email: { in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])) } },
+        ],
       },
-      select: { id: true, email: true, mediaServer: true },
+      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true },
     }),
   ]);
 
   const existingMap = new Map(existingRows.map((r) => [r.sourceUserId, r]));
   const linkedMap = new Map(linkedUsers.map((u) => [u.email, u]));
+  const linkedBySubMap = new Map(
+    linkedUsers.flatMap((u) => (u.jellyfinUserId ? [[u.jellyfinUserId, u] as const] : [])),
+  );
 
   for (const u of users) {
     try {
       const existing = existingMap.get(u.id) ?? null;
-      const linked = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
-      const userId =
-        linked && (!linked.mediaServer || linked.mediaServer.toLowerCase() === "jellyfin")
-          ? linked.id
-          : null;
+      // Subject id first, email second. A subject match needs no mediaServer
+      // guard — jellyfinUserId is unique and only Jellyfin sign-in writes it, so
+      // there is no cross-provider collision to defend against (unlike an email
+      // match, which could be a Plex-pinned user who happens to share the address).
+      const linkedBySub = linkedBySubMap.get(u.id) ?? null;
+      const linkedByEmail = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
+      const resolved =
+        linkedBySub?.id ??
+        (linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
+          ? linkedByEmail.id
+          : null);
+      // An admin set this row's account binding by hand — automatic resolution
+      // must not overwrite it on the next hourly run.
+      const userId = existing?.manualUserLink ? null : resolved;
 
       // For new/unsynced users: auto-disable if the setting is on, otherwise seed from server.
       // For existing users with an explicit value: keep it (honors manual flips to true).

@@ -88,6 +88,8 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
 const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> = [
   { route: "/api/admin/users", reason: "user management delegated via withPermission(Permission.MANAGE_USERS)" },
   { route: "/api/admin/users/[id]", reason: "user management delegated via withPermission(Permission.MANAGE_USERS)" },
+  { route: "/api/admin/users/[id]/reactivate", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); re-enabling an ADMIN target additionally requires Permission.ADMIN in-handler" },
+  { route: "/api/admin/users/[id]/purge", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); purging an ADMIN target additionally requires Permission.ADMIN in-handler, and the target must already be disabled" },
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */

@@ -281,10 +281,18 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    findMany: async (args: { where?: { id?: { in: string[] } } }) => {
+    findMany: async (args: { where?: { id?: { in: string[] }; deactivatedAt?: unknown } }) => {
       const ids = args?.where?.id?.in;
       if (!ids) return []; // email-normalize / any non-id query resolves empty
-      return ids.map((id) => ({ ...(usersById.get(id) ?? defaultUser(id)) }));
+      const rows = ids.map((id) => ({ ...(usersById.get(id) ?? defaultUser(id)) }));
+      // claimAvailableNotificationWinners asks for the DISABLED subset so it can
+      // drop those recipients from the fan-out. Honour the predicate — returning
+      // every id here would read as "everyone is disabled" and silently suppress
+      // the notification this file exists to pin.
+      if (args?.where?.deactivatedAt !== undefined) {
+        return rows.filter((u) => (u as { deactivatedAt?: Date | null }).deactivatedAt != null);
+      }
+      return rows;
     },
     update: async () => ({}),
   },

@@ -99,9 +99,12 @@ export async function verifyAndRefreshSession(
   if (!authSessionRow) return null;
   if (!dbUser) return null;
 
-  // A self-deleted (anonymized + disabled) account can never re-authenticate,
-  // even within a still-valid JWT exp window — absolute, not an iat cutoff.
-  // Set by self-account-deletion (src/app/api/profile/route.ts).
+  // A DISABLED account can never re-authenticate, even within a still-valid JWT
+  // exp window — absolute, not an iat cutoff. Set by account removal, either the
+  // user's own (src/app/api/profile/route.ts) or an admin's
+  // (src/app/api/admin/users/[id]/route.ts); cleared by the reactivate route.
+  // The sign-in paths refuse it separately (signInAndMintSession throws
+  // AccountDeactivatedError) — this is the gate for tokens already minted.
   if (dbUser.deactivatedAt) return null;
 
   const revokedSec = dbUser.sessionsRevokedAt

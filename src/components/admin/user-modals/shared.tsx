@@ -17,6 +17,13 @@ export interface User {
   email: string;
   role: "ADMIN" | "ISSUE_ADMIN" | "USER";
   createdAt: string;
+  // Account lifecycle (src/lib/account-lifecycle.ts). `disabled` — sign-in is
+  // refused but nothing was scrubbed, so an admin can re-enable it. `purged` —
+  // personal data was irreversibly scrubbed; the row can never be re-enabled.
+  // Booleans, not timestamps: the client must not call new Date() in render
+  // (guardrail 16), and only the on/off state drives the UI.
+  disabled: boolean;
+  purged: boolean;
   source: "local" | "plex" | "jellyfin";
   discordId: string | null;
   permissions: string;

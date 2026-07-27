@@ -17,14 +17,30 @@ interface ServerUser {
   downloadsEnabled: boolean | null;
   isServerAdmin: boolean;
   userId: string | null;
+  // An admin pinned this row's account binding by hand, so the automatic
+  // linkers (the 5s poll and the hourly Jellyfin sync) leave it alone.
+  manualUserLink: boolean;
   user: { name: string | null; email: string } | null;
+}
+
+// A Summonarr account the identity can be attributed to.
+interface LinkableAccount {
+  id: string;
+  name: string | null;
+  email: string;
 }
 
 interface ServerUserTableProps {
   users: ServerUser[];
   hasJellyfin: boolean;
   autoDisableNew: boolean;
+  accounts: LinkableAccount[];
 }
+
+// Sentinels for the picker's two non-account options. Prefixed so they can
+// never collide with a real cuid.
+const AUTO = "__auto__";
+const NONE = "__none__";
 
 const sourceStyles: Record<string, string> = {
   plex:     "border-yellow-600/30 bg-yellow-500/10 text-yellow-400",
@@ -35,6 +51,82 @@ const avatarColors: Record<string, string> = {
   plex:     "bg-yellow-600",
   jellyfin: "bg-purple-700",
 };
+
+// Manual account binding for one media-server identity. Automatic resolution
+// (provider subject id, then email) covers the common case; this is the escape
+// hatch for an identity that matched nothing or matched the WRONG account.
+// Choosing an account or "Not linked" pins the row so the 5s poll and the hourly
+// sync stop re-deriving it; "Automatic" hands it back.
+function LinkPicker({
+  row,
+  accounts,
+}: {
+  row: ServerUser;
+  accounts: LinkableAccount[];
+}) {
+  const router = useRouter();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = !row.manualUserLink ? AUTO : (row.userId ?? NONE);
+
+  async function change(next: string) {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/server-users/${row.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          next === AUTO ? { autoLink: true } : { userId: next === NONE ? null : next },
+        ),
+      });
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok || data?.error) {
+        setError(data?.error ?? `Failed (${res.status})`);
+        return;
+      }
+      router.refresh();
+    } catch {
+      setError("Network error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-1.5">
+        {loading ? (
+          <Loader2 className="w-3 h-3 animate-spin text-zinc-500 shrink-0" />
+        ) : (
+          <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
+        )}
+        <select
+          value={value}
+          disabled={loading}
+          aria-label={`Summonarr account attributed for ${row.username}`}
+          onChange={(e) => change(e.target.value)}
+          className="max-w-[170px] truncate rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+        >
+          <option value={AUTO}>
+            Automatic{row.user ? ` — ${row.user.name ?? row.user.email}` : " — unmatched"}
+          </option>
+          <option value={NONE}>Not linked</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>
+              {a.name ?? a.email}
+            </option>
+          ))}
+        </select>
+      </div>
+      {row.manualUserLink && !error && (
+        <span className="text-[10px] text-amber-500/80">pinned by admin</span>
+      )}
+      {error && <span className="text-[10px] text-red-400">{error}</span>}
+    </div>
+  );
+}
 
 function DownloadToggle({
   userId,
@@ -254,7 +346,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   );
 }
 
-export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUserTableProps) {
+export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }: ServerUserTableProps) {
   const [search, setSearch] = useState("");
 
   const filtered = search.trim()
@@ -272,7 +364,6 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
     if (group.length === 0) return null;
     return group.map((u) => {
       const initials = u.username.slice(0, 2).toUpperCase();
-      const linked = u.user ?? null;
 
       return (
         <tr key={u.id} className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/20 transition-colors">
@@ -309,16 +400,9 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew }: ServerUs
             </Badge>
           </td>
 
-          {/* Linked Summonarr account */}
+          {/* Linked Summonarr account — whose watch history this identity feeds */}
           <td className="py-2.5 px-3 hidden md:table-cell">
-            {linked ? (
-              <div className="flex items-center gap-1 text-xs text-zinc-400">
-                <Link className="w-3 h-3 text-zinc-500 shrink-0" />
-                <span className="truncate max-w-[140px]">{linked.name ?? linked.email}</span>
-              </div>
-            ) : (
-              <span className="text-xs text-zinc-500">—</span>
-            )}
+            <LinkPicker row={u} accounts={accounts} />
           </td>
 
           {/* Downloads toggle (Jellyfin only — Plex sharing API does not support remote toggle) */}

@@ -191,10 +191,15 @@ type MsuUpsertArgs = {
   update: Record<string, unknown>;
 };
 const lockSqls: string[] = [];
-const userFindCalls: Array<{ where: { email: string } }> = [];
+// Every user lookup the resolver issues, in order — the email fallback AND the
+// provider-subject lookup that now precedes it.
+const userFindCalls: Array<{ where: { email?: string; plexUserId?: string; jellyfinUserId?: string } }> = [];
+// Row returned for the EMAIL lookup. `userBySub` is the (authoritative)
+// provider-subject match; null means no account is bound to that subject id.
 let userRow: UserRow | null = null;
+let userBySub: { id: string } | null = null;
 const msuFindCalls: Array<Record<string, unknown>> = [];
-let msuExisting: { id: string; serverMachineId: string | null } | null = null;
+let msuExisting: { id: string; serverMachineId: string | null; manualUserLink?: boolean } | null = null;
 const msuUpserts: MsuUpsertArgs[] = [];
 let txOptions: unknown;
 const txStub = {
@@ -203,8 +208,9 @@ const txStub = {
     return 0;
   },
   user: {
-    findUnique: async (args: { where: { email: string } }) => {
+    findUnique: async (args: { where: { email?: string; plexUserId?: string; jellyfinUserId?: string } }) => {
       userFindCalls.push(args);
+      if (args.where.plexUserId !== undefined || args.where.jellyfinUserId !== undefined) return userBySub;
       return userRow;
     },
   },
@@ -253,6 +259,7 @@ beforeEach(() => {
   lockSqls.length = 0;
   userFindCalls.length = 0;
   userRow = null;
+  userBySub = null;
   msuFindCalls.length = 0;
   msuExisting = null;
   msuUpserts.length = 0;
@@ -644,7 +651,7 @@ test("MediaServerMismatchError: a real Error subclass carrying the (source, sour
   assert.match(err.message, /plex:u-9 bound to a different server/);
 });
 
-test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, no user lookup without an email, no binding pre-check without a machineId", async () => {
+test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, subject lookup only (no email), row read carries the manual-link pin", async () => {
   const id = await resolveMediaServerUser({ source: "plex", sourceUserId: "u-1", username: "alice" });
   assert.equal(id, "msu-row-1");
   assert.deepEqual(txOptions, { timeout: 15_000 });
@@ -664,8 +671,19 @@ test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020
   assert.equal(keys[0], keys[1]);
   assert.notEqual(keys[0], keys[2]);
 
-  assert.equal(userFindCalls.length, 0); // no email → no User lookup
-  assert.equal(msuFindCalls.length, 0); // no machineId → no binding pre-check
+  // Three calls for the three resolves above: the subject lookup ALWAYS runs (it
+  // is the authoritative link), the email fallback only when an email exists.
+  assert.equal(userFindCalls.length, 3);
+  assert.ok(userFindCalls.every((c) => "plexUserId" in c.where), "no email → subject lookup only");
+  // The existing-row read is UNCONDITIONAL (once per resolve): it carries
+  // `manualUserLink`, which every upsert needs so an admin's hand-set binding
+  // survives. The server-binding CHECK inside it is what stays gated on a
+  // supplied machineId — with none offered here, nothing is refused.
+  assert.equal(msuFindCalls.length, 3);
+  assert.deepEqual(msuFindCalls[0], {
+    where: { source_sourceUserId: { source: "plex", sourceUserId: "u-1" } },
+    select: { id: true, serverMachineId: true, manualUserLink: true },
+  });
   assert.deepEqual(msuUpserts[0].where, { source_sourceUserId: { source: "plex", sourceUserId: "u-1" } });
   // Exact create/update shapes: deepEqual pins key ABSENCE too — no
   // isServerAdmin key may appear when the caller didn't send one.
@@ -690,8 +708,10 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
     email: "  Bob@Example.COM ",
     thumbUrl: "https://plex.tv/thumb.png",
   });
-  assert.equal(userFindCalls.length, 1);
-  assert.deepEqual(userFindCalls[0].where, { email: "bob@example.com" }); // NFKC+lowercase+trim
+  // Subject lookup first (no account bound to "u-2"), then the email fallback.
+  assert.equal(userFindCalls.length, 2);
+  assert.deepEqual(userFindCalls[0].where, { plexUserId: "u-2" });
+  assert.deepEqual(userFindCalls[1].where, { email: "bob@example.com" }); // NFKC+lowercase+trim
   assert.deepEqual(msuUpserts[0].create, {
     source: "plex",
     sourceUserId: "u-2",
@@ -709,18 +729,88 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
   });
 });
 
-test("resolveMediaServerUser: deactivated accounts and other-server accounts are NEVER linked", async () => {
-  // Admin-deactivated account keeps its email — fresh watches must not attribute to it.
+test("resolveMediaServerUser: a DISABLED account still gets linked — its watch history keeps flowing", async () => {
+  // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
+  // and the person behind a disabled account usually keeps watching on the media
+  // server. Refusing the link here orphaned their MediaServerUser row, so every
+  // watch from that moment on stopped being attributed to them — blanking both
+  // the admin per-user views and getMyWatchHistory, permanently, even after an
+  // admin re-enabled the account. A PURGED account is excluded by construction
+  // instead: its email becomes deleted-<id>@deleted.invalid, which no media
+  // server will ever report.
   userRow = { id: "user-8", mediaServer: null, deactivatedAt: new Date("2026-01-01T00:00:00.000Z") };
   await resolveMediaServerUser({ source: "plex", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
-  assert.equal(msuUpserts[0].create.userId, null);
-  assert.ok(!("userId" in msuUpserts[0].update), "update must not carry a userId for a deactivated account");
+  assert.equal(msuUpserts[0].create.userId, "user-8");
+  assert.equal(msuUpserts[0].update.userId, "user-8");
+});
 
+test("resolveMediaServerUser: the provider SUBJECT id links a user with no email on either side", async () => {
+  // The linkage hole email-only matching left open: a Jellyfin account needs no
+  // email at all, and a Jellyfin-provisioned Summonarr row carries the synthetic
+  // jellyfin-<id>@jellyfin.local login address that no media server will ever
+  // report. Both sides null ⇒ the old code skipped the lookup entirely and the
+  // user's watches were never attributed to anyone. sourceUserId IS the value
+  // sign-in pinned to User.jellyfinUserId, so it links them exactly.
+  userBySub = { id: "user-sub" };
+  await resolveMediaServerUser({ source: "jellyfin", sourceUserId: "jf-uuid-1", username: "erin" });
+  assert.deepEqual(userFindCalls[0].where, { jellyfinUserId: "jf-uuid-1" });
+  assert.equal(userFindCalls.length, 1, "a subject hit must short-circuit the email fallback");
+  assert.equal(msuUpserts[0].create.userId, "user-sub");
+  assert.equal(msuUpserts[0].update.userId, "user-sub");
+});
+
+test("resolveMediaServerUser: the subject id WINS over a conflicting email match", async () => {
+  // Email is user-changeable on both sides and can collide; the provider subject
+  // is unique and written only by that provider's sign-in. When they disagree,
+  // the subject is the identity.
+  userBySub = { id: "user-correct" };
+  userRow = { id: "user-stale-email-owner", mediaServer: null, deactivatedAt: null };
+  await resolveMediaServerUser({
+    source: "plex",
+    sourceUserId: "plex-acct-9",
+    username: "frank",
+    email: "shared@example.com",
+  });
+  assert.equal(msuUpserts[0].create.userId, "user-correct");
+});
+
+test("resolveMediaServerUser: a PURGED account can't be relinked by either key", async () => {
+  // Purge nulls plexUserId/jellyfinUserId AND rewrites the email to
+  // deleted-<id>@deleted.invalid, so both branches miss by construction — the
+  // new subject path must not reopen the door a purge is meant to close.
+  userBySub = null; // the subject columns were nulled
+  userRow = null; // and no media server reports a .invalid address
+  await resolveMediaServerUser({
+    source: "plex",
+    sourceUserId: "plex-acct-purged",
+    username: "gone",
+    email: "real@example.com",
+  });
+  assert.equal(msuUpserts[0].create.userId, null);
+  assert.ok(!("userId" in msuUpserts[0].update));
+});
+
+test("resolveMediaServerUser: an admin's MANUAL link is never overwritten by automatic resolution", async () => {
+  // The pin is what makes the manual link/unlink admin action usable at all:
+  // this resolver runs every 5s, so an unpinned correction would be undone
+  // within seconds of the admin making it.
+  msuExisting = { id: "row-manual", serverMachineId: null, manualUserLink: true };
+  userBySub = { id: "user-auto-would-pick" };
+  await resolveMediaServerUser({
+    source: "plex",
+    sourceUserId: "plex-acct-manual",
+    username: "hank",
+    email: "hank@example.com",
+  });
+  assert.ok(!("userId" in msuUpserts[0].update), "a pinned row's binding must not be rewritten");
+});
+
+test("resolveMediaServerUser: other-server accounts are NEVER linked", async () => {
   // A user pinned to jellyfin must not be linked by a plex identity with the same email.
   userRow = { id: "user-9", mediaServer: "jellyfin", deactivatedAt: null };
   await resolveMediaServerUser({ source: "plex", sourceUserId: "u-4", username: "dave", email: "dave@example.com" });
-  assert.equal(msuUpserts[1].create.userId, null);
-  assert.ok(!("userId" in msuUpserts[1].update));
+  assert.equal(msuUpserts[0].create.userId, null);
+  assert.ok(!("userId" in msuUpserts[0].update));
 });
 
 test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMismatchError before any upsert; first-seen and matching machineIds proceed", async () => {

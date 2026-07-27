@@ -22,11 +22,18 @@ model User {
   // gives admins a one-shot "log this user out everywhere" primitive that is
   // honored on every replica's next refresh.
   sessionsRevokedAt DateTime?
-  // Set when the user self-deletes their account (App Store Guideline 5.1.1(v)).
-  // The row is ANONYMIZED in place — PII scrubbed, provider-subject keys + OAuth
-  // rows cleared — so their requests/votes/issues survive de-identified, but the
-  // account can never sign in again. Excluded from the "last active admin" count.
+  // Set when the account is removed — by the user (self-delete, App Store
+  // Guideline 5.1.1(v)) or by an admin. The row is DISABLED, not scrubbed: every
+  // session is revoked and sign-in is refused for every provider, but the
+  // identity and its data are retained so an admin can re-enable the account.
+  // Excluded from the "last active admin" count. Clearing it re-enables sign-in.
   deactivatedAt DateTime?
+  // Set when an admin PURGES a disabled account's personal data (the irreversible
+  // step). The row is anonymized in place — PII scrubbed, provider-subject keys +
+  // OAuth rows cleared — so requests/votes/issues survive de-identified. A purged
+  // row can never be re-enabled into a usable account: there is no identity left
+  // to sign in with. Always accompanied by a non-null deactivatedAt.
+  purgedAt      DateTime?
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -654,6 +661,9 @@ enum AuditAction {
   USER_ROLE_CHANGE
   USER_PERMISSIONS_CHANGE
   USER_DELETE
+  USER_DEACTIVATE
+  USER_REACTIVATE
+  USER_PURGE
   SETTINGS_CHANGE
   LIBRARY_SYNC
   ISSUE_STATUS_CHANGE
@@ -678,6 +688,7 @@ enum AuditAction {
   BATCH_REQUEST_DECLINE
   VOTE_DISMISS_ALL
   SERVER_USERS_BULK
+  SERVER_USER_LINK
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
   BLACKLIST_CHANGE
@@ -703,6 +714,15 @@ model MediaServerUser {
   thumbUrl         String?
   userId           String? // FK to User — nullable for unlinked server users
   user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // An admin set `userId` by hand (PATCH /api/admin/server-users/[id]), so the
+  // automatic linkers MUST leave it alone — both resolveMediaServerUser (every
+  // 5s poll) and the hourly Jellyfin user sync re-derive `userId` from the
+  // provider subject id / email and would otherwise overwrite the override on
+  // the next run, which is exactly the mis-binding an admin is correcting.
+  // Also set when an admin deliberately UNLINKS (userId → null), so automatic
+  // linking can't immediately re-bind it. Clearing this flag hands the row back
+  // to automatic resolution.
+  manualUserLink   Boolean  @default(false)
   downloadsEnabled Boolean? // null = not yet synced; true = allowed; false = enforced-disabled
   isServerAdmin    Boolean  @default(false) // cached from server — admins are never touched by bulk enforcement
   // false = removed from the media server (soft-deleted). NEVER hard-delete a

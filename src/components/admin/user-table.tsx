@@ -15,6 +15,8 @@ import {
   Bell,
   Server,
   KeyRound,
+  UserX,
+  UserCheck,
 } from "@/components/icons";
 import { Permission, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
@@ -57,12 +59,14 @@ const avatarColors: Record<User["source"], string> = {
 interface ActionsMenuProps {
   u: User;
   onPatch: (key: string, body: object) => void;
-  onDelete: () => void;
+  onDisable: () => void;
+  onReactivate: () => void;
+  onPurge: () => void;
   has4k?: boolean;
   namedInstances?: NamedInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, namedInstances }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -208,7 +212,17 @@ function ActionsMenu({ u, onPatch, onDelete, has4k, namedInstances }: ActionsMen
 
           <div className="my-1 border-t border-zinc-800" />
 
-          {item(onDelete, <Trash2 className="w-3.5 h-3.5 shrink-0" />, "Delete user", true)}
+          {/* Account removal is two steps: disable (reversible — nothing is
+              scrubbed, and the user's watch history keeps being attributed) and
+              then purge (irreversible PII scrub). A purged row can't be
+              re-enabled, so it gets neither action. */}
+          {!u.disabled && item(onDisable, <UserX className="w-3.5 h-3.5 shrink-0" />, "Disable account", true)}
+          {u.disabled && !u.purged && item(
+            onReactivate,
+            <UserCheck className="w-3.5 h-3.5 text-green-400 shrink-0" />,
+            "Re-enable account",
+          )}
+          {u.disabled && !u.purged && item(onPurge, <Trash2 className="w-3.5 h-3.5 shrink-0" />, "Purge personal data", true)}
         </div>
       )}
 
@@ -223,7 +237,9 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  // Inline confirm state, keyed by user id. "disable" is reversible; "purge"
+  // is not, so they confirm separately and never share a button.
+  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" } | null>(null);
   const mounted = useHasMounted();
 
   async function patch(id: string, key: string, body: object) {
@@ -248,12 +264,21 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
     }
   }
 
-  async function deleteUser(id: string) {
-    setConfirmingDelete(null);
-    setBusy(id + "del");
+  // The three account-lifecycle actions. DELETE disables (reversible, nothing
+  // scrubbed); /reactivate turns it back on; /purge is the irreversible scrub and
+  // is only offered for an already-disabled account.
+  async function lifecycle(id: string, action: "disable" | "reactivate" | "purge") {
+    setConfirming(null);
+    setBusy(id + action);
     setError(null);
+    const path =
+      action === "disable"
+        ? `/api/admin/users/${id}`
+        : `/api/admin/users/${id}/${action}`;
     try {
-      const res = await fetch(withBasePath(`/api/admin/users/${id}`), { method: "DELETE" });
+      const res = await fetch(withBasePath(path), {
+        method: action === "disable" ? "DELETE" : "POST",
+      });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
         setError(data?.error ?? `Request failed (${res.status})`);
@@ -403,6 +428,18 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
               >
                 {roleLabel[u.role]}
               </Badge>
+              {u.disabled && (
+                <Badge
+                  className="border text-[10px] px-1.5 h-5 border-red-500/30 bg-red-500/10 text-red-400"
+                  title={
+                    u.purged
+                      ? "Personal data was purged — this account can't be re-enabled"
+                      : "Sign-in is blocked. Data is intact and an admin can re-enable it."
+                  }
+                >
+                  {u.purged ? "purged" : "disabled"}
+                </Badge>
+              )}
             </div>
 
             {isBusy ? (
@@ -416,22 +453,29 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
               />
             ) : isSelf ? (
               <div className="w-7 shrink-0" />
-            ) : confirmingDelete === u.id ? (
+            ) : confirming?.id === u.id ? (
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
-                  aria-label={`Confirm delete ${displayName} and all their requests`}
-                  onClick={() => deleteUser(u.id)}
+                  aria-label={
+                    confirming.kind === "disable"
+                      ? `Confirm disabling ${displayName}`
+                      : `Confirm permanently purging ${displayName}'s personal data`
+                  }
+                  onClick={() => lifecycle(u.id, confirming.kind)}
                   autoFocus
                   className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete user
+                  {confirming.kind === "disable" ? (
+                    <><UserX className="w-3.5 h-3.5" />Disable</>
+                  ) : (
+                    <><Trash2 className="w-3.5 h-3.5" />Purge data</>
+                  )}
                 </button>
                 <button
                   type="button"
-                  aria-label="Cancel delete"
-                  onClick={() => setConfirmingDelete(null)}
+                  aria-label="Cancel"
+                  onClick={() => setConfirming(null)}
                   className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
                 >
                   Cancel
@@ -441,7 +485,9 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
               <ActionsMenu
                 u={u}
                 onPatch={(key, body) => patch(u.id, key, body)}
-                onDelete={() => setConfirmingDelete(u.id)}
+                onDisable={() => setConfirming({ id: u.id, kind: "disable" })}
+                onReactivate={() => lifecycle(u.id, "reactivate")}
+                onPurge={() => setConfirming({ id: u.id, kind: "purge" })}
                 has4k={has4k}
                 namedInstances={namedInstances}
               />

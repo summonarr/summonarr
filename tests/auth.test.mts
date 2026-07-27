@@ -136,6 +136,7 @@ type UserRow = {
   mediaServer: string | null;
   plexClientId: string | null;
   sessionsRevokedAt: Date | null;
+  deactivatedAt: Date | null;
 };
 type AccountRow = {
   id: string;
@@ -267,6 +268,7 @@ const models = {
         mediaServer: null,
         plexClientId: null,
         sessionsRevokedAt: null,
+        deactivatedAt: null, // a freshly provisioned account is never disabled
       };
       users.push(row);
       return applySelect(row as unknown as Record<string, unknown>, args.select);
@@ -526,6 +528,7 @@ const {
   findOrCreateJellyfinUser,
   findOrCreateOidcUser,
   signInAndMintSession,
+  AccountDeactivatedError,
   revokeSessionById,
   revokeAllUserSessions,
   PROVIDER_REBIND_REQUIRED,
@@ -580,6 +583,7 @@ function seedUser(overrides: Partial<UserRow> & { id: string; email: string }): 
     mediaServer: null,
     plexClientId: null,
     sessionsRevokedAt: null,
+    deactivatedAt: null,
     ...overrides,
   };
   users.push(row);
@@ -1392,6 +1396,38 @@ test("mint (credentials): SignInResult + JWT claims, the AuthSession row, an ema
   assert.equal(plexResult.user.mediaServer, "plex");
   const plexClaims = await verifySessionJwt(plexResult.token);
   assert.equal(plexClaims?.mediaServer, "plex");
+});
+
+test("mint REFUSES a disabled account — no JWT, no AuthSession row, no AUTH_LOGIN audit", async () => {
+  // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
+  // so the row keeps its email, provider-subject keys and OAuth rows and every
+  // provider's lookup still MATCHES it. signInAndMintSession is the single
+  // chokepoint that turns it away — and it must do so BEFORE minting, or a
+  // removed user walks away with a token and a live session row that only dies
+  // on their next request.
+  seedUser({
+    id: "u-off",
+    email: "off@example.com",
+    role: "USER",
+    deactivatedAt: new Date("2026-07-20T09:00:00.000Z"),
+  });
+  const user = mintableUser("u-off");
+  const sessionsBefore = authSessions.size;
+  const auditsBefore = auditRows.length;
+
+  await assert.rejects(
+    () => signInAndMintSession({ user, providerId: "credentials" }),
+    (err: unknown) => err instanceof AccountDeactivatedError && err instanceof Error,
+  );
+
+  assert.equal(authSessions.size, sessionsBefore, "no AuthSession row may be written for a disabled account");
+  await flushAsync();
+  assert.equal(auditRows.length, auditsBefore, "a refused sign-in must not log AUTH_LOGIN");
+
+  // Re-enabling the account (an admin clearing deactivatedAt) lets it mint again.
+  users.find((u) => u.id === "u-off")!.deactivatedAt = null;
+  const ok = await signInAndMintSession({ user: mintableUser("u-off"), providerId: "credentials" });
+  assert.equal(ok.user.id, "u-off");
 });
 
 test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; the 1-year native TTL requires the X-Summonarr-Client header", async () => {

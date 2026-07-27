@@ -5,9 +5,10 @@
 // Division of labour with the leaf-module suites (owned elsewhere, NOT re-pinned):
 //   - tests/audit.test.mts OWNS logAudit-vs-logAuditOrFail semantics (swallow vs
 //     propagate, field mapping). Here we pin which VARIANT each route chose.
-//   - tests/anonymize-user.test.mts OWNS anonymizeUserInTx's write set + the
-//     last-admin CAS. Here we pin the user-DELETE route's WIRING of it (runs it in
-//     a $transaction, maps LastAdminError → 400, never hard-deletes the row).
+//   - tests/account-lifecycle.test.mts OWNS deactivateUserInTx/purgeUserDataInTx's
+//     write sets + the last-admin CAS. Here we pin the ROUTES' wiring of them (run
+//     inside a $transaction, LastAdminError → 400, disable is reversible and the
+//     purge is gated on the account already being disabled).
 //   - tests/session-revocation.test.mts OWNS the force-revoke ledger Set. Here we
 //     pin the revoke ROUTE's ordering (mark lands only after the DB write commits).
 //   - tests/api-auth.test.mts OWNS the withAuth/withAdmin/withPermission wrapper
@@ -82,6 +83,7 @@ type DbUser = {
   id: string; role: string; permissions: bigint; name: string | null; email: string | null;
   mediaServer: string | null; notificationEmail: string | null;
   sessionsRevokedAt: Date | null; passwordChangedAt: Date | null; deactivatedAt: Date | null;
+  purgedAt: Date | null;
 };
 type AuthRow = { userId: string; deviceLabel: string | null; createdAt: Date };
 
@@ -89,6 +91,11 @@ const usersById = new Map<string, DbUser>();
 const authSessionsById = new Map<string, AuthRow>();
 const settings = new Map<string, string>();
 const playHistoryById = new Map<string, Record<string, unknown>>();
+type ServerUserRow = {
+  id: string; source: string; username: string; active: boolean;
+  isServerAdmin: boolean; userId: string | null; manualUserLink: boolean;
+};
+const serverUsersById = new Map<string, ServerUserRow>();
 const trashAppsById = new Map<string, { id: string; trashSpec: { trashId: string; kind: string } }>();
 
 // Per-test knobs, reset in beforeEach.
@@ -123,6 +130,9 @@ function makeTx() {
     pushSubscription: { deleteMany: rec("pushSubscription.deleteMany") },
     discordLinkToken: { deleteMany: rec("discordLinkToken.deleteMany") },
     discordMergeCode: { deleteMany: rec("discordMergeCode.deleteMany") },
+    watchlistItem: { deleteMany: rec("watchlistItem.deleteMany") },
+    hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
+    notification: { deleteMany: rec("notification.deleteMany") },
     mediaServerUser: {
       updateMany: rec("mediaServerUser.updateMany"),
       deleteMany: async () => {
@@ -153,7 +163,9 @@ function makeTx() {
     user: {
       findUnique: async (args: { where: { id: string } }) => {
         const u = usersById.get(args.where.id);
-        return u ? { sessionsRevokedAt: u.sessionsRevokedAt } : null;
+        // purgeUserDataInTx re-reads the lifecycle state inside the tx to enforce
+        // its "already disabled" precondition; the revoke path reads the cutoff.
+        return u ? { sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt } : null;
       },
       update: rec("user.update"),
     },
@@ -167,6 +179,15 @@ const fakePrisma = {
       return u ? { ...u } : null;
     },
     update: async (args: unknown) => { txOps.push({ op: "user.update(top)", args }); return {}; },
+    // reactivateUser()'s guarded restore — the WHERE is the whole contract, so
+    // the stub enforces it rather than blindly reporting a hit.
+    updateMany: async (args: { where: { id: string; purgedAt: null; deactivatedAt: unknown }; data: { deactivatedAt: null } }) => {
+      txOps.push({ op: "user.updateMany(top)", args });
+      const u = usersById.get(args.where.id);
+      if (!u || u.purgedAt != null || u.deactivatedAt == null) return { count: 0 };
+      u.deactivatedAt = null;
+      return { count: 1 };
+    },
     findMany: async () => [],
   },
   authSession: {
@@ -188,6 +209,15 @@ const fakePrisma = {
   mediaRequest: { count: async () => counts.requests },
   issue: { count: async () => counts.issues },
   deletionVote: { count: async () => counts.votes },
+  mediaServerUser: {
+    findUnique: async (args: { where: { id: string } }) => serverUsersById.get(args.where.id) ?? null,
+    update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+      txOps.push({ op: "mediaServerUser.update(top)", args });
+      const row = serverUsersById.get(args.where.id);
+      if (row) Object.assign(row, args.data);
+      return {};
+    },
+  },
   playHistory: {
     findUnique: async (args: { where: { id: string } }) => playHistoryById.get(args.where.id) ?? null,
     delete: async (args: { where: { id: string } }) => { txOps.push({ op: "playHistory.delete", args }); return {}; },
@@ -225,6 +255,9 @@ const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/ro
 const { DELETE: playHistoryDelete } = await import("../src/app/api/play-history/[id]/route.ts");
 const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/admin/users/[id]/route.ts");
 const { DELETE: sessionsRevoke } = await import("../src/app/api/admin/users/[id]/sessions/route.ts");
+const { POST: userReactivate } = await import("../src/app/api/admin/users/[id]/reactivate/route.ts");
+const { POST: userPurge } = await import("../src/app/api/admin/users/[id]/purge/route.ts");
+const { PATCH: serverUserPatch } = await import("../src/app/api/admin/server-users/[id]/route.ts");
 const { DELETE: trashDelete } = await import("../src/app/api/admin/trash-guides/applications/[id]/route.ts");
 const { POST: plexTerminate } = await import("../src/app/api/admin/play-history/terminate-session/route.ts");
 const { POST: jellyfinTerminate } = await import("../src/app/api/admin/play-history/terminate-jellyfin-session/route.ts");
@@ -248,7 +281,7 @@ async function mintSession(role: string): Promise<{ userId: string; token: strin
   usersById.set(userId, {
     id: userId, role, permissions: 0n, name: `Actor ${seq}`, email: "actor@example.com",
     mediaServer: null, notificationEmail: null,
-    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null,
+    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, purgedAt: null,
   });
   authSessionsById.set(sessionId, { userId, deviceLabel: "actor-device", createdAt: new Date() });
   const token = await signSessionJwt(
@@ -267,8 +300,18 @@ function seedUser(role: string): string {
   usersById.set(id, {
     id, role, permissions: 0n, name: `Target ${seq}`, email: `target-${seq}@example.com`,
     mediaServer: null, notificationEmail: null,
-    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null,
+    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, purgedAt: null,
   });
+  return id;
+}
+
+// A target that has already been removed (disabled). `purged` additionally marks
+// its personal data as scrubbed — the state that can never be re-enabled.
+function seedDisabledUser(role: string, opts: { purged?: boolean } = {}): string {
+  const id = seedUser(role);
+  const row = usersById.get(id)!;
+  row.deactivatedAt = new Date("2026-07-20T09:00:00.000Z");
+  if (opts.purged) row.purgedAt = new Date("2026-07-21T09:00:00.000Z");
   return id;
 }
 
@@ -305,6 +348,7 @@ beforeEach(() => {
   // authSessionsById are keyed by a unique seq and re-minted, so they don't).
   settings.clear();
   playHistoryById.clear();
+  serverUsersById.clear();
   trashAppsById.clear();
 });
 
@@ -412,7 +456,7 @@ test("GUARDRAIL 26 (user-delete): auditLog throws → 200 {ok:true} kept, the an
   assert.ok(sawSwallow());
 });
 
-test("user-delete: happy path → 200 and one USER_DELETE (anonymize) audit row", async () => {
+test("user-delete: happy path → 200 and one USER_DEACTIVATE audit row", async () => {
   const admin = await mintSession("ADMIN");
   const targetId = seedUser("USER");
   counts = { requests: 4, issues: 1, votes: 2 };
@@ -420,7 +464,7 @@ test("user-delete: happy path → 200 and one USER_DELETE (anonymize) audit row"
   assert.equal(res.status, 200);
   await flush();
   assert.equal(auditRows.length, 1);
-  assert.equal(auditRows[0].action, "USER_DELETE");
+  assert.equal(auditRows[0].action, "USER_DEACTIVATE");
   assert.equal(auditRows[0].target, `user:${targetId}`);
 });
 
@@ -600,17 +644,253 @@ test("revoke all: happy path → 200 {revoked:'all'}, the whole-user mark is set
 // GUARDRAIL 28 — user-delete unlinks MediaServerUser, never hard-deletes it
 // ════════════════════════════════════════════════════════════════════════════
 
-test("GUARDRAIL 28 (user-delete): identity is severed by UNLINK (userId→null), never a hard delete", async () => {
+test("user-delete DISABLES only: the MediaServerUser link and the identity both survive", async () => {
   const admin = await mintSession("ADMIN");
   const targetId = seedUser("USER");
-  // makeTx().mediaServerUser.deleteMany throws, so a green delete proves no
-  // hard-delete was attempted — play history stays attached, just unattributed.
   const res = await userDelete(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
   assert.equal(res.status, 200);
+
+  // The link is left ALONE — not unlinked and (guardrail 28) not hard-deleted.
+  // Severing it orphans the user's Plex/Jellyfin identity, and every watch from
+  // that point on stops resolving to them in the admin per-user views and in
+  // getMyWatchHistory — permanently, even after the account is re-enabled.
+  assert.equal(txOps.filter((o) => o.op.startsWith("mediaServerUser.")).length, 0);
+  // Nothing is scrubbed either: the row is disabled, and the OAuth rows that let
+  // the user sign in again after an admin re-enables them are still there.
+  assert.equal(txOps.filter((o) => o.op === "account.deleteMany").length, 0);
+  const update = txOps.find((o) => o.op === "user.update");
+  assert.ok(update, "the row must be stamped deactivated");
+  const data = (update.args as { data: Record<string, unknown> }).data;
+  assert.deepEqual(Object.keys(data).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Account lifecycle: disable → re-enable, and the separate irreversible purge
+// ════════════════════════════════════════════════════════════════════════════
+
+test("user-delete on an ALREADY disabled account is an idempotent 200 that opens no tx", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("ADMIN");
+  casRows = 0; // the CAS would refuse — proving the short-circuit ran first
+  const res = await userDelete(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
+  // Without the short-circuit, re-disabling a disabled ADMIN would see its own
+  // row excluded from the active-admin count and 400 with "last admin".
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(txOps.length, 0);
+});
+
+test("reactivate: clears deactivatedAt via the guarded updateMany and audits USER_REACTIVATE", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("USER");
+  const res = await userReactivate(req(`http://localhost:3000/api/admin/users/${targetId}/reactivate`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+
+  const restore = txOps.find((o) => o.op === "user.updateMany(top)");
+  assert.ok(restore, "the restore must run as a guarded updateMany, not a blind update");
+  assert.deepEqual(restore.args, {
+    where: { id: targetId, purgedAt: null, deactivatedAt: { not: null } },
+    data: { deactivatedAt: null },
+  });
+  assert.equal(usersById.get(targetId)?.deactivatedAt, null);
+  await flush();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, "USER_REACTIVATE");
+});
+
+test("reactivate refuses a PURGED account — there is no identity left to sign in with", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("USER", { purged: true });
+  const res = await userReactivate(req(`http://localhost:3000/api/admin/users/${targetId}/reactivate`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /purged/);
+  assert.equal(txOps.length, 0, "no write may be attempted for a purged row");
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("reactivate is idempotent: an account that is already enabled → 200 with no write", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER"); // never disabled
+  const res = await userReactivate(req(`http://localhost:3000/api/admin/users/${targetId}/reactivate`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(txOps.length, 0);
+  await flush();
+  assert.equal(auditAttempts.length, 0, "nothing changed, so nothing is audited");
+});
+
+test("purge REFUSES an account that is still enabled — disable first, then purge", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER"); // active
+  const res = await userPurge(req(`http://localhost:3000/api/admin/users/${targetId}/purge`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /Disable this account before purging/);
+  assert.equal(txOps.length, 0, "an active user's data can never be destroyed in one step");
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("purge of a disabled account scrubs it, keeps the row, and audits USER_PURGE", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("USER");
+  counts = { requests: 4, issues: 1, votes: 2 };
+  const res = await userPurge(req(`http://localhost:3000/api/admin/users/${targetId}/purge`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200);
+
+  // This is the path that DOES sever the identity — unlinked, never hard-deleted
+  // (guardrail 28: makeTx's mediaServerUser.deleteMany throws).
   const unlink = txOps.find((o) => o.op === "mediaServerUser.updateMany");
-  assert.ok(unlink, "the anonymize must UNLINK the MediaServerUser rows");
+  assert.ok(unlink, "the purge must UNLINK the MediaServerUser rows");
   assert.deepEqual(unlink.args, { where: { userId: targetId }, data: { userId: null } });
-  assert.equal(txOps.filter((o) => o.op === "mediaServerUser.deleteMany").length, 0, "guardrail 28: never a hard delete");
+  const scrub = txOps.find((o) => o.op === "user.update");
+  const data = (scrub!.args as { data: Record<string, unknown> }).data;
+  assert.equal(data.email, `deleted-${targetId}@deleted.invalid`);
+  assert.equal(data.passwordHash, null);
+  assert.ok(data.purgedAt instanceof Date);
+
+  await flush();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, "USER_PURGE");
+  // The audit row is the last record of who this was — captured PRE-scrub, since
+  // after the purge the User row no longer carries a name or a real email.
+  assert.match(JSON.stringify(auditRows[0]), /target-\d+@example\.com/);
+});
+
+test("GUARDRAIL 26 (purge): auditLog throws → 200 kept, the scrub committed, swallow logged", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedDisabledUser("USER");
+  auditThrows = true;
+  const res = await userPurge(req(`http://localhost:3000/api/admin/users/${targetId}/purge`, { method: "POST", headers: admin.header }), ctxFor(targetId));
+  assert.equal(res.status, 200, "a failed audit write must not 500 an already-committed, irreversible scrub");
+  assert.ok(txOps.some((o) => o.op === "user.update"));
+  await flush();
+  assert.equal(auditAttempts.length, 1);
+  assert.ok(sawSwallow());
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Manual media-server account linking (the automatic-resolution escape hatch)
+// ════════════════════════════════════════════════════════════════════════════
+
+function seedServerUser(over: Partial<ServerUserRow> = {}): string {
+  seq++;
+  const id = `msu-${seq}`;
+  serverUsersById.set(id, {
+    id, source: "jellyfin", username: `srv-${seq}`, active: true,
+    isServerAdmin: false, userId: null, manualUserLink: false, ...over,
+  });
+  return id;
+}
+
+const linkReq = (id: string, body: unknown, header: Record<string, string>) =>
+  req(`http://localhost:3000/api/admin/server-users/${id}`, {
+    method: "PATCH",
+    headers: { ...header, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+test("link: binds the identity to an account AND pins it so the auto-linkers skip the row", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const msuId = seedServerUser();
+  const res = await serverUserPatch(linkReq(msuId, { userId: targetId }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+
+  // manualUserLink is the load-bearing half: resolveMediaServerUser re-derives
+  // userId every 5s, so without the pin this correction would be overwritten
+  // almost immediately.
+  assert.deepEqual(serverUsersById.get(msuId)?.userId, targetId);
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, true);
+  await flush();
+  assert.equal(auditRows.length, 1);
+  assert.equal(auditRows[0].action, "SERVER_USER_LINK");
+});
+
+test("unlink: clears the binding and STILL pins, so automatic linking can't re-bind it", async () => {
+  const admin = await mintSession("ADMIN");
+  const msuId = seedServerUser({ userId: "someone", manualUserLink: false });
+  const res = await serverUserPatch(linkReq(msuId, { userId: null }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(msuId)?.userId, null);
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, true, "an unpinned unlink would be undone on the next poll");
+});
+
+test("autoLink: releases the pin without clobbering the current binding", async () => {
+  const admin = await mintSession("ADMIN");
+  const msuId = seedServerUser({ userId: "user-x", manualUserLink: true });
+  const res = await serverUserPatch(linkReq(msuId, { autoLink: true }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(msuId)?.manualUserLink, false);
+  // Left as-is — the next poll/sync re-derives it.
+  assert.equal(serverUsersById.get(msuId)?.userId, "user-x");
+});
+
+test("link refuses a PURGED account — no identity left to attribute history to", async () => {
+  const admin = await mintSession("ADMIN");
+  const purgedId = seedDisabledUser("USER", { purged: true });
+  const msuId = seedServerUser();
+  const res = await serverUserPatch(linkReq(msuId, { userId: purgedId }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /purged/);
+  assert.equal(serverUsersById.get(msuId)?.userId, null);
+});
+
+test("link ACCEPTS a disabled account — a disabled user still owns their watch history", async () => {
+  const admin = await mintSession("ADMIN");
+  const disabledId = seedDisabledUser("USER");
+  const msuId = seedServerUser();
+  const res = await serverUserPatch(linkReq(msuId, { userId: disabledId }, admin.header), ctxFor(msuId));
+  assert.equal(res.status, 200);
+  assert.equal(serverUsersById.get(msuId)?.userId, disabledId);
+});
+
+test("link works for a PLEX row and for a server admin — the download-policy guards don't apply", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  // Both of these are hard-refused for { downloadsEnabled }, but every identity
+  // owns watch history that has to land on the right account.
+  const plexAdminMsu = seedServerUser({ source: "plex", isServerAdmin: true });
+  const linked = await serverUserPatch(linkReq(plexAdminMsu, { userId: targetId }, admin.header), ctxFor(plexAdminMsu));
+  assert.equal(linked.status, 200);
+  assert.equal(serverUsersById.get(plexAdminMsu)?.userId, targetId);
+
+  const policy = await serverUserPatch(linkReq(plexAdminMsu, { downloadsEnabled: true }, admin.header), ctxFor(plexAdminMsu));
+  assert.equal(policy.status, 400, "download policy is still refused for a server admin");
+});
+
+test("link: unknown target → 404, soft-deleted server user → 404, empty body → 400", async () => {
+  const admin = await mintSession("ADMIN");
+  const msuId = seedServerUser();
+  const unknown = await serverUserPatch(linkReq(msuId, { userId: "nope" }, admin.header), ctxFor(msuId));
+  assert.equal(unknown.status, 404);
+
+  const departed = seedServerUser({ active: false });
+  const gone = await serverUserPatch(linkReq(departed, { userId: seedUser("USER") }, admin.header), ctxFor(departed));
+  assert.equal(gone.status, 404);
+
+  const empty = await serverUserPatch(linkReq(msuId, {}, admin.header), ctxFor(msuId));
+  assert.equal(empty.status, 400);
+  await flush();
+  assert.equal(auditAttempts.length, 0, "no rejected request may audit a link that didn't happen");
+});
+
+test("link: no session → 401, non-admin → 403, and the binding is untouched", async () => {
+  const msuId = seedServerUser();
+  const targetId = seedUser("USER");
+  const anon = await serverUserPatch(
+    req(`http://localhost:3000/api/admin/server-users/${msuId}`, {
+      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ userId: targetId }),
+    }),
+    ctxFor(msuId),
+  );
+  assert.equal(anon.status, 401);
+
+  const user = await mintSession("USER");
+  const forbidden = await serverUserPatch(linkReq(msuId, { userId: targetId }, user.header), ctxFor(msuId));
+  assert.equal(forbidden.status, 403);
+  assert.equal(serverUsersById.get(msuId)?.userId, null);
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -631,10 +911,10 @@ test("role-change: demoting the LAST admin → 400 (CAS matched 0 rows) with no 
 test("user-delete: deleting the LAST admin → 400 (LastAdminError) with no audit", async () => {
   const admin = await mintSession("ADMIN");
   const targetId = seedUser("ADMIN");
-  casRows = 0; // anonymizeUserInTx's last-admin CAS throws LastAdminError
+  casRows = 0; // deactivateUserInTx's last-admin CAS throws LastAdminError
   const res = await userDelete(req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "DELETE", headers: admin.header }), ctxFor(targetId));
   assert.equal(res.status, 400);
-  assert.deepEqual(await res.json(), { error: "Cannot delete the last admin" });
+  assert.deepEqual(await res.json(), { error: "Cannot disable the last admin" });
   await flush();
   assert.equal(auditAttempts.length, 0);
 });

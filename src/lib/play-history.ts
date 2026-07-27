@@ -189,14 +189,43 @@ export async function resolveMediaServerUser(params: {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(2020, ${lockKey})`);
 
+    // Resolve which Summonarr account this media-server identity belongs to.
+    // Neither branch filters on `deactivatedAt`: a DISABLED account still owns
+    // its watch history, and the person behind it usually keeps watching on the
+    // server, so their plays must keep landing on their row — otherwise the admin
+    // per-user views and getMyWatchHistory go blank from the moment they were
+    // removed and STAY blank after an admin re-enables the account. A PURGED
+    // account is excluded by construction on both branches instead: the purge
+    // nulls plexUserId/jellyfinUserId and rewrites the email to
+    // deleted-<id>@deleted.invalid, neither of which a media server can report.
     let userId: string | null = null;
-    if (email) {
-      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true, deactivatedAt: true } });
-      // Never relink play history to a deactivated account. A deleted user's email
-      // is rewritten to deleted-<id>@deleted.invalid so it can't match here, but an
-      // admin-deactivated (not deleted) account keeps its email — without this guard
-      // the poller would attribute fresh watches to that dead account.
-      if (user && !user.deactivatedAt && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+    // 1. Provider subject id — the AUTHORITATIVE binding. `sourceUserId` is the
+    // Plex accountID / Jellyfin userId, which is exactly what sign-in pins to
+    // User.plexUserId / User.jellyfinUserId, so a match here is the same identity
+    // by construction. Email is a weak key by comparison: a Jellyfin account
+    // needs no email at all (so both sides are null and nothing ever links), a
+    // Jellyfin-provisioned Summonarr row often carries the synthetic
+    // jellyfin-<id>@jellyfin.local login address that no media server will ever
+    // report, and either side can be changed by the user at any time. Without
+    // this path those users' watches are never attributed to anyone.
+    //
+    // No mediaServer guard is needed on this branch: the subject columns are
+    // unique and written only by the matching provider's sign-in, so unlike an
+    // email match there is no cross-provider collision to defend against.
+    const bySub =
+      source.toLowerCase() === "plex"
+        ? await tx.user.findUnique({ where: { plexUserId: sourceUserId }, select: { id: true } })
+        : source.toLowerCase() === "jellyfin"
+          ? await tx.user.findUnique({ where: { jellyfinUserId: sourceUserId }, select: { id: true } })
+          : null;
+    if (bySub) userId = bySub.id;
+
+    // 2. Email fallback — covers accounts provisioned before the subject id was
+    // bound (e.g. a local/OIDC user who watches on the server under the same
+    // address, or a Plex row awaiting the plexUserId backfill).
+    if (!userId && email) {
+      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
+      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
         userId = user.id;
       }
     }
@@ -210,18 +239,22 @@ export async function resolveMediaServerUser(params: {
     // user linkage) to a server they control. Pinning the first-seen machineId and
     // rejecting mismatches keeps each media-server user bound to the one server that
     // originally established it.
-    if (serverMachineId) {
-      const existing = await tx.mediaServerUser.findUnique({
-        where: { source_sourceUserId: { source, sourceUserId } },
-        select: { id: true, serverMachineId: true },
-      });
-      if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
-        console.warn(
-          `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
-        );
-        throw new MediaServerMismatchError(source, sourceUserId);
-      }
+    // Read unconditionally (not just when a machineId is offered): `manualUserLink`
+    // is needed on every upsert so an admin's hand-set binding survives this poll.
+    const existing = await tx.mediaServerUser.findUnique({
+      where: { source_sourceUserId: { source, sourceUserId } },
+      select: { id: true, serverMachineId: true, manualUserLink: true },
+    });
+    if (serverMachineId && existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
+      console.warn(
+        `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
+      );
+      throw new MediaServerMismatchError(source, sourceUserId);
     }
+    // An admin corrected (or deliberately cleared) this row's account binding.
+    // Automatic resolution must not overwrite it — this poll runs every 5s, so
+    // without the guard a manual fix would survive for seconds at most.
+    if (existing?.manualUserLink) userId = null;
 
     const record = await tx.mediaServerUser.upsert({
       where: { source_sourceUserId: { source, sourceUserId } },

@@ -8,7 +8,7 @@ import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
-import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
+import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 
 // Thrown by the DELETE tx when the in-transaction role re-read shows the target became
 // ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
@@ -314,8 +314,12 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });
   }
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true, deactivatedAt: true } });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  // Idempotent, and load-bearing: re-running deactivateUserInTx on an already
+  // disabled ADMIN would see its own row excluded from the active-admin count
+  // and throw LastAdminError spuriously.
+  if (target.deactivatedAt) return NextResponse.json({ ok: true });
 
   // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
@@ -328,16 +332,18 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     prisma.deletionVote.count({ where: { userId: id } }),
   ]);
 
-  // Admin delete ANONYMIZES rather than hard-deletes, mirroring the self-delete
+  // Admin delete DISABLES rather than hard-deletes, mirroring the self-delete
   // path (/api/profile): a hard delete cascades and destroys the user's
-  // requests/issues/votes, whereas anonymization preserves that instance history
-  // behind a de-identified row. Both paths share anonymizeUserInTx.
+  // requests/issues/votes, and even an anonymize-in-place severs the
+  // MediaServerUser link so their future watches stop being attributed. Disabling
+  // keeps everything and is reversible via the reactivate route; the irreversible
+  // scrub is the separate purge route. Both paths share deactivateUserInTx.
   const now = new Date();
 
   try {
     await prisma.$transaction(async (tx) => {
       // The role read above is three DB round-trips stale by the time the tx opens, and
-      // anonymizeUserInTx only arms the advisory lock + last-admin CAS when the role it is
+      // deactivateUserInTx only arms the advisory lock + last-admin CAS when the role it is
       // HANDED is ADMIN. A promotion landing in that window would otherwise slip past both
       // that CAS and the caller-authority gate, letting a non-admin MANAGE_USERS holder
       // deactivate the instance's last admin. Re-resolve the role inside the tx, under the
@@ -348,11 +354,11 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       if (freshRole === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
         throw new TargetBecameAdminError();
       }
-      await anonymizeUserInTx(tx, id, freshRole, now);
+      await deactivateUserInTx(tx, id, freshRole, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
-      return NextResponse.json({ error: "Cannot delete the last admin" }, { status: 400 });
+      return NextResponse.json({ error: "Cannot disable the last admin" }, { status: 400 });
     }
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
@@ -362,9 +368,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   invalidateUserSession(id);
 
-  // Account already anonymized; a failed audit write must not 500 it (guardrail 26
-  // — logAudit swallows write failures). History (requests/issues/votes) is
-  // preserved on the de-identified row, not cascade-deleted.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { kind: "admin-delete-anonymize", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
+  // Account already disabled; a failed audit write must not 500 it (guardrail 26
+  // — logAudit swallows write failures). Everything (requests/issues/votes, the
+  // identity itself) is preserved — the account is off, not erased.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
   return NextResponse.json({ ok: true });
 });

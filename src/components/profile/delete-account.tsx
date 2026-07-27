@@ -7,9 +7,11 @@ import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
 
 // Self-service account deletion (App Store Guideline 5.1.1(v)). Calls
-// DELETE /api/profile, which anonymizes + disables the account (scrubs PII,
-// revokes sessions) while keeping requests/votes/issues de-identified. The
-// server already revoked the session, so we just bounce to /login.
+// DELETE /api/profile, which DISABLES the account: every session is revoked and
+// sign-in is refused from then on, but nothing is scrubbed, so an admin can
+// restore it. The copy below must not promise erasure — the irreversible scrub
+// is a separate admin action (see src/lib/account-lifecycle.ts). The server
+// already revoked the session, so we just bounce to /login.
 export function DeleteAccount({ requiresPassword = false }: { requiresPassword?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -47,8 +49,10 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
     return (
       <div className="space-y-3">
         <p className="text-sm text-zinc-400">
-          Permanently delete your account and personal data. Your requests, votes,
-          and issues are kept but de-identified. This can’t be undone.
+          Close your account and sign out everywhere. You won’t be able to sign
+          back in — only an administrator can restore access. Your requests,
+          votes, issues and watch history are kept. Ask an administrator if you
+          also want your personal data erased.
         </p>
         <Button
           type="button"
@@ -56,7 +60,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           onClick={() => setConfirming(true)}
           className="w-full sm:w-auto"
         >
-          Delete account
+          Close account
         </Button>
       </div>
     );
@@ -66,8 +70,8 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
     <div className="space-y-3">
       <p className="text-sm text-zinc-400">
         Type <span className="font-semibold text-zinc-200">DELETE</span> to confirm.
-        This permanently deletes your account and personal data and signs you out —
-        you won’t be able to sign back in.
+        This closes your account and signs you out of every device — you won’t be
+        able to sign back in unless an administrator restores it.
       </p>
       <Input
         value={confirmText}
@@ -98,7 +102,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           className="w-full sm:w-auto"
         >
           {deleting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-          {deleting ? "Deleting…" : "Permanently delete account"}
+          {deleting ? "Closing…" : "Close my account"}
         </Button>
         <Button
           type="button"

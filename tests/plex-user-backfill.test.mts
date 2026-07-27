@@ -178,9 +178,11 @@ test("the candidate query pins the Plex-only definition (who would ACTUALLY be l
   // Local (passwordHash), Jellyfin (jellyfinUserId or synthetic email), and
   // OIDC users have another way in — they must not be candidates, or every
   // boot spams REFUSED warnings for users that are fine. `deactivatedAt: null`
-  // is the same rule for DELETED users: anonymizeUserInTx nulls passwordHash /
-  // plexUserId / jellyfinUserId and drops the Account rows, so a deleted
-  // account matches the Plex-only shape exactly — see the dedicated test below.
+  // is the same rule for REMOVED accounts: sign-in is refused for them outright,
+  // so a plexUserId they can never use is pointless to backfill — and a PURGED
+  // row (purgeUserDataInTx nulls passwordHash / plexUserId / jellyfinUserId and
+  // drops the Account rows) matches the Plex-only shape exactly — see the
+  // dedicated test below.
   await runPlexUserBackfillIfNeeded();
   assert.deepEqual(userFindManyCalls[0], {
     where: {
@@ -195,7 +197,7 @@ test("the candidate query pins the Plex-only definition (who would ACTUALLY be l
   });
 });
 
-test("a deleted (anonymized) user is excluded — the row shape anonymizeUserInTx leaves behind IS the Plex-only shape", async () => {
+test("a purged user is excluded — the row shape purgeUserDataInTx leaves behind IS the Plex-only shape", async () => {
   // Regression: every boot warned "1 Plex-only user(s) could NOT be bound …
   // REFUSED on next Plex sign-in" naming deleted-<id>@deleted.invalid. The row
   // is deactivated and its .invalid email can never appear in plex.tv's account
@@ -205,7 +207,7 @@ test("a deleted (anonymized) user is excluded — the row shape anonymizeUserInT
   // Assert against the where-clause (the in-memory stub does not filter): the
   // deactivatedAt term must be present, so the DB never returns such a row.
   const anonymizedShape = {
-    // exactly what anonymize-user.ts writes, minus the fields it leaves alone
+    // exactly what account-lifecycle.ts's purge writes, minus the fields it leaves alone
     passwordHash: null,
     plexUserId: null,
     jellyfinUserId: null,
