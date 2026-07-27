@@ -20,6 +20,26 @@ export class LastAdminError extends Error {}
 // that is already disabled — see the note on that function.
 export class NotDeactivatedError extends Error {}
 
+// The tombstone address a purge rewrites `email` to. RFC-2606 reserved `.invalid`
+// (never routable) with the row's own id embedded, so it is unique per user AND
+// unforgeable as a real address — which makes it a reliable structural marker
+// that a row has been scrubbed.
+export function purgedEmailFor(id: string): string {
+  return `deleted-${id}@deleted.invalid`;
+}
+
+// Has this row been scrubbed? `purgedAt` is the explicit marker, but it did not
+// exist before the deactivate/purge split — every account removed by the older
+// anonymize-on-delete code carries the scrubbed SHAPE with a null `purgedAt`.
+// Treating those as merely "disabled" let them be re-enabled into a zombie: an
+// ACTIVE row with no password, no provider subject, no OAuth rows and an
+// unroutable email, so nobody can ever sign into it, while it counts toward the
+// active-admin total and re-enters the Plex backfill's candidate set (which
+// warns about it on every boot). Check the shape as well as the column.
+export function isPurgedRow(row: { id: string; email: string; purgedAt: Date | null }): boolean {
+  return row.purgedAt != null || row.email === purgedEmailFor(row.id);
+}
+
 // ─── Account removal is TWO steps ──────────────────────────────────────────
 //
 // 1. DEACTIVATE (this function) — reversible. Shared by the self-delete
@@ -85,11 +105,47 @@ export async function deactivateUserInTx(
 // re-enabling it would only resurrect a ghost (and re-add it to the
 // active-admin count).
 export async function reactivateUser(id: string): Promise<boolean> {
-  const res = await prisma.user.updateMany({
-    where: { id, purgedAt: null, deactivatedAt: { not: null } },
-    data: { deactivatedAt: null },
-  });
-  return res.count === 1;
+  // Raw SQL because the scrubbed-shape guard compares `email` against a value
+  // derived from the row's own id, which Prisma's updateMany filter can't
+  // express. Doing it in the statement keeps the check atomic — a read-then-write
+  // could race a concurrent purge and resurrect a row mid-scrub. The
+  // `purgedAt IS NULL` term alone is NOT enough: rows scrubbed before that
+  // column existed carry the tombstone email with a null `purgedAt` (see
+  // isPurgedRow), and re-enabling one produces an unusable zombie account.
+  const rows = await prisma.$executeRaw`
+    UPDATE "User" SET "deactivatedAt" = NULL
+    WHERE id = ${id}
+      AND "purgedAt" IS NULL
+      AND "deactivatedAt" IS NOT NULL
+      AND email <> 'deleted-' || id || '@deleted.invalid'
+  `;
+  return rows === 1;
+}
+
+// One-shot boot self-heal for accounts scrubbed BEFORE `purgedAt` existed.
+// Stamps the marker so every purge-aware surface (the reactivate guard, the
+// admin badge, the Plex backfill's candidate filter) recognises them, and
+// re-disables any that were already re-enabled into a zombie. Matches on the
+// tombstone email, which only a purge can have written.
+//
+// Idempotent, and best-effort: never throws, never blocks boot.
+export async function markLegacyPurgedAccounts(): Promise<void> {
+  try {
+    const healed = await prisma.$executeRaw`
+      UPDATE "User"
+      SET "purgedAt" = COALESCE("deactivatedAt", NOW()),
+          "deactivatedAt" = COALESCE("deactivatedAt", NOW())
+      WHERE "purgedAt" IS NULL
+        AND email = 'deleted-' || id || '@deleted.invalid'
+    `;
+    if (healed > 0) {
+      console.warn(
+        `[account-lifecycle] marked ${healed} previously-anonymized account(s) as purged (and re-disabled any that had been re-enabled).`,
+      );
+    }
+  } catch (err) {
+    console.error("[account-lifecycle] legacy purge backfill failed:", err instanceof Error ? err.message : err);
+  }
 }
 
 // The irreversible half — see the note on deactivateUserInTx. Scrubs the row's
@@ -142,8 +198,9 @@ export async function purgeUserDataInTx(
     where: { id },
     data: {
       name: "Deleted user",
-      // RFC-2606 reserved `.invalid` TLD — never routable, and `id` keeps it unique.
-      email: `deleted-${id}@deleted.invalid`,
+      // Shared with isPurgedRow / markLegacyPurgedAccounts — the two must never
+      // drift, or a scrubbed row stops being recognisable as one.
+      email: purgedEmailFor(id),
       image: null,
       passwordHash: null,
       discordId: null,

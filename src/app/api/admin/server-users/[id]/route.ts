@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
+import { isPurgedRow } from "@/lib/account-lifecycle";
 
 // PATCH /api/admin/server-users/[id] — two independent admin actions on one
 // media-server identity:
@@ -88,7 +89,8 @@ export const PATCH = withAdmin(async (
       // history to it would re-attach data to a row that exists only as a
       // de-identified tombstone. A merely DISABLED account is fine and is the
       // common case: it still owns its history (see account-lifecycle.ts).
-      if (target.purgedAt) {
+      // Shape-aware (see isPurgedRow) so a pre-`purgedAt` scrubbed row is caught too.
+      if (isPurgedRow(target)) {
         return NextResponse.json(
           { error: "That account's data was purged and it can no longer be linked." },
           { status: 400 },

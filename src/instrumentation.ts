@@ -234,6 +234,15 @@ export async function register() {
     // immutable-id-based (provider, plexUserId) matching) aren't locked out on
     // their next sign-in. See src/lib/plex-user-backfill.ts for the full
     // rationale. Fire-and-forget — must never block boot.
+    // Stamp `purgedAt` on accounts scrubbed before that column existed, and
+    // re-disable any that were re-enabled into a zombie. Must run BEFORE the
+    // Plex backfill: an un-marked, re-enabled tombstone looks exactly like a
+    // Plex-only user awaiting a plexUserId, so the backfill warns about it on
+    // every boot. Awaited for that ordering; it is a single indexed UPDATE.
+    await import("@/lib/account-lifecycle")
+      .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
+      .catch((err) => console.error("[account-lifecycle] startup error:", err));
+
     import("@/lib/plex-user-backfill")
       .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
       .catch((err) => console.error("[plex-backfill] startup error:", err));

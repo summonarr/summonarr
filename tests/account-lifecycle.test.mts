@@ -45,7 +45,7 @@ process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // the module's prisma impor
 
 // Dynamic import so the env assignment above genuinely precedes the
 // module-graph load (account-lifecycle imports ./prisma for its TxClient type).
-const { deactivateUserInTx, purgeUserDataInTx, LastAdminError, NotDeactivatedError } =
+const { deactivateUserInTx, purgeUserDataInTx, LastAdminError, NotDeactivatedError, isPurgedRow, purgedEmailFor } =
   await import("../src/lib/account-lifecycle.ts");
 type AnyTx = Parameters<typeof deactivateUserInTx>[0];
 
@@ -320,6 +320,35 @@ test("the tombstone email is unique per user id and sits on the unroutable .inva
   for (const email of [first, second]) {
     assert.match(email, /^deleted-user-(one|two)@deleted\.invalid$/);
   }
+});
+
+// ── purged-row detection (the pre-`purgedAt` migration gap) ─────────────────
+
+test("isPurgedRow recognises a row scrubbed BEFORE purgedAt existed, by its tombstone email", async () => {
+  // The gap that shipped a zombie: `purgedAt` is new, so every account removed
+  // by the older anonymize-on-delete code has the scrubbed shape and a NULL
+  // marker. A bare `purgedAt != null` test reads those as merely "disabled" and
+  // lets them be re-enabled — producing an ACTIVE row nobody can sign into (no
+  // password, no provider subject, no OAuth rows, an unroutable email) that
+  // still counts toward the active-admin total.
+  const legacy = { id: "abc123", email: "deleted-abc123@deleted.invalid", purgedAt: null };
+  assert.equal(isPurgedRow(legacy), true);
+
+  // The explicit marker still wins on its own, whatever the address.
+  assert.equal(isPurgedRow({ id: "x", email: "real@example.com", purgedAt: new Date() }), true);
+
+  // A live account is never mistaken for one — including the near-miss where
+  // the tombstone belongs to a DIFFERENT id (the address embeds the row's own).
+  assert.equal(isPurgedRow({ id: "x", email: "real@example.com", purgedAt: null }), false);
+  assert.equal(isPurgedRow({ id: "x", email: "deleted-someone-else@deleted.invalid", purgedAt: null }), false);
+});
+
+test("the purge writes exactly the address isPurgedRow looks for (no drift between them)", async () => {
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  const { data } = opArgs("user.update") as { data: { email: string } };
+  assert.equal(data.email, purgedEmailFor(ID));
+  // The round trip is the invariant: whatever purge writes must be detectable.
+  assert.equal(isPurgedRow({ id: ID, email: data.email, purgedAt: null }), true);
 });
 
 test("purge severs the MediaServerUser identity by UNLINKING (userId → null), never by deletion", async () => {

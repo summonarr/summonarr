@@ -242,7 +242,24 @@ const fakePrisma = {
     return Promise.all(arg as Promise<unknown>[]);
   },
   $queryRaw: async () => { throw new Error("unexpected top-level $queryRaw"); },
-  $executeRaw: async () => { throw new Error("unexpected top-level $executeRaw"); },
+  // reactivateUser's guarded restore. It is raw SQL because the guard compares
+  // `email` against a value derived from the row's OWN id, which a Prisma
+  // updateMany filter can't express — so the stub enforces the same three terms
+  // the statement does rather than blindly reporting a hit.
+  $executeRaw: async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = strings.join("?").replace(/\s+/g, " ");
+    if (!/UPDATE "User" SET "deactivatedAt" = NULL/.test(sql)) {
+      throw new Error(`unexpected top-level $executeRaw: ${sql}`);
+    }
+    txOps.push({ op: "reactivate.$executeRaw", args: { sql, values } });
+    const row = usersById.get(values[0] as string);
+    if (!row) return 0;
+    if (row.purgedAt != null) return 0;
+    if (row.deactivatedAt == null) return 0;
+    if (row.email === `deleted-${row.id}@deleted.invalid`) return 0; // pre-`purgedAt` tombstone
+    row.deactivatedAt = null;
+    return 1;
+  },
 };
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
@@ -687,12 +704,15 @@ test("reactivate: clears deactivatedAt via the guarded updateMany and audits USE
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
 
-  const restore = txOps.find((o) => o.op === "user.updateMany(top)");
-  assert.ok(restore, "the restore must run as a guarded updateMany, not a blind update");
-  assert.deepEqual(restore.args, {
-    where: { id: targetId, purgedAt: null, deactivatedAt: { not: null } },
-    data: { deactivatedAt: null },
-  });
+  // One guarded statement, not a read-then-write: a concurrent purge landing
+  // between the two would otherwise resurrect a row mid-scrub.
+  const restore = txOps.find((o) => o.op === "reactivate.$executeRaw");
+  assert.ok(restore, "the restore must run as a single guarded statement");
+  const { sql, values } = restore.args as { sql: string; values: unknown[] };
+  assert.match(sql, /"purgedAt" IS NULL/);
+  assert.match(sql, /"deactivatedAt" IS NOT NULL/);
+  assert.match(sql, /email <> 'deleted-' \|\| id \|\| '@deleted\.invalid'/); // the legacy-tombstone guard
+  assert.deepEqual(values, [targetId]); // id travels as a bind param
   assert.equal(usersById.get(targetId)?.deactivatedAt, null);
   await flush();
   assert.equal(auditRows.length, 1);
@@ -706,6 +726,30 @@ test("reactivate refuses a PURGED account — there is no identity left to sign 
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /purged/);
   assert.equal(txOps.length, 0, "no write may be attempted for a purged row");
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("reactivate refuses a LEGACY-purged row (tombstone email, null purgedAt) — no zombie", async () => {
+  // The account this shipped broken for: scrubbed by the older
+  // anonymize-on-delete code, so it carries the tombstone shape but a NULL
+  // purgedAt. The `purgedAt` test alone passed it through and re-enabled it into
+  // an ACTIVE row nobody can sign into, which then also re-entered the Plex
+  // backfill's candidate set and warned on every boot.
+  const admin = await mintSession("ADMIN");
+  const ghostId = seedDisabledUser("USER");
+  const ghost = usersById.get(ghostId)!;
+  ghost.email = `deleted-${ghostId}@deleted.invalid`;
+  ghost.name = "Deleted user";
+  ghost.purgedAt = null; // the column did not exist when this row was scrubbed
+
+  const out = await userReactivate(
+    req(`http://localhost:3000/api/admin/users/${ghostId}/reactivate`, { method: "POST", headers: admin.header }),
+    ctxFor(ghostId),
+  );
+  assert.equal(out.status, 400);
+  assert.match((await out.json()).error, /purged/);
+  assert.ok(usersById.get(ghostId)?.deactivatedAt != null, "the tombstone must stay disabled");
   await flush();
   assert.equal(auditAttempts.length, 0);
 });

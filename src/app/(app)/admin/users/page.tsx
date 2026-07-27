@@ -10,6 +10,7 @@ import { PageHeader } from "@/components/ui/design";
 import { isArrConfigured } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
+import { isPurgedRow } from "@/lib/account-lifecycle";
 
 export const dynamic = "force-dynamic";
 
@@ -130,7 +131,7 @@ export default async function UsersPage() {
             role: u.role,
             createdAt: u.createdAt.toISOString(),
             disabled: u.deactivatedAt != null,
-            purged: u.purgedAt != null,
+            purged: isPurgedRow(u),
             discordId: u.discordId,
             permissions: u.permissions.toString(),
             movieQuotaLimit: u.movieQuotaLimit,
@@ -179,7 +180,7 @@ export default async function UsersPage() {
             // excluded — they have no identity left to attribute history to
             // (the route rejects them too).
             accounts={users
-              .filter((u) => u.purgedAt == null)
+              .filter((u) => !isPurgedRow(u))
               .map((u) => ({ id: u.id, name: u.name, email: u.email }))}
           />
         </div>

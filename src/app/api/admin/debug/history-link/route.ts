@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/email-normalize";
+import { isPurgedRow } from "@/lib/account-lifecycle";
 
 // Play-history attribution counterpart to /api/admin/debug/arr-state: answers
 // "why does this account see no watch history?" in one call.
@@ -86,6 +87,12 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       hasProviderSubject: !!(user.plexUserId || user.jellyfinUserId),
       deactivatedAt: user.deactivatedAt,
       purgedAt: user.purgedAt,
+      // A scrubbed row, by marker OR by shape (rows purged before `purgedAt`
+      // existed carry only the tombstone email). Looking one of these up is the
+      // classic wrong turn: it is the OLD, de-identified record, never the
+      // account the person signs in with today — that is a separate row under
+      // their real address, and it is the one to pass here.
+      isPurgedTombstone: isPurgedRow(user),
     },
     resolvedMediaServerUserIds: visible.map((r) => r.id),
     visibleHistoryRows: visible.reduce((n, r) => n + r.playHistoryRows, 0),

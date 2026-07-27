@@ -5,7 +5,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { reactivateUser } from "@/lib/account-lifecycle";
+import { reactivateUser, isPurgedRow } from "@/lib/account-lifecycle";
 
 // POST /api/admin/users/[id]/reactivate — re-enable a disabled account.
 //
@@ -27,7 +27,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
+    select: { id: true, role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -38,7 +38,11 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Only an admin can re-enable an admin account" }, { status: 403 });
   }
 
-  if (target.purgedAt) {
+  // isPurgedRow, not a bare `purgedAt` test: accounts scrubbed before that column
+  // existed carry the tombstone email with a null marker, and re-enabling one
+  // yields a zombie nobody can sign into (no password, no provider subject, no
+  // OAuth rows, an unroutable email) that still counts as an active user.
+  if (isPurgedRow(target)) {
     return NextResponse.json(
       { error: "This account's data was purged and it can no longer be re-enabled." },
       { status: 400 },
