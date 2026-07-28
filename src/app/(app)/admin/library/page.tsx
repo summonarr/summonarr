@@ -205,8 +205,10 @@ async function buildArrPathMap(
   const service = mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
   const cacheKey = `arr:${service}:paths`;
 
+  // `cached?.length`, not `cached`: an empty array is a truthy cache HIT, so a
+  // once-poisoned key would blank the verdict column for the whole 6h TTL.
   const cached = await getCache<[string, number][]>(cacheKey);
-  if (cached) return new Map(cached);
+  if (cached?.length) return new Map(cached);
 
   // Merge the path→tmdbId mapping across EVERY configured instance (default,
   // 4K, named) — a title that lives only in a non-default instance's library
@@ -224,6 +226,7 @@ async function buildArrPathMap(
 
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
     type ArrItem = { tmdbId?: number; path?: string };
+    let anyInstanceFailed = false;
     for (const inst of instances) {
       try {
         const cfg = await getArrCfg(service, inst.slug);
@@ -235,11 +238,17 @@ async function buildArrPathMap(
           if (!map.has(normPath)) map.set(normPath, item.tmdbId);
         }
       } catch {
-        // One unreachable instance shouldn't blank the whole verdict column.
+        // One unreachable instance shouldn't blank the whole verdict column —
+        // which is exactly what memoizing this partial result would do. Record
+        // the failure and skip the write so the next page load retries; a
+        // 30-second Radarr restart otherwise cost 6h of blank ARR verdicts.
+        anyInstanceFailed = true;
       }
     }
 
-    await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
+    if (!anyInstanceFailed && map.size > 0) {
+      await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
+    }
   } catch { }
   return map;
 }

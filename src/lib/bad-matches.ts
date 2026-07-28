@@ -77,8 +77,11 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
   // against full-path keys — or vice versa — all miss, so every arrVerdict
   // silently reads null). Keep the two keys distinct.
   const cacheKey = `arr:${mediaType === "MOVIE" ? "radarr" : "sonarr"}:paths:name`;
+  // `cached?.length`, not `cached`: `[]` is a truthy hit, so an empty map (a
+  // freshly-configured or still-importing instance answering 200 []) would stick
+  // for the full 6h TTL and null every arrVerdict.
   const cached = await getCache<[string, number][]>(cacheKey);
-  if (cached) return new Map(cached);
+  if (cached?.length) return new Map(cached);
 
   const map = new Map<string, number>();
   try {
@@ -105,7 +108,7 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
       const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
       if (folderName) map.set(folderName, item.tmdbId);
     }
-    await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
+    if (map.size > 0) await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
   } catch (err) {
     // Don't swallow silently — a missing arr map makes every bad-match verdict
     // null, which previously looked like "no problems found".
