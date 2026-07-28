@@ -194,8 +194,17 @@ export async function purgeUserDataInTx(
   await tx.watchlistItem.deleteMany({ where: { userId: id } });
   await tx.hiddenItem.deleteMany({ where: { userId: id } });
   await tx.notification.deleteMany({ where: { userId: id } });
-  await tx.user.update({
-    where: { id },
+  // Re-check deactivation atomically in the same statement that scrubs the row.
+  // The precondition read at the top of this function is several awaited
+  // deletes ago — a concurrent reactivate can clear deactivatedAt in that
+  // window, and an unguarded update below would still go through, producing a
+  // NEW zombie shape: purgedAt set (isPurgedRow reports it scrubbed) but
+  // deactivatedAt NULL (every OTHER last-admin CAS in this codebase — the
+  // role-change route and deactivateUserInTx both count
+  // `role = 'ADMIN' AND deactivatedAt IS NULL` — would miscount it as a second
+  // active admin and let the real last admin be deactivated or demoted).
+  const scrubbed = await tx.user.updateMany({
+    where: { id, deactivatedAt: { not: null } },
     data: {
       name: "Deleted user",
       // Shared with isPurgedRow / markLegacyPurgedAccounts — the two must never
@@ -212,4 +221,8 @@ export async function purgeUserDataInTx(
       sessionsRevokedAt: now, // pushes every existing JWT's iat below the cutoff
     },
   });
+  // Lost the race — the account was reactivated after our read above. Throw so
+  // the caller's $transaction rolls back everything issued so far, rather than
+  // leaving a half-scrubbed row that's no longer deactivated.
+  if (scrubbed.count === 0) throw new NotDeactivatedError();
 }

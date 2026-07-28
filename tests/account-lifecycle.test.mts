@@ -54,6 +54,7 @@ type Op = { op: string; args?: unknown };
 const ops: Op[] = [];
 const opNames = () => ops.map((o) => o.op);
 let casRows = 1; // rows affected by the last-admin CAS ($executeRaw)
+let userUpdateManyRows = 1; // rows affected by purge's final guarded update (races: set to 0)
 let lastCas: { sql: string; values: unknown[] } | null = null;
 // What user.findUnique returns to purgeUserDataInTx's precondition check.
 let userState: { deactivatedAt: Date | null; purgedAt: Date | null } | null = null;
@@ -97,6 +98,10 @@ const baseTx = {
       return userState;
     },
     update: record("user", "update"),
+    updateMany: async (args: unknown) => {
+      ops.push({ op: "user.updateMany", args });
+      return { count: userUpdateManyRows };
+    },
     delete: trap("account removal must never hard-delete the User row — history stays attached"),
     deleteMany: trap("account removal must never hard-delete the User row — history stays attached"),
   },
@@ -139,7 +144,7 @@ const PURGE_OPS = [
   "watchlistItem.deleteMany",
   "hiddenItem.deleteMany",
   "notification.deleteMany",
-  "user.update",
+  "user.updateMany",
 ];
 
 function opArgs(op: string): unknown {
@@ -151,6 +156,7 @@ function opArgs(op: string): unknown {
 beforeEach(() => {
   ops.length = 0;
   casRows = 1;
+  userUpdateManyRows = 1;
   lastCas = null;
   userState = { deactivatedAt: DISABLED_AT, purgedAt: null };
 });
@@ -283,10 +289,12 @@ test("the purge payload is EXACTLY the personal-data field set — nothing more,
   await purgeUserDataInTx(purgeTx, ID, NOW);
   // deepEqual pins both directions: every personal field is nulled/replaced, and
   // no OTHER field (role, quotas, createdAt, …) is touched — requests/votes/
-  // issues stay attached to the de-identified row. deactivatedAt is absent on
-  // purpose: the row is ALREADY disabled and must stay that way.
-  assert.deepEqual(opArgs("user.update"), {
-    where: { id: ID },
+  // issues stay attached to the de-identified row. deactivatedAt is absent from
+  // `data` on purpose: the row is ALREADY disabled and must stay that way — it's
+  // re-asserted in `where` instead, as the atomic race guard (see the dedicated
+  // race test below).
+  assert.deepEqual(opArgs("user.updateMany"), {
+    where: { id: ID, deactivatedAt: { not: null } },
     data: {
       name: "Deleted user",
       email: `deleted-${ID}@deleted.invalid`,
@@ -305,16 +313,34 @@ test("the purge payload is EXACTLY the personal-data field set — nothing more,
 
 test("purge never clears deactivatedAt — a purged row can't come back as a live account", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
-  const { data } = opArgs("user.update") as { data: Record<string, unknown> };
+  const { data } = opArgs("user.updateMany") as { data: Record<string, unknown> };
   assert.ok(!("deactivatedAt" in data), "deactivatedAt must be left untouched by the purge");
+});
+
+test("purge re-checks deactivation atomically in the same statement that scrubs the row — a concurrent reactivate aborts the whole purge instead of leaving a zombie", async () => {
+  // Simulates a reactivate winning the race AFTER purge's precondition read (at
+  // the top of the function) but BEFORE its final write, several awaited
+  // deletes later: the guarded updateMany matches 0 rows because deactivatedAt
+  // is no longer set. Without this guard the write would go through anyway,
+  // producing a row with purgedAt set but deactivatedAt NULL — a zombie that
+  // miscounts as a second active admin in every last-admin CAS in this codebase.
+  userUpdateManyRows = 0;
+  await assert.rejects(
+    () => purgeUserDataInTx(purgeTx, ID, NOW),
+    (err: unknown) => err instanceof NotDeactivatedError,
+  );
+  // The full scrub sequence still ran up to and including the guarded write —
+  // it's the throw AFTER that write, not a skipped write, that aborts the purge
+  // and rolls the caller's $transaction back with nothing durable.
+  assert.deepEqual(opNames(), PURGE_OPS);
 });
 
 test("the tombstone email is unique per user id and sits on the unroutable .invalid TLD", async () => {
   await purgeUserDataInTx(purgeTx, "user-one", NOW);
-  const first = (opArgs("user.update") as { data: { email: string } }).data.email;
+  const first = (opArgs("user.updateMany") as { data: { email: string } }).data.email;
   ops.length = 0;
   await purgeUserDataInTx(purgeTx, "user-two", NOW);
-  const second = (opArgs("user.update") as { data: { email: string } }).data.email;
+  const second = (opArgs("user.updateMany") as { data: { email: string } }).data.email;
 
   assert.notEqual(first, second); // id keeps the unique-email constraint satisfiable
   for (const email of [first, second]) {
@@ -345,7 +371,7 @@ test("isPurgedRow recognises a row scrubbed BEFORE purgedAt existed, by its tomb
 
 test("the purge writes exactly the address isPurgedRow looks for (no drift between them)", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
-  const { data } = opArgs("user.update") as { data: { email: string } };
+  const { data } = opArgs("user.updateMany") as { data: { email: string } };
   assert.equal(data.email, purgedEmailFor(ID));
   // The round trip is the invariant: whatever purge writes must be detectable.
   assert.equal(isPurgedRow({ id: ID, email: data.email, purgedAt: null }), true);

@@ -168,6 +168,16 @@ function makeTx() {
         return u ? { sessionsRevokedAt: u.sessionsRevokedAt, deactivatedAt: u.deactivatedAt, purgedAt: u.purgedAt } : null;
       },
       update: rec("user.update"),
+      // purgeUserDataInTx's final write — atomically re-checks deactivatedAt in
+      // the SAME statement that scrubs the row, closing a race where a
+      // concurrent reactivate could otherwise leave a purged-but-active zombie.
+      // Mirrors the real WHERE guard against the same usersById state the
+      // precondition check above reads.
+      updateMany: async (args: { where: { id: string; deactivatedAt: { not: null } } }) => {
+        const u = usersById.get(args.where.id);
+        txOps.push({ op: "user.updateMany", args });
+        return u && u.deactivatedAt != null ? { count: 1 } : { count: 0 };
+      },
     },
   };
 }
@@ -788,7 +798,7 @@ test("purge of a disabled account scrubs it, keeps the row, and audits USER_PURG
   const unlink = txOps.find((o) => o.op === "mediaServerUser.updateMany");
   assert.ok(unlink, "the purge must UNLINK the MediaServerUser rows");
   assert.deepEqual(unlink.args, { where: { userId: targetId }, data: { userId: null } });
-  const scrub = txOps.find((o) => o.op === "user.update");
+  const scrub = txOps.find((o) => o.op === "user.updateMany");
   const data = (scrub!.args as { data: Record<string, unknown> }).data;
   assert.equal(data.email, `deleted-${targetId}@deleted.invalid`);
   assert.equal(data.passwordHash, null);
@@ -808,7 +818,7 @@ test("GUARDRAIL 26 (purge): auditLog throws → 200 kept, the scrub committed, s
   auditThrows = true;
   const res = await userPurge(req(`http://localhost:3000/api/admin/users/${targetId}/purge`, { method: "POST", headers: admin.header }), ctxFor(targetId));
   assert.equal(res.status, 200, "a failed audit write must not 500 an already-committed, irreversible scrub");
-  assert.ok(txOps.some((o) => o.op === "user.update"));
+  assert.ok(txOps.some((o) => o.op === "user.updateMany"));
   await flush();
   assert.equal(auditAttempts.length, 1);
   assert.ok(sawSwallow());
