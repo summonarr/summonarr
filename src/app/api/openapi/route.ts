@@ -918,8 +918,11 @@ const spec = {
     "/push/vapid-key": {
       get: {
         tags: ["Push"],
+        // No `security: []` override — the handler is withAuth-wrapped and 401s
+        // anonymous callers, so it must inherit the document-level session/bearer
+        // requirement. Declaring it public made generated clients omit the
+        // credential and fail push registration with an unexplained 401.
         summary: "Get the public VAPID key for push subscription",
-        security: [],
         responses: { "200": { description: "VAPID public key", content: { "application/json": { schema: { type: "object", properties: { publicKey: { type: "string" } } } } } } },
       },
     },
@@ -1437,6 +1440,26 @@ const spec = {
           "200": {
             description: "Provider-configured flags, MDBList/OMDB quota-lockout state, raw ratings cache rows, details-cache rating fields, optional live probe",
           },
+        },
+      },
+    },
+
+    "/admin/debug/history-link": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "Dump play-history attribution state for an account (ADMIN)",
+        description:
+          "Why a user's watch history is empty: the account's three identity columns, every candidate MediaServerUser row with per-row matchesFk / matchesSubject / visibleToUser verdicts, the resolved id list, and any orphaned server identities holding history the account cannot see. Pass exactly one of userId or email.",
+        parameters: [
+          { name: "userId", in: "query", schema: { type: "string" }, description: "Summonarr User id (mutually exclusive with email)" },
+          { name: "email", in: "query", schema: { type: "string" }, description: "Account email (mutually exclusive with userId)" },
+        ],
+        responses: {
+          "200": {
+            description: "Identity columns, candidate MediaServerUser rows with match verdicts, resolved ids, orphanedWithHistory",
+          },
+          "400": { description: "Neither userId nor email supplied" },
+          "404": { description: "No account matched" },
         },
       },
     },

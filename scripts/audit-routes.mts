@@ -194,7 +194,13 @@ function routePath(file: string): string {
 }
 
 function isAllowlisted(rel: string): boolean {
-  return ALLOWLIST.some((a) => rel === a.prefix || rel.startsWith(a.prefix));
+  // A subtree match must stop at a path separator. `rel.startsWith("health")`
+  // also matched a sibling like `health-internal/…`, silently exempting a brand
+  // new route from the CI auth gate — the one thing this script exists to stop.
+  // Exact matches still pass (the bare `health` / `interactions` routes).
+  return ALLOWLIST.some(
+    (a) => rel === a.prefix || rel.startsWith(a.prefix.endsWith("/") ? a.prefix : `${a.prefix}/`),
+  );
 }
 
 function main(): void {
