@@ -12,7 +12,11 @@ export function sanitizeText(input: string): string {
 }
 
 export function sanitizeOptional(input: string | undefined | null): string | null {
-  if (input == null) return null;
+  // Runtime-guard the type, don't just trust it. These values come from JSON
+  // request bodies, where the declared body type is a compile-time claim only —
+  // a client sending `{"title": 123}` reached `.replace` on a number and threw,
+  // turning what should be a 400 into a 500.
+  if (typeof input !== "string") return null;
   const cleaned = sanitizeText(input);
   return cleaned || null;
 }

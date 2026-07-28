@@ -369,13 +369,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       const looksLikeUrl = value.includes("://");
       const requireUrl = key === "donationAmazon";
       if (looksLikeUrl || requireUrl) {
+        // https ONLY, matching the renderer. /donate's safeUrl() drops anything
+        // that isn't https:, so an http:// link saved cleanly here and then
+        // silently rendered as dead text — the admin got a success toast for a
+        // link that could never work. Reject at write time instead. (Tightening
+        // this side rather than loosening the page: a donation link is exactly
+        // where an http downgrade matters.)
         try {
           const parsed = new URL(value);
-          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          if (parsed.protocol !== "https:") {
             return NextResponse.json(
               {
                 error: "invalid-url",
-                message: "Donation URL must be http:// or https://",
+                message: "Donation URL must be https://",
               },
               { status: 400 },
             );
@@ -384,7 +390,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           return NextResponse.json(
             {
               error: "invalid-url",
-              message: "Donation URL must be http:// or https://",
+              message: "Donation URL must be https://",
             },
             { status: 400 },
           );

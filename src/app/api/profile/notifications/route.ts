@@ -85,48 +85,63 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       // the account (fetched live below). An attacker cannot point notifications at
       // a mailbox they don't already control on the upstream Jellyfin server, so the
       // upstream server's own account ownership becomes the verification boundary.
-      // Summonarr has no self-service email-verification flow (no confirmation-code
-      // round-trip), so this server-authoritative match is the only sound mitigation
-      // available.
+      //
+      // There IS now a self-service verification flow — POST /api/profile/
+      // notification-email + /confirm mails a one-time token and binds the address
+      // only after the user proves possession. It is the way to set a NEW address;
+      // this branch stays server-authoritative for anything it hasn't already
+      // verified.
       const candidate = normalizeEmail(raw);
       const me = await prisma.user.findUnique({
         where: { id: session.user.id },
-        select: { jellyfinUserId: true },
+        select: { jellyfinUserId: true, notificationEmail: true },
       });
       const jellyfinUserId = me?.jellyfinUserId ?? null;
 
-      let reportedEmail: string | null = null;
-      if (jellyfinUserId) {
-        const { url, apiKey } = await getJellyfinConfig();
-        if (url && apiKey) {
-          // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
-          // reads Settings (no encryptToken at the call site — guardrail 7a holds).
-          const fromJellyfin = await getJellyfinUserEmail(url, apiKey, jellyfinUserId);
-          if (fromJellyfin) reportedEmail = normalizeEmail(fromJellyfin);
+      // An unchanged write-back of the CURRENTLY STORED address is a no-op, and
+      // that value is already verified — either it matched Jellyfin when it was
+      // set, or the user confirmed possession through the token flow. Rejecting it
+      // 403'd clients that simply PATCH the whole prefs object back (the iOS
+      // setNotificationEmail helper does exactly that) for a value this server is
+      // already using. Equality only — this can never bind a new address.
+      if (me?.notificationEmail && candidate === normalizeEmail(me.notificationEmail)) {
+        data.notificationEmail = candidate;
+      } else {
+        let reportedEmail: string | null = null;
+        if (jellyfinUserId) {
+          const { url, apiKey } = await getJellyfinConfig();
+          if (url && apiKey) {
+            // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
+            // reads Settings (no encryptToken at the call site — guardrail 7a holds).
+            const fromJellyfin = await getJellyfinUserEmail(url, apiKey, jellyfinUserId);
+            if (fromJellyfin) reportedEmail = normalizeEmail(fromJellyfin);
+          }
         }
-      }
 
-      // TODO: If the Jellyfin server reports NO email for this account there is
-      // nothing server-authoritative to bind the requested address to. Rather than
-      // fall back to accepting an unverified free-form address (which would reopen
-      // the notification-redirect / harassment vector described above), reject the
-      // write. The proper long-term fix is a self-service email-verification flow
-      // (mail a one-time code to the requested address and persist it only after the
-      // user confirms possession) — deferred because it requires reliable outbound
-      // mail infrastructure to be a hard dependency of the profile flow.
-      if (!reportedEmail) {
-        return NextResponse.json(
-          { error: "Set an email on your Jellyfin account first, then it can be used for notifications." },
-          { status: 403 },
-        );
+        // Nothing server-authoritative to bind a NEW address to. Accepting a
+        // free-form one here would reopen the notification-redirect / harassment
+        // vector, so point the caller at the verification flow instead — that
+        // path mails a one-time token and binds only on proven possession.
+        if (!reportedEmail) {
+          return NextResponse.json(
+            {
+              error:
+                "Verify this address first (POST /api/profile/notification-email), or set an email on your Jellyfin account.",
+            },
+            { status: 403 },
+          );
+        }
+        if (candidate !== reportedEmail) {
+          return NextResponse.json(
+            {
+              error:
+                "notificationEmail must match the email on your Jellyfin account, or be verified first via POST /api/profile/notification-email.",
+            },
+            { status: 403 },
+          );
+        }
+        data.notificationEmail = candidate;
       }
-      if (candidate !== reportedEmail) {
-        return NextResponse.json(
-          { error: "notificationEmail must match the email on your Jellyfin account." },
-          { status: 403 },
-        );
-      }
-      data.notificationEmail = candidate;
     } else {
       return NextResponse.json({ error: "Invalid notificationEmail" }, { status: 400 });
     }

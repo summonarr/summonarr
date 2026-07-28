@@ -88,7 +88,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // matters because labels get captured by the audit log (auditContext bundles
   // user-controlled strings into `details`) — a bidi-override would otherwise
   // let a user spoof apparent identity in audit-table views.
-  const sanitizedLabel = label
+  // typeof-guard BEFORE the string method — the parsed body is untyped at
+  // runtime, so a numeric `label` threw on .replace and returned a 500.
+  const sanitizedLabel = typeof label === "string" && label
     ? (sanitizeText(label).slice(0, 100) || undefined)
     : undefined;
 

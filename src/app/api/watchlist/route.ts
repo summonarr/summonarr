@@ -19,7 +19,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const typeParam = sp.get("type");
   const mediaType = typeParam === "MOVIE" || typeParam === "TV" ? typeParam : undefined;
-  const q = (sp.get("q") ?? "").trim();
+  // See /api/votes: Prisma `contains` → ILIKE '%q%' with no ESCAPE, so strip
+  // `%`/`_`/`\` and bound the length (wildcard-scan DoS, the same mitigation
+  // /api/play-history applies to its search box).
+  const q = (sp.get("q") ?? "").trim().replace(/[%_\\]/g, "").slice(0, 100);
 
   const where: Prisma.WatchlistItemWhereInput = {
     userId: session.user.id,

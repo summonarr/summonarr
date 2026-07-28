@@ -149,3 +149,18 @@ test("sanitizeForLog stringifies undefined and plain objects", () => {
   assert.equal(sanitizeForLog(undefined), "undefined");
   assert.equal(sanitizeForLog({}), "[object Object]");
 });
+
+test("sanitizeOptional runtime-guards non-strings instead of throwing", () => {
+  // The declared param type is a compile-time claim only — every caller feeds it a
+  // field off a parsed JSON request body. `{"title": 123}` reached .replace on a
+  // number and threw, turning a 400 into a 500 on /api/hidden, /api/push/apns and
+  // /api/push/subscribe.
+  for (const bad of [123, true, {}, [], 0, NaN] as unknown as (string | undefined | null)[]) {
+    assert.equal(sanitizeOptional(bad), null);
+  }
+  // Genuine strings are unaffected, including the empty-string → null contract.
+  assert.equal(sanitizeOptional("  Dune  "), "Dune");
+  assert.equal(sanitizeOptional("   "), null);
+  assert.equal(sanitizeOptional(null), null);
+  assert.equal(sanitizeOptional(undefined), null);
+});
