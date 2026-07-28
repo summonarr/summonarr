@@ -878,7 +878,7 @@ async function handleComponent(interaction: any): Promise<void> {
                   }
                 }
               } else {
-                const firstAired = await getSeriesFirstAired(selected.id);
+                const firstAired = await getSeriesFirstAired(selected.id, routedSlug);
                 if (firstAired && new Date(firstAired) > now) {
                   released = false;
                   soonestReleaseDate = firstAired;

@@ -169,3 +169,46 @@ test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFe
   assert.match(source, /maxResponseBytes: ARR_FETCH_MAX_BYTES/);
   assert.match(source, /timeoutMs: ARR_FETCH_TIMEOUT_MS/);
 });
+
+test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback actually fires", () => {
+  // getCfg is module-private and DB-bound, so pin it structurally (same technique
+  // as the 50 MB cap above). An empty-string rootFolder is the instance manager's
+  // documented "— use the server's default —" choice: its select ships
+  // <option value=""> and POST /api/admin/arr-instances writes it verbatim as a
+  // Setting row. Every guard around the value is a FALSY check
+  // (`cfg.rootFolder ? skip : fetch`, `!cfg.rootFolder && !rootFolders.length`),
+  // so "" flows through them as "unset" — but it SURVIVES `??`, so
+  // `cfg.rootFolder ?? rootFolders[0].path` yielded "" and the add POSTed
+  // rootFolderPath:"". Radarr/Sonarr 400 that, and every request routed to the
+  // instance bounced APPROVED→PENDING forever behind an opaque "Arr request
+  // failed (400)". The sibling qualityProfileId already normalizes for exactly
+  // this reason.
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const fn = source.slice(source.indexOf("async function getCfg("));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.match(
+    body,
+    /rootFolder:\s*map\[folderKey\]\s*\|\|\s*undefined/,
+    "rootFolder must be `|| undefined` — a bare `map[folderKey]` lets \"\" survive the `??` at both add sites",
+  );
+
+  // And both add sites must still rely on `??` (the guards above them assume it).
+  for (const site of ["addMovieToRadarr", "addSeriesToSonarr"]) {
+    const f = source.slice(source.indexOf(`export async function ${site}`));
+    const b = f.slice(0, f.indexOf("\n}\n"));
+    assert.match(b, /const rootFolderPath = cfg\.rootFolder \?\? rootFolders\[0\]\.path;/, `${site} root-folder fallback`);
+  }
+});
+
+test("isSeriesWantedInSonarr tolerates a series row with no statistics block", () => {
+  // Its two siblings guard `statistics` explicitly (one carries a comment about
+  // an "opaque availability freeze"); this one dereferenced it bare, so a single
+  // anomalous /api/v3/series row would throw into the function's own catch and
+  // report wantedLive:false with no error — actively misleading the arr-state
+  // diagnostic CLAUDE.md tells operators to trust first.
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const fn = source.slice(source.indexOf("export async function isSeriesWantedInSonarr"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+  assert.match(body, /match\.statistics\?\./, "statistics must be optional-chained");
+  assert.doesNotMatch(body, /match\.statistics\.[a-z]/i, "no bare statistics dereference may remain");
+});

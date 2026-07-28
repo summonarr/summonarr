@@ -249,7 +249,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           }
         }
       } else {
-        const firstAired = await getSeriesFirstAired(req.tmdbId);
+        const firstAired = await getSeriesFirstAired(req.tmdbId, req.arrInstance);
         if (firstAired && new Date(firstAired) > now) {
           released = false;
           soonestReleaseDate = firstAired;

@@ -344,7 +344,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
             }
           }
         } else {
-          const firstAired = await getSeriesFirstAired(updated.tmdbId);
+          const firstAired = await getSeriesFirstAired(updated.tmdbId, variant);
           if (firstAired && new Date(firstAired) > now) {
             released = false;
             soonestReleaseDate = firstAired;
