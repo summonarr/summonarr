@@ -317,11 +317,12 @@ _cron_loop() {
   RATINGS_NEXT=$((NOW_INIT + 180))
   WARM_MDBLIST_NEXT=$((NOW_INIT + 240))
   WARM_OMDB_NEXT=$((NOW_INIT + 300))
+  WARM_RECOMMENDATIONS_NEXT=$((NOW_INIT + 480))
   PURGE_SESSIONS_NEXT=$((NOW_INIT + 600))
   SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -356,6 +357,10 @@ _cron_loop() {
     if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
       _cron_sync "${WARM_OMDB_URL:-${CRON_BASE}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
       WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}")
+    fi
+    if [ "$NOW" -ge "$WARM_RECOMMENDATIONS_NEXT" ]; then
+      _cron_sync "${WARM_RECOMMENDATIONS_URL:-${CRON_BASE}/api/cron/warm-recommendations}" "warm-recommendations" && rc=0 || rc=$?
+      WARM_RECOMMENDATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_RECOMMENDATIONS_INTERVAL:-43200}")
     fi
     if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
       _cron_sync "${SCRUB_AUDIT_PII_URL:-${CRON_BASE}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?

@@ -49,6 +49,13 @@ const VALID_CATEGORIES: readonly FeatureCategory[] = ["pages", "behaviors", "int
 // desyncs the old settings UI from the new toggle (both write the same row).
 const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] as const;
 
+// feature.* keys that deliberately default OFF despite being modern (not
+// pre-Features-tab) flags — because the behavior they gate starts out with no
+// data to show. Distinct from LEGACY_KEYS (which predate the Features tab
+// entirely); this is a narrow, named exception to "every feature.* flag
+// defaults ON", not a second legacy era.
+const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou"] as const;
+
 // ── Registry invariants ──────────────────────────────────────────────────
 
 test("FEATURE_KEYS mirrors FEATURE_DEFINITIONS order and every key is unique", () => {
@@ -102,6 +109,8 @@ test("defaults are sane: feature.* flags default ON, legacy flags keep their his
   for (const def of FEATURE_DEFINITIONS) {
     if ((LEGACY_KEYS as readonly string[]).includes(def.key)) {
       assert.equal(def.defaultEnabled, false, `legacy ${def.key} must default OFF`);
+    } else if ((NEW_FEATURE_DEFAULT_OFF_KEYS as readonly string[]).includes(def.key)) {
+      assert.equal(def.defaultEnabled, false, `${def.key} must default OFF (no data until its cron/behavior populates it)`);
     } else {
       assert.equal(def.defaultEnabled, true, `${def.key} must default ON`);
     }
@@ -146,7 +155,7 @@ test("each group contains exactly the definitions of its category, in registry o
 
 test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
-  assert.equal(groups.pages.length, 6);
+  assert.equal(groups.pages.length, 7);
   assert.equal(groups.behaviors.length, 4);
   assert.equal(groups.integrations.length, 7);
   assert.equal(groups.admin.length, 5);

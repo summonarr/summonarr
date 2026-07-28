@@ -47,6 +47,7 @@ export const BACKUP_TABLES = [
   "WatchlistItem",
   "HiddenItem",
   "Notification",
+  "UserRecommendation",
   "BlacklistItem",
 ] as const;
 

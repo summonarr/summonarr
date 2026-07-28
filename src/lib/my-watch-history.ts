@@ -131,7 +131,7 @@ interface RawGroupedRow {
 // Inactive (soft-deleted) server users stay INCLUDED — history outlives a
 // user's removal from the media server (guardrail 28), and it is still the
 // caller's own history.
-async function resolveLinkedMediaServerUserIds(summonarrUserId: string): Promise<string[]> {
+export async function resolveLinkedMediaServerUserIds(summonarrUserId: string): Promise<string[]> {
   const me = await prisma.user.findUnique({
     where: { id: summonarrUserId },
     select: { plexUserId: true, jellyfinUserId: true },

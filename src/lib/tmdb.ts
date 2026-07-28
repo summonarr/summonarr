@@ -1014,6 +1014,7 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
 
 export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
   const key = `movie:${id}:suggestions`;
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1037,10 +1038,12 @@ export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
   // suggestions for the full 7-day DETAILS TTL (mirrors searchMulti's guard).
   if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
+  });
 }
 
 export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
   const key = `tv:${id}:suggestions`;
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1062,6 +1065,7 @@ export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
   // Don't cache an empty result — see getMovieSuggestions.
   if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
+  });
 }
 
 export async function getMovieCollection(collectionId: number): Promise<TmdbMedia[]> {

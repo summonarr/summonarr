@@ -135,6 +135,7 @@ model User {
   watchlist         WatchlistItem[]
   hidden            HiddenItem[]
   notifications     Notification[]
+  recommendations   UserRecommendation[]
 }
 
 model PushSubscription {
@@ -1047,6 +1048,42 @@ model HiddenItem {
 
   @@unique([userId, tmdbId, mediaType]) // one hide entry per user per item
   @@index([userId, createdAt])
+}
+
+// Per-user "For You" recommendation cache, precomputed by the
+// warm-recommendations cron (src/lib/recommendations.ts) from the user's own
+// watched PlayHistory + WatchlistItem seeds fanned out through TMDB's
+// similar/recommendations endpoints. Read directly by the home page — no live
+// TMDB call on that hot path. Fields are denormalized from the TmdbMedia the
+// suggestions call already returned (same rationale as WatchlistItem/HiddenItem:
+// a suggestion-only tmdbId isn't guaranteed a TmdbMediaCore/TmdbCache row) —
+// enough of them to reconstruct a valid TmdbMedia without a second fetch.
+// releaseYear is NOT stored; it's derived from releaseDate at read time,
+// matching normalizeMovie/normalizeTV's convention everywhere else.
+model UserRecommendation {
+  id        String   @id @default(cuid(2))
+  computedAt DateTime @default(now())
+
+  tmdbId       Int
+  mediaType    MediaType
+  title        String  @db.VarChar(500)
+  overview     String?
+  posterPath   String? @db.VarChar(500)
+  backdropPath String? @db.VarChar(500)
+  releaseDate  String? @db.VarChar(16)
+  voteAverage  Float   @default(0)
+
+  // score = seed-type-weight × recency-weight, summed across every seed that
+  // surfaced this candidate; rank is score's sort position (read path orders
+  // by rank directly instead of re-deriving it).
+  score Float
+  rank  Int
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType])
+  @@index([userId, rank])
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event
