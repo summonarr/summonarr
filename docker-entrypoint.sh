@@ -273,15 +273,21 @@ JSEOF
 # dead port while both health probes kept reporting healthy.
 CRON_BASE="http://localhost:${PORT:-3000}${BASE_PATH}"
 
-# Digits-only, or the supplied default. The interval knobs are free-form env vars
-# (SYNC_INTERVAL, RATINGS_SYNC_INTERVAL, CRON_RETRY_INTERVAL, …); a typo like
-# "1h" or "3600s" makes the $(( )) arithmetic below a fatal shell error, and with
-# `set -e` that kills the whole _cron_loop subshell for the container's lifetime —
-# every cron silently stops while the healthcheck keeps reporting healthy.
+# Digits-only, no leading zero, or the supplied default. The interval knobs are
+# free-form env vars (SYNC_INTERVAL, RATINGS_SYNC_INTERVAL, CRON_RETRY_INTERVAL,
+# …); a typo like "1h" or "3600s" makes the $(( )) arithmetic below a fatal shell
+# error, and with `set -e` that kills the whole _cron_loop subshell for the
+# container's lifetime — every cron silently stops while the healthcheck keeps
+# reporting healthy. A plain digits-only check isn't enough on its own: shell
+# arithmetic treats a leading zero as OCTAL, so "009"/"018" (all-digits, but
+# invalid octal since octal digits stop at 7) hits the exact same fatal $(( ))
+# error, and "010" doesn't error but silently becomes decimal 8. Reject any
+# all-digit value that isn't exactly "0" or free of a leading zero.
 _cron_int() {
   case "$1" in
     ''|*[!0-9]*) echo "$2" ;;
-    *)           echo "$1" ;;
+    0|[1-9]*)    echo "$1" ;;
+    *)           echo "$2" ;; # all-digits but leading-zero (e.g. "009") — octal-ambiguous
   esac
 }
 
@@ -377,7 +383,12 @@ _cron_loop() {
 # Node becoming reachable. 60s max is the same window the HEALTHCHECK
 # start-period uses.
 _play_history_loop() {
-  INTERVAL=${PLAY_HISTORY_SYNC_INTERVAL:-5}
+  # Routed through _cron_int like every other interval knob (see its comment) —
+  # this one feeds `sleep` directly rather than $(( )) arithmetic, but an empty
+  # or non-numeric value is fatal there too ("sleep: invalid number"), and under
+  # `set -e` that silently and permanently stops play-history/Now Playing
+  # polling while the healthcheck stays green.
+  INTERVAL=$(_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5)
   echo "Play history polling started (every ${INTERVAL}s)"
 
   PORT_VALUE="${PORT:-3000}" BASE_PATH_VALUE="${BASE_PATH}" node --input-type=module <<'JSEOF'
