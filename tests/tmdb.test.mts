@@ -710,6 +710,23 @@ test("discover TV: first_air_date param family, allowlisted sort passes through,
   assert.equal(cacheUpserts[0]?.key, "discover:tv:first_air_date.desc:16::10::1999:2001:::page:2");
 });
 
+test("discover movies: an out-of-range page number is clamped to 500 in BOTH the wire param and the cache key", async () => {
+  respond = () => jsonResponse(pageOf([rawMovie(41, "Disc Movie")], 1));
+  const result = await discoverMoviesPage({}, 999999);
+
+  assert.equal(fetchCalls[0].url.searchParams.get("page"), "500");
+  assert.match(cacheUpserts[0]?.key ?? "", /:page:500$/);
+  assert.equal(result.items.length, 1);
+});
+
+test("discover movies: an all-invalid-id (empty) page is NOT cached — a transient upstream blip can't suppress real results for the DISCOVER TTL", async () => {
+  respond = () => jsonResponse(pageOf([rawMovie(0, "Bad Id")], 1)); // filtered out by id>0
+  const result = await discoverMoviesPage({}, 1);
+
+  assert.equal(result.items.length, 0);
+  assert.equal(cacheUpserts.length, 0);
+});
+
 // ── degradation: missing token, transient socket errors ─────────────────────
 
 test("no TMDB_READ_TOKEN: list helpers degrade to [] with ZERO fetches and cache nothing", async () => {
