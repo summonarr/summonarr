@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
+import { posterUrl } from "@/lib/tmdb-types";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -268,16 +269,25 @@ async function ungroupedQuery(
     prisma.playHistory.count({ where }),
   ]);
 
-  const posters = await resolvePosterMap(items);
-  const itemsWithPosters = items.map((it) => ({
-    ...it,
-    posterUrl: it.tmdbId != null ? posters[it.tmdbId] ?? null : null,
-    // In ungrouped mode every row is its own chain of one — surface segmentCount
-    // so the client can render the badge consistently in either mode.
-    segmentCount: 1,
-    chainId: it.referenceId ?? it.id,
-    totalPlayDuration: it.playDuration,
-  }));
+  // Live TmdbMediaCore/TmdbCache paths. `posterUrl` (the web field) stays
+  // live-only as it always was; `posterPath` — the row's finalize-time snapshot,
+  // null for anything uncached at record time — falls back to the snapshot but
+  // now prefers the live path, which is what native clients read.
+  const livePaths = await resolvePosterPathMap(items);
+  const itemsWithPosters = items.map((it) => {
+    const live =
+      it.tmdbId != null ? livePaths[posterPathKey(it.tmdbId, it.mediaType)] ?? null : null;
+    return {
+      ...it,
+      posterPath: live ?? it.posterPath,
+      posterUrl: posterUrl(live, "w342"),
+      // In ungrouped mode every row is its own chain of one — surface segmentCount
+      // so the client can render the badge consistently in either mode.
+      segmentCount: 1,
+      chainId: it.referenceId ?? it.id,
+      totalPlayDuration: it.playDuration,
+    };
+  });
 
   return NextResponse.json({
     items: itemsWithPosters,
@@ -385,12 +395,11 @@ async function groupedQuery(
 
   const total = totalRows[0]?.total ?? 0;
 
-  // Resolve posters by tmdbId. Mirror the ungrouped path's contract so the
-  // UI doesn't need a mode switch for posterUrl.
-  const tmdbIds = [...new Set(rows.map((r) => r.tmdbId).filter((v): v is number => v != null))];
-  const posters = tmdbIds.length > 0
-    ? await resolvePosterMap(rows as unknown as { tmdbId: number | null; mediaType: "MOVIE" | "TV" | null }[])
-    : {};
+  // Resolve posters per (tmdbId, mediaType). Mirror the ungrouped path's
+  // contract so the UI doesn't need a mode switch for posterUrl (or posterPath).
+  const livePaths = await resolvePosterPathMap(
+    rows as unknown as { tmdbId: number | null; mediaType: string | null }[],
+  );
 
   const items = rows.map((r) => {
     // Map snake_case raw columns to the camelCase shape the rest of the app
@@ -403,10 +412,13 @@ async function groupedQuery(
           thumbUrl: r.msu_thumb_url,
         }
       : null;
+    const live =
+      r.tmdbId != null ? livePaths[posterPathKey(r.tmdbId, r.mediaType)] ?? null : null;
     return {
       ...r,
       mediaServerUser,
-      posterUrl: r.tmdbId != null ? posters[r.tmdbId] ?? null : null,
+      posterPath: live ?? r.posterPath,
+      posterUrl: posterUrl(live, "w342"),
       segmentCount: r.segment_count,
       chainId: r.chain_id,
       totalPlayDuration: r.total_play_duration,

@@ -151,7 +151,7 @@ shadowPrismaModel(prisma, "activeSession", {
 type HistoryCreateArgs = { data: Array<Record<string, unknown>>; skipDuplicates?: boolean };
 const historyCreates: HistoryCreateArgs[] = [];
 const historyFindFirstCalls: Array<Record<string, unknown>> = [];
-let priorUnwatchedRow: { id: string; referenceId: string | null } | null = null;
+let priorPlayRow: { id: string; referenceId: string | null; watched: boolean } | null = null;
 let historyFindFirstError = false;
 const historyDeleteManyCalls: Array<{ where: { startedAt: { lt: Date } } }> = [];
 let historyDeleteCount = 0;
@@ -163,7 +163,7 @@ shadowPrismaModel(prisma, "playHistory", {
   findFirst: async (args: Record<string, unknown>) => {
     historyFindFirstCalls.push(args);
     if (historyFindFirstError) throw new Error("history lookup down");
-    return priorUnwatchedRow;
+    return priorPlayRow;
   },
   deleteMany: async (args: { where: { startedAt: { lt: Date } } }) => {
     historyDeleteManyCalls.push(args);
@@ -249,7 +249,7 @@ beforeEach(() => {
   activeSessionUpdateManyError = null;
   historyCreates.length = 0;
   historyFindFirstCalls.length = 0;
-  priorUnwatchedRow = null;
+  priorPlayRow = null;
   historyFindFirstError = false;
   historyDeleteManyCalls.length = 0;
   historyDeleteCount = 0;
@@ -1061,26 +1061,29 @@ test("recordCompletedSession: opts.stoppedAt wins over lastSeenAt; a degenerate 
 test("recordCompletedSession: resume-grouping chains onto the prior unwatched watch — root id first, then the shared referenceId; exact 7-day lookback query", async () => {
   setSettings({});
   const session = makeSession();
-  priorUnwatchedRow = { id: "prior-1", referenceId: null }; // the prior row IS the chain root
+  priorPlayRow = { id: "prior-1", referenceId: null, watched: false }; // the prior row IS the chain root
   await recordCompletedSession(session, { skipSSE: true });
   assert.equal(historyCreates[0].data[0].referenceId, "prior-1");
+  // `watched` is NOT a WHERE term: the rule is "chain only if the MOST RECENT
+  // prior play was unwatched". Filtering it in SQL instead skips over a completed
+  // watch to reach an older unwatched one, which merged a rewatch into a finished
+  // chain. Fetch the latest row and decide in JS — hence watched in the select.
   assert.deepEqual(historyFindFirstCalls[0], {
     where: {
       source: "plex",
       sourceItemId: "item-1",
       mediaServerUserId: "msu-1",
-      watched: false, // a watched prior means the next play is a rewatch, not a resume
       startedAt: {
         gte: new Date(session.lastSeenAt.getTime() - 7 * 24 * 60 * 60 * 1000), // stoppedAt − 7d
         lt: session.startedAt,
       },
     },
     orderBy: { startedAt: "desc" },
-    select: { id: true, referenceId: true },
+    select: { id: true, referenceId: true, watched: true },
   });
 
   // A prior row already inside a chain shares its root, not its own id.
-  priorUnwatchedRow = { id: "prior-2", referenceId: "chain-root" };
+  priorPlayRow = { id: "prior-2", referenceId: "chain-root", watched: false };
   await recordCompletedSession(makeSession(), { skipSSE: true });
   assert.equal(historyCreates[1].data[0].referenceId, "chain-root");
 
@@ -1089,6 +1092,22 @@ test("recordCompletedSession: resume-grouping chains onto the prior unwatched wa
   await recordCompletedSession(makeSession({ sourceItemId: null }), { skipSSE: true });
   assert.equal(historyFindFirstCalls.length, lookupsSoFar);
   assert.equal(historyCreates[2].data[0].referenceId, null);
+});
+
+test("recordCompletedSession: a REWATCH starts its own chain — the most recent prior play being watched terminates the chain", async () => {
+  setSettings({});
+  // Mon: paused at 30min (unwatched) → Tue: finished (watched, chained to Mon) →
+  // Sat: full rewatch. Saturday's most recent prior play is Tuesday's COMPLETED
+  // row, so it must root its own chain rather than joining {Mon, Tue}. Otherwise
+  // the grouped history view (which partitions on COALESCE(referenceId, id))
+  // renders all three as one 3-segment viewing and the rewatch vanishes.
+  priorPlayRow = { id: "tuesday-finish", referenceId: "monday-start", watched: true };
+  await recordCompletedSession(makeSession(), { skipSSE: true });
+  assert.equal(
+    historyCreates[0].data[0].referenceId,
+    null,
+    "a rewatch after a completed watch must not inherit the finished chain's referenceId",
+  );
 });
 
 test("recordCompletedSession: poster comes from the TmdbCache details blob (tv: key for TV), never the session's own posterPath; miss and malformed JSON degrade to null", async () => {

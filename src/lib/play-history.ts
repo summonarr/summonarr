@@ -3,6 +3,7 @@ import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
 import { posterUrl } from "./tmdb-types";
+import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -476,17 +477,23 @@ export async function recordCompletedSession(
   let referenceId: string | null = null;
   if (session.sourceItemId) {
     const lookbackCutoff = new Date(stoppedAt.getTime() - RESUME_GROUPING_LOOKBACK_MS);
-    const priorUnwatched = await prisma.playHistory.findFirst({
+    // Ask for the most recent prior play and THEN test whether it was unwatched.
+    // Putting `watched: false` in the WHERE instead (as this did) doesn't
+    // implement the rule above — it just skips over watched rows to find an older
+    // unwatched one, so a rewatch chains onto the completed watch that preceded
+    // it: "paused Monday / finished Tuesday / rewatched Saturday" collapsed into a
+    // single 3-segment viewing and the rewatch stopped counting as its own.
+    const prior = await prisma.playHistory.findFirst({
       where: {
         source: session.source,
         sourceItemId: session.sourceItemId,
         mediaServerUserId: session.mediaServerUserId,
-        watched: false,
         startedAt: { gte: lookbackCutoff, lt: session.startedAt },
       },
       orderBy: { startedAt: "desc" },
-      select: { id: true, referenceId: true },
+      select: { id: true, referenceId: true, watched: true },
     }).catch(() => null);
+    const priorUnwatched = prior && !prior.watched ? prior : null;
     if (priorUnwatched) {
       // Chain to the previous row's referenceId (already a chain root) or to
       // the row's own id (it's the root). Either way, every row in the chain
@@ -1531,6 +1538,32 @@ const RESOLUTION_BUCKET_SQL = `CASE
   ELSE 'Other'
 END`;
 
+// Shared tail of the two leaderboard queries: swap the row's stored
+// `PlayHistory.posterPath` for the LIVE TmdbMediaCore/TmdbCache path.
+//
+// The stored value is a snapshot taken at finalize time from the title's
+// `:details` cache row, so it's null for anything nobody had opened in the app
+// before watching it — which left the admin Statistics page and the iOS Admin
+// Activity leaderboards on placeholder tiles. It stays as the fallback for
+// titles the caches no longer hold. Two extra indexed reads per leaderboard,
+// and `getMostRewatched` memoizes its result anyway.
+async function withLivePosterPaths(
+  rows: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[],
+) {
+  const livePaths = await resolvePosterPathMap(rows);
+  return rows.map((r) => ({
+    tmdbId: r.tmdbId,
+    mediaType: r.mediaType,
+    title: r.title,
+    // Namespaced key: these two leaderboards partition by mediaType, so a movie
+    // row and a TV row with the same tmdbId can both rank — a bare-id lookup
+    // would hand them the same (one of them wrong) poster.
+    posterPath: livePaths[posterPathKey(r.tmdbId, r.mediaType)] ?? r.posterPath,
+    plays: Number(r.plays),
+    viewers: Number(r.viewers),
+  }));
+}
+
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
   // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index.
@@ -1541,8 +1574,8 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   const rows = await prisma.$queryRawUnsafe<
     { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[]
   >(
-    // Carry the stored posterPath (like getTopWatchedUncached) so the rewatched
-    // rows render real cover art instead of a placeholder — no TmdbCache round-trip.
+    // Carry the stored posterPath (like getTopWatchedUncached) as the fallback
+    // beneath the live lookup below.
     `SELECT "tmdbId", "mediaType"::text, MAX("title") AS title,
             MAX("posterPath") AS "posterPath",
             COUNT(*)::bigint AS plays,
@@ -1556,22 +1589,14 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
     ...params,
   );
 
-  return rows.map((r) => ({
-    tmdbId: r.tmdbId,
-    mediaType: r.mediaType,
-    title: r.title,
-    posterPath: r.posterPath,
-    plays: Number(r.plays),
-    viewers: Number(r.viewers),
-  }));
+  return withLivePosterPaths(rows);
 }
 
 // Top-watched titles split per media type. Unlike getMostRewatchedUncached
 // this has NO `HAVING COUNT(*) > 1` rewatch filter — a movie watched once
 // still ranks — and partitions by mediaType so movies can't be starved out
 // of a global top-N by TV shows (whose tmdbId aggregates every episode).
-// Carries the stored posterPath so callers get real cover art without a
-// TmdbCache round-trip.
+// Posters resolve the same way (withLivePosterPaths).
 async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limitPerType = 8) {
   const { where, params } = buildStatsFilters(filters);
   // Push then read length so a future param insertion can't shift the $-index (cf. 803cd11).
@@ -1599,14 +1624,7 @@ async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limi
     ...params,
   );
 
-  return rows.map((r) => ({
-    tmdbId: r.tmdbId,
-    mediaType: r.mediaType,
-    title: r.title,
-    posterPath: r.posterPath,
-    plays: Number(r.plays),
-    viewers: Number(r.viewers),
-  }));
+  return withLivePosterPaths(rows);
 }
 
 export interface PlayHistoryStatsFilters {

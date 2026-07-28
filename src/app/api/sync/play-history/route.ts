@@ -32,6 +32,20 @@ import {
 
 type SyncResult = { started: number; updated: number; ended: number };
 
+// Both session helpers compose an episode's display title as
+// `${show} — ${episode}` (plex.ts / jellyfin.ts). Recover the episode half by
+// removing that exact prefix, NOT by splitting on the separator: the show name
+// can contain " — " too, and splitting left its tail glued to the episode name.
+// Falls back to the composed title when the prefix isn't there (nothing to strip).
+const TITLE_SEP = " — ";
+function stripShowPrefix(composed: string, show: string | null | undefined): string | null {
+  if (show && composed.startsWith(show + TITLE_SEP)) {
+    return composed.slice(show.length + TITLE_SEP.length) || null;
+  }
+  const idx = composed.indexOf(TITLE_SEP);
+  return idx === -1 ? null : composed.slice(idx + TITLE_SEP.length) || null;
+}
+
 // DLNA clients open phantom sessions just from *browsing* the library — the
 // session appears in /status/sessions for one tick with platform="DLNA" and
 // then disappears. Tautulli sleeps 1s and re-fetches to filter them
@@ -355,10 +369,11 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           seasonNumber: s.parentIndex ?? null,
           episodeNumber: s.index ?? null,
           // getPlexSessions composes an episode title as `${grandparentTitle} — ${title}`.
-          // Taking only [1] truncated at the first separator, so an episode (or show) name
-          // containing " — " stored a fragment — permanently, since episodeTitle is
-          // write-once here and copied verbatim into PlayHistory. Mirror the Jellyfin form.
-          episodeTitle: s.type === "episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
+          // Strip that exact prefix rather than splitting: `slice(1).join(" — ")`
+          // survived an EPISODE name containing " — " but not a SHOW name
+          // containing one ("Foo — Bar" + "Pilot" stored "Bar — Pilot"), and this
+          // is write-once here and copied verbatim into PlayHistory.
+          episodeTitle: s.type === "episode" ? stripShowPrefix(s.title, s.grandparentTitle) : null,
           sourceItemId: s.ratingKey,
           posterPath,
           progressPercent,
@@ -479,10 +494,31 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
     .filter((s) => s.sessionId && s.sessionId !== s.playSessionId)
     .map((s) => `jellyfin:${s.sessionId}`);
   const allIds = [...new Set([...primaryIds, ...altIds])];
-  const idRows = allIds.length > 0
-    ? await prisma.activeSession.findMany({ where: { id: { in: allIds } } })
+  // A row's `id` is frozen at create ("jellyfin:<playSessionId-then>") but the
+  // update branch REWRITES its `sessionKey` to the current playSessionId. After
+  // that the two disagree, so an id-only lookup misses the row — and since
+  // ActiveSession is @@unique([source, sessionKey]), the create branch's
+  // createMany({skipDuplicates}) then silently swallowed the conflict (ON CONFLICT
+  // DO NOTHING, no target) and returned "started" for a row that was never
+  // inserted. The next episode got no ActiveSession at all, was never finalized,
+  // and — the poller being the sole Jellyfin writer (guardrail 19) — that watch
+  // was unrecoverable, while the stale row kept the now-playing card pinned until
+  // cleanupStaleSessions reaped it 30 minutes later. Match on the live sessionKey
+  // too so the itemId-change finalize below runs instead.
+  const allKeys = [...new Set(valid.flatMap((s) => [s.playSessionId, s.sessionId].filter((k): k is string => !!k)))];
+  const idRows = allIds.length > 0 || allKeys.length > 0
+    ? await prisma.activeSession.findMany({
+        where: {
+          source: "jellyfin", // sessionKey is only unique WITH the source
+          OR: [{ id: { in: allIds } }, { sessionKey: { in: allKeys } }],
+        },
+      })
     : [];
   const idRowMap = new Map(idRows.map((r) => [r.id, r]));
+  const keyRowMap = new Map(idRows.map((r) => [r.sessionKey, r]));
+  // Every row already owned by id OR by live sessionKey — the fallback must not
+  // hand any of them to a different session (see the notIn note below).
+  const claimedIds = idRows.map((r) => r.id);
 
   // Fallback rows: only fetch for sessions that didn't match the primary or alternate id.
   const fallbackPairs = valid
@@ -490,6 +526,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       const sessionId = `jellyfin:${s.playSessionId}`;
       const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
       if (idRowMap.has(sessionId) || (altSessionId && idRowMap.has(altSessionId))) return null;
+      if (keyRowMap.has(s.playSessionId) || (s.sessionId && keyRowMap.has(s.sessionId))) return null;
       return { msUserId: userIds[i], itemId: s.itemId };
     })
     .filter((p): p is { msUserId: string; itemId: string } => !!p && !!p.itemId);
@@ -503,7 +540,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
     ? await prisma.activeSession.findMany({
         where: {
           source: "jellyfin",
-          id: { notIn: allIds },
+          id: { notIn: claimedIds.length > 0 ? claimedIds : allIds },
           OR: fallbackPairs.map((p) => ({ mediaServerUserId: p.msUserId, sourceItemId: p.itemId })),
         },
       })
@@ -591,7 +628,9 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       // callback before it looks up.
       const idMatch =
         idRowMap.get(sessionId) ??
-        (altSessionId ? idRowMap.get(altSessionId) : undefined);
+        (altSessionId ? idRowMap.get(altSessionId) : undefined) ??
+        keyRowMap.get(s.playSessionId) ??
+        (s.sessionId ? keyRowMap.get(s.sessionId) : undefined);
       const fallbackKey = `${msUserId}:${s.itemId ?? ""}`;
       const fallbackRow = idMatch ? undefined : fallbackMap.get(fallbackKey);
       if (fallbackRow) fallbackMap.delete(fallbackKey);
@@ -665,7 +704,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           year: s.year != null ? String(s.year) : null,
           seasonNumber: s.seasonNumber ?? null,
           episodeNumber: s.episodeNumber ?? null,
-          episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
+          episodeTitle: s.itemType === "Episode" ? stripShowPrefix(s.title, s.seriesName) : null,
           sourceItemId: s.itemId,
           posterPath: jfPosterPath,
           progressPercent,
