@@ -89,7 +89,15 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (service !== "radarr" && service !== "sonarr") {
     return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
   }
-  const instances = Array.isArray(body.instances) ? body.instances : [];
+  // Require the array explicitly. Coercing a missing/malformed `instances` to []
+  // reads downstream as "the admin removed every named instance" and deleteMany's
+  // their Setting rows — including the encrypted API keys and webhook secrets,
+  // which are unrecoverable. A body that doesn't say is not a body that means
+  // "delete everything".
+  if (!Array.isArray(body.instances)) {
+    return NextResponse.json({ error: "instances must be an array" }, { status: 400 });
+  }
+  const instances = body.instances;
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidInstanceSlug(inst.slug)) {
       return NextResponse.json({ error: `invalid instance slug: ${inst?.slug}` }, { status: 400 });

@@ -291,18 +291,18 @@ const JF_BASE = "http://10.88.0.2:8096";
 let seq = 0;
 
 // Mint a real signed session JWT backed by an in-memory User + AuthSession row.
-async function mintSession(role: string): Promise<{ userId: string; token: string; header: Record<string, string> }> {
+async function mintSession(role: string, perms: bigint = 0n): Promise<{ userId: string; token: string; header: Record<string, string> }> {
   seq++;
   const userId = `actor-${seq}`;
   const sessionId = `actor-sess-${seq}`;
   usersById.set(userId, {
-    id: userId, role, permissions: 0n, name: `Actor ${seq}`, email: "actor@example.com",
+    id: userId, role, permissions: perms, name: `Actor ${seq}`, email: "actor@example.com",
     mediaServer: null, notificationEmail: null,
     sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, purgedAt: null,
   });
   authSessionsById.set(sessionId, { userId, deviceLabel: "actor-device", createdAt: new Date() });
   const token = await signSessionJwt(
-    { id: userId, role, permissions: "0", provider: "credentials", sessionId, expiresAt: Math.floor(Date.now() / 1000) + 86_400 },
+    { id: userId, role, permissions: perms.toString(), provider: "credentials", sessionId, expiresAt: Math.floor(Date.now() / 1000) + 86_400 },
     { expiresInSeconds: 7_200 },
   );
   // Bearer transport: skips the UA-fingerprint check + the sliding Set-Cookie,
@@ -1063,4 +1063,80 @@ test("db-import: BACKUP_DB_PASSWORD unset OR too short → 503 before touching t
   process.env.BACKUP_DB_PASSWORD = "short"; // < 12 chars → the "too short" gate
   const short = await dbImport(req("http://localhost:3000/api/admin/backup/db-import", { method: "POST", headers: admin.header, body: "x" }), undefined);
   assert.equal(short.status, 503);
+});
+
+// ── privilege-bearing PATCH branches ────────────────────────────────────────
+
+test("a permissions mask of 0 is refused — storing it silently RESTORES the role preset", async () => {
+  // effectivePermissions() treats 0 as the "row was never seeded" sentinel and
+  // maps it back to the role's default preset. So unchecking the last box in the
+  // permissions editor (which PATCHes "0") read as a total revocation everywhere
+  // an operator can see — modal, DB column, audit row — while the user silently
+  // kept REQUEST/REQUEST_MOVIE/REQUEST_TV on their very next request.
+  const admin = await mintSession("ADMIN", 1n); // ADMIN superbit
+  const targetId = seedUser("USER");
+  const res = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...admin.header, "content-type": "application/json" },
+      body: JSON.stringify({ permissions: "0" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /resolves back to the role's default preset/);
+  assert.equal(usersById.get(targetId)!.permissions, 0n, "the row must be left untouched");
+
+  // A non-zero mask still writes normally.
+  const ok = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...admin.header, "content-type": "application/json" },
+      body: JSON.stringify({ permissions: "16" }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(ok.status, 200);
+  assert.deepEqual(await ok.json(), { id: targetId, permissions: "16" });
+});
+
+test("a MANAGE_USERS delegate cannot grant ITSELF instance access, quota, or a content-rating cap", async () => {
+  // `role` and `permissions` each carry an isSelf gate; these three branches had
+  // none, and every one ends in invalidateUserSession(id) — which re-signs the
+  // JWT from the DB column, so a self-grant lands on the delegate's next request.
+  const MANAGE_USERS = 1n << 1n;
+  const delegate = await mintSession("USER", MANAGE_USERS);
+  usersById.set(delegate.userId, {
+    id: delegate.userId, role: "USER", permissions: MANAGE_USERS, name: "Delegate",
+    email: "delegate@example.com", mediaServer: null, notificationEmail: null,
+    sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null, purgedAt: null,
+  });
+
+  for (const body of [
+    { instanceGrants: { anime: { request: true, autoApprove: true } } },
+    { movieQuotaLimit: 100000 },
+    { maxContentRating: null },
+  ]) {
+    const res = await userPatch(
+      req(`http://localhost:3000/api/admin/users/${delegate.userId}`, {
+        method: "PATCH",
+        headers: { ...delegate.header, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      ctxFor(delegate.userId),
+    );
+    assert.equal(res.status, 403, `self-edit of ${Object.keys(body)[0]} must be refused`);
+  }
+
+  // The same delegate may still edit SOMEONE ELSE — this gate is about self-service only.
+  const targetId = seedUser("USER");
+  const other = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...delegate.header, "content-type": "application/json" },
+      body: JSON.stringify({ maxContentRating: null }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(other.status, 200);
 });

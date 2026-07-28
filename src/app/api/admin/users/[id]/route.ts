@@ -14,6 +14,10 @@ import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 // ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
 class TargetBecameAdminError extends Error {}
 
+// Module-scoped so the self-escalation gate below and the quota branch read the
+// SAME list — a second copy would drift and silently reopen the hole.
+const QUOTA_FIELDS = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;
+
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
@@ -64,6 +68,27 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     }
   }
 
+  // MANAGE_USERS delegates management of OTHER accounts. The `role` and
+  // `permissions` branches each carry their own isSelf gate; these three fields
+  // are privilege-bearing too and had none, so a delegate could PATCH their OWN
+  // row to grant themselves request + auto-approve on a RESTRICTED named instance,
+  // lift their own quota to an effectively unlimited value, or raise their own
+  // content-rating cap. Each branch ends in invalidateUserSession(id), which
+  // re-signs the JWT from the DB column, so the self-grant lands on their very
+  // next request. Gate all three in one place, mirroring those branches.
+  if (!callerIsAdmin && isSelf) {
+    const selfPrivilegeEdit =
+      "maxContentRating" in body ||
+      body.instanceGrants !== undefined ||
+      QUOTA_FIELDS.some((k) => k in body);
+    if (selfPrivilegeEdit) {
+      return NextResponse.json(
+        { error: "Cannot change your own instance access, quota, or content rating cap" },
+        { status: 403 },
+      );
+    }
+  }
+
   if ("mediaServer" in body) {
     const ms = body.mediaServer;
     if (ms !== null && ms !== "plex" && ms !== "jellyfin") {
@@ -109,6 +134,23 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const parsed = parseAndValidatePermissions(body.permissions);
     if (parsed === null) {
       return NextResponse.json({ error: "permissions must be a decimal bitmask within the known permission set" }, { status: 400 });
+    }
+    // A stored mask of exactly 0 is the "row was never seeded" sentinel:
+    // effectivePermissions() maps it back to the ROLE PRESET (permissions.ts).
+    // So writing 0 does the opposite of what the editor shows — unchecking the
+    // last box would silently restore REQUEST/REQUEST_MOVIE/REQUEST_TV while the
+    // modal, the DB column and the audit row all read "no permissions". Refuse it
+    // rather than store an unrepresentable intent. Mirrors the quota branch below,
+    // which rejects a limit of 0 for exactly this class of footgun.
+    if (parsed === 0n) {
+      return NextResponse.json(
+        {
+          error:
+            "A mask of 0 means \"unseeded\" and resolves back to the role's default preset, not \"no access\". " +
+            "Leave at least one bit set, or disable the account to remove access entirely.",
+        },
+        { status: 400 },
+      );
     }
     const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
     if (!targetUser) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -180,8 +222,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ id, instanceGrants: grants });
   }
 
-  const quotaFields = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;
-  const quotaField = quotaFields.find((k) => k in body);
+  const quotaField = QUOTA_FIELDS.find((k) => k in body);
   if (quotaField !== undefined) {
     const val = body[quotaField];
     if (val !== null && val !== undefined && (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 100_000)) {
