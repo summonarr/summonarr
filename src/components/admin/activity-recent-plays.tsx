@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -166,6 +166,19 @@ export function ActivityRecentPlays({
   const [hasMore, setHasMore] = useState(initialPlays.length >= 20);
   const [page, setPage] = useState(1);
   const mounted = useHasMounted();
+
+  // ActivityLiveRefresher calls router.refresh() on every activity:history-updated
+  // SSE event so this table reflects a finished stream. But router.refresh()
+  // re-renders the SERVER tree without unmounting client components, and this
+  // component's key only changes on a filter change — so `plays` stayed frozen at
+  // whatever loaded on first mount while the cards and leaderboards around it
+  // updated. Re-seed from the incoming prop. Same pattern as browse-grid.tsx and
+  // audit-log-table.tsx.
+  useEffect(() => {
+    setPlays(initialPlays);
+    setPage(1);
+    setHasMore(initialPlays.length >= 20);
+  }, [initialPlays]);
 
   const loadMore = async () => {
     setLoading(true);

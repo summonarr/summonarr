@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
@@ -141,11 +141,15 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
   const [reason, setReason] = useState(DEFAULT_TERMINATE_REASON);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bounded release of the `busy` gate on a successful terminate (see onSubmit).
+  const terminateFallback = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(terminateFallback.current), []);
   if (!target) return null;
   const { endpoint, sessionKey } = target;
   const serverLabel = session.source === "jellyfin" ? "Jellyfin" : "Plex";
 
   function openDialog() {
+    clearTimeout(terminateFallback.current);
     setReason(DEFAULT_TERMINATE_REASON);
     setError(null);
     setBusy(false);
@@ -175,6 +179,15 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
       // unmounts on the next activity:sessions SSE push (within ~1s) once the
       // server tears the stream down — that removes this whole component (and
       // the dialog) with it, so we don't flash the dialog closed prematurely.
+      //
+      // ...but that unmount is not guaranteed: Plex ignores termination for some
+      // direct-play clients (200 returned, stream keeps going), and the shared SSE
+      // connection can be parked on its 30s permanent-failure re-probe. Every
+      // dismissal route (Escape, backdrop, X, Cancel) is gated on `busy`, so
+      // without a bound the admin's only way out was a full page reload. Release
+      // the gate after 10s so the dialog is always escapable; if the card does
+      // unmount first this timer dies with it.
+      terminateFallback.current = setTimeout(() => setBusy(false), 10_000);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);

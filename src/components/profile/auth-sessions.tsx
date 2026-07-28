@@ -35,20 +35,50 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
+  // Revoking a session OTHER than this one is step-up protected server-side:
+  // credential accounts must re-enter their password, SSO accounts must hold a
+  // recent sign-in. The client used to send neither and ignore res.ok, so every
+  // revoke 401'd and the UI reported success — the device was never signed out.
+  const [passwordFor, setPasswordFor] = useState<string | null>(null);
+  const [password, setPassword] = useState("");
+  const [revokeError, setRevokeError] = useState<string | null>(null);
   // `formatRelativeTime` and `toLocaleDateString` both diverge between SSR and CSR
   // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
-  async function revoke(sessionId: string) {
+  async function revoke(sessionId: string, confirmPassword?: string) {
     setRevoking(sessionId);
     setConfirmingRevoke(null);
+    setRevokeError(null);
     try {
-      await fetch(withBasePath("/api/sessions"), {
+      const res = await fetch(withBasePath("/api/sessions"), {
         method:  "DELETE",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ sessionId }),
+        body:    JSON.stringify(confirmPassword ? { sessionId, confirmPassword } : { sessionId }),
       });
-      router.refresh();
+      if (res.ok) {
+        setPasswordFor(null);
+        setPassword("");
+        router.refresh();
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      if (data.error === "password-required") {
+        // Expected on the first attempt for a credentials account — ask, retry.
+        setPasswordFor(sessionId);
+        setPassword("");
+        setRevokeError(null);
+      } else if (data.error === "invalid-password") {
+        setPasswordFor(sessionId);
+        setPassword("");
+        setRevokeError("Incorrect password.");
+      } else {
+        setPasswordFor(null);
+        setPassword("");
+        setRevokeError(data.message ?? data.error ?? "Failed to revoke session.");
+      }
+    } catch {
+      setRevokeError("Failed to revoke session.");
     } finally {
       setRevoking(null);
     }
@@ -103,7 +133,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
             </div>
           </div>
 
-          {!s.isCurrent && confirmingRevoke !== s.sessionId && (
+          {!s.isCurrent && passwordFor !== s.sessionId && confirmingRevoke !== s.sessionId && (
             <Button
               type="button"
               size="sm"
@@ -121,7 +151,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 : <Trash2  className="w-3.5 h-3.5" />}
             </Button>
           )}
-          {!s.isCurrent && confirmingRevoke === s.sessionId && (
+          {!s.isCurrent && passwordFor !== s.sessionId && confirmingRevoke === s.sessionId && (
             <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
               <Button
                 type="button"
@@ -146,8 +176,48 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               </Button>
             </div>
           )}
+          {!s.isCurrent && passwordFor === s.sessionId && (
+            <form
+              className="flex items-center gap-1.5 shrink-0 mt-0.5"
+              onSubmit={(e) => { e.preventDefault(); if (password) revoke(s.sessionId, password); }}
+            >
+              <input
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                aria-label="Confirm your password to revoke this device"
+                placeholder="Your password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="h-9 w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                aria-label="Confirm revoke session"
+                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                disabled={!password || revoking === s.sessionId}
+              >
+                {revoking === s.sessionId
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <Trash2 className="w-3.5 h-3.5" />}
+                Revoke
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label="Cancel revoke"
+                className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
+                onClick={() => { setPasswordFor(null); setPassword(""); setRevokeError(null); }}
+              >
+                <X className="w-3.5 h-3.5" />
+              </Button>
+            </form>
+          )}
         </div>
       ))}
+      {revokeError && <p className="text-xs text-red-400">{revokeError}</p>}
     </div>
   );
 }

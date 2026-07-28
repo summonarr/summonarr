@@ -32,7 +32,16 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
     setRunning((prev) => new Set(prev).add(name));
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
-      const data = await res.json() as { ok?: boolean; skipped?: boolean; durationMs?: number; error?: string };
+      const data = await res.json() as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
+      // Judge on the HTTP status plus an explicit `error`, NOT on `ok`/`skipped`.
+      // Most of these endpoints return neither: /api/sync answers
+      // {checked, marked, …} and /api/sync/upcoming {movies, tv, …}, so a fully
+      // successful run fell through to "error" and showed a red badge. And
+      // /api/sync/ratings' `skipped` is a COUNT, not a boolean — so the best
+      // possible run (skipped: 0) read as falsy and was also marked failed.
+      // Failures are already signalled properly: a non-2xx status (upcoming
+      // returns 502) or an `error` field (the degraded-sync case, which is a 200).
+      const succeeded = res.ok && !data.error;
 
       setJobs((prev) =>
         prev.map((j) =>
@@ -41,7 +50,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 ...j,
                 lastRun: new Date().toISOString(),
                 lastDuration: data.durationMs ?? null,
-                lastStatus: data.ok ? "ok" : data.skipped ? "ok" : "error",
+                lastStatus: succeeded ? "ok" : "error",
               }
             : j,
         ),

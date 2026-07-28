@@ -74,12 +74,22 @@ export function WatchHistoryList({
   // Refetch from page one when a filter changes. The first render already has
   // the server-fetched unfiltered page, so skip the initial run.
   const firstRender = useRef(true);
+  // Bumped on every filter change; loadMore() uses it to drop a superseded response.
+  const filterGen = useRef(0);
   useEffect(() => {
     if (firstRender.current) {
       firstRender.current = false;
       return;
     }
     const ac = new AbortController();
+    // Every filter change starts a new generation. loadMore() captures the value
+    // at click time and drops its response if the filters moved on — otherwise a
+    // slow "Load more" landed AFTER a filter switch and appended the old query's
+    // rows (movies under a TV-filtered list), overwrote `total` with the pre-filter
+    // count, and installed the PREVIOUS query's cursor so later pages walked the
+    // wrong result set. The filter fetch itself is abort-guarded; this one can't be
+    // (its rows are appended, not replaced), so it needs the generation check.
+    filterGen.current += 1;
     setRefreshing(true);
     setError(null);
     const params = new URLSearchParams();
@@ -107,6 +117,7 @@ export function WatchHistoryList({
 
   async function loadMore() {
     if (!nextCursor) return;
+    const myGen = filterGen.current;
     setLoadingMore(true);
     try {
       const params = new URLSearchParams();
@@ -116,6 +127,8 @@ export function WatchHistoryList({
       const res = await fetch(withBasePath(`/api/play-history/mine?${params.toString()}`));
       if (res.ok) {
         const data = (await res.json()) as MyWatchHistoryPage;
+        if (filterGen.current !== myGen) return; // filters changed mid-flight
+
         // De-dup by id — a row could shift into an already-loaded page as new
         // plays finalize between fetches.
         setItems((cur) => {

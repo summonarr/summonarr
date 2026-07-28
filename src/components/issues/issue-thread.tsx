@@ -148,7 +148,10 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>
         )}
         {messages.map((msg) => {
-          const authorName = msg.author.name ?? msg.author.email;
+          // `email` is only selected for admins on GET and never on POST, and
+          // User.name is nullable — so this was `undefined` for a null-named
+          // author and `authorName[0]` below threw, blanking the whole thread.
+          const authorName = msg.author.name ?? msg.author.email ?? "Unknown";
           const isAdmin = msg.fromAdmin;
           return (
             <div key={msg.id} className={`flex gap-2.5 ${isAdmin ? "flex-row-reverse" : "flex-row"}`}>

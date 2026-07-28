@@ -109,8 +109,10 @@ export function IssueActions({
         body: JSON.stringify({ status, resolution: resolutionNote }),
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? "Status update failed");
+        // `message` first — a concurrent status change answers
+        // { error: "status-conflict", message: "<sentence>" }; the slug alone is noise.
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setArrError(data.message ?? data.error ?? "Status update failed");
         return;
       }
       router.refresh();
