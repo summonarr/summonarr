@@ -318,7 +318,10 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
 async function getAdminSubscriptions(excludeUserId?: string) {
   // Bitmask: MANAGE_REQUESTS holders (new requests, deletion votes, manual arr interaction).
   const subs = await prisma.pushSubscription.findMany({
-    where: excludeUserId ? { userId: { not: excludeUserId } } : {},
+    // A disabled account keeps its PushSubscription rows (guardrail 33 — the
+    // deactivate write set is exactly two fields), so its devices would keep
+    // buzzing with other people's requests indefinitely.
+    where: { user: { deactivatedAt: null }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
     include: { user: { select: { role: true, permissions: true } } },
   });
   return subs.filter((s) => {
@@ -339,7 +342,7 @@ async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restri
   const subs = await prisma.pushSubscription.findMany({
     where: {
       ...userIdFilter,
-      user: { notifyOnIssue: true },
+      user: { notifyOnIssue: true, deactivatedAt: null }, // see getAdminSubscriptions
     },
     include: { user: { select: { role: true, permissions: true } } },
   });

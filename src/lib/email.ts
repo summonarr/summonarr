@@ -203,7 +203,12 @@ async function getAdminEmails(excludeUserId?: string): Promise<string[]> {
   // Bitmask authoritative: any holder of MANAGE_REQUESTS (or ADMIN superbit).
   // Includes custom-granted users; falls back correctly for legacy rows.
   const rows = await prisma.user.findMany({
-    where: excludeUserId ? { id: { not: excludeUserId } } : {},
+    // Disabled accounts keep their role, permissions and email (guardrail 33 —
+    // deactivateUserInTx writes exactly two fields), so without this they'd keep
+    // receiving admin mail forever. A PURGED row is worse: its tombstone address
+    // (deleted-<id>@deleted.invalid) hard-bounces on every send. This is the
+    // admin-side chokepoint — the requester fan-out has its own two gates.
+    where: { deactivatedAt: null, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
     select: { email: true, notificationEmail: true, role: true, permissions: true },
   });
   return rows
@@ -227,6 +232,7 @@ async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUse
   const rows = await prisma.user.findMany({
     where: {
       notifyOnIssue: true,
+      deactivatedAt: null, // see getAdminEmails
       ...idFilter,
     },
     select: { email: true, notificationEmail: true, role: true, permissions: true },

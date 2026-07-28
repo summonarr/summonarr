@@ -505,6 +505,9 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
       where: {
         discordId: { not: null },
         notifyOnIssue: true,
+        // A disabled account keeps its Discord link (guardrail 33), so without
+        // this it keeps getting DM'd about every new issue.
+        deactivatedAt: null,
         ...idFilter,
       },
       select: { discordId: true, role: true, permissions: true },

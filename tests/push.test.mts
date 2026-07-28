@@ -691,7 +691,8 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
   // Exact query shape: DB-level exclusion + the role/permissions join the
   // bitmask filter needs.
   assert.deepEqual(subQueries[0], {
-    where: { userId: { not: "u-requester" } },
+    // disabled accounts keep their PushSubscription rows (guardrail 33)
+    where: { user: { deactivatedAt: null }, userId: { not: "u-requester" } },
     include: { user: { select: { role: true, permissions: true } } },
   });
   assert.deepEqual(
@@ -703,7 +704,7 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
   // — so the previously-excluded admin's device is now included as well.
   relayCalls.length = 0;
   await notifyAdminsDeletionVoteThresholdPush({ title: "Dune", mediaType: "MOVIE", voteCount: 5 });
-  assert.deepEqual(subQueries[1].where, {});
+  assert.deepEqual(subQueries[1].where, { user: { deactivatedAt: null } });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
     ["token-raw-grant", "token-role-admin", "token-self"],
@@ -723,7 +724,7 @@ test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitm
   await notifyAdminsNewIssuePush({ title: "Dune", issueType: "VIDEO", reportedBy: "alice", excludeUserId: "u-rep" });
 
   assert.deepEqual(subQueries[0], {
-    where: { userId: { not: "u-rep" }, user: { notifyOnIssue: true } },
+    where: { userId: { not: "u-rep" }, user: { notifyOnIssue: true, deactivatedAt: null } },
     include: { user: { select: { role: true, permissions: true } } },
   });
   assert.deepEqual(
@@ -748,7 +749,7 @@ test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitm
 
   // restrictToUserId alone narrows the where to exactly that user.
   await notifyAdminsIssueMessagePush({ title: "Dune", userName: "alice", body: "hi", restrictToUserId: "u-ia" });
-  assert.deepEqual(subQueries.at(-1)?.where, { userId: "u-ia", user: { notifyOnIssue: true } });
+  assert.deepEqual(subQueries.at(-1)?.where, { userId: "u-ia", user: { notifyOnIssue: true, deactivatedAt: null } });
   assert.deepEqual(relayCalls.map((c) => c.body.deviceToken), ["token-issue-admin-on"]);
 });
 

@@ -88,7 +88,9 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
       body: text,
       fromAdmin: isAdmin,
     },
-    include: { author: { select: { name: true, role: true } } },
+    // Mirror GET's author select (email for admins only) so a null-named author
+    // renders identically whether the thread was fetched or just posted to.
+    include: { author: { select: { name: true, role: true, ...(isAdmin ? { email: true } : {}) } } },
   });
 
   // Auto-transition to IN_PROGRESS when an admin first replies — signals the reporter
@@ -146,8 +148,21 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   };
 
   if (isAdmin) {
-    void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
-    void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
+    // ONE lookup decides whether any reporter-facing channel runs, mirroring
+    // notifyRequestStatusChange (guardrail 33 — gate at a chokepoint, never
+    // re-scatter it into the per-channel queries). Account removal disables
+    // rather than scrubs, so a removed reporter keeps a live email, Discord link
+    // and push subscriptions and would otherwise be notified forever.
+    const reporterActive = prisma.user
+      .findUnique({ where: { id: issue.reportedBy }, select: { deactivatedAt: true } })
+      .then((u) => !!u && u.deactivatedAt == null)
+      .catch(() => false);
+
+    void reporterActive.then((active) => {
+      if (!active) return;
+      void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
+      void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
+    });
     // An issue admin who reported the issue and then replies in their own thread
     // shouldn't get a self-notification inbox row ("<self> replied…"). Mirrors the
     // selfAction guard the request routes use.
@@ -166,8 +181,9 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         where: { id: issue.reportedBy },
         select: { email: true, notificationEmail: true, notifyOnIssue: true },
       })
-      .then((reporter) => {
+      .then(async (reporter) => {
         if (!reporter?.notifyOnIssue) return;
+        if (!(await reporterActive)) return; // same chokepoint as above
         const toEmail = resolveUserNotificationEmail(reporter);
         if (!toEmail) return;
         return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text });

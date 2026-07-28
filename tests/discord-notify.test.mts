@@ -383,6 +383,7 @@ test("admin fan-out selects by MANAGE_ISSUES (role preset or explicit bit) and e
   assert.deepEqual(userFindManyWheres[0], {
     discordId: { not: null },
     notifyOnIssue: true,
+    deactivatedAt: null, // disabled accounts keep their Discord link (guardrail 33)
     id: { not: "u-author" },
   });
 
@@ -419,6 +420,7 @@ test("admin fan-out: restrictToUserId narrows the query, fromAdmin flips the hea
   assert.deepEqual(userFindManyWheres[0], {
     discordId: { not: null },
     notifyOnIssue: true,
+    deactivatedAt: null, // disabled accounts keep their Discord link (guardrail 33)
     id: "u-claimer",
   });
   const embed = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
