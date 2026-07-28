@@ -68,12 +68,17 @@ const { prewarmLibraryCache } = await import("../src/lib/tmdb-prewarm.ts");
 // Minimal faithful model of the where/orderBy/cursor/skip/take subset the
 // iterator uses — its paging contracts are owned by library-iterator.test.mts.
 type MediaType = "MOVIE" | "TV";
-type Row = { tmdbId: number; mediaType: MediaType };
+// serverInstance is optional here (unlike library-iterator.test.mts's own
+// stub, which owns the multi-server paging contract exhaustively) — every
+// fixture in this file models a single-server deployment, so the delegate
+// below normalizes an absent serverInstance to "" rather than requiring every
+// literal row across this file to spell it out.
+type Row = { tmdbId: number; mediaType: MediaType; serverInstance?: string };
 type LibFindManyArgs = {
   where: { mediaType: MediaType };
   take: number;
   skip?: number;
-  cursor?: { tmdbId_mediaType: { tmdbId: number; mediaType: MediaType } };
+  cursor?: { tmdbId_mediaType_serverInstance: { tmdbId: number; mediaType: MediaType; serverInstance: string } };
 };
 
 const libCalls: { source: "plex" | "jellyfin" }[] = [];
@@ -85,15 +90,15 @@ function libraryDelegate(source: "plex" | "jellyfin") {
       libCalls.push({ source });
       const all = tables[source]
         .filter((r) => r.mediaType === args.where.mediaType)
-        .sort((a, b) => a.tmdbId - b.tmdbId);
+        .sort((a, b) => a.tmdbId - b.tmdbId || (a.serverInstance ?? "").localeCompare(b.serverInstance ?? ""));
       let start = 0;
       if (args.cursor) {
-        const { tmdbId, mediaType } = args.cursor.tmdbId_mediaType;
-        const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType);
-        if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType} not found`);
+        const { tmdbId, mediaType, serverInstance } = args.cursor.tmdbId_mediaType_serverInstance;
+        const idx = all.findIndex((r) => r.tmdbId === tmdbId && r.mediaType === mediaType && (r.serverInstance ?? "") === serverInstance);
+        if (idx === -1) throw new Error(`cursor row ${tmdbId}:${mediaType}:${serverInstance} not found`);
         start = idx + (args.skip ?? 0);
       }
-      return all.slice(start, start + args.take).map((r) => ({ ...r }));
+      return all.slice(start, start + args.take).map((r) => ({ ...r, serverInstance: r.serverInstance ?? "" }));
     },
   };
 }

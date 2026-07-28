@@ -51,10 +51,20 @@ export const SETTINGS_SENSITIVE_KEYS_SET: ReadonlySet<string> = new Set(
 // leaf that the Prisma client can load without pulling in any API surface.
 const ARR_INSTANCE_SECRET_RE = /^(radarr|sonarr)([A-Z0-9][A-Za-z0-9]*)?(ApiKey|WebhookSecret)$/;
 
+// Per-instance Plex/Jellyfin secret keys (multi-server support) — same
+// shape-regex rationale as ARR_INSTANCE_SECRET_RE: admin-defined server slugs
+// can't be statically enumerated. Matches plex<Segment>AdminToken and
+// jellyfin<Segment>ApiKey (Segment capitalized per src/lib/media-instances.ts:
+// "" / "Remote" / …), including the base plexAdminToken/jellyfinApiKey keys
+// (harmless — they're also in the static set above). It CANNOT match a
+// ServerUrl/AdminEmail/Libraries/PathStripPrefix/RestrictSignIn key, so those
+// stay plaintext by design.
+const MEDIA_INSTANCE_SECRET_RE = /^(plex([A-Z0-9][A-Za-z0-9]*)?AdminToken|jellyfin([A-Z0-9][A-Za-z0-9]*)?ApiKey)$/;
+
 // The single predicate the encryption extension (src/lib/prisma.ts) and the
 // settings write surface consult. A key is sensitive if it's in the static set OR
-// it's a per-instance Radarr/Sonarr secret. Guardrail 7a: a miss here = a secret
-// stored plaintext-at-rest, so both writers MUST route through this.
+// it's a per-instance Radarr/Sonarr/Plex/Jellyfin secret. Guardrail 7a: a miss
+// here = a secret stored plaintext-at-rest, so both writers MUST route through this.
 export function isSensitiveSettingKey(key: string): boolean {
-  return SETTINGS_SENSITIVE_KEYS_SET.has(key) || ARR_INSTANCE_SECRET_RE.test(key);
+  return SETTINGS_SENSITIVE_KEYS_SET.has(key) || ARR_INSTANCE_SECRET_RE.test(key) || MEDIA_INSTANCE_SECRET_RE.test(key);
 }

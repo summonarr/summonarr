@@ -243,7 +243,9 @@ export async function resolveMediaServerUser(params: {
     // Read unconditionally (not just when a machineId is offered): `manualUserLink`
     // is needed on every upsert so an admin's hand-set binding survives this poll.
     const existing = await tx.mediaServerUser.findUnique({
-      where: { source_sourceUserId: { source, sourceUserId } },
+      // serverInstance hardcoded to the default ("") — resolveMediaServerUser
+      // isn't instance-aware yet (multi-server activation is Phase 1/2).
+      where: { source_serverInstance_sourceUserId: { source, serverInstance: "", sourceUserId } },
       select: { id: true, serverMachineId: true, manualUserLink: true },
     });
     if (serverMachineId && existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
@@ -258,7 +260,7 @@ export async function resolveMediaServerUser(params: {
     if (existing?.manualUserLink) userId = null;
 
     const record = await tx.mediaServerUser.upsert({
-      where: { source_sourceUserId: { source, sourceUserId } },
+      where: { source_serverInstance_sourceUserId: { source, serverInstance: "", sourceUserId } },
       create: {
         source,
         sourceUserId,

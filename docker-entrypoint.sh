@@ -165,6 +165,48 @@ try {
 }
 ARRINSTANCE_EOF
 
+echo "Adding serverInstance for multi-server Plex/Jellyfin support..."
+node --input-type=module <<'MEDIAINSTANCE_EOF'
+const { DATABASE_URL } = process.env;
+// Non-destructive additive migration for multi-server Plex/Jellyfin support.
+// Adds the `serverInstance` column (matching the schema default "") to every
+// affected table so the subsequent `prisma db push` only has to swap the
+// PK/unique keys onto an already-populated column — the entrypoint's auto-safe
+// "unique constraint" / "primary key will be changed" warnings, never a
+// destructive drop. Unlike the is4k→arrInstance migration there is no legacy
+// discriminator to interpret — every existing row unambiguously belongs to the
+// single server that existed before this feature, so a plain ADD COLUMN with
+// its default is the whole migration (no UPDATE backfill pass needed).
+//
+// Idempotent — ADD COLUMN IF NOT EXISTS. Best-effort: runs BEFORE db push and
+// continues boot on failure (a real key collision then fails db push loudly,
+// leaving the DB untouched). Skips cleanly on a fresh DB.
+const TABLES = [
+  "PlexLibraryItem", "JellyfinLibraryItem", "MediaServerUser",
+  "PlayHistory", "ActiveSession",
+];
+const { default: { Client } } = await import('pg');
+const client = new Client({ connectionString: DATABASE_URL });
+try {
+  await client.connect();
+  for (const table of TABLES) {
+    const t = await client.query(`SELECT to_regclass('"${table}"') AS t`);
+    if (t.rows[0].t === null) continue; // fresh DB — db push will create it
+    const hasServerInstance = await client.query(
+      `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = 'serverInstance'`,
+      [table],
+    );
+    if (hasServerInstance.rowCount > 0) continue; // already migrated
+    await client.query(`ALTER TABLE "${table}" ADD COLUMN IF NOT EXISTS "serverInstance" TEXT NOT NULL DEFAULT ''`);
+    console.log(`[entrypoint] ${table}: added serverInstance column (default server, backward-compatible).`);
+  }
+} catch (err) {
+  console.error(`[entrypoint] serverInstance backfill failed — continuing boot: ${err?.message ?? err}`);
+} finally {
+  await client.end().catch(() => {});
+}
+MEDIAINSTANCE_EOF
+
 echo "Syncing database schema..."
 # Schema migration policy:
 #   1. Try `prisma db push` first. If it succeeds, done.

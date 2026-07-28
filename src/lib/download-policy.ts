@@ -132,7 +132,9 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
       const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
 
       await prisma.mediaServerUser.upsert({
-        where: { source_sourceUserId: { source: "jellyfin", sourceUserId: u.id } },
+        // serverInstance hardcoded to the default ("") — this function isn't
+        // instance-aware yet (multi-server Jellyfin activation is Phase 1).
+        where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: "", sourceUserId: u.id } },
         create: {
           source: "jellyfin",
           sourceUserId: u.id,

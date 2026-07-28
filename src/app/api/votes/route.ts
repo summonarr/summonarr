@@ -195,8 +195,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const [inPlex, inJellyfin] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
-    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
+    prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
+    prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
   ]);
   if (!inPlex && !inJellyfin) {
     return NextResponse.json({ error: "Media is not in any library" }, { status: 422 });

@@ -12,6 +12,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -22,6 +23,11 @@ type FixMatchBody = {
   correctTmdbId:  number;
 
   canonicalGuid?: string;
+  // Multi-server support: which configured server's library row to remap.
+  // Optional + defaults to the default server ("") so an existing caller that
+  // doesn't send it yet keeps targeting the only server that existed before
+  // this field was added.
+  serverInstance?: string;
 };
 
 interface PlexSearchResult {
@@ -501,6 +507,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   if (tmdbId === correctTmdbId) {
     return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
   }
+  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
+  }
+  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
 
   // The remap is inherently two-phase: the remote library server must be
   // rewritten first (to learn the new item id), then the local cache row is
@@ -512,8 +522,8 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   let remoteRemapped = false;
   try {
     if (server === "plex") {
-      const item = await prisma.plexLibraryItem.findUnique({
-        where: { tmdbId_mediaType: { tmdbId, mediaType } },
+      const item = await prisma.plexLibraryItem.findFirst({
+        where: { tmdbId, mediaType, serverInstance },
         select: { plexRatingKey: true, filePath: true },
       });
       if (!item?.plexRatingKey) {
@@ -528,16 +538,16 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // remap. Acquire 2001 before 2002 (one consistent global order → no deadlock).
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
         await tx.plexLibraryItem.upsert({
-          where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
-          create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
+          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
           update: { plexRatingKey: item.plexRatingKey },
         });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
@@ -560,8 +570,8 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
 
     } else {
-      const item = await prisma.jellyfinLibraryItem.findUnique({
-        where: { tmdbId_mediaType: { tmdbId, mediaType } },
+      const item = await prisma.jellyfinLibraryItem.findFirst({
+        where: { tmdbId, mediaType, serverInstance },
         select: { jellyfinItemId: true, filePath: true },
       });
       if (!item?.jellyfinItemId) {
@@ -576,16 +586,16 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // 2002, so a concurrent sync can't clobber/interleave this manual remap.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
         await tx.jellyfinLibraryItem.upsert({
-          where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
-          create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, jellyfinItemId: resolvedItemId },
+          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, jellyfinItemId: resolvedItemId },
           update: { jellyfinItemId: resolvedItemId },
         });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)

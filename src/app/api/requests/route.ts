@@ -397,10 +397,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const [plexItem, jellyfinItem, arrAvailable] = await Promise.all([
     skipLibraryCheck
       ? Promise.resolve(null)
-      : prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
+      : prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
     skipLibraryCheck
       ? Promise.resolve(null)
-      : prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
+      : prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
     isAutoApprove
       ? mediaType === "MOVIE"
         ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)

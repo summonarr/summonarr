@@ -132,8 +132,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // that aren't available (the UI only surfaces "report issue" on available media).
   const mt = mediaType as "MOVIE" | "TV";
   const [plexHit, jellyfinHit] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
-    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+    prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType: mt }, select: { tmdbId: true } }),
+    prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType: mt }, select: { tmdbId: true } }),
   ]);
   if (!plexHit && !jellyfinHit) {
     return NextResponse.json({ error: "This title isn't in the library — issues can only be filed for available media." }, { status: 422 });

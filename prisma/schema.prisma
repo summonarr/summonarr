@@ -285,6 +285,11 @@ model MediaRequest {
 model PlexLibraryItem {
   tmdbId        Int
   mediaType     MediaType
+  // Multi-server support: "" = the default Plex server (plexServerUrl/plexAdminToken);
+  // a named slug = an additional configured server (src/lib/media-instance-registry.ts).
+  // Existing rows land on "" via the column default — a plain ADD COLUMN, no backfill,
+  // since there's no legacy discriminator to interpret (contrast is4k→arrInstance).
+  serverInstance String    @default("")
   filePath      String?
   plexRatingKey String? // Plex internal ratingKey — needed to call fix-match API
   title         String?
@@ -293,9 +298,10 @@ model PlexLibraryItem {
   contentRating String? // e.g. "PG-13", "R", "TV-MA" — from Plex contentRating field
   addedAt       DateTime? // when the item was added to the Plex library
 
-  @@id([tmdbId, mediaType])
+  @@id([tmdbId, mediaType, serverInstance])
   @@index([plexRatingKey]) // play-history sync filters on plexRatingKey every poll
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
+  @@index([serverInstance])
 }
 
 // ─── Jellyfin Library Cache ───────────────────────────────────────────────────
@@ -303,6 +309,8 @@ model PlexLibraryItem {
 model JellyfinLibraryItem {
   tmdbId          Int
   mediaType       MediaType
+  // Multi-server support — see PlexLibraryItem.serverInstance for the full rationale.
+  serverInstance  String    @default("")
   filePath        String?
   jellyfinItemId  String? // Jellyfin internal item UUID — needed to call fix-match API
   title           String?
@@ -312,9 +320,10 @@ model JellyfinLibraryItem {
   communityRating Float? // Jellyfin community rating (0–10)
   addedAt         DateTime? // when the item was added to Jellyfin (DateCreated)
 
-  @@id([tmdbId, mediaType])
+  @@id([tmdbId, mediaType, serverInstance])
   @@index([jellyfinItemId]) // play-history sync filters on jellyfinItemId every poll
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
+  @@index([serverInstance])
 }
 
 // ─── TV Episode Cache ─────────────────────────────────────────────────────────
@@ -701,6 +710,12 @@ enum AuditAction {
 model MediaServerUser {
   id               String   @id @default(cuid(2))
   source           String // "plex" | "jellyfin"
+  // Multi-server support. Plex's sourceUserId (the plex.tv cloud accountId) is
+  // stable across every Plex server that account can see, so without this a
+  // shared account on two Plex servers would collide onto one row and fight
+  // over per-server facts (isServerAdmin, downloadsEnabled). Distinct from
+  // serverMachineId below (still dormant, not repurposed). "" = default server.
+  serverInstance   String   @default("")
   sourceUserId     String // Plex accountID or Jellyfin userId UUID
   // Server machineIdentifier (Plex) or System/Info Id (Jellyfin) the row was first
   // observed on. Currently DORMANT scaffolding: the only writer is the trusted
@@ -737,14 +752,17 @@ model MediaServerUser {
   playHistory    PlayHistory[]
   activeSessions ActiveSession[]
 
-  @@unique([source, sourceUserId])
+  @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
   @@index([source])
+  @@index([source, serverInstance])
 }
 
 model PlayHistory {
   id     String @id @default(cuid(2))
   source String @db.VarChar(16) // "plex" | "jellyfin"
+  // Multi-server support — see PlexLibraryItem.serverInstance / MediaServerUser.serverInstance.
+  serverInstance String @default("") @db.VarChar(32)
 
   // Session timing
   startedAt      DateTime
@@ -821,7 +839,7 @@ model PlayHistory {
 
   createdAt DateTime @default(now())
 
-  @@unique([source, sourceSessionId])
+  @@unique([source, serverInstance, sourceSessionId])
   @@index([mediaServerUserId, startedAt(sort: Desc)])
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
@@ -838,11 +856,20 @@ model PlayHistory {
   // 30+ range-scoped aggregate queries from a smaller heap when filters are set.
   @@index([source, startedAt(sort: Desc)])
   @@index([mediaType, startedAt(sort: Desc)])
+  @@index([source, serverInstance])
 }
 
 model ActiveSession {
-  id     String @id @db.VarChar(256) // source:sessionKey composite
+  // Default instance: "source:sessionKey" (unchanged, byte-identical to today).
+  // Named instance: "source:serverInstance:sessionKey" — see activeSessionId()/
+  // parseActiveSessionId() in src/lib/media-instances.ts. Slugs can't contain
+  // ":" and sessionKey is a bare integer, so the 2-vs-3-part split is unambiguous.
+  id     String @id @db.VarChar(256)
   source String @db.VarChar(16) // "plex" | "jellyfin"
+  // Multi-server support — see PlexLibraryItem.serverInstance. Fixes a real
+  // collision risk: two Plex servers reusing the same low-cardinality
+  // sessionKey would otherwise collide on both this PK and the unique index below.
+  serverInstance String @default("") @db.VarChar(32)
 
   sessionKey String   @db.VarChar(256)
   startedAt  DateTime
@@ -907,8 +934,9 @@ model ActiveSession {
   creditsStartMs Int?
   creditsEndMs   Int?
 
-  @@unique([source, sessionKey])
+  @@unique([source, serverInstance, sessionKey])
   @@index([source])
+  @@index([source, serverInstance])
 }
 
 // ─── IP Geolocation Cache ────────────────────────────────────────────────────

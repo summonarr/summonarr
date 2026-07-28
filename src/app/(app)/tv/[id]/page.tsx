@@ -83,11 +83,11 @@ export default async function TVDetailPage({
     onWatchlist,
     onHidden,
   ] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "TV" } },
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId: media.id, mediaType: "TV" },
     }),
-    prisma.jellyfinLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "TV" } },
+    prisma.jellyfinLibraryItem.findFirst({
+      where: { tmdbId: media.id, mediaType: "TV" },
     }),
     prisma.mediaRequest.findFirst({
       where: { tmdbId: media.id, mediaType: "TV", tvdbId: { not: null } },

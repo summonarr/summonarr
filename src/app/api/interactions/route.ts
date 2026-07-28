@@ -746,8 +746,8 @@ async function handleComponent(interaction: any): Promise<void> {
       }
 
       const [plexItem, jellyfinItem, arrAvailableRow] = await Promise.all([
-        prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
-        prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
+        prisma.plexLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType } }),
+        prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType } }),
         // For a routed non-default instance, that instance's own availability also
         // short-circuits (the shared library only counts when !skipLibraryCheck).
         routedSlug !== ""

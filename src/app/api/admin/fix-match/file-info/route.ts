@@ -22,12 +22,12 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   }
 
   const [plexItem, jellyfinItem] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId, mediaType } },
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId, mediaType },
       select: { filePath: true },
     }),
-    prisma.jellyfinLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId, mediaType } },
+    prisma.jellyfinLibraryItem.findFirst({
+      where: { tmdbId, mediaType },
       select: { filePath: true },
     }),
   ]);

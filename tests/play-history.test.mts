@@ -186,7 +186,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
 // $transaction: run the callback against an in-memory tx facade.
 type UserRow = { id: string; mediaServer: string | null; deactivatedAt: Date | null };
 type MsuUpsertArgs = {
-  where: { source_sourceUserId: { source: string; sourceUserId: string } };
+  where: { source_serverInstance_sourceUserId: { source: string; serverInstance: string; sourceUserId: string } };
   create: Record<string, unknown>;
   update: Record<string, unknown>;
 };
@@ -277,6 +277,7 @@ function makeSession(overrides: Partial<ActiveSession> = {}): ActiveSession {
   return {
     id: "plex:key-1",
     source: "plex",
+    serverInstance: "",
     sessionKey: "key-1",
     startedAt: BASE_STARTED_AT,
     lastSeenAt: new Date(BASE_STARTED_AT.getTime() + 40 * 60_000),
@@ -681,10 +682,10 @@ test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020
   // supplied machineId — with none offered here, nothing is refused.
   assert.equal(msuFindCalls.length, 3);
   assert.deepEqual(msuFindCalls[0], {
-    where: { source_sourceUserId: { source: "plex", sourceUserId: "u-1" } },
+    where: { source_serverInstance_sourceUserId: { source: "plex", serverInstance: "", sourceUserId: "u-1" } },
     select: { id: true, serverMachineId: true, manualUserLink: true },
   });
-  assert.deepEqual(msuUpserts[0].where, { source_sourceUserId: { source: "plex", sourceUserId: "u-1" } });
+  assert.deepEqual(msuUpserts[0].where, { source_serverInstance_sourceUserId: { source: "plex", serverInstance: "", sourceUserId: "u-1" } });
   // Exact create/update shapes: deepEqual pins key ABSENCE too — no
   // isServerAdmin key may appear when the caller didn't send one.
   assert.deepEqual(msuUpserts[0].create, {

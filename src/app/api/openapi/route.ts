@@ -1243,6 +1243,51 @@ const spec = {
         },
       },
     },
+    "/admin/media-instances": {
+      get: {
+        tags: ["Admin – Settings"],
+        summary: "List all Plex/Jellyfin server instances with connection state (ADMIN)",
+        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+      },
+      post: {
+        tags: ["Admin – Settings"],
+        summary: "Save one service's instance registry + connection settings (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "instances"],
+                properties: {
+                  service: { type: "string", enum: ["plex", "jellyfin"] },
+                  instances: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      required: ["slug"],
+                      properties: {
+                        slug: { type: "string", description: "'' = default, or a named slug (lowercase alnum)" },
+                        name: { type: "string" },
+                        serverUrl: { type: "string", description: "Plex only" },
+                        adminToken: { type: "string", description: "Plex only; write-only, send the mask sentinel to keep unchanged" },
+                        adminEmail: { type: "string", description: "Plex only" },
+                        url: { type: "string", description: "Jellyfin only" },
+                        apiKey: { type: "string", description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Saved; includes per-instance connection test results" },
+          "400": { description: "Invalid service or slug" },
+        },
+      },
+    },
     "/admin/users/{id}/sessions": {
       get: {
         tags: ["Admin – Users"],
@@ -1731,6 +1776,14 @@ const spec = {
       post: {
         tags: ["Cron"],
         summary: "Pre-warm OMDB ratings cache",
+        security: [{ cronSecret: [] }],
+        responses: { "200": { description: "Warm result" } },
+      },
+    },
+    "/cron/warm-recommendations": {
+      post: {
+        tags: ["Cron"],
+        summary: "Pre-warm personalized \"For You\" recommendation cache",
         security: [{ cronSecret: [] }],
         responses: { "200": { description: "Warm result" } },
       },

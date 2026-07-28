@@ -378,14 +378,14 @@ shadowPrismaModel(prisma, "blacklistItem", {
 let plexHas = false;
 let jellyfinHas = false;
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findUnique: async (args: unknown) => {
-    rec("plexLibraryItem.findUnique", args);
+  findFirst: async (args: unknown) => {
+    rec("plexLibraryItem.findFirst", args);
     return plexHas ? { tmdbId: 603, mediaType: "MOVIE" } : null;
   },
 });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findUnique: async (args: unknown) => {
-    rec("jellyfinLibraryItem.findUnique", args);
+  findFirst: async (args: unknown) => {
+    rec("jellyfinLibraryItem.findFirst", args);
     return jellyfinHas ? { tmdbId: 603, mediaType: "MOVIE" } : null;
   },
 });
@@ -707,7 +707,7 @@ test("the legacy is4k:true shorthand maps to the '4k' instance, skips the shared
   assert.equal(((await res.json()) as Record<string, unknown>).arrInstance, "4k");
   assert.equal(createdData().arrInstance, "4k");
   assert.equal(
-    opsOf("plexLibraryItem.findUnique").length,
+    opsOf("plexLibraryItem.findFirst").length,
     0,
     "skipLibraryCheck: a library copy at another quality must not block the 4K request",
   );
