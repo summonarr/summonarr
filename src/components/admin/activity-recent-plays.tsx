@@ -64,6 +64,10 @@ function formatBitrate(raw: number | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
+// Unpinned locale/timezone (via "en-US" + no timeZone) is only safe because
+// the sole caller (below, inside DetailRow) never renders during SSR/first
+// paint — DetailRow is gated behind `isExpanded`, false until a post-hydration
+// click (guardrail 16). Don't call this from an ungated render path.
 function formatTimestamp(dateStr: string | null): string {
   if (!dateStr) return "—";
   return new Date(dateStr).toLocaleString("en-US");
