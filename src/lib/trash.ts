@@ -5,6 +5,7 @@ import { safeFetchTrusted } from "./safe-fetch";
 import { arrFetch, ArrResponseError, getArrCfg, type ArrCfg, type ArrVariant } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { BATCH_TX_TIMEOUT } from "./cron-auth";
+import { mapLimit } from "./concurrency";
 import {
   isCustomFormatPayload,
   isCustomFormatGroupPayload,
@@ -48,6 +49,10 @@ const RAW_FETCH_MAX_BYTES = 2 * 1024 * 1024;
 const TREE_FETCH_TIMEOUT_MS = 30_000;
 const RAW_FETCH_TIMEOUT_MS = 15_000;
 const GH_CONCURRENCY = 8;
+// Bounds the recordApply() fan-out on the prefetch-failure path (guardrail 31)
+// — an admin can have applied hundreds of custom formats/quality profiles, and
+// each recordApply is its own Prisma upsert.
+const RECORD_APPLY_CONCURRENCY = 8;
 
 const TRASH_PATHS: Record<TrashService, {
   cf: string;
@@ -135,9 +140,37 @@ export interface TrashQualityProfile {
   [k: string]: unknown;
 }
 
+// A full refresh calls ghAuthHeaders() (and so loadGithubToken()) once per file —
+// potentially hundreds of times for a real TRaSH catalog. Memoize with a short
+// TTL + in-flight coalescing (mirrors omdb.ts's getApiKey()) so a refresh issues
+// one Setting read instead of hundreds; an admin's token change still propagates
+// within the TTL window.
+const GITHUB_TOKEN_TTL_MS = 30_000;
+let githubTokenCache: { value: string | null; at: number } | null = null;
+let githubTokenInflight: Promise<string | null> | null = null;
+
 async function loadGithubToken(): Promise<string | null> {
-  const row = await prisma.setting.findUnique({ where: { key: "trashGithubToken" } });
-  return row?.value && row.value.length > 0 ? row.value : null;
+  if (githubTokenCache && Date.now() - githubTokenCache.at < GITHUB_TOKEN_TTL_MS) {
+    return githubTokenCache.value;
+  }
+  if (githubTokenInflight) return githubTokenInflight;
+  const p = (async () => {
+    const row = await prisma.setting.findUnique({ where: { key: "trashGithubToken" } });
+    const value = row?.value && row.value.length > 0 ? row.value : null;
+    githubTokenCache = { value, at: Date.now() };
+    return value;
+  })();
+  githubTokenInflight = p;
+  p.finally(() => { githubTokenInflight = null; }).catch(() => {});
+  return p;
+}
+
+// Test-support only: the cache above is module-level state that would
+// otherwise leak a stale (or absent) token across unrelated test() blocks in
+// the same file/process. Not used by production code paths.
+export function __resetGithubTokenCacheForTests(): void {
+  githubTokenCache = null;
+  githubTokenInflight = null;
 }
 
 async function ghAuthHeaders(): Promise<HeadersInit> {
@@ -884,8 +917,8 @@ export async function applyCustomFormats(
     // the loop below would create duplicates. Fail the whole batch instead of
     // guessing (also satisfies GR7: surface the error).
     console.warn("[trash] failed to prefetch remote customformat list:", err instanceof Error ? err.message : err);
-    return Promise.all(
-      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, arrInstance)),
+    return mapLimit(specs, RECORD_APPLY_CONCURRENCY, (spec) =>
+      recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, arrInstance),
     );
   }
 
@@ -1329,8 +1362,8 @@ export async function applyQualityProfiles(
     // Can't read existing quality profiles → a blind POST below would duplicate
     // them. Fail the whole batch instead of guessing (also satisfies GR7).
     console.warn("[trash] failed to prefetch remote qualityprofile list:", err instanceof Error ? err.message : err);
-    return Promise.all(
-      specs.map((spec) => recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, arrInstance)),
+    return mapLimit(specs, RECORD_APPLY_CONCURRENCY, (spec) =>
+      recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, arrInstance),
     );
   }
 
