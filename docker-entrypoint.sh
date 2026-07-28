@@ -266,12 +266,34 @@ JSEOF
 # Compute the next-run timestamp for a job: full interval on success, a short
 # retry window on failure so a transient outage doesn't skip the job for an
 # entire (possibly 24h) interval.
+
+# Internal loopback base for every cron POST. Honours PORT exactly like the
+# readiness probe below and the Dockerfile HEALTHCHECK already do — the URLs
+# hardcoded :3000, so running with a custom PORT pointed all eleven crons at a
+# dead port while both health probes kept reporting healthy.
+CRON_BASE="http://localhost:${PORT:-3000}${BASE_PATH}"
+
+# Digits-only, or the supplied default. The interval knobs are free-form env vars
+# (SYNC_INTERVAL, RATINGS_SYNC_INTERVAL, CRON_RETRY_INTERVAL, …); a typo like
+# "1h" or "3600s" makes the $(( )) arithmetic below a fatal shell error, and with
+# `set -e` that kills the whole _cron_loop subshell for the container's lifetime —
+# every cron silently stops while the healthcheck keeps reporting healthy.
+_cron_int() {
+  case "$1" in
+    ''|*[!0-9]*) echo "$2" ;;
+    *)           echo "$1" ;;
+  esac
+}
+
+# Compute the next-run timestamp for a job: full interval on success, a short
+# retry window on failure so a transient outage doesn't skip the job for an
+# entire (possibly 24h) interval.
 _cron_next() {
-  _exit="$1"; _now="$2"; _interval="$3"
+  _exit="$1"; _now="$2"; _interval=$(_cron_int "$3" 3600)
   if [ "$_exit" -eq 0 ]; then
     echo $((_now + _interval))
   else
-    _retry=${CRON_RETRY_INTERVAL:-300}
+    _retry=$(_cron_int "${CRON_RETRY_INTERVAL:-300}" 300)
     [ "$_retry" -gt "$_interval" ] && _retry="$_interval"
     echo $((_now + _retry))
   fi
@@ -298,43 +320,43 @@ _cron_loop() {
     sleep 60
     NOW=$(date +%s)
     if [ "$NOW" -ge "$SYNC_NEXT" ]; then
-      _cron_sync "${SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync}" "sync" && rc=0 || rc=$?
+      _cron_sync "${SYNC_URL:-${CRON_BASE}/api/sync}" "sync" && rc=0 || rc=$?
       SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${SYNC_INTERVAL:-3600}")
     fi
     if [ "$NOW" -ge "$UPCOMING_NEXT" ]; then
-      _cron_sync "${UPCOMING_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/upcoming}" "upcoming" && rc=0 || rc=$?
+      _cron_sync "${UPCOMING_SYNC_URL:-${CRON_BASE}/api/sync/upcoming}" "upcoming" && rc=0 || rc=$?
       UPCOMING_NEXT=$(_cron_next "$rc" "$NOW" "${UPCOMING_SYNC_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$RATINGS_NEXT" ]; then
-      _cron_sync "${RATINGS_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/ratings}" "ratings" && rc=0 || rc=$?
+      _cron_sync "${RATINGS_SYNC_URL:-${CRON_BASE}/api/sync/ratings}" "ratings" && rc=0 || rc=$?
       RATINGS_NEXT=$(_cron_next "$rc" "$NOW" "${RATINGS_SYNC_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
-      _cron_sync "${PURGE_SESSIONS_URL:-http://localhost:3000${BASE_PATH}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
+      _cron_sync "${PURGE_SESSIONS_URL:-${CRON_BASE}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
       PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
-      _cron_sync "${LIST_CACHE_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
+      _cron_sync "${LIST_CACHE_SYNC_URL:-${CRON_BASE}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
       LIST_CACHE_NEXT=$(_cron_next "$rc" "$NOW" "${LIST_CACHE_SYNC_INTERVAL:-21600}")
     fi
     if [ "$NOW" -ge "$WARM_ACTIVITY_NEXT" ]; then
-      _cron_sync "${WARM_ACTIVITY_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-activity}" "warm-activity" quiet && rc=0 || rc=$?
+      _cron_sync "${WARM_ACTIVITY_URL:-${CRON_BASE}/api/cron/warm-activity}" "warm-activity" quiet && rc=0 || rc=$?
       WARM_ACTIVITY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_ACTIVITY_INTERVAL:-1800}")
     fi
     if [ "$NOW" -ge "$WARM_MDBLIST_NEXT" ]; then
-      _cron_sync "${WARM_MDBLIST_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-mdblist}" "warm-mdblist" && rc=0 || rc=$?
+      _cron_sync "${WARM_MDBLIST_URL:-${CRON_BASE}/api/cron/warm-mdblist}" "warm-mdblist" && rc=0 || rc=$?
       WARM_MDBLIST_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_MDBLIST_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
-      _cron_sync "${WARM_OMDB_URL:-http://localhost:3000${BASE_PATH}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
+      _cron_sync "${WARM_OMDB_URL:-${CRON_BASE}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
       WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
-      _cron_sync "${SCRUB_AUDIT_PII_URL:-http://localhost:3000${BASE_PATH}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?
+      _cron_sync "${SCRUB_AUDIT_PII_URL:-${CRON_BASE}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?
       SCRUB_AUDIT_PII_NEXT=$(_cron_next "$rc" "$NOW" "${SCRUB_AUDIT_PII_INTERVAL:-86400}")
     fi
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
-      _cron_sync "${TRASH_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
+      _cron_sync "${TRASH_SYNC_URL:-${CRON_BASE}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
       TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}")
     fi
   done
@@ -380,7 +402,7 @@ JSEOF
     # failed poll would kill this loop permanently — play-history/Now Playing
     # tracking silently stops until the container restarts, while the container
     # still reports healthy. The _cron_loop calls are all guarded the same way.
-    _cron_sync "${PLAY_HISTORY_SYNC_URL:-http://localhost:3000${BASE_PATH}/api/sync/play-history}" "play-history" "1" || true
+    _cron_sync "${PLAY_HISTORY_SYNC_URL:-${CRON_BASE}/api/sync/play-history}" "play-history" "1" || true
     sleep "$INTERVAL"
   done
 }
