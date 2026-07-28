@@ -560,7 +560,10 @@ export async function notifyUsersRequestsApproved(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true },
+      // deactivatedAt: null — account removal disables rather than scrubs
+      // (guardrail 33), so a removed user keeps a live Discord link and would
+      // otherwise still get pinged by a later batch approve/decline.
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true, deactivatedAt: null },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
@@ -639,7 +642,8 @@ export async function notifyUsersRequestsDeclined(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true },
+      // deactivatedAt: null — see notifyUsersRequestsApproved.
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true, deactivatedAt: null },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));

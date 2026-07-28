@@ -596,6 +596,7 @@ test("bulk approve: dedups requesters in one opt-in query, posts per REQUEST, an
     id: { in: ["u1", "u2", "u3"] },
     discordId: { not: null },
     notifyOnApproved: true,
+    deactivatedAt: null,
   });
 
   // One post per resolvable REQUEST (u1 gets two), none for u3.

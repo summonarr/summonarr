@@ -700,7 +700,10 @@ export async function notifyUsersRequestsApprovedPush(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, pushOnApproved: true },
+      // deactivatedAt: null — account removal disables rather than scrubs
+      // (guardrail 33), so a removed user keeps live push subscriptions and
+      // would otherwise still get pinged by a later batch approve/decline.
+      where: { id: { in: userIds }, pushOnApproved: true, deactivatedAt: null },
       select: { id: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
@@ -749,7 +752,8 @@ export async function notifyUsersRequestsDeclinedPush(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, pushOnDeclined: true },
+      // deactivatedAt: null — see notifyUsersRequestsApprovedPush.
+      where: { id: { in: userIds }, pushOnDeclined: true, deactivatedAt: null },
       select: { id: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
