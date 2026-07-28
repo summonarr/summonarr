@@ -299,6 +299,23 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "donationBuyMeACoffee",
   ]);
 
+  // The Donations form resubmits all six fields together on every save, not
+  // just the one the admin is editing. A field can hold a pre-existing
+  // http(s)-agnostic value saved before the https-only rule below existed —
+  // without this exemption, that one untouched legacy field would 400 EVERY
+  // future save on the whole tab (including edits to unrelated fields), with
+  // no indication in the UI of which field is blocking it. Only a genuinely
+  // new/changed value is held to the rule; resubmitting the unchanged stored
+  // value is a no-op. This doesn't weaken /donate's own safeUrl() render-time
+  // guard (the actual XSS boundary), which still drops anything non-https
+  // regardless of what's stored.
+  const submittedDonationKeys = Object.keys(body).filter((k) => DONATION_URL_KEYS.has(k));
+  const currentDonationValues = new Map(
+    submittedDonationKeys.length > 0
+      ? (await prisma.setting.findMany({ where: { key: { in: submittedDonationKeys } } })).map((r) => [r.key, r.value])
+      : [],
+  );
+
   const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
   const isSecretShapedKey = (k: string) =>
     SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
@@ -363,7 +380,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
-    if (DONATION_URL_KEYS.has(key)) {
+    if (DONATION_URL_KEYS.has(key) && value !== currentDonationValues.get(key)) {
       // donationAmazon must always be a full URL; the others may be a plain handle
       // (e.g. "@alice"). Apply scheme guard when value looks URL-shaped (contains "://").
       const looksLikeUrl = value.includes("://");
