@@ -7,6 +7,7 @@ import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
@@ -58,8 +59,10 @@ export default async function AuditLogPage({
       where.createdAt.lt = end;
     }
   }
-  if (user) where.userName = { contains: user, mode: "insensitive" };
-  if (target) where.target = { contains: target, mode: "insensitive" };
+  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
+  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  if (user) where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
+  if (target) where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
   if (hideCron) where.userId = { not: "system" };
 
   const logs = await prisma.auditLog.findMany({

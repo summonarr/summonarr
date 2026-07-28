@@ -5,6 +5,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
@@ -64,12 +65,14 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     }
   }
 
+  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
+  // metacharacters and bound the length (search-box DoS, matches /api/votes).
   if (user) {
-    where.userName = { contains: user, mode: "insensitive" };
+    where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
   }
 
   if (target) {
-    where.target = { contains: target, mode: "insensitive" };
+    where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
   }
 
   if (hideCron) {

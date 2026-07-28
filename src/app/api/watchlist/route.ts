@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { verifyTmdbMedia } from "@/lib/tmdb";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 const PAGE_SIZE = 60;
 const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
@@ -19,10 +20,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
   const typeParam = sp.get("type");
   const mediaType = typeParam === "MOVIE" || typeParam === "TV" ? typeParam : undefined;
-  // See /api/votes: Prisma `contains` → ILIKE '%q%' with no ESCAPE, so strip
-  // `%`/`_`/`\` and bound the length (wildcard-scan DoS, the same mitigation
-  // /api/play-history applies to its search box).
-  const q = (sp.get("q") ?? "").trim().replace(/[%_\\]/g, "").slice(0, 100);
+  const q = sanitizeContainsSearch((sp.get("q") ?? "").trim());
 
   const where: Prisma.WatchlistItemWhereInput = {
     userId: session.user.id,

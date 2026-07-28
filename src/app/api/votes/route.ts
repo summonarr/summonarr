@@ -7,7 +7,7 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
-import { sanitizeOptional } from "@/lib/sanitize";
+import { sanitizeOptional, sanitizeContainsSearch } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
@@ -29,11 +29,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
     sortParam && (VALID_VOTE_SORTS as readonly string[]).includes(sortParam)
       ? (sortParam as (typeof VALID_VOTE_SORTS)[number])
       : "votes";
-  // Strip LIKE metacharacters and cap the length before it reaches Prisma
-  // `contains` — that emits ILIKE '%q%' with no ESCAPE clause, so `%`/`_` stay
-  // wildcards and an unbounded pattern makes the search box a wildcard-scan DoS.
-  // Same shape as sanitizeContainsSearch in /api/play-history.
-  const q = (sp.get("q") ?? "").trim().replace(/[%_\\]/g, "").slice(0, 100);
+  const q = sanitizeContainsSearch((sp.get("q") ?? "").trim());
 
   // Mirrors the web /votes page: `mine` scopes to the caller's votes, `q` matches
   // the title, `recent` orders groups by their most-recent vote.

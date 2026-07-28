@@ -4,21 +4,13 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 import type { Prisma } from "@/generated/prisma";
 
 export const dynamic = "force-dynamic";
 
 const MAX_EXPORT_ROWS = 10_000;
 const PAGE_SIZE = 1000;
-const MAX_SEARCH_LEN = 100;
-
-// Prisma's `contains` filter emits an ILIKE with no `ESCAPE` clause, so a search
-// term laden with `%`/`_` wildcards would force an unindexable pattern scan (a
-// search-box DoS). Strip the LIKE metacharacters (and the escape char) and bound
-// the length so the filter is a bounded literal substring match.
-function sanitizeContainsSearch(s: string): string {
-  return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
-}
 
 function escapeCSV(value: unknown): string {
   if (value == null) return "";

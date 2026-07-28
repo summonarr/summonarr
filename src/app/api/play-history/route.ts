@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
@@ -20,16 +21,6 @@ function escapeIlike(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
-// The Prisma `contains` filter (used on the ungrouped path) emits an ILIKE with
-// NO `ESCAPE` clause, so any `%`/`_` in the search term remain wildcards and a
-// wildcard-laden string forces an unindexable pattern scan (a search-box DoS).
-// Unlike the grouped raw-SQL path we cannot attach an ESCAPE clause here, so we
-// strip the metacharacters (and the escape char) and bound the length, leaving a
-// literal substring match for normal text.
-const MAX_SEARCH_LEN = 100;
-function sanitizeContainsSearch(s: string): string {
-  return s.replace(/[%_\\]/g, "").slice(0, MAX_SEARCH_LEN);
-}
 
 export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, session) => {
   // The grouped path runs two heavy window-function/aggregate raw queries over

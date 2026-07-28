@@ -12,7 +12,7 @@ import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { sanitizeForLog } from "@/lib/sanitize";
+import { sanitizeForLog, sanitizeContainsSearch } from "@/lib/sanitize";
 import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
 import { getArrInstances, getSyncableArrInstances, isInstanceConfigured } from "@/lib/arr-instance-registry";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
@@ -43,7 +43,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
     sortParam && (VALID_SORTS as readonly string[]).includes(sortParam)
       ? (sortParam as (typeof VALID_SORTS)[number])
       : "newest";
-  const q = (sp.get("q") ?? "").trim();
+  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
+  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  const q = sanitizeContainsSearch((sp.get("q") ?? "").trim());
 
   // MANAGE_REQUESTS sees every request (admins included via the ADMIN superbit);
   // everyone else sees only their own.
