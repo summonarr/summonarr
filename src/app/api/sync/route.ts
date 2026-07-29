@@ -13,8 +13,9 @@ import {
 } from "@/lib/arr";
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
+import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -567,17 +568,21 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [plexConfig, jellyfinConfig, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+  const [plexConfig, jellyfinInstances, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
     getPlexConfig(),
-    getJellyfinConfig(),
+    // Every configured, connection-ready Jellyfin server (multi-server support) — each
+    // instance's own url/apiKey is resolved via getJellyfinConfig(instance.slug) below.
+    getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
   let plexMovieIds = new Map<number, PlexLibraryItemData>();
   let plexTvIds    = new Map<number, PlexLibraryItemData>();
-  let jfMovieIds   = new Map<number, JellyfinLibraryItemData>();
-  let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
+  // Never reassigned (unlike plexMovieIds/plexTvIds above) — each configured Jellyfin
+  // instance's results are merged in via .set() rather than replacing the map wholesale.
+  const jfMovieIds = new Map<number, JellyfinLibraryItemData>();
+  const jfTvIds    = new Map<number, JellyfinLibraryItemData>();
   let plexSyncSucceeded = false;
   let jellyfinSyncSucceeded = false;
 
@@ -649,58 +654,124 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     })(),
     (async () => {
       if (!jellyfinEnabled) return;
-      if (!jellyfinConfig.url || !jellyfinConfig.apiKey) return;
-      try {
-        const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
-        const apiKey  = jellyfinConfig.apiKey;
-        // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
-        // otherwise the scheduled full sync ingests every library and marks excluded
-        // media as owned.
-        const selectedJellyfinIds = jfLibrariesRow?.value
-          ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-          : undefined;
-        [jfMovieIds, jfTvIds] = await Promise.all([
-          getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
-          getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
-        ]);
-        const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-        const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-        // Advisory lock 2001,2 — matches /api/sync/jellyfin so the two callers can't race the same write.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-          await tx.jellyfinLibraryItem.deleteMany();
-          if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
-          if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        jellyfinSyncSucceeded = true;
-        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+      if (jellyfinInstances.length === 0) return;
+
+      // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
+      // otherwise the scheduled full sync ingests every library and marks excluded
+      // media as owned. One admin-facing setting, shared across every instance.
+      const selectedJellyfinIds = jfLibrariesRow?.value
+        ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+        : undefined;
+
+      // Fan out over every configured, connection-ready Jellyfin server (multi-server
+      // support). Unlike arr, there's no per-request instance to attribute a fetch
+      // failure to — availability here is a union across all configured servers, not
+      // per-instance routing (see media-instances.ts) — so a failed instance simply
+      // contributes nothing to the write below, and jellyfinSyncSucceeded (used only by
+      // the revert/stale-fallback checks further down, which need to know this run's
+      // union data is a COMPLETE picture) requires every configured instance's fetch AND
+      // the write to have both succeeded.
+      const fetched = await Promise.all(
+        jellyfinInstances.map(async (instance) => {
+          try {
+            const cfg = await getJellyfinConfig(instance.slug);
+            if (!cfg.url || !cfg.apiKey) return { slug: instance.slug, result: null }; // defensive; getSyncableMediaInstances already filters to configured ones
+            const baseUrl = cfg.url.replace(/\/$/, "");
+            const apiKey = cfg.apiKey;
+            const [movieIds, tvIds] = await Promise.all([
+              getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
+              getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
+            ]);
+            return { slug: instance.slug, result: { baseUrl, apiKey, movieIds, tvIds } };
+          } catch (err) {
+            console.error(`[sync] Jellyfin check failed for instance "${instance.slug}":`, err);
+            return { slug: instance.slug, result: null };
+          }
+        }),
+      );
+      const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, ...f.result }] : []));
+
+      // Union into the shared maps the ~300 lines of downstream availability logic
+      // already expect — they only ever ask "is this tmdbId in the map," so a plain
+      // per-key merge is correct regardless of which instance's value wins a collision.
+      for (const { movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) jfMovieIds.set(tmdbId, d);
+        for (const [tmdbId, d] of tvIds) jfTvIds.set(tmdbId, d);
+      }
+
+      let libraryWriteSucceeded = true;
+      if (writable.length > 0) {
+        try {
+          // Advisory lock 2001,2 — matches /api/sync/jellyfin. Per-instance scoped delete
+          // (mirrors the arr side's per-slug scoping above) so one instance's rewrite
+          // never touches another's rows; only instances whose fetch succeeded are
+          // touched at all (G13 — a failed instance's existing rows are left intact,
+          // never wiped).
+          await prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
+            for (const { slug, movieIds, tvIds } of writable) {
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+              await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: slug } });
+              if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
+              if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
+            }
+          }, { timeout: BATCH_TX_TIMEOUT });
+        } catch (err) {
+          console.error("[sync] Jellyfin library write failed:", err);
+          libraryWriteSucceeded = false;
+        }
+      }
+
+      jellyfinSyncSucceeded = libraryWriteSucceeded && fetched.every((f) => f.result !== null);
+      if (jellyfinSyncSucceeded) {
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale
+        // source. Means "every configured instance synced clean this run."
         await prisma.setting.upsert({
           where: { key: "lastJellyfinSyncSucceededAt" },
           update: { value: String(Date.now()) },
           create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
         }).catch((err) => console.error("[sync] failed to stamp lastJellyfinSyncSucceededAt:", err));
+      }
 
+      // TVEpisodeCache has no serverInstance column (episodes are TMDB-anchored, shared
+      // data — see media-instances.ts) — a per-instance episode-fetch failure can't be
+      // handled by leaving just THAT instance's rows stale the way the scoped
+      // JellyfinLibraryItem delete above does, so any single failure here skips the WHOLE
+      // write and leaves existing rows untouched — the same all-or-nothing contract the
+      // pre-multi-instance code already had (getJellyfinTVEpisodes throwing skipped the
+      // delete+insert entirely). Looping the delete+insert TOGETHER per instance would
+      // also have each instance's pass wipe the previous instance's just-written rows, so
+      // every instance's rows are accumulated and the delete+insert runs ONCE at the end.
+      let allEpisodesFetched = true;
+      const allEpisodeRows: Array<{ source: "jellyfin" } & JellyfinTVEpisodeData> = [];
+      for (const { slug, baseUrl, apiKey, tvIds } of writable) {
+        // Built from THIS instance's own TV map, never the cross-instance union: Jellyfin
+        // item ids are server-local and can collide across independently-administered
+        // servers, so a global series map could resolve episodes onto the wrong show.
         const jfSeriesMap = new Map<string, number>();
-        for (const [tmdbId, data] of jfTvIds) {
+        for (const [tmdbId, data] of tvIds) {
           if (data.itemId) jfSeriesMap.set(data.itemId, tmdbId);
         }
         try {
-          // Full replace: clear then insert (see the Plex block above). getJellyfinTVEpisodes
-          // throws on a fetch failure (caught below → no clear), so an empty result here is a
-          // genuinely-empty library and the stale episode ownership should be cleared.
           const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, jfSeriesMap);
-          const episodeRows = episodes.map((e) => ({ source: "jellyfin" as const, ...e }));
+          allEpisodeRows.push(...episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+        } catch (err) {
+          console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);
+          allEpisodesFetched = false;
+        }
+      }
+      if (allEpisodesFetched && writable.length > 0) {
+        try {
           await prisma.$transaction(async (tx) => {
             // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
-            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+            if (allEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allEpisodeRows);
           }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Jellyfin TV episode cache failed:", err);
         }
-      } catch (err) {
-        console.error("[sync] Jellyfin check failed:", err);
       }
     })(),
   ]);
@@ -723,7 +794,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // actually present in the unreached library. Only trust a library map when its source
   // synced; skip the demote entirely while a configured source is down.
   const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
-  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jellyfinConfig.url && jellyfinConfig.apiKey);
+  const jellyfinConfiguredEnabled = jellyfinEnabled && jellyfinInstances.length > 0;
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed
     // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an

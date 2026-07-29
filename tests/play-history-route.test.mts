@@ -197,17 +197,41 @@ function matchesFindMany(row: ActiveRow, where?: ActiveWhere): boolean {
   return true;
 }
 
+// Jellyfin's connection settings moved off the route's bulk SYNC read onto
+// getJellyfinConfig's own findUnique calls, which shrank that read down to
+// exactly {plexServerUrl, plexAdminToken} — byte-identical in shape to
+// reconcilePlexEventStream's OWN internal 2-key read (plex-events.ts). Args
+// alone can no longer tell the two callers apart. But every POST issues
+// exactly one of each, and reconcile's is ALWAYS fired (fire-and-forget, at
+// the very top of syncPlayHistory) and thus ALWAYS recorded strictly before
+// the route reaches its own read (which sits behind an awaited
+// reanchorActiveSessionsOnBoot() call) — so parity of a per-shape counter
+// reliably tells them apart across any number of POSTs in one test: odd =
+// reconcile (must stay starved so it never opens a real SSE connection),
+// even = the route's own read (must see the real connection settings).
+let plexOnlyReadCount = 0;
+
 const fakePrisma = {
   setting: {
     findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
       rec("setting", "findMany", args);
       const keys = args?.where?.key?.in ?? [];
-      // The route's SYNC read is the ONLY read that asks for jellyfinUrl; only
-      // it may see the connection URLs (see the syncSettings comment above).
-      const isSyncRead = keys.includes("jellyfinUrl");
+      // The media-instance registry's isMediaInstanceConfigured("jellyfin", slug)
+      // check is the only OTHER caller of this bulk path; it asks for
+      // jellyfin<Slug>Url/jellyfin<Slug>ApiKey (jellyfinUrl/jellyfinApiKey for the
+      // default instance, jellyfinRemoteUrl/jellyfinRemoteApiKey for a named one —
+      // see jellyfinSettingKey in media-instances.ts) and must keep seeing them
+      // for EVERY instance, not just the default's exact key spelling.
+      const isSyncRead = keys.some((k) => /^jellyfin([A-Z][A-Za-z0-9]*)?(Url|ApiKey)$/.test(k));
+      const isPlexOnlyPair = keys.length === 2 && keys.includes("plexServerUrl") && keys.includes("plexAdminToken");
+      let isRouteOwnPlexRead = false;
+      if (isPlexOnlyPair) {
+        plexOnlyReadCount++;
+        isRouteOwnPlexRead = plexOnlyReadCount % 2 === 0;
+      }
       const rows: Array<{ key: string; value: string }> = [];
       for (const k of keys) {
-        if (isSyncRead && syncSettings.has(k)) rows.push({ key: k, value: syncSettings.get(k)! });
+        if ((isSyncRead || isRouteOwnPlexRead) && syncSettings.has(k)) rows.push({ key: k, value: syncSettings.get(k)! });
         else if (settings.has(k)) rows.push({ key: k, value: settings.get(k)! });
       }
       return rows;
@@ -217,6 +241,21 @@ const fakePrisma = {
       settingUpserts.push({ key: args.where.key, value: args.create.value });
       settings.set(args.where.key, args.create.value);
       return args.create;
+    },
+    // getJellyfinConfig (per-instance connection read) and the media-instance
+    // registry (getSyncableMediaInstances) both read single keys via
+    // findUnique rather than the bulk findMany above. jellyfinUrl/jellyfinApiKey
+    // live in syncSettings (same "only the sync path sees these" fiction as
+    // the findMany stub); a registry key (jellyfinInstances/plexInstances)
+    // with nothing seeded returns null, so getSyncableMediaInstances resolves
+    // to just the default ("") instance — exactly what every test here assumes.
+    findUnique: async (args?: { where?: { key?: string } }) => {
+      rec("setting", "findUnique", args);
+      const key = args?.where?.key;
+      if (!key) return null;
+      if (syncSettings.has(key)) return { key, value: syncSettings.get(key)! };
+      if (settings.has(key)) return { key, value: settings.get(key)! };
+      return null;
     },
   },
   activeSession: {
@@ -337,10 +376,17 @@ const fakePrisma = {
 // ── scripted fetch: /status/sessions, /Sessions, plex.tv owner, markers ─────
 const PLEX_URL = "http://10.66.0.1:32400"; // RFC1918 literal: admin SSRF, no DNS
 const JF_URL = "http://10.66.0.2:8096";
+// A second, independently-configured Jellyfin server (multi-server support —
+// the guardrail-20-style session-id-collision test uses this). Unconfigured
+// (no registry/connection Settings seeded) by default, so every existing
+// single-instance test is unaffected — getSyncableMediaInstances resolves to
+// just the default instance unless a test explicitly seeds jellyfinInstances.
+const JF_REMOTE_URL = "http://10.66.0.3:8096";
 type FetchRecord = { url: string; method: string };
 const fetchLog: FetchRecord[] = [];
 let plexSnapshot: Array<Record<string, unknown>> = [];
 let jfSnapshot: Array<Record<string, unknown>> = [];
+let jfRemoteSnapshot: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
 let jfSessionsStatus = 200;
 
@@ -360,6 +406,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return okJson({ MediaContainer: { Metadata: [{}] } }); // no markers → no marker updateMany
   }
   if (url.pathname === "/Sessions") {
+    if (url.origin === JF_REMOTE_URL) return okJson(jfRemoteSnapshot, jfSessionsStatus);
     return okJson(jfSnapshot, jfSessionsStatus);
   }
   throw new Error(`unexpected fetch in test: ${String(input)}`);
@@ -557,6 +604,7 @@ async function mintSession(role: string): Promise<{ userId: string; token: strin
 beforeEach(() => {
   dbCalls.length = 0;
   warns.length = 0;
+  plexOnlyReadCount = 0;
   // NOTE: `errors` is deliberately never reset — the final test pins the route
   // stays console.error-silent across the whole file (guardrail 7).
   fetchLog.length = 0;
@@ -910,6 +958,51 @@ test("a brand-new jellyfin session is created from the /Sessions snapshot", asyn
   assert.equal(created[0].sessionKey, "jf-new");
   assert.equal(created[0].tmdbId, 551, "the ProviderIds.Tmdb resolves the movie id");
   assert.equal(created[0].progressMs, 30_000n, "positionTicks (100ns) convert to ms");
+});
+
+test("multi-server: two Jellyfin instances reporting the SAME raw playSessionId in one tick create TWO distinct ActiveSession rows, not a collision", async () => {
+  // Register a second, independently-configured Jellyfin server (media-
+  // instance-registry.ts's JSON registry + its own connection Settings —
+  // jellyfinRemoteUrl/jellyfinRemoteApiKey, see media-instances.ts). getSyncableMediaInstances
+  // then resolves BOTH the default and "remote" as syncable.
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  syncSettings.set("jellyfinRemoteUrl", JF_REMOTE_URL);
+  syncSettings.set("jellyfinRemoteApiKey", "jf-api-key-remote");
+  try {
+    // Two unrelated, independently-administered Jellyfin servers can each
+    // mint the same low-cardinality PlaySessionId — there's nothing coordinating
+    // them. Before activeSessionId's instance-qualified id format (guardrail:
+    // "two Plex servers reusing the same low-cardinality sessionKey would
+    // collide on both the PK and the unique index"), the second instance's
+    // createMany({skipDuplicates}) would silently no-op onto the first
+    // instance's already-created row and that session would never get its own
+    // ActiveSession at all.
+    jfSnapshot = [jfSnap("collide-123", { positionTicks: 100_000_000, durationTicks: 72_000_000_000 })];
+    jfRemoteSnapshot = [jfSnap("collide-123", { positionTicks: 200_000_000, durationTicks: 72_000_000_000 })];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    const body = await bodyOf(res);
+    assert.deepEqual(body.jellyfin, { started: 1, updated: 0, ended: 0 }, "the default instance's session was created");
+    assert.deepEqual(body["jellyfin:remote"], { started: 1, updated: 0, ended: 0 }, "the named instance's session was ALSO created, independently");
+    await settle();
+
+    assert.equal(activeStore.has("jellyfin:collide-123"), true, "default-instance session keeps the legacy 2-segment id");
+    assert.equal(activeStore.has("jellyfin:remote:collide-123"), true, "named-instance session gets its own 3-segment id — no collision");
+    assert.equal(activeStore.size, 2, "both rows coexist; neither create silently no-op'd onto the other via skipDuplicates");
+
+    const defaultRow = activeStore.get("jellyfin:collide-123")!;
+    const remoteRow = activeStore.get("jellyfin:remote:collide-123")!;
+    assert.equal(defaultRow.sessionKey, "collide-123");
+    assert.equal(remoteRow.sessionKey, "collide-123", "the raw sessionKey column is identical on both rows — only the composite id disambiguates them");
+    assert.equal(defaultRow.progressMs, 10_000n);
+    assert.equal(remoteRow.progressMs, 20_000n, "the two servers' independent playheads were not merged into one row");
+  } finally {
+    // Restore single-instance-only state for every later test in this file.
+    settings.delete("jellyfinInstances");
+    syncSettings.delete("jellyfinRemoteUrl");
+    syncSettings.delete("jellyfinRemoteApiKey");
+    jfRemoteSnapshot = [];
+  }
 });
 
 // ═══ Degraded run — a single-source outage stays 200 but flags the ledger ═══

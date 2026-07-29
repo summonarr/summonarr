@@ -6,10 +6,15 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { mediaInstanceLabel } from "@/lib/media-instances";
 
 interface ServerUser {
   id: string;
   source: string;
+  // Multi-server support — "" is the default (and, for a single-server
+  // deployment, only) instance. Distinguishes same-named users across two
+  // independently-configured servers of the same provider.
+  serverInstance: string;
   sourceUserId: string;
   username: string;
   email: string | null;
@@ -363,7 +368,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
   const plexUsers = filtered.filter((u) => u.source === "plex");
   const jellyfinUsers = filtered.filter((u) => u.source === "jellyfin");
 
-  function renderGroup(group: ServerUser[], source: string) {
+  function renderGroup(group: ServerUser[], source: "plex" | "jellyfin") {
     if (group.length === 0) return null;
     return group.map((u) => {
       const initials = u.username.slice(0, 2).toUpperCase();
@@ -404,10 +409,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
             </div>
           </td>
 
-          {/* Source badge */}
+          {/* Source badge — includes the instance slug for a named server
+              (e.g. "jellyfin:remote") so a same-named user on two servers of
+              the same provider is distinguishable; unchanged ("jellyfin") for
+              the default/only instance in a single-server deployment. */}
           <td className="py-2.5 px-3 hidden sm:table-cell">
             <Badge className={`text-[10px] ${sourceStyles[source] ?? ""}`}>
-              {source}
+              {mediaInstanceLabel(source, u.serverInstance)}
             </Badge>
           </td>
 

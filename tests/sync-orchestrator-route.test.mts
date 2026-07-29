@@ -582,10 +582,14 @@ test("guardrail 13: a { recentOnly } / { full:false } / empty body never downgra
       [null],
       `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional Plex library replace`,
     );
+    // Jellyfin's delete is scoped per-instance (serverInstance: "" for the default/only
+    // configured server here) rather than unconditional like Plex — multi-server support
+    // (Phase 1) — but it's still an UNCONDITIONAL delete of that instance's rows (no
+    // recency/date filter), so recentOnly still can't have downgraded it to insert-only.
     assert.deepEqual(
       jfDeletes.map((d) => d.args),
-      [null],
-      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional Jellyfin library replace`,
+      [{ where: { serverInstance: "" } }],
+      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional (per-instance-scoped) Jellyfin library replace`,
     );
     // And it repopulates inside the SAME transaction (full-replace atomicity).
     assert.ok(plexTx[0].ops.some((o) => o.model === "plexLibraryItem" && o.method === "createMany"));
@@ -694,6 +698,93 @@ test("guardrail 14: notifiedAvailable is flipped ONLY by the claim CAS (UPDATE �
     [],
     "guardrail 14: notifiedAvailable must never be written by a plain mediaRequest.updateMany — only the CAS may flip it",
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-server Jellyfin (Phase 1) — union-availability + per-instance scoping
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A second, independently-configured Jellyfin server (media-instance-registry.ts's
+// JSON registry + its own jellyfinRemoteUrl/jellyfinRemoteApiKey Settings — see
+// media-instances.ts). Unlike the arr instance model, nothing routes a REQUEST
+// to a specific Jellyfin server — availability is a union across every
+// configured server of a type — so these tests pin that union directly,
+// alongside the per-instance-scoped library write it's built on.
+const JF_REMOTE_BASE = "http://10.77.0.3:8096";
+const JF_REMOTE_ORIGIN = new URL(JF_REMOTE_BASE).origin;
+
+function configureJellyfinMultiServer(): void {
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-api-key-default");
+  settings.set("jellyfinRemoteUrl", JF_REMOTE_BASE);
+  settings.set("jellyfinRemoteApiKey", "jf-api-key-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+}
+
+test("multi-server: a request is marked AVAILABLE via the UNION of two independently-configured Jellyfin instances' libraries", async () => {
+  configureJellyfinMultiServer();
+  // Disjoint libraries — no overlap — so a match can only come from the UNION,
+  // never from either instance's map alone.
+  const defaultResponder = jellyfinResponder([300]);
+  const remoteResponder = jellyfinResponder([400]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "req-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    b.jellyfinMarked,
+    2,
+    "both requests matched the UNIONED jellyfin availability map — the downstream marking logic never changed, only how the map is populated",
+  );
+  assert.equal(requests.get("req-default-only")?.status, "AVAILABLE");
+  assert.equal(
+    requests.get("req-remote-only")?.status,
+    "AVAILABLE",
+    "a title that exists ONLY on the second, named instance is still marked available — proves the union, not just the default instance's library, backs the decision",
+  );
+});
+
+test("multi-server: two configured Jellyfin instances each get their OWN serverInstance-scoped deleteMany + createMany — never each other's rows", async () => {
+  configureJellyfinMultiServer();
+  const defaultResponder = jellyfinResponder([300]);
+  const remoteResponder = jellyfinResponder([400]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const jfTx = txTouching("jellyfinLibraryItem");
+  assert.equal(jfTx.length, 1, "both instances' scoped writes land inside ONE shared transaction (one lock acquisition — mirrors the arr instance loop)");
+
+  const deletes = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "deleteMany");
+  assert.equal(deletes.length, 2, "one scoped delete per configured instance — never a single unconditional wipe");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null).sort(),
+    ["", "remote"],
+    "each delete is scoped to its OWN instance slug",
+  );
+
+  const creates = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "createMany");
+  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  for (const c of creates) {
+    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    assert.ok(rows.length > 0);
+    assert.equal(
+      new Set(rows.map((r) => r.serverInstance)).size,
+      1,
+      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+    );
+  }
+  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

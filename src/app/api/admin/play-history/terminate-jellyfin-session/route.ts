@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
 // sends the "Stop" playstate command (POST /Sessions/{id}/Playing/Stop), which
@@ -11,14 +12,17 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 // event within ~1s; the normal finalize path writes the PlayHistory row, so we
 // don't write one inline.
 //
-// Body: { sessionKey: string, reason?: string }
+// Body: { sessionKey: string, serverInstance?: string, reason?: string }
 // ActiveSession.sessionKey for Jellyfin holds the PlaySessionId, but Jellyfin's
 // Stop endpoint addresses sessions by the session UUID (Sessions[].Id). We
 // resolve sessionKey → session UUID via a live /Sessions snapshot — which also
 // confirms the session exists and is owned by an account we recognize, so an
-// admin can't POST an arbitrary identifier at the upstream server.
+// admin can't POST an arbitrary identifier at the upstream server. serverInstance
+// picks which configured Jellyfin server to resolve against (multi-server
+// support); omitted/absent defaults to the default instance so existing callers
+// (older admin UI builds) are unaffected.
 export const POST = withAdmin(async (req, _ctx, session) => {
-  const parsed = await readJsonCapped<{ sessionKey?: unknown; reason?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ sessionKey?: unknown; serverInstance?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
@@ -31,7 +35,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "sessionKey is required" }, { status: 400 });
   }
 
-  const jellyfinConfig = await getJellyfinConfig();
+  if (body.serverInstance !== undefined && (typeof body.serverInstance !== "string" || !isValidMediaInstanceSlug(body.serverInstance))) {
+    return NextResponse.json({ error: `invalid serverInstance: ${String(body.serverInstance)}` }, { status: 400 });
+  }
+  const serverInstance = typeof body.serverInstance === "string" ? body.serverInstance : DEFAULT_MEDIA_INSTANCE;
+
+  const jellyfinConfig = await getJellyfinConfig(serverInstance);
   const serverUrl = jellyfinConfig.url?.replace(/\/$/, "") ?? null;
   const apiKey = jellyfinConfig.apiKey;
 
@@ -72,6 +81,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     target: sessionKey,
     details: {
       sessionKey,
+      serverInstance,
       sessionId: match.sessionId,
       reason,
       mediaTitle: match.title,

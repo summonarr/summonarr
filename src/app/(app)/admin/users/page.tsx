@@ -66,6 +66,9 @@ export default async function UsersPage() {
       select: {
         id: true,
         source: true,
+        // Multi-server support — distinguishes same-named/same-sourceUserId rows
+        // across two independently-configured servers of the same provider.
+        serverInstance: true,
         sourceUserId: true,
         username: true,
         email: true,

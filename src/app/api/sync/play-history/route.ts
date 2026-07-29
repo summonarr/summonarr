@@ -17,6 +17,9 @@ import {
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel } from "@/lib/media-instances";
+import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
@@ -165,6 +168,9 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const userIds = await mapLimit(valid, 4, (s) =>
     resolveMediaServerUser({
       source: "plex",
+      // Hardcoded to the default instance — Plex multi-server activation is
+      // Phase 2; this poller's Plex branch isn't instance-aware yet.
+      serverInstance: DEFAULT_MEDIA_INSTANCE,
       sourceUserId: s.accountId,
       username: s.accountName,
       thumbUrl: s.accountThumb || null,
@@ -465,7 +471,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   return { started, updated, ended };
 }
 
-async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<SyncResult> {
+async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string, apiKey: string): Promise<SyncResult> {
   const sessions = await getJellyfinSessions(baseUrl, apiKey);
   const now = new Date();
 
@@ -481,6 +487,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const userIds = await mapLimit(valid, 4, (s) =>
     resolveMediaServerUser({
       source: "jellyfin",
+      serverInstance: instance,
       sourceUserId: s.userId,
       username: s.userName,
     }),
@@ -489,27 +496,33 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   // Bulk prefetch: existing ActiveSession rows. Three lookup keys per session — primary id,
   // alternate id (when sessionId !== playSessionId), and the (msUserId, sourceItemId) fallback
   // that handles webhook-vs-polling PlaySessionId drift.
-  const primaryIds = valid.map((s) => `jellyfin:${s.playSessionId}`);
+  const primaryIds = valid.map((s) => activeSessionId("jellyfin", instance, s.playSessionId));
   const altIds = valid
     .filter((s) => s.sessionId && s.sessionId !== s.playSessionId)
-    .map((s) => `jellyfin:${s.sessionId}`);
+    .map((s) => activeSessionId("jellyfin", instance, s.sessionId));
   const allIds = [...new Set([...primaryIds, ...altIds])];
-  // A row's `id` is frozen at create ("jellyfin:<playSessionId-then>") but the
+  // A row's `id` is frozen at create ("jellyfin:<playSessionId-then>", or
+  // "jellyfin:<instance>:<playSessionId-then>" for a named instance) but the
   // update branch REWRITES its `sessionKey` to the current playSessionId. After
   // that the two disagree, so an id-only lookup misses the row — and since
-  // ActiveSession is @@unique([source, sessionKey]), the create branch's
-  // createMany({skipDuplicates}) then silently swallowed the conflict (ON CONFLICT
-  // DO NOTHING, no target) and returned "started" for a row that was never
-  // inserted. The next episode got no ActiveSession at all, was never finalized,
-  // and — the poller being the sole Jellyfin writer (guardrail 19) — that watch
-  // was unrecoverable, while the stale row kept the now-playing card pinned until
-  // cleanupStaleSessions reaped it 30 minutes later. Match on the live sessionKey
-  // too so the itemId-change finalize below runs instead.
+  // ActiveSession is @@unique([source, serverInstance, sessionKey]), the create
+  // branch's createMany({skipDuplicates}) then silently swallowed the conflict
+  // (ON CONFLICT DO NOTHING, no target) and returned "started" for a row that
+  // was never inserted. The next episode got no ActiveSession at all, was never
+  // finalized, and — the poller being the sole Jellyfin writer (guardrail 19) —
+  // that watch was unrecoverable, while the stale row kept the now-playing card
+  // pinned until cleanupStaleSessions reaped it 30 minutes later. Match on the
+  // live sessionKey too so the itemId-change finalize below runs instead.
   const allKeys = [...new Set(valid.flatMap((s) => [s.playSessionId, s.sessionId].filter((k): k is string => !!k)))];
   const idRows = allIds.length > 0 || allKeys.length > 0
     ? await prisma.activeSession.findMany({
         where: {
-          source: "jellyfin", // sessionKey is only unique WITH the source
+          // sessionKey is only unique WITH (source, serverInstance) — two
+          // instances can report the same raw playSessionId, so the
+          // serverInstance filter must apply to BOTH the id and sessionKey
+          // branches or a same-key row on a different instance could leak in.
+          source: "jellyfin",
+          serverInstance: instance,
           OR: [{ id: { in: allIds } }, { sessionKey: { in: allKeys } }],
         },
       })
@@ -523,8 +536,8 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   // Fallback rows: only fetch for sessions that didn't match the primary or alternate id.
   const fallbackPairs = valid
     .map((s, i) => {
-      const sessionId = `jellyfin:${s.playSessionId}`;
-      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      const sessionId = activeSessionId("jellyfin", instance, s.playSessionId);
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? activeSessionId("jellyfin", instance, s.sessionId) : null;
       if (idRowMap.has(sessionId) || (altSessionId && idRowMap.has(altSessionId))) return null;
       if (keyRowMap.has(s.playSessionId) || (s.sessionId && keyRowMap.has(s.sessionId))) return null;
       return { msUserId: userIds[i], itemId: s.itemId };
@@ -535,11 +548,14 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   // tablet) otherwise resolves the tablet's new PlaySessionId onto the TV's live row, which
   // rewrites that row instead of creating one — so the second stream never gets an
   // ActiveSession, is never finalized, and (poller being the sole Jellyfin writer, guardrail
-  // 19) its watch is unrecoverable.
+  // 19) its watch is unrecoverable. serverInstance scoped too (belt-and-suspenders — mediaServerUserId
+  // already pins to one instance's MediaServerUser row transitively, since resolveMediaServerUser
+  // never resolves across instances).
   const fallbackRows = fallbackPairs.length > 0
     ? await prisma.activeSession.findMany({
         where: {
           source: "jellyfin",
+          serverInstance: instance,
           id: { notIn: claimedIds.length > 0 ? claimedIds : allIds },
           OR: fallbackPairs.map((p) => ({ mediaServerUserId: p.msUserId, sourceItemId: p.itemId })),
         },
@@ -606,8 +622,8 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
 
   const writeResults = await Promise.all(
     resolved.map(async ({ s, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
-      const sessionId = `jellyfin:${s.playSessionId}`;
-      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      const sessionId = activeSessionId("jellyfin", instance, s.playSessionId);
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? activeSessionId("jellyfin", instance, s.sessionId) : null;
       const positionMs = Math.floor(s.positionTicks / 10_000);
       const durationMs = Math.floor(s.durationTicks / 10_000);
       const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
@@ -691,6 +707,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         data: [{
           id: sessionId,
           source: "jellyfin",
+          serverInstance: instance,
           sessionKey: s.playSessionId,
           startedAt: now,
           lastSeenAt: now,
@@ -732,7 +749,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const updated = writeResults.filter((r) => r === "updated").length;
 
   const activeJfSessions = await prisma.activeSession.findMany({
-    where: { source: "jellyfin" },
+    where: { source: "jellyfin", serverInstance: instance },
   });
 
   // Grace window: only finalize sessions missing from /Sessions for
@@ -762,7 +779,9 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   return { started, updated, ended };
 }
 
-const SYNC_SETTING_KEYS = ["plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey"] as const;
+// Jellyfin's connection config is no longer read from this fixed list — it's
+// resolved per configured instance via getJellyfinConfig(instance.slug) below.
+const SYNC_SETTING_KEYS = ["plexServerUrl", "plexAdminToken"] as const;
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -811,8 +830,6 @@ async function syncPlayHistory(request: NextRequest) {
     const settingMap = new Map(settingRows.map((r) => [r.key, r.value]));
     const plexServerUrl = settingMap.get("plexServerUrl")?.replace(/\/$/, "") ?? null;
     const plexAdminToken = settingMap.get("plexAdminToken") ?? null;
-    const jellyfinUrl = settingMap.get("jellyfinUrl")?.replace(/\/$/, "") ?? null;
-    const jellyfinApiKey = settingMap.get("jellyfinApiKey") ?? null;
 
     const syncPromises: Promise<void>[] = [];
 
@@ -828,29 +845,55 @@ async function syncPlayHistory(request: NextRequest) {
       );
     }
 
-    if (jellyfinEnabled && jellyfinUrl && jellyfinApiKey) {
-      syncPromises.push(
-        syncJellyfinSessions(jellyfinUrl, jellyfinApiKey)
-          .then((r) => { results.jellyfin = r; })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn("[play-history] Jellyfin session sync failed:", msg);
-            results.jellyfin = { error: msg };
-          })
-      );
+    if (jellyfinEnabled) {
+      // Fixed single call widened to a loop over every configured, connection-
+      // ready Jellyfin server (multi-server support). Sequential resolution of
+      // each instance's config, but the actual session syncs still run
+      // concurrently (same syncPromises array as the Plex pass above).
+      const jellyfinInstances = await getSyncableMediaInstances("jellyfin");
+      for (const instance of jellyfinInstances) {
+        const label = mediaInstanceLabel("jellyfin", instance.slug);
+        let cfg: { url: string | null; apiKey: string | null };
+        try {
+          cfg = await getJellyfinConfig(instance.slug);
+        } catch (err) {
+          // Isolate a config-read failure to just this instance, matching every
+          // other failure mode below. An uncaught throw here would abort the
+          // loop entirely and 500 the whole poll tick via the outer catch,
+          // discarding Plex's and any earlier instances' already-queued results
+          // over a transient blip on one instance's Settings read.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[play-history] Jellyfin config read failed for instance "${instance.slug}":`, msg);
+          results[label] = { error: msg };
+          continue;
+        }
+        if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
+        const url = cfg.url.replace(/\/$/, "");
+        const apiKey = cfg.apiKey;
+        syncPromises.push(
+          syncJellyfinSessions(instance.slug, url, apiKey)
+            .then((r) => { results[label] = r; })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.warn(`[play-history] Jellyfin session sync failed for instance "${instance.slug}":`, msg);
+              results[label] = { error: msg };
+            })
+        );
+      }
     }
 
     await Promise.all(syncPromises);
 
-    // Single batched activity:history-updated after both source loops complete.
-    // recordCompletedSession is called with skipSSE inside each loop to avoid
-    // N+1 events. Emit only when at least one session actually ended.
-    // Parens are load-bearing: `+` binds tighter than `??`, so without them
-    // `a?.x ?? 0 + b?.y ?? 0` parses as `a?.x ?? (0 + (b?.y ?? 0))` and a
-    // defined `plex.ended = 0` would short-circuit, silently dropping Jellyfin's count.
-    const totalEnded =
-      ((results.plex as { ended?: number } | undefined)?.ended ?? 0) +
-      ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
+    // Single batched activity:history-updated after every source loop completes
+    // (Plex + one entry per configured Jellyfin instance). recordCompletedSession
+    // is called with skipSSE inside each loop to avoid N+1 events. Emit only when
+    // at least one session actually ended. Summed generically over `results`'
+    // current keys (plex, jellyfin, jellyfin:<slug>, …) rather than two hardcoded
+    // fields, since Jellyfin now contributes a variable number of entries.
+    const totalEnded = Object.values(results).reduce((sum: number, r) => {
+      const ended = (r as { ended?: unknown } | null)?.ended;
+      return sum + (typeof ended === "number" ? ended : 0);
+    }, 0);
     if (totalEnded > 0) {
       emitSSE({ type: "activity:history-updated" });
     }
@@ -885,11 +928,13 @@ async function syncPlayHistory(request: NextRequest) {
   // (a failed source previously still recorded ok:true, hiding the outage from
   // the admin System tab). Status stays 200 — this route runs every 5s from the
   // entrypoint poller, and a non-2xx during a media-server outage would spam the
-  // docker logs with a failure line per tick.
-  const degraded = [
-    ...((results.plex as { error?: string } | undefined)?.error !== undefined ? ["plex"] : []),
-    ...((results.jellyfin as { error?: string } | undefined)?.error !== undefined ? ["jellyfin"] : []),
-  ];
+  // docker logs with a failure line per tick. Checked generically over `results`'
+  // keys (plex, jellyfin, jellyfin:<slug>, …) — `results.purged` (a bare number,
+  // set above on the retention-purge path) safely fails the object/error checks
+  // below and is never mistaken for a degraded source.
+  const degraded = Object.entries(results)
+    .filter(([, r]) => typeof r === "object" && r !== null && (r as { error?: unknown }).error !== undefined)
+    .map(([key]) => key);
   return NextResponse.json(
     results,
     degraded.length > 0 ? { headers: { "X-Cron-Degraded": degraded.join(",") } } : undefined,

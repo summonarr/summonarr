@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
+import { parseActiveSessionId } from "@/lib/media-instances";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
 import {
@@ -26,12 +27,17 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
-// ActiveSession.id is "<source>:<sessionKey>". Strip the prefix to recover the
-// raw sessionKey the terminate endpoints expect. Returns the endpoint + key for
-// the sources that support termination (Plex, Jellyfin), or null otherwise.
+// ActiveSession.id is "<source>:<sessionKey>" for the default instance, or
+// "<source>:<instance>:<sessionKey>" for a named one (see activeSessionId in
+// media-instances.ts). Plex sessions are always 2-segment in this phase (Plex
+// multi-server activation is Phase 2), but a Jellyfin session on a named
+// instance needs the real parse — a naive prefix-strip would send the
+// instance slug as part of the sessionKey and the server would 404 it.
+// Returns the endpoint + key (+ instance, Jellyfin only) for the sources that
+// support termination (Plex, Jellyfin), or null otherwise.
 function terminateTargetFor(
   session: ActiveSessionLive,
-): { endpoint: string; sessionKey: string } | null {
+): { endpoint: string; sessionKey: string; serverInstance?: string } | null {
   if (session.id.startsWith("plex:")) {
     return {
       endpoint: "/api/admin/play-history/terminate-session",
@@ -39,9 +45,11 @@ function terminateTargetFor(
     };
   }
   if (session.id.startsWith("jellyfin:")) {
+    const parsed = parseActiveSessionId(session.id);
     return {
       endpoint: "/api/admin/play-history/terminate-jellyfin-session",
-      sessionKey: session.id.slice(9),
+      sessionKey: parsed.sessionKey,
+      serverInstance: parsed.serverInstance,
     };
   }
   return null;
@@ -145,7 +153,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
   const terminateFallback = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(terminateFallback.current), []);
   if (!target) return null;
-  const { endpoint, sessionKey } = target;
+  const { endpoint, sessionKey, serverInstance } = target;
   const serverLabel = session.source === "jellyfin" ? "Jellyfin" : "Plex";
 
   function openDialog() {
@@ -166,6 +174,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionKey,
+          ...(serverInstance !== undefined ? { serverInstance } : {}),
           reason: reason.trim() || DEFAULT_TERMINATE_REASON,
         }),
       });

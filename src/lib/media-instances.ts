@@ -37,6 +37,15 @@ export function isValidMediaInstanceSlug(slug: string): boolean {
   return NAMED_SLUG_RE.test(slug);
 }
 
+// A short, human-readable label for a per-instance result/log line —
+// "jellyfin" for the default instance (unchanged for a single-server
+// deployment), "jellyfin:remote" for a named one. Used anywhere a
+// multi-instance sync result needs to say which server it came from
+// (download-policy.ts, the play-history poller).
+export function mediaInstanceLabel(service: MediaServerService, instance: MediaInstanceKey): string {
+  return instance === DEFAULT_MEDIA_INSTANCE ? service : `${service}:${instance}`;
+}
+
 // The Setting-key segment for an instance slug. "" → "", "remote" → "Remote".
 export function instanceKeySegment(instance: MediaInstanceKey): string {
   if (instance === DEFAULT_MEDIA_INSTANCE) return "";

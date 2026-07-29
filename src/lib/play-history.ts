@@ -157,6 +157,7 @@ function fnv1a32(s: string): number {
 // User by normalized email, serialized under an advisory lock. Returns the row id.
 export async function resolveMediaServerUser(params: {
   source: string;
+  serverInstance: string;
   sourceUserId: string;
   username: string;
   email?: string | null;
@@ -164,7 +165,7 @@ export async function resolveMediaServerUser(params: {
   serverMachineId?: string | null;
   isServerAdmin?: boolean;
 }): Promise<string> {
-  const { source, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  const { source, serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
   // Normalize once and use the same value for both lookup AND the upserted column,
   // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
   // emails that vary in case, and so we don't write mixed-case copies into
@@ -185,7 +186,7 @@ export async function resolveMediaServerUser(params: {
   // 1-bit entropy loss is acceptable: collisions across distinct
   // (source, sourceUserId) pairs serialize unrelated upserts on the same
   // lock — a tiny throughput cost, not a correctness issue.
-  const lockKey = fnv1a32(`mediaServerUser:${source}:${sourceUserId}`) & 0x7fffffff;
+  const lockKey = fnv1a32(`mediaServerUser:${source}:${serverInstance}:${sourceUserId}`) & 0x7fffffff;
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(2020, ${lockKey})`);
@@ -243,9 +244,7 @@ export async function resolveMediaServerUser(params: {
     // Read unconditionally (not just when a machineId is offered): `manualUserLink`
     // is needed on every upsert so an admin's hand-set binding survives this poll.
     const existing = await tx.mediaServerUser.findUnique({
-      // serverInstance hardcoded to the default ("") — resolveMediaServerUser
-      // isn't instance-aware yet (multi-server activation is Phase 1/2).
-      where: { source_serverInstance_sourceUserId: { source, serverInstance: "", sourceUserId } },
+      where: { source_serverInstance_sourceUserId: { source, serverInstance, sourceUserId } },
       select: { id: true, serverMachineId: true, manualUserLink: true },
     });
     if (serverMachineId && existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
@@ -260,9 +259,10 @@ export async function resolveMediaServerUser(params: {
     if (existing?.manualUserLink) userId = null;
 
     const record = await tx.mediaServerUser.upsert({
-      where: { source_serverInstance_sourceUserId: { source, serverInstance: "", sourceUserId } },
+      where: { source_serverInstance_sourceUserId: { source, serverInstance, sourceUserId } },
       create: {
         source,
+        serverInstance,
         sourceUserId,
         username,
         email: email ?? null,

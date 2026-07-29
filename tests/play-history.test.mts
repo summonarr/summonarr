@@ -653,7 +653,7 @@ test("MediaServerMismatchError: a real Error subclass carrying the (source, sour
 });
 
 test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, subject lookup only (no email), row read carries the manual-link pin", async () => {
-  const id = await resolveMediaServerUser({ source: "plex", sourceUserId: "u-1", username: "alice" });
+  const id = await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-1", username: "alice" });
   assert.equal(id, "msu-row-1");
   assert.deepEqual(txOptions, { timeout: 15_000 });
 
@@ -666,8 +666,8 @@ test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020
   assert.ok(Number.isInteger(key) && key >= 0 && key <= 0x7fffffff, `lock key out of int32 range: ${key}`);
 
   // Deterministic per (source, sourceUserId); distinct identities get distinct keys.
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-1", username: "alice" });
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-2", username: "bob" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-1", username: "alice" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-2", username: "bob" });
   const keys = lockSqls.map((s) => Number(s.match(/\((\d+), (\d+)\)/)![2]));
   assert.equal(keys[0], keys[1]);
   assert.notEqual(keys[0], keys[2]);
@@ -690,6 +690,7 @@ test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020
   // isServerAdmin key may appear when the caller didn't send one.
   assert.deepEqual(msuUpserts[0].create, {
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-1",
     username: "alice",
     email: null,
@@ -704,6 +705,7 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
   userRow = { id: "user-7", mediaServer: "PLEX", deactivatedAt: null }; // case-insensitive server match
   await resolveMediaServerUser({
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-2",
     username: "Bob",
     email: "  Bob@Example.COM ",
@@ -715,6 +717,7 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
   assert.deepEqual(userFindCalls[1].where, { email: "bob@example.com" }); // NFKC+lowercase+trim
   assert.deepEqual(msuUpserts[0].create, {
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-2",
     username: "Bob",
     email: "bob@example.com", // normalized copy is what round-trips later lookups
@@ -740,7 +743,7 @@ test("resolveMediaServerUser: a DISABLED account still gets linked — its watch
   // instead: its email becomes deleted-<id>@deleted.invalid, which no media
   // server will ever report.
   userRow = { id: "user-8", mediaServer: null, deactivatedAt: new Date("2026-01-01T00:00:00.000Z") };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
   assert.equal(msuUpserts[0].create.userId, "user-8");
   assert.equal(msuUpserts[0].update.userId, "user-8");
 });
@@ -753,7 +756,7 @@ test("resolveMediaServerUser: the provider SUBJECT id links a user with no email
   // user's watches were never attributed to anyone. sourceUserId IS the value
   // sign-in pinned to User.jellyfinUserId, so it links them exactly.
   userBySub = { id: "user-sub" };
-  await resolveMediaServerUser({ source: "jellyfin", sourceUserId: "jf-uuid-1", username: "erin" });
+  await resolveMediaServerUser({ source: "jellyfin", serverInstance: "", sourceUserId: "jf-uuid-1", username: "erin" });
   assert.deepEqual(userFindCalls[0].where, { jellyfinUserId: "jf-uuid-1" });
   assert.equal(userFindCalls.length, 1, "a subject hit must short-circuit the email fallback");
   assert.equal(msuUpserts[0].create.userId, "user-sub");
@@ -768,6 +771,7 @@ test("resolveMediaServerUser: the subject id WINS over a conflicting email match
   userRow = { id: "user-stale-email-owner", mediaServer: null, deactivatedAt: null };
   await resolveMediaServerUser({
     source: "plex",
+    serverInstance: "",
     sourceUserId: "plex-acct-9",
     username: "frank",
     email: "shared@example.com",
@@ -783,6 +787,7 @@ test("resolveMediaServerUser: a PURGED account can't be relinked by either key",
   userRow = null; // and no media server reports a .invalid address
   await resolveMediaServerUser({
     source: "plex",
+    serverInstance: "",
     sourceUserId: "plex-acct-purged",
     username: "gone",
     email: "real@example.com",
@@ -799,6 +804,7 @@ test("resolveMediaServerUser: an admin's MANUAL link is never overwritten by aut
   userBySub = { id: "user-auto-would-pick" };
   await resolveMediaServerUser({
     source: "plex",
+    serverInstance: "",
     sourceUserId: "plex-acct-manual",
     username: "hank",
     email: "hank@example.com",
@@ -809,7 +815,7 @@ test("resolveMediaServerUser: an admin's MANUAL link is never overwritten by aut
 test("resolveMediaServerUser: other-server accounts are NEVER linked", async () => {
   // A user pinned to jellyfin must not be linked by a plex identity with the same email.
   userRow = { id: "user-9", mediaServer: "jellyfin", deactivatedAt: null };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-4", username: "dave", email: "dave@example.com" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-4", username: "dave", email: "dave@example.com" });
   assert.equal(msuUpserts[0].create.userId, null);
   assert.ok(!("userId" in msuUpserts[0].update));
 });
@@ -819,6 +825,7 @@ test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMisma
   await assert.rejects(
     resolveMediaServerUser({
       source: "plex",
+      serverInstance: "",
       sourceUserId: "u-5",
       username: "eve",
       serverMachineId: "machine-B",
@@ -838,24 +845,24 @@ test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMisma
 
   // A row that never recorded a machineId accepts the first one offered…
   msuExisting = { id: "row-1", serverMachineId: null };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
   assert.equal(msuUpserts[0].create.serverMachineId, "machine-B");
   assert.equal(msuUpserts[0].update.serverMachineId, "machine-B");
   // …and the same machineId keeps working.
   msuExisting = { id: "row-1", serverMachineId: "machine-B" };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
   assert.equal(msuUpserts.length, 2);
 });
 
 test("resolveMediaServerUser: isServerAdmin is set-only — create records false, but an update may only ever promote to true", async () => {
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-6", username: "frank", isServerAdmin: false });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-6", username: "frank", isServerAdmin: false });
   assert.equal(msuUpserts[0].create.isServerAdmin, false);
   assert.ok(
     !("isServerAdmin" in msuUpserts[0].update),
     "false must NEVER demote an existing admin row (token rotation / fresh-client transients)",
   );
 
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-6", username: "frank", isServerAdmin: true });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-6", username: "frank", isServerAdmin: true });
   assert.equal(msuUpserts[1].create.isServerAdmin, true);
   assert.equal(msuUpserts[1].update.isServerAdmin, true);
 });

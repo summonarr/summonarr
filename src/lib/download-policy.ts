@@ -2,6 +2,8 @@ import { prisma } from "./prisma";
 import { getJellyfinAllUsers, setJellyfinDownloadPolicy } from "./jellyfin";
 import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
+import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
+import { getSyncableMediaInstances } from "./media-instance-registry";
 
 interface PolicySyncResult {
   source: string;
@@ -39,8 +41,8 @@ export function isSafeToReconcileJellyfinUsers(fetchedCount: number, priorActive
 export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
 
-  const [jellyfinConfig, autoDisableRow] = await Promise.all([
-    getJellyfinConfig(),
+  const [instances, autoDisableRow] = await Promise.all([
+    getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
   ]);
 
@@ -49,22 +51,28 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // Users already in the DB with downloadsEnabled=true are never touched.
   const autoDisableNew = autoDisableRow?.value === "true";
 
-  if (jellyfinConfig.url && jellyfinConfig.apiKey) {
+  // Sequential, not fan-out: the instance count is admin-configured and small
+  // (never library-scaled), so guardrail 31's bounded-concurrency concern
+  // doesn't apply — a straightforward loop keeps this simple and avoids two
+  // instances' full user-syncs interleaving their own internal work.
+  for (const instance of instances) {
+    const cfg = await getJellyfinConfig(instance.slug);
+    if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
     try {
-      results.push(await syncJellyfinPolicies(jellyfinConfig.url, jellyfinConfig.apiKey, autoDisableNew));
+      results.push(await syncJellyfinPolicies(instance.slug, cfg.url, cfg.apiKey, autoDisableNew));
     } catch (err) {
-      console.warn("[download-policy] Jellyfin sync task failed:", err instanceof Error ? err.message : String(err));
+      console.warn(`[download-policy] Jellyfin sync task failed for instance "${instance.slug}":`, err instanceof Error ? err.message : String(err));
       // Surface the task-level failure to the caller's error total so the cron
       // run is recorded as not-ok instead of silently reporting green.
-      results.push({ source: "jellyfin", upserted: 0, enforced: 0, errors: 1 });
+      results.push({ source: mediaInstanceLabel("jellyfin", instance.slug), upserted: 0, enforced: 0, errors: 1 });
     }
   }
 
   return results;
 }
 
-async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
-  const result: PolicySyncResult = { source: "jellyfin", upserted: 0, enforced: 0, errors: 0 };
+async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
+  const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
 
   let users;
   try {
@@ -83,7 +91,7 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   // case from the local user's lowercase-stored email) still matches.
   const [existingRows, linkedUsers] = await Promise.all([
     prisma.mediaServerUser.findMany({
-      where: { source: "jellyfin" },
+      where: { source: "jellyfin", serverInstance: instance },
       select: { sourceUserId: true, downloadsEnabled: true, active: true, manualUserLink: true },
     }),
     prisma.user.findMany({
@@ -132,11 +140,10 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
       const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
 
       await prisma.mediaServerUser.upsert({
-        // serverInstance hardcoded to the default ("") — this function isn't
-        // instance-aware yet (multi-server Jellyfin activation is Phase 1).
-        where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: "", sourceUserId: u.id } },
+        where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: instance, sourceUserId: u.id } },
         create: {
           source: "jellyfin",
+          serverInstance: instance,
           sourceUserId: u.id,
           username: u.name,
           email: u.email ?? null,
@@ -181,13 +188,17 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   const safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
   if (safeToReconcile) {
     const currentIds = users.map((u) => u.id);
+    // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
+    // user who exists only on a DIFFERENT Jellyfin server would look "absent"
+    // from THIS instance's fetch and get incorrectly soft-deleted, destroying
+    // their attribution to play history that survives on the other server.
     await prisma.mediaServerUser.updateMany({
-      where: { source: "jellyfin", sourceUserId: { notIn: currentIds }, active: true },
+      where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
       data: { active: false },
     });
   } else if (users.length > 0) {
     console.warn(
-      `[download-policy] Skipping Jellyfin user reconcile: fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response`,
+      `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response`,
     );
   }
 
@@ -201,13 +212,15 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
 export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<void> {
   const record = await prisma.mediaServerUser.findUnique({
     where: { id: mediaServerUserId },
-    select: { source: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
+    select: { source: true, serverInstance: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
   });
 
   if (!record || record.isServerAdmin || record.downloadsEnabled === null) return;
   if (record.source !== "jellyfin") return;
 
-  const { url, apiKey } = await getJellyfinConfig();
+  // Resolve THIS row's own server, not always the default — a toggle on a
+  // named-instance user must push to that instance, never instance "".
+  const { url, apiKey } = await getJellyfinConfig(record.serverInstance);
   if (!url || !apiKey) return;
   await setJellyfinDownloadPolicy(url, apiKey, record.sourceUserId, record.downloadsEnabled);
 }
