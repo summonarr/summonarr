@@ -167,7 +167,7 @@ type PlexCacheRow = {
   lastUsedAt: Date;
   expiresAt: Date;
 };
-type MsuRow = { id: string; source: string; sourceUserId: string; active: boolean };
+type MsuRow = { id: string; source: string; serverInstance: string; sourceUserId: string; active: boolean };
 type AuditRow = {
   userId: string | null;
   userName: string;
@@ -420,7 +420,7 @@ const models = {
   },
   mediaServerUser: {
     findFirst: async (args: {
-      where?: { source?: string; sourceUserId?: string; active?: boolean };
+      where?: { source?: string; serverInstance?: string; sourceUserId?: string; active?: boolean };
       select?: Record<string, boolean>;
     }) => {
       dbOp("mediaServerUser.findFirst");
@@ -428,6 +428,7 @@ const models = {
       const row = mediaServerUsers.find(
         (m) =>
           (w.source === undefined || m.source === w.source) &&
+          (w.serverInstance === undefined || m.serverInstance === w.serverInstance) &&
           (w.sourceUserId === undefined || m.sourceUserId === w.sourceUserId) &&
           (w.active === undefined || m.active === w.active),
       );
@@ -1101,7 +1102,7 @@ test("jellyfin membership gate: VALID credentials refuse when the account is unk
   assert.equal(users.length, 0, "a refused account must not be provisioned");
 
   // A soft-deleted (inactive) member is NOT a member — the gate filters active:true.
-  mediaServerUsers.push({ id: "msu-1", source: "jellyfin", sourceUserId: "jf-unknown", active: false });
+  mediaServerUsers.push({ id: "msu-1", source: "jellyfin", serverInstance: "", sourceUserId: "jf-unknown", active: false });
   assert.equal(
     await authorizeWithJellyfin({ username: "unknown", password: "pw" }, makeReq(chromeUa("jf-gate"))),
     null,
@@ -1112,7 +1113,7 @@ test("jellyfin membership gate: VALID credentials refuse when the account is unk
 
 test("jellyfin: an ACTIVE synced member is provisioned with the synthetic @jellyfin.local email and device payload", async () => {
   settings.set("jellyfinUrl", "http://10.77.0.3:8096");
-  mediaServerUsers.push({ id: "msu-2", source: "jellyfin", sourceUserId: "jf-1", active: true });
+  mediaServerUsers.push({ id: "msu-2", source: "jellyfin", serverInstance: "", sourceUserId: "jf-1", active: true });
   respond = (url) => {
     if (url.pathname === "/Users/AuthenticateByName") {
       return jsonResponse({ User: { Id: "jf-1", Name: "Jelly User" } });
@@ -1185,7 +1186,7 @@ test("jellyfin legacy anchor: a pre-binding row keyed only by the synthetic emai
   // no jellyfinUserId. It is NOT a "returning bound user" for the membership
   // gate, so it needs its active MediaServerUser row to sign in.
   seedUser({ id: "u-legacy", email: "jellyfin-jf-4@jellyfin.local", name: "Legacy" });
-  mediaServerUsers.push({ id: "msu-4", source: "jellyfin", sourceUserId: "jf-4", active: true });
+  mediaServerUsers.push({ id: "msu-4", source: "jellyfin", serverInstance: "", sourceUserId: "jf-4", active: true });
   respond = (url) => {
     if (url.pathname === "/Users/AuthenticateByName") {
       return jsonResponse({ User: { Id: "jf-4", Name: "Legacy" } });
@@ -1201,6 +1202,133 @@ test("jellyfin legacy anchor: a pre-binding row keyed only by the synthetic emai
   assert.equal(result.id, "u-legacy", "the existing row must be re-used, not duplicated");
   assert.equal(users.length, 1);
   assert.equal(userById("u-legacy").jellyfinUserId, "jf-4", "the sub must be backfilled so future sign-ins bind on it");
+});
+
+// ── multi-instance (Phase 1.5) ──────────────────────────────────────────────
+
+test("jellyfin multi-instance: MediaServerUser membership is scoped to the instance signed into", async () => {
+  settings.set("jellyfinUrl", "http://10.77.10.1:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.2:8096");
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateByName") {
+      return jsonResponse({ User: { Id: "jf-multi", Name: "Multi" } });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  // Active member of "remote" ONLY — the default instance's gate must not see it.
+  mediaServerUsers.push({ id: "msu-remote", source: "jellyfin", serverInstance: "remote", sourceUserId: "jf-multi", active: true });
+
+  assert.equal(
+    await authorizeWithJellyfin({ username: "multi", password: "pw" }, makeReq(chromeUa("jf-multi-default"))),
+    null,
+    "a member of the remote instance must not be admitted via the default instance",
+  );
+  await flushAsync();
+  assert.equal(auditDetails().reason, "not_authorized");
+  assert.equal(users.length, 0);
+
+  // The SAME server credential, presented against "remote", is admitted.
+  const remoteResult = await authorizeWithJellyfin(
+    { username: "multi", password: "pw" },
+    makeReq(chromeUa("jf-multi-remote")),
+    "remote",
+  );
+  assert.ok(remoteResult, "the remote instance's own member must be admitted via that instance");
+  assert.equal(users.length, 1);
+});
+
+test("jellyfin multi-instance: restrict-sign-in is independently configurable per instance", async () => {
+  settings.set("jellyfinUrl", "http://10.77.10.3:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.4:8096");
+  settings.set("jellyfinRemoteRestrictSignIn", "false"); // remote is open; default stays fail-closed
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateByName") {
+      return jsonResponse({ User: { Id: "jf-open-remote", Name: "Open Remote" } });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+
+  // Unknown account, no MediaServerUser anywhere — refused via the (still
+  // restricted) default instance...
+  assert.equal(
+    await authorizeWithJellyfin({ username: "openremote", password: "pw" }, makeReq(chromeUa("jf-open-default"))),
+    null,
+  );
+  await flushAsync();
+  assert.equal(auditDetails().reason, "not_authorized");
+
+  // ...but admitted via "remote", whose restrict flag is independently off.
+  const admitted = await authorizeWithJellyfin(
+    { username: "openremote", password: "pw" },
+    makeReq(chromeUa("jf-open-remote2")),
+    "remote",
+  );
+  assert.ok(admitted, "an instance with restrict-sign-in disabled admits any valid credential on THAT instance");
+});
+
+test("jellyfin multi-instance: the returning-bound-user bypass is GLOBAL, unscoped by instance", async () => {
+  settings.set("jellyfinUrl", "http://10.77.10.5:8096");
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.6:8096");
+  seedUser({ id: "u-jf-global", email: "jellyfin-jf-global@jellyfin.local", name: "Global", jellyfinUserId: "jf-global" });
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateByName") {
+      return jsonResponse({ User: { Id: "jf-global", Name: "Global" } });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+
+  // No MediaServerUser row on EITHER instance — only the User.jellyfinUserId
+  // binding exists. Identity binding is a single cross-instance anchor by
+  // design (the multi-server plan's decision #6), so sign-in via "remote"
+  // must still succeed even though the binding has no per-instance
+  // relationship to it.
+  const result = await authorizeWithJellyfin(
+    { username: "global", password: "pw" },
+    makeReq(chromeUa("jf-global-remote")),
+    "remote",
+  );
+  assert.ok(result, "a globally-bound user must be admitted through ANY configured instance");
+  assert.equal(result.id, "u-jf-global");
+});
+
+test("findOrCreateJellyfinUser: the best-effort real-email lookup resolves config for the GIVEN instance, not the default", async () => {
+  // Only "remote" has BOTH url+apiKey configured (the lookup needs both) — the
+  // default instance is left unconfigured, so a wrong-instance read would
+  // silently skip the lookup instead of hitting the wrong server.
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.8:8096");
+  settings.set("jellyfinRemoteApiKey", "remote-api-key");
+  respond = (url) => {
+    if (url.pathname === "/Users/jf-email-remote") {
+      return jsonResponse({ Id: "jf-email-remote", Email: "remote-user@example.com" });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+
+  const created = asUser(await findOrCreateJellyfinUser("jf-email-remote", "Remote Email", "remote"));
+  assert.equal(created.email, "remote-user@example.com", "the real email must come from the instance's own Jellyfin server");
+  assert.equal(fetchCalls[0]?.url.origin, "http://10.77.10.8:8096");
+});
+
+test("jellyfin QuickConnect: instance selects which server's URL is used, and its own membership gate applies", async () => {
+  // The default instance is intentionally left unconfigured — proves the URL
+  // (and therefore the membership check) really comes from the instance
+  // argument, not a hardcoded default fallback.
+  settings.set("jellyfinRemoteUrl", "http://10.77.10.7:8096");
+  mediaServerUsers.push({ id: "msu-qc-remote", source: "jellyfin", serverInstance: "remote", sourceUserId: "jf-qc-remote", active: true });
+  respond = (url) => {
+    if (url.pathname === "/Users/AuthenticateWithQuickConnect") {
+      return jsonResponse({ User: { Id: "jf-qc-remote", Name: "QC Remote" } });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+
+  const result = await authorizeWithJellyfinQuickConnect(
+    { secret: "qc-secret-remote" },
+    makeReq(chromeUa("qc-remote")),
+    "remote",
+  );
+  assert.ok(result, "QuickConnect against a configured named instance must succeed");
+  assert.equal(fetchCalls[0]?.url.origin, "http://10.77.10.7:8096");
 });
 
 test("jellyfin QuickConnect: the per-secret bucket (hashed key) refuses brute redemption before any fetch", async () => {

@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { Loader2 } from "@/components/icons";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { withBasePath } from "@/lib/base-path";
@@ -13,9 +14,15 @@ import { safeInternalPath } from "@/lib/safe-url";
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
 
+interface JellyfinInstance {
+  slug: string;
+  name: string;
+}
+
 interface Props {
   plexEnabled: boolean;
   jellyfinEnabled: boolean;
+  jellyfinInstances: JellyfinInstance[];
   oidcEnabled: boolean;
   oidcName: string;
   localLoginDisabled: boolean;
@@ -43,7 +50,7 @@ async function signInWithFetch(
   return { ok: true };
 }
 
-export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName, localLoginDisabled, siteUrl }: Props) {
+export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oidcEnabled, oidcName, localLoginDisabled, siteUrl }: Props) {
   const router = useRouter();
   const searchParams = useSearchParams();
   // Sidebar/header read role from this context; refresh after sign-in so
@@ -66,6 +73,14 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [jellyfinMode, setJellyfinMode] = useState<JellyfinMode>("password");
+  // Defaults to the FIRST syncable instance, not a bare "" — an admin can
+  // configure only a named instance (e.g. via the separate "Additional media
+  // servers" card) with no default ever wired up, in which case "" isn't a
+  // valid instance at all and every sign-in would 503. Every existing
+  // single-default deployment still resolves this to "" (getSyncableMediaInstances
+  // always returns the default first when it's configured), so the select
+  // below (which only renders for length > 1) never has to move it.
+  const [jellyfinInstance, setJellyfinInstance] = useState(jellyfinInstances[0]?.slug ?? "");
   const [qcCode, setQcCode] = useState<string | null>(null);
   // Cancels an in-flight QuickConnect poll loop (provider switch, "Use password
   // instead", unmount) so an abandoned code can't later complete a sign-in.
@@ -223,7 +238,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     const payload =
       provider === "credentials"
         ? { email: fields.email, password: fields.password, rememberMe: String(rememberMe) }
-        : { username: fields.username, password: fields.password, rememberMe: String(rememberMe) };
+        : { username: fields.username, password: fields.password, rememberMe: String(rememberMe), instance: jellyfinInstance };
 
     // OIDC is handled via window.location.href below; this branch only fires for credentials/jellyfin.
     const fetchProvider = provider as "credentials" | "jellyfin";
@@ -249,6 +264,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     setError("");
     setFields({ email: "", password: "", username: "" });
     setJellyfinMode("password");
+    setJellyfinInstance(jellyfinInstances[0]?.slug ?? "");
     setQcCode(null);
     setRememberMe(false);
     setLoading(false);
@@ -261,10 +277,12 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
     setError("");
     setQcCode(null);
 
+    const instanceQs = jellyfinInstance ? `?instance=${encodeURIComponent(jellyfinInstance)}` : "";
+
     let secret: string;
     let code: string;
     try {
-      const res = await fetch(withBasePath("/api/auth/jellyfin/quickconnect"), { method: "POST" });
+      const res = await fetch(withBasePath(`/api/auth/jellyfin/quickconnect${instanceQs}`), { method: "POST" });
       if (!res.ok) throw new Error("initiate failed");
       const data: { secret: string; code: string } = await res.json();
       secret = data.secret;
@@ -284,7 +302,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
       if (qcRunRef.current !== myRun) return;
       try {
         const poll = await fetch(
-          withBasePath(`/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1`)
+          withBasePath(`/api/auth/jellyfin/quickconnect?secret=${encodeURIComponent(secret)}&wait=1${instanceQs ? `&instance=${encodeURIComponent(jellyfinInstance)}` : ""}`)
         );
         if (poll.ok) {
           const data: { authenticated: boolean } = await poll.json();
@@ -399,6 +417,21 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, oidcEnabled, oidcName,
           </Button>
           {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
         </div>
+      )}
+
+      {provider === "jellyfin" && jellyfinInstances.length > 1 && (
+        <Field label="Server" htmlFor="jf-instance">
+          <StyledSelect
+            id="jf-instance"
+            value={jellyfinInstance}
+            onChange={(e) => setJellyfinInstance(e.target.value)}
+            className="w-full"
+          >
+            {jellyfinInstances.map((i) => (
+              <option key={i.slug} value={i.slug}>{i.name}</option>
+            ))}
+          </StyledSelect>
+        </Field>
       )}
 
       {provider === "jellyfin" && jellyfinMode === "quickconnect" && (

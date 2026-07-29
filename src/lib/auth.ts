@@ -16,6 +16,7 @@ import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -140,6 +141,7 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
@@ -176,7 +178,7 @@ export async function findOrCreateJellyfinUser(
   //    trusted cross-provider identity anchor — only the provider subject id is.
   let realEmail: string | null = null;
   try {
-    const jellyfinConfig = await getJellyfinConfig();
+    const jellyfinConfig = await getJellyfinConfig(instance);
     if (jellyfinConfig.url && jellyfinConfig.apiKey) {
       realEmail = await getJellyfinUserEmail(jellyfinConfig.url, jellyfinConfig.apiKey, jellyfinId);
     }
@@ -873,13 +875,22 @@ export async function authorizeWithPlex(
 //     so an upgrade can't lock out anyone who has already signed in).
 // A brand-new, unknown Jellyfin account (no MediaServerUser, no bound User) is
 // refused until an admin syncs the library or allows them.
-async function isJellyfinSignInAllowed(jellyfinUserId: string): Promise<boolean> {
-  const restrictRow = await prisma.setting.findUnique({ where: { key: "jellyfinRestrictSignIn" } });
+//
+// Both the restrict-sign-in policy and the membership check are scoped to the
+// instance the credential was verified against — a server B account must not
+// be admitted by server A's MediaServerUser rows (or vice versa). The
+// "already-bound returning user" bypass stays GLOBAL and unscoped: identity
+// binding (User.jellyfinUserId) is a single cross-instance anchor by design
+// (see the multi-server plan's decision #6), so a user who has ever bound to
+// this jellyfinUserId on ANY instance must not be locked out by an instance's
+// restrict policy.
+async function isJellyfinSignInAllowed(jellyfinUserId: string, instance: MediaInstanceKey): Promise<boolean> {
+  const restrictRow = await prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "RestrictSignIn") } });
   const restrict = (restrictRow?.value ?? "true").trim().toLowerCase() !== "false";
   if (!restrict) return true;
   const [member, existing] = await Promise.all([
     prisma.mediaServerUser.findFirst({
-      where: { source: "jellyfin", sourceUserId: jellyfinUserId, active: true },
+      where: { source: "jellyfin", serverInstance: instance, sourceUserId: jellyfinUserId, active: true },
       select: { id: true },
     }),
     prisma.user.findUnique({ where: { jellyfinUserId }, select: { id: true } }),
@@ -890,6 +901,7 @@ async function isJellyfinSignInAllowed(jellyfinUserId: string): Promise<boolean>
 export async function authorizeWithJellyfin(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<Record<string, unknown> | null> {
   if (!credentials?.username || !credentials?.password) return null;
   const username = credentials.username as string;
@@ -900,14 +912,16 @@ export async function authorizeWithJellyfin(
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
 
+  // Deliberately NOT scoped by instance — an attacker's per-IP attempt budget
+  // must not multiply with the number of configured Jellyfin servers.
   if (!checkRateLimit(`jellyfin-ip:${ip}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "rate_limited" } });
     return null;
   }
 
-  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
-    console.error("[jellyfin auth] Jellyfin URL is not configured");
+    console.error(`[jellyfin auth] Jellyfin URL is not configured for instance "${instance}"`);
     await dummyVerify();
     return null;
   }
@@ -929,13 +943,13 @@ export async function authorizeWithJellyfin(
   // server credential is not enough: the account must be a known member of this
   // Summonarr instance (or the gate must be explicitly disabled). See
   // isJellyfinSignInAllowed for the membership criteria.
-  if (!(await isJellyfinSignInAllowed(jfUser.id))) {
+  if (!(await isJellyfinSignInAllowed(jfUser.id, instance))) {
     console.warn("[jellyfin auth] sign-in refused: user is not an authorized member of this instance.");
     await dummyVerify();
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "not_authorized" } });
     return null;
   }
-  const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
+  const jfDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
   if (jfDbUser === PROVIDER_REBIND_REQUIRED || jfDbUser === PROVIDER_SETUP_REQUIRED) {
     await dummyVerify();
     const reason = jfDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
@@ -949,11 +963,13 @@ export async function authorizeWithJellyfin(
 export async function authorizeWithJellyfinQuickConnect(
   credentials: Partial<Record<string, unknown>>,
   req: Request,
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<Record<string, unknown> | null> {
   if (!credentials?.secret) return null;
   const headers = (req as Request).headers as Headers;
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
+  // Deliberately NOT scoped by instance — see authorizeWithJellyfin.
   if (!checkRateLimit(`jellyfin-qc-ip:${ip}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
@@ -966,9 +982,9 @@ export async function authorizeWithJellyfinQuickConnect(
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }
-  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
-    console.error("[jellyfin quickconnect auth] Jellyfin URL is not configured");
+    console.error(`[jellyfin quickconnect auth] Jellyfin URL is not configured for instance "${instance}"`);
     await dummyVerify();
     return null;
   }
@@ -987,13 +1003,13 @@ export async function authorizeWithJellyfinQuickConnect(
   // Fail-closed membership gate (same as the standard Jellyfin path): a valid
   // QuickConnect secret authenticates the account but does not by itself authorize
   // sign-in — the account must be a known member of this instance.
-  if (!(await isJellyfinSignInAllowed(jfUser.id))) {
+  if (!(await isJellyfinSignInAllowed(jfUser.id, instance))) {
     console.warn("[jellyfin quickconnect auth] sign-in refused: user is not an authorized member of this instance.");
     await dummyVerify();
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "not_authorized" } });
     return null;
   }
-  const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name);
+  const qcDbUser = await findOrCreateJellyfinUser(jfUser.id, jfUser.name, instance);
   if (qcDbUser === PROVIDER_REBIND_REQUIRED || qcDbUser === PROVIDER_SETUP_REQUIRED) {
     const reason = qcDbUser === PROVIDER_SETUP_REQUIRED ? "setup_required" : "email_collision_needs_rebind";
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason } });
