@@ -1013,6 +1013,40 @@ const spec = {
         responses: { "200": { description: "Plex client ID", content: { "application/json": { schema: { type: "object", properties: { clientId: { type: "string" } } } } } } },
       },
     },
+    "/auth/jellyfin/servers": {
+      get: {
+        tags: ["Auth"],
+        summary: "List the configured Jellyfin servers available for sign-in",
+        description:
+          "Public pre-auth picker source for clients that cannot render the login page's server component. Only fully configured instances (server URL + API key) are listed, default (\"\") first. Returns an empty list — not a 404 — when Jellyfin is not configured. Rate-limited per IP.",
+        security: [],
+        responses: {
+          "200": {
+            description: "Configured Jellyfin instances",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    servers: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          slug: { type: "string", description: "Instance key; \"\" is the default server" },
+                          name: { type: "string" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "429": { description: "Rate limited" },
+        },
+      },
+    },
     "/auth/jellyfin/quickconnect": {
       post: {
         tags: ["Auth"],

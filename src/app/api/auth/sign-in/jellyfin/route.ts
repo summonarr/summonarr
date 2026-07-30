@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { AccountDeactivatedError, authorizeWithJellyfin, signInAndMintSession } from "@/lib/auth";
-import { DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
@@ -26,6 +26,17 @@ export async function POST(req: NextRequest) {
   // gracefully when it's absent. Requiring it here too would 503 a deployment
   // that pre-Phase-1.5 could sign into just fine.
   const instance = typeof body.instance === "string" ? body.instance : DEFAULT_MEDIA_INSTANCE;
+  // Validate the slug the way every other instance-consuming route does (the
+  // QuickConnect initiate route, both terminate routes, the fix-match trio).
+  // Not a security hole — the value only ever reaches a parameterized Setting
+  // key and is never persisted — but instanceKeySegment upper-cases the first
+  // character only, so "Remote" derives the SAME jellyfinRemoteUrl/ApiKey config
+  // and passes the gate below, while the membership lookup downstream queries
+  // `serverInstance: "Remote"` and matches no MediaServerUser row. That refuses
+  // a legitimate first-time user of that server: it fails closed, but wrongly.
+  if (!isValidMediaInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+  }
   if (!(await getConfiguredJellyfinUrl(instance))) {
     return NextResponse.json({ error: "Jellyfin sign-in is not configured for this server" }, { status: 503 });
   }

@@ -48,6 +48,10 @@ export type CandidatesResponse = {
   arrConfirmedTitle:   string | null;
   ratingKey:           string;
   plexFilePath:        string | null;
+  // Display-only comparison hint. Read from `serverInstance` when that Jellyfin
+  // server holds the title, otherwise from any configured one that does — a bad
+  // match can straddle two different servers, so the Plex slug must not scope
+  // this side. See the lookup below.
   jellyfinFilePath:    string | null;
   // Which configured Plex server the ratingKey + candidates came from. Echoed so
   // the caller can POST the fix back against the SAME server (a ratingKey is
@@ -207,16 +211,35 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   }
   const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
 
-  const [item, jellyfinItem] = await Promise.all([
+  const [item, jellyfinRows] = await Promise.all([
     prisma.plexLibraryItem.findFirst({
       where: { tmdbId, mediaType, serverInstance },
       select: { plexRatingKey: true, filePath: true },
     }),
-    prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId, mediaType, serverInstance },
-      select: { filePath: true },
+    // Deliberately NOT scoped by `serverInstance`: that slug names the PLEX
+    // server this listing is for, and the two sides of a bad match are
+    // independent instances — bad-matches.ts pairs library rows by relative
+    // path across every configured server and gives each side its own
+    // `serverInstance`. Scoping the Jellyfin read with the Plex slug therefore
+    // blanked (or mis-sourced) the hint on exactly the cross-instance mismatch
+    // an admin opens this picker to resolve. Widening is safe because
+    // `jellyfinFilePath` is display-only — nothing is written from it, and the
+    // POST that applies a fix targets Plex alone (`server !== "plex"` is
+    // rejected above).
+    prisma.jellyfinLibraryItem.findMany({
+      where: { tmdbId, mediaType },
+      select: { serverInstance: true, filePath: true },
+      orderBy: { serverInstance: "asc" },
     }),
   ]);
+  // Requested instance first, so every answer this route already gives is
+  // unchanged — a single-server deployment (every row on "") is byte-identical
+  // (guardrail 35), and a multi-server one only gains a path where it used to
+  // report none.
+  const jellyfinItem =
+    jellyfinRows.find((r) => r.serverInstance === serverInstance && r.filePath)
+    ?? jellyfinRows.find((r) => r.filePath)
+    ?? null;
   if (!item?.plexRatingKey) {
     return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
   }

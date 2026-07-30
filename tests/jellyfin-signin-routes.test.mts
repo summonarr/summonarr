@@ -5,11 +5,13 @@
 // auth.ts unit level in auth.test.mts — this file only pins the ROUTE wiring
 // around it:
 //
-//   POST /api/auth/sign-in/jellyfin — body.instance is validated against
-//   getSyncableMediaInstances("jellyfin") (an unregistered/unconfigured slug
-//   503s before any fetch); omitting it keeps signing into the default
-//   instance for old clients; a configured NAMED instance signs in end to end
-//   against THAT instance's own server.
+//   POST /api/auth/sign-in/jellyfin — body.instance must be a well-formed slug
+//   (a mis-cased "Remote" 400s, because it derives the same Setting keys as
+//   "remote" but a different membership bucket) and must name a server with a
+//   configured URL (an unregistered/unconfigured slug 503s before any fetch);
+//   omitting it keeps signing into the default instance for old clients; a
+//   configured NAMED instance signs in end to end against THAT instance's own
+//   server.
 //
 //   POST /api/auth/jellyfin/quickconnect (initiate) — an invalid instance
 //   slug is rejected before any fetch.
@@ -261,6 +263,25 @@ test("sign-in/jellyfin: an unregistered instance is refused (503) before any fet
   assert.equal(res.status, 503);
   assert.deepEqual(await bodyOf(res), { error: "Jellyfin sign-in is not configured for this server" });
   assert.equal(fetchCalls.length, 0, "an unconfigured instance must be rejected before contacting any server");
+});
+
+test("sign-in/jellyfin: an INVALID instance slug is rejected (400) before any fetch", async () => {
+  // Not merely cosmetic: instanceKeySegment upper-cases the FIRST character
+  // only, so "Remote" derives the very same jellyfinRemoteUrl/ApiKey config as
+  // "remote" and would sail past the configured-URL gate — and then the
+  // membership lookup downstream queries serverInstance "Remote", which matches
+  // no MediaServerUser row, refusing a legitimate first-time user of that
+  // server. Fails closed, but wrongly. Every sibling instance-consuming route
+  // (QuickConnect initiate, both terminate routes, the fix-match trio) validates.
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.3:8096");
+  mediaServerUsers.push({ id: "msu-case", source: "jellyfin", serverInstance: "remote", sourceUserId: "jf-case-1", active: true });
+
+  const res = await jellyfinSignInPost(
+    jsonReq("http://localhost:3000/api/auth/sign-in/jellyfin", { username: "u", password: "pw", instance: "Remote" }),
+  );
+  assert.equal(res.status, 400);
+  assert.deepEqual(await bodyOf(res), { error: "Invalid server" });
+  assert.equal(fetchCalls.length, 0, "an invalid slug must be rejected before contacting any server");
 });
 
 test("sign-in/jellyfin: omitting instance signs into the DEFAULT server (backward compatible with pre-Phase-1.5 clients)", async () => {
