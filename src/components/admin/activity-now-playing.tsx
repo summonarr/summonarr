@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
+import { parseActiveSessionId } from "@/lib/media-instances";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
 import {
@@ -26,22 +27,30 @@ import {
   methodLabel,
 } from "@/components/admin/activity-ui";
 
-// ActiveSession.id is "<source>:<sessionKey>". Strip the prefix to recover the
-// raw sessionKey the terminate endpoints expect. Returns the endpoint + key for
-// the sources that support termination (Plex, Jellyfin), or null otherwise.
+// ActiveSession.id is "<source>:<sessionKey>" for the default instance, or
+// "<source>:<instance>:<sessionKey>" for a named one (see activeSessionId in
+// media-instances.ts). Both sources need the real parse — a naive prefix-strip
+// on a named instance's session would send the instance slug as part of the
+// sessionKey and the server would 404 it (and resolve against the wrong
+// server's snapshot). Returns the endpoint + key + instance for the sources
+// that support termination (Plex, Jellyfin), or null otherwise.
 function terminateTargetFor(
   session: ActiveSessionLive,
-): { endpoint: string; sessionKey: string } | null {
+): { endpoint: string; sessionKey: string; serverInstance?: string } | null {
   if (session.id.startsWith("plex:")) {
+    const parsed = parseActiveSessionId(session.id);
     return {
       endpoint: "/api/admin/play-history/terminate-session",
-      sessionKey: session.id.slice(5),
+      sessionKey: parsed.sessionKey,
+      serverInstance: parsed.serverInstance,
     };
   }
   if (session.id.startsWith("jellyfin:")) {
+    const parsed = parseActiveSessionId(session.id);
     return {
       endpoint: "/api/admin/play-history/terminate-jellyfin-session",
-      sessionKey: session.id.slice(9),
+      sessionKey: parsed.sessionKey,
+      serverInstance: parsed.serverInstance,
     };
   }
   return null;
@@ -141,11 +150,15 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
   const [reason, setReason] = useState(DEFAULT_TERMINATE_REASON);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Bounded release of the `busy` gate on a successful terminate (see onSubmit).
+  const terminateFallback = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(terminateFallback.current), []);
   if (!target) return null;
-  const { endpoint, sessionKey } = target;
+  const { endpoint, sessionKey, serverInstance } = target;
   const serverLabel = session.source === "jellyfin" ? "Jellyfin" : "Plex";
 
   function openDialog() {
+    clearTimeout(terminateFallback.current);
     setReason(DEFAULT_TERMINATE_REASON);
     setError(null);
     setBusy(false);
@@ -162,6 +175,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sessionKey,
+          ...(serverInstance !== undefined ? { serverInstance } : {}),
           reason: reason.trim() || DEFAULT_TERMINATE_REASON,
         }),
       });
@@ -175,6 +189,15 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
       // unmounts on the next activity:sessions SSE push (within ~1s) once the
       // server tears the stream down — that removes this whole component (and
       // the dialog) with it, so we don't flash the dialog closed prematurely.
+      //
+      // ...but that unmount is not guaranteed: Plex ignores termination for some
+      // direct-play clients (200 returned, stream keeps going), and the shared SSE
+      // connection can be parked on its 30s permanent-failure re-probe. Every
+      // dismissal route (Escape, backdrop, X, Cancel) is gated on `busy`, so
+      // without a bound the admin's only way out was a full page reload. Release
+      // the gate after 10s so the dialog is always escapable; if the card does
+      // unmount first this timer dies with it.
+      terminateFallback.current = setTimeout(() => setBusy(false), 10_000);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -341,6 +364,12 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
     ? `/admin/activity/media/${s.tmdbId}${s.mediaType ? `?type=${(s.mediaType ?? "").toUpperCase()}` : ""}`
     : null;
   const accent = accentFor(s.title || s.id);
+  // Which media server this stream is on. ActiveSessionLive carries no
+  // `serverInstance` field (neither does the SSE snapshot select), but the id
+  // encodes the slug by construction — see activeSessionId in
+  // media-instances.ts — so the badge needs no wire change. "" for the default
+  // instance, and SourceTag renders nothing extra in that case.
+  const serverInstance = parseActiveSessionId(s.id).serverInstance;
   const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
   const bitrateMbps = toBitrateKbps(s.bitrate) / 1000;
   const paused = s.state === "paused";
@@ -430,7 +459,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <SourceTag source={s.source} />
+            <SourceTag source={s.source} instance={serverInstance} />
             <span
               className="ds-mono"
               style={{ fontSize: 9.5, color: "var(--ds-fg-disabled)" }}

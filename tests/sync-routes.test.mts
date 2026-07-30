@@ -75,6 +75,7 @@ const settingUpserts: Array<{ key: string; value: string }> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 const existingPlexByType = new Map<string, number[]>();
 const existingJellyfinByType = new Map<string, number[]>();
+const plexFindManyWheres: Array<Record<string, unknown>> = []; // every plexLibraryItem.findMany where (dedupe + recentOnly reads)
 
 // verifyAndRefreshSession's DB surface for the admin-session tests (the
 // api-auth.test.mts fixture shape — claims always mirror the row, no rotation).
@@ -120,7 +121,10 @@ const fakePrisma = {
     },
   },
   plexLibraryItem: {
-    findMany: async (args: FindManyByTmdbArgs) => existingRowsFor(existingPlexByType, args),
+    findMany: async (args: FindManyByTmdbArgs) => {
+      plexFindManyWheres.push(args.where as Record<string, unknown>);
+      return existingRowsFor(existingPlexByType, args);
+    },
   },
   jellyfinLibraryItem: {
     findMany: async (args: FindManyByTmdbArgs) => existingRowsFor(existingJellyfinByType, args),
@@ -351,6 +355,7 @@ beforeEach(() => {
   settings.clear();
   existingPlexByType.clear();
   existingJellyfinByType.clear();
+  plexFindManyWheres.length = 0;
   failCreateManyOn = null;
   respond = (url) => {
     throw new Error(`unexpected fetch ${url} — script a responder for this test`);
@@ -461,8 +466,11 @@ test("plex { full: true } → /all fetch and a full replace: deleteMany + repopu
   assert.equal(BATCH_TX_TIMEOUT, 30_000);
   assert.deepEqual(tx.ops, [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 1)" },
-    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "MOVIE" } } },
-    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "TV" } } },
+    // Default-instance-scoped (multi-server, Phase 2): this route only syncs the
+    // default ("") Plex server, so its full replace must leave any named
+    // instance's rows alone — an unscoped delete would wipe them.
+    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "MOVIE", serverInstance: "" } } },
+    { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "TV", serverInstance: "" } } },
     {
       model: "plexLibraryItem",
       method: "createMany",
@@ -501,14 +509,16 @@ test("plex bodyless POST is recentOnly: /recentlyAdded fetch, insert-only of NEW
 
   // Guardrail 13: the ONLY delete the Plex recentOnly path may issue is the
   // stale plexRatingKey→tmdbId mapping clear, scoped to EXACTLY the incoming
-  // batch's ratingKeys. Any wholesale (mediaType-scoped or unscoped) deleteMany
+  // batch's ratingKeys AND to the default instance (ratingKeys are server-local
+  // integers, so a named instance can legitimately hold the same key for a
+  // different title). Any wholesale (mediaType-scoped or unscoped) deleteMany
   // here is the library-nuking bug the guardrail exists to prevent.
   const deletes = opsFor("plexLibraryItem", "deleteMany");
   assert.deepEqual(
     deletes.map((d) => d.args),
-    [{ where: { plexRatingKey: { in: ["rk604"] } } }],
+    [{ where: { serverInstance: "", plexRatingKey: { in: ["rk604"] } } }],
     "guardrail 13 violated: the Plex recentOnly path may only clear stale mappings for the " +
-      "incoming batch's ratingKeys — any other deleteMany nukes the library when the window is empty",
+      "incoming batch's ratingKeys (default instance only) — any other deleteMany nukes the library when the window is empty",
   );
 });
 
@@ -615,9 +625,13 @@ test("jellyfin { full: true } → NO MinDateLastSaved; wholesale deleteMany + re
   assert.equal(tx.timeout, BATCH_TX_TIMEOUT);
   assert.deepEqual(tx.ops, [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 2)" },
-    // Unscoped deleteMany (args null = called with no filter): the full path
-    // replaces the whole table — inside the same tx as the repopulate.
-    { model: "jellyfinLibraryItem", method: "deleteMany", args: null },
+    // Default-instance-scoped (multi-server, Phase 1 fix): this route only syncs
+    // the default ("") Jellyfin server, so its full replace must leave any named
+    // instance's rows alone — the pre-fix unscoped deleteMany wiped them and
+    // repopulated only the default's (availability flicker until the next
+    // orchestrator run). Still an unconditional delete of that instance's rows,
+    // inside the same tx as the repopulate.
+    { model: "jellyfinLibraryItem", method: "deleteMany", args: { where: { serverInstance: "" } } },
     {
       model: "jellyfinLibraryItem",
       method: "createMany",
@@ -686,4 +700,63 @@ test("a failed full-replace insert propagates out of the SHARED transaction (rol
       "splitting them would leave the library deleted with nothing repopulated",
   );
   assert.equal(ledgerFor("jellyfin-sync")?.ok, false);
+});
+
+// ── multi-server safety: the per-source routes are default-instance-only ────
+// Named additional Plex/Jellyfin instances sync exclusively via the /api/sync
+// orchestrator's per-instance fan-out; these routes touch ONLY the default ("")
+// instance's rows, so an admin Resync can never clobber a named instance.
+
+test("multi-server safety: BOTH routes' full-replace deletes are scoped to the default instance — a named instance's rows survive the admin Resync", async () => {
+  configurePlex();
+  configureJellyfin();
+  respond = (url) =>
+    url.origin === PLEX_BASE ? plexMovieResponder([PLEX_ITEM_MIN])(url) : jellyfinMovieResponder([JF_ITEM_MIN])(url);
+
+  const plexRes = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(plexRes.status, 200);
+  const jfRes = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(jfRes.status, 200);
+  await settleFireAndForget();
+
+  for (const model of LIBRARY_MODELS) {
+    const deletes = opsFor(model, "deleteMany");
+    assert.ok(deletes.length > 0, `${model}: the full path must still delete + repopulate (guardrail 13's full-replace leg)`);
+    for (const d of deletes) {
+      assert.equal(
+        (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance,
+        "",
+        `${model}: every full-replace delete must be scoped to the DEFAULT instance — an unscoped ` +
+          "delete wipes every named instance's rows and repopulates only the default's",
+      );
+    }
+  }
+});
+
+test("multi-server safety: the plex dedupe clone's prior-mapping lookup is default-instance-scoped (agreement with the orchestrator's dedupe)", async () => {
+  configurePlex();
+  // ONE item carrying TWO tmdb guids — genuine conflation within the batch — so
+  // the clone's prior-mapping DB read fires. full:true keeps that read the ONLY
+  // plexLibraryItem.findMany (recentOnly's already-present check would add more).
+  respond = plexMovieResponder([
+    { ratingKey: "rk-dup", type: "movie", title: "Conflated", Guid: [{ id: "tmdb://601" }, { id: "tmdb://602" }] },
+  ]);
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.deepEqual(
+    plexFindManyWheres,
+    [{ mediaType: "MOVIE", serverInstance: "", tmdbId: { in: [601, 602] } }],
+    "the conflated-ratingKey read must consult only the default instance's rows — ratingKeys are " +
+      "small server-local integers, so an unscoped read could import a named instance's mapping " +
+      "and wrongly drop this server's row",
+  );
+  // No prior mapping ⇒ keep the first occurrence: only tmdb 601 is inserted.
+  const creates = opsFor("plexLibraryItem", "createMany");
+  assert.equal(creates.length, 1);
+  assert.deepEqual(
+    (creates[0].args as { data: Array<{ tmdbId: number }> }).data.map((r) => r.tmdbId),
+    [601],
+  );
 });

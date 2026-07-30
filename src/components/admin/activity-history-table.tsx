@@ -481,6 +481,33 @@ export function ActivityHistoryTable({
                                     : "var(--ds-jellyfin)",
                               }}
                             />
+                            {/* Instance slug for a named server, so two plays
+                                on different servers of the same provider are
+                                distinguishable. Rendered only when non-empty:
+                                "" means the default server AND every row
+                                written before multi-server support, which must
+                                stay unlabelled. Colour is keyed off `source`
+                                (matching the dot), never off the slug. */}
+                            {r.serverInstance && (
+                              <span
+                                className="ds-mono"
+                                title={`Played on the "${r.serverInstance}" ${r.source} server`}
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: "1px 5px",
+                                  borderRadius: 999,
+                                  background: "oklch(1 0 0 / 0.06)",
+                                  color:
+                                    r.source === "plex"
+                                      ? "var(--ds-plex)"
+                                      : "var(--ds-jellyfin)",
+                                  letterSpacing: "0.04em",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {r.serverInstance}
+                              </span>
+                            )}
                           </Link>
                         </td>
                         <td style={{ padding: "10px 11px", minWidth: 240 }}>

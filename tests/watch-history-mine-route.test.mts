@@ -773,6 +773,38 @@ test("entry detail expands the whole group from ANY play id; foreign rows 404 li
   assert.equal(unauth.status, 401);
 });
 
+test("entry detail: group-wide watched/completed are exact for a group LARGER than the play-list cap", async () => {
+  // Regression. `watched`/`completed` were computed with playRows.some(...) over
+  // the play list, which is capped at MY_ENTRY_PLAYS_CAP (100) and ordered newest
+  // first. A group with more plays than that whose only qualifying play sorts
+  // outside the newest 100 therefore rendered as UNWATCHED here, while the list
+  // view — bool_or over every row in the group — showed the same entry watched.
+  // The two surfaces read the same entry, so they must agree; the flags are now
+  // existence probes over the whole group, like the playCount/seconds aggregates
+  // beside them.
+  const alice = await mintSession();
+  addMsu("msu-a1", alice.userId);
+
+  const ep = { tmdbId: 1396, mediaType: "TV" as const, title: "Breaking Bad", seasonNumber: 1, episodeNumber: 1 };
+  // The OLDEST play is the only watched one — it lands at position 105 of the
+  // newest-first ordering, i.e. outside the 100-row cap.
+  const oldestWatched = addPlay("msu-a1", { ...ep, playDuration: 10, watched: true, completed: true });
+  for (let i = 0; i < 104; i++) {
+    addPlay("msu-a1", { ...ep, playDuration: 1, watched: false, completed: false });
+  }
+
+  const { status, body } = await fetchEntry(alice.token, oldestWatched.id);
+  assert.equal(status, 200);
+  assert.equal(body.plays.length, 100, "the play list itself stays capped");
+  assert.ok(
+    !body.plays.some((p) => p.id === oldestWatched.id),
+    "precondition: the one watched play must fall OUTSIDE the returned page, or this pins nothing",
+  );
+  assert.equal(body.item.playCount, 105, "aggregates span the whole group");
+  assert.equal(body.item.watched, true, "group-wide watched must not be truncated to the capped list");
+  assert.equal(body.item.completed, true, "same for completed");
+});
+
 test("entry detail groups unmatched rows by library item, and a bare row stands alone", async () => {
   const alice = await mintSession();
   addMsu("msu-a1", alice.userId);

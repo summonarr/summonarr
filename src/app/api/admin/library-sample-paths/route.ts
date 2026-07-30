@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
 
 const SAMPLE_COUNT = 6;
 
 // Longest shared directory prefix across paths (excludes the final filename
 // segment), used as the inferred library mount point to strip in the UI.
+// Only ever hand it ONE server instance's paths — see the query scope below.
 function commonPathPrefix(paths: string[]): string {
   if (paths.length === 0) return "";
   const segmented = paths.map((p) => p.replace(/\\/g, "/").split("/").filter(Boolean));
@@ -56,11 +58,19 @@ function pickTvShowSamples(paths: string[], mountPoint: string): string[] {
 }
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
+  // Scoped to the DEFAULT server instance, which is the one the shared
+  // plex/jellyfin{Movie,Tv}PathStripPrefix Settings this preview accompanies
+  // apply to. Mixing instances would hand commonPathPrefix two unrelated
+  // bind-mount roots (/plexmedia/… and /mnt/nas/video/…), collapsing the
+  // inferred mount to "" — the admin would then be shown full absolute paths
+  // as if that were the default server's mount while typing a prefix against
+  // it. A per-instance selector for this preview is a later, additive change.
+  const scope = { serverInstance: DEFAULT_MEDIA_INSTANCE, filePath: { not: null } } as const;
   const [plexMovieRows, plexTvRows, jellyfinMovieRows, jellyfinTvRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
-    prisma.plexLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
-    prisma.jellyfinLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
-    prisma.jellyfinLibraryItem.findMany({ where: { filePath: { not: null }, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
+    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
+    prisma.plexLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
+    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "MOVIE" }, select: { filePath: true }, take: 500 }),
+    prisma.jellyfinLibraryItem.findMany({ where: { ...scope, mediaType: "TV" },    select: { filePath: true }, take: 500 }),
   ]);
 
   const plexMoviePaths    = plexMovieRows.map((r) => r.filePath!);

@@ -82,6 +82,7 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const {
   assignDiscordRolesOnLink,
+  revokeDiscordRolesOnUnlink,
   notifyAdminsNewRequestDiscord,
   notifyAdminsNewIssueDiscord,
   notifyAdminsIssueMessage,
@@ -382,6 +383,7 @@ test("admin fan-out selects by MANAGE_ISSUES (role preset or explicit bit) and e
   assert.deepEqual(userFindManyWheres[0], {
     discordId: { not: null },
     notifyOnIssue: true,
+    deactivatedAt: null, // disabled accounts keep their Discord link (guardrail 33)
     id: { not: "u-author" },
   });
 
@@ -418,6 +420,7 @@ test("admin fan-out: restrictToUserId narrows the query, fromAdmin flips the hea
   assert.deepEqual(userFindManyWheres[0], {
     discordId: { not: null },
     notifyOnIssue: true,
+    deactivatedAt: null, // disabled accounts keep their Discord link (guardrail 33)
     id: "u-claimer",
   });
   const embed = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
@@ -454,18 +457,28 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
     discordIssueAdminRoleId: "900000000000000006",
   };
 
-  // Plex account (real email), plain USER → linked + plex roles only.
+  // Role sync is a DIFF over the roles Summonarr manages: the roles the user
+  // should have are PUT, and any OTHER managed role is DELETEd. Add-only sync
+  // left a demoted admin holding their Discord admin role forever. Roles the
+  // operator granted by hand are not in the managed set and are never touched.
+  const byMethod = (m: string) =>
+    sent.filter((s) => s.method === m).map((s) => s.url.split("/roles/")[1]).sort();
+
+  // Plex account (real email), plain USER → linked + plex granted; the jellyfin,
+  // admin and issue-admin roles are managed-but-not-desired, so they are revoked.
   setSettings(roleCfg);
   await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000003"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
   assert.deepEqual(
-    sent.map((s) => s.url),
+    sent.filter((s) => s.method === "PUT").map((s) => s.url),
     [
       `${API}/guilds/${guild}/members/${DID}/roles/900000000000000002`,
       `${API}/guilds/${guild}/members/${DID}/roles/900000000000000003`,
     ],
   );
   for (const s of sent) {
-    assert.equal(s.method, "PUT");
+    assert.ok(s.method === "PUT" || s.method === "DELETE");
     assert.equal(s.headers.get("authorization"), AUTH);
   }
 
@@ -473,17 +486,68 @@ test("role assignment maps provider + app role to role ids and skips non-snowfla
   // linked + jellyfin + issue-admin roles.
   sent.length = 0;
   await assignDiscordRolesOnLink(DID, "bob@jellyfin.local", "ISSUE_ADMIN");
-  assert.deepEqual(
-    sent.map((s) => s.url.split("/roles/")[1]),
-    ["900000000000000002", "900000000000000004", "900000000000000006"],
-  );
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002", "900000000000000004", "900000000000000006"]);
+  // The plex role is revoked on a Plex→Jellyfin switch, and the full-admin role
+  // is revoked for an ISSUE_ADMIN — both previously accumulated silently.
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000003", "900000000000000005"]);
 
   // A non-snowflake configured role id is filtered out instead of sent to Discord.
   sent.length = 0;
   setSettings({ ...roleCfg, discordPlexRoleId: "plex-members" });
   invalidateFeatureFlagCache();
   await assignDiscordRolesOnLink(DID, "alice@example.com", "USER");
-  assert.deepEqual(sent.map((s) => s.url.split("/roles/")[1]), ["900000000000000002"]);
+  // The non-snowflake plex id is filtered out of BOTH sets — it is never granted
+  // and never revoked, so a malformed config value can't produce a Discord call.
+  assert.deepEqual(byMethod("PUT"), ["900000000000000002"]);
+  assert.deepEqual(byMethod("DELETE"), ["900000000000000004", "900000000000000005", "900000000000000006"]);
+});
+
+test("unlink revokes every managed role — and only the managed ones", async () => {
+  const guild = "900000000000000001";
+  setSettings({
+    discordBotToken: BOT,
+    discordGuildId: guild,
+    discordLinkedRoleId: "900000000000000002",
+    discordPlexRoleId: "900000000000000003",
+    discordJellyfinRoleId: "900000000000000004",
+    discordAdminRoleId: "900000000000000005",
+    discordIssueAdminRoleId: "900000000000000006",
+  });
+  invalidateFeatureFlagCache();
+
+  await revokeDiscordRolesOnUnlink(DID);
+
+  // The role diff in assignDiscordRolesOnLink only runs while an account is
+  // LINKED, so without this an unlinked user kept every role Summonarr ever
+  // granted — the admin role included — with no way to lose it.
+  assert.deepEqual(
+    sent.map((s) => s.url.split("/roles/")[1]).sort(),
+    [
+      "900000000000000002",
+      "900000000000000003",
+      "900000000000000004",
+      "900000000000000005",
+      "900000000000000006",
+    ],
+  );
+  for (const s of sent) {
+    assert.equal(s.method, "DELETE");
+    assert.equal(s.headers.get("authorization"), AUTH);
+  }
+
+  // A non-snowflake configured id is filtered out rather than sent to Discord,
+  // and an unconfigured guild is a pure no-op.
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT, discordGuildId: guild, discordAdminRoleId: "not-a-snowflake" });
+  invalidateFeatureFlagCache();
+  await revokeDiscordRolesOnUnlink(DID);
+  assert.equal(sent.length, 0, "no managed role ids are valid → nothing to revoke");
+
+  sent.length = 0;
+  setSettings({ discordBotToken: BOT, discordLinkedRoleId: "900000000000000002" });
+  invalidateFeatureFlagCache();
+  await revokeDiscordRolesOnUnlink(DID);
+  assert.equal(sent.length, 0, "no guild configured → zero fetches");
 });
 
 test("role assignment: no guild config or invalid member id → zero fetches; a failed PUT only logs", async () => {
@@ -532,6 +596,7 @@ test("bulk approve: dedups requesters in one opt-in query, posts per REQUEST, an
     id: { in: ["u1", "u2", "u3"] },
     discordId: { not: null },
     notifyOnApproved: true,
+    deactivatedAt: null,
   });
 
   // One post per resolvable REQUEST (u1 gets two), none for u3.

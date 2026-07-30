@@ -256,7 +256,7 @@ test("notifyAdminsNewRequest: MANAGE_REQUESTS bitmask selects recipients; exclus
   // The requester exclusion is a DB-side where; the select is exactly what the
   // permission filter + resolver consume.
   assert.equal(userFindManyCalls.length, 1);
-  assert.deepEqual(userFindManyCalls[0].where, { id: { not: "u-req" } });
+  assert.deepEqual(userFindManyCalls[0].where, { deactivatedAt: null, id: { not: "u-req" } });
   assert.deepEqual(userFindManyCalls[0].select, {
     email: true,
     notificationEmail: true,
@@ -306,7 +306,7 @@ test("notifyAdminsNewIssue: notifyOnIssue filters DB-side, MANAGE_ISSUES filters
   });
 
   assert.equal(userFindManyCalls.length, 1);
-  assert.deepEqual(userFindManyCalls[0].where, { notifyOnIssue: true, id: { not: "u-rep" } });
+  assert.deepEqual(userFindManyCalls[0].where, { notifyOnIssue: true, deactivatedAt: null, id: { not: "u-rep" } });
   const emails = sentEmails();
   assert.deepEqual(
     emails.map((e) => e.to).sort(),
@@ -348,7 +348,7 @@ test("notifyAdminsIssueMessageEmail: restrictToUserId === excludeUserId short-ci
     restrictToUserId: "u2",
   });
   assert.equal(userFindManyCalls.length, 1);
-  assert.deepEqual(userFindManyCalls[0].where, { notifyOnIssue: true, id: "u2" });
+  assert.deepEqual(userFindManyCalls[0].where, { notifyOnIssue: true, deactivatedAt: null, id: "u2" });
   assert.deepEqual(sentEmails().map((e) => e.to), ["target@example.com"]);
 });
 

@@ -13,6 +13,7 @@ import { verifyTmdbMedia } from "@/lib/tmdb";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
@@ -130,10 +131,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
   // Jellyfin library hit so the API can't be scripted into issue records for titles
   // that aren't available (the UI only surfaces "report issue" on available media).
+  //
+  // Scoped to the servers THIS reporter can see: a copy on a restricted server they hold
+  // no grant for isn't media they HAVE, so it must not open the gate. The converse is what
+  // makes the check consistent with the button — the detail page renders "report issue" off
+  // the same per-user availability.
   const mt = mediaType as "MOVIE" | "TV";
+  const visible = await getVisibleServerInstances(session);
   const [plexHit, jellyfinHit] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
-    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType: mt } }, select: { tmdbId: true } }),
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId, mediaType: mt, serverInstance: { in: visible.plex } },
+      select: { tmdbId: true },
+    }),
+    prisma.jellyfinLibraryItem.findFirst({
+      where: { tmdbId, mediaType: mt, serverInstance: { in: visible.jellyfin } },
+      select: { tmdbId: true },
+    }),
   ]);
   if (!plexHit && !jellyfinHit) {
     return NextResponse.json({ error: "This title isn't in the library — issues can only be filed for available media." }, { status: 422 });

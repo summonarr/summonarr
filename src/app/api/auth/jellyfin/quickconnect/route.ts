@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import {
@@ -8,6 +9,18 @@ import {
   hashQuickConnectSecret,
   signQcFlowCookie,
 } from "@/lib/jellyfin-flow-state";
+
+// `instance` travels as a query param on both the initiate (POST) and poll
+// (GET) requests — client-supplied here is fine for BOTH: this only resolves
+// which Jellyfin server URL to call, never an authorization decision. The
+// security-sensitive step is the sign-in finalize route, which reads the
+// instance back out of the signed flow cookie stamped below, never from the
+// client. See jellyfin-flow-state.ts.
+function readInstanceParam(req: NextRequest): string | null {
+  const raw = new URL(req.url).searchParams.get("instance");
+  const instance = raw ?? DEFAULT_MEDIA_INSTANCE;
+  return isValidMediaInstanceSlug(instance) ? instance : null;
+}
 
 function isSecureCookieContext(): boolean {
   const url = process.env.AUTH_URL ?? "";
@@ -44,7 +57,11 @@ setInterval(() => {
 }, 60_000).unref();
 
 export async function POST(req: NextRequest) {
-  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  const instance = readInstanceParam(req);
+  if (instance === null) {
+    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+  }
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
   }
@@ -56,9 +73,12 @@ export async function POST(req: NextRequest) {
     const result = await initiateJellyfinQuickConnect(jellyfinUrl);
     // Bind the secret to this browser so /api/auth/sign-in/jellyfin-quickconnect
     // can refuse a redemption from any other origin. Cookie carries the SHA-256
-    // of the secret (not the secret itself).
+    // of the secret (not the secret itself) plus the instance the secret was
+    // actually issued against — the finalize route trusts THIS, not any
+    // instance value a client submits directly.
     const cookieValue = await signQcFlowCookie({
       secretHash: hashQuickConnectSecret(result.secret),
+      instance,
     });
     // Native clients can't carry the HttpOnly flow cookie, so hand them the same
     // signed flowState in the body to send back at sign-in (mirrors Plex /start).
@@ -76,7 +96,11 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: NextRequest) {
-  const jellyfinUrl = await getConfiguredJellyfinUrl();
+  const instance = readInstanceParam(req);
+  if (instance === null) {
+    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+  }
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
   }

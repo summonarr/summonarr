@@ -131,7 +131,7 @@ interface RawGroupedRow {
 // Inactive (soft-deleted) server users stay INCLUDED — history outlives a
 // user's removal from the media server (guardrail 28), and it is still the
 // caller's own history.
-async function resolveLinkedMediaServerUserIds(summonarrUserId: string): Promise<string[]> {
+export async function resolveLinkedMediaServerUserIds(summonarrUserId: string): Promise<string[]> {
   const me = await prisma.user.findUnique({
     where: { id: summonarrUserId },
     select: { plexUserId: true, jellyfinUserId: true },
@@ -408,7 +408,7 @@ export async function getMyWatchHistoryEntry(
     AND: [{ mediaServerUserId: { in: ids } }, groupWhere],
   };
 
-  const [playRows, agg] = await Promise.all([
+  const [playRows, agg, anyWatched, anyCompleted] = await Promise.all([
     prisma.playHistory.findMany({
       where: scopedGroup,
       select: {
@@ -436,6 +436,20 @@ export async function getMyWatchHistoryEntry(
       _min: { startedAt: true },
       _max: { startedAt: true },
     }),
+    // watched/completed are GROUP-wide flags, so they must be computed over the
+    // whole group — not over `playRows`, which is capped at MY_ENTRY_PLAYS_CAP.
+    // A group with more than that many plays whose only qualifying play sorts
+    // outside the newest 100 would render as unwatched here while the list view
+    // (bool_or over every row) shows it watched. Existence probes, not counts —
+    // we only need the boolean, and they ride the same round trip.
+    prisma.playHistory.findFirst({
+      where: { AND: [scopedGroup, { watched: true }] },
+      select: { id: true },
+    }),
+    prisma.playHistory.findFirst({
+      where: { AND: [scopedGroup, { completed: true }] },
+      select: { id: true },
+    }),
   ]);
 
   const newest = playRows[0];
@@ -449,8 +463,8 @@ export async function getMyWatchHistoryEntry(
     stoppedAt: newest.stoppedAt.toISOString(),
     duration: newest.duration,
     playDuration: newest.playDuration,
-    watched: playRows.some((p) => p.watched),
-    completed: playRows.some((p) => p.completed),
+    watched: anyWatched !== null,
+    completed: anyCompleted !== null,
     tmdbId: anchor.tmdbId,
     mediaType: anchor.mediaType,
     title: anchor.title,

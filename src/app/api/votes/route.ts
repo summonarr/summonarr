@@ -7,11 +7,12 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { verifyTmdbMedia } from "@/lib/tmdb";
-import { sanitizeOptional } from "@/lib/sanitize";
+import { sanitizeOptional, sanitizeContainsSearch } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 
 const PAGE_SIZE = 40;
 const VALID_VOTE_SORTS = ["votes", "recent"] as const;
@@ -29,7 +30,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
     sortParam && (VALID_VOTE_SORTS as readonly string[]).includes(sortParam)
       ? (sortParam as (typeof VALID_VOTE_SORTS)[number])
       : "votes";
-  const q = (sp.get("q") ?? "").trim();
+  const q = sanitizeContainsSearch((sp.get("q") ?? "").trim());
 
   // Mirrors the web /votes page: `mine` scopes to the caller's votes, `q` matches
   // the title, `recent` orders groups by their most-recent vote.
@@ -194,9 +195,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }
 
+  // Scoped to the servers THIS voter can see. A deletion vote is a claim about media the
+  // voter has access to; a copy on a restricted server they hold no grant for is not in
+  // "any library" as far as they are concerned, and the vote button on the detail page is
+  // gated on the same per-user availability.
+  const visible = await getVisibleServerInstances(session);
   const [inPlex, inJellyfin] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
-    prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId, mediaType } } }),
+    prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.plex } } }),
+    prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.jellyfin } } }),
   ]);
   if (!inPlex && !inJellyfin) {
     return NextResponse.json({ error: "Media is not in any library" }, { status: 422 });

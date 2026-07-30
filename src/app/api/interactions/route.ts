@@ -16,7 +16,8 @@ import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { canAutoApproveInstance, canRequest, canRequestInstance, defaultPermissionsForRole, effectivePermissions, hasPermission, parseInstanceGrants, Permission } from "@/lib/permissions";
+import { canAutoApproveInstance, canRequest, canRequestInstance, defaultPermissionsForRole, effectivePermissions, hasPermission, parseInstanceGrants, parseMediaServerGrants, Permission } from "@/lib/permissions";
+import { getMediaInstanceAccessLists, visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { isBlacklisted } from "@/lib/blacklist";
@@ -77,7 +78,31 @@ interface TmdbResult {
   requested?: boolean;
 }
 
-async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> {
+// Which Plex/Jellyfin servers a Discord caller may see. The acting identity here is a
+// discordId, not a session or a primary key, so this resolves it itself — and only when a
+// restricted server actually exists, so a deployment that hasn't opted in issues no extra
+// user read at all.
+async function discordVisibleInstances(discordUserId: string): Promise<VisibleServerInstances> {
+  const { plex, jellyfin, anyRestricted } = await getMediaInstanceAccessLists();
+  if (!anyRestricted) return visibleInstancesFor(0n, {}, plex, jellyfin);
+  const user = await prisma.user.findUnique({
+    where: { discordId: discordUserId },
+    select: { role: true, permissions: true, mediaServerGrants: true },
+  });
+  // No linked/shadow account yet ⇒ least privilege, same as an anonymous web reader.
+  if (!user) return visibleInstancesFor(0n, {}, plex, jellyfin);
+  return visibleInstancesFor(
+    effectivePermissions(user.role, user.permissions),
+    parseMediaServerGrants(user.mediaServerGrants),
+    plex,
+    jellyfin,
+  );
+}
+
+async function attachAvailability(
+  results: TmdbResult[],
+  visible: VisibleServerInstances,
+): Promise<TmdbResult[]> {
   if (results.length === 0) return results;
   const orClause = results.map((r) => ({
     tmdbId: r.id,
@@ -87,8 +112,10 @@ async function attachAvailability(results: TmdbResult[]): Promise<TmdbResult[]> 
   const tvIds    = results.filter((r) => r.mediaType === "tv").map((r) => r.id);
 
   const [plexRows, jfRows, requestRows, radarrRows, sonarrRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ where: { OR: orClause }, select: { tmdbId: true, mediaType: true } }),
-    prisma.jellyfinLibraryItem.findMany({ where: { OR: orClause }, select: { tmdbId: true, mediaType: true } }),
+    // Library rows are scoped to the servers the searching user may see — a restricted
+    // server they hold no grant for must not badge a result "available" in the embed.
+    prisma.plexLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.plex } }, select: { tmdbId: true, mediaType: true } }),
+    prisma.jellyfinLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.jellyfin } }, select: { tmdbId: true, mediaType: true } }),
     prisma.mediaRequest.findMany({
       where: { status: { not: "DECLINED" }, OR: orClause },
       select: { tmdbId: true, mediaType: true },
@@ -338,7 +365,7 @@ async function handleCommand(interaction: any): Promise<void> {
       let results: TmdbResult[];
       try {
         const raw = await cachedSearchTmdb(query, type, discordUserId);
-        results = await attachAvailability(raw);
+        results = await attachAvailability(raw, await discordVisibleInstances(discordUserId));
       } catch (err) {
         console.error("[interactions] TMDB search error:", err);
         await editOriginal(appId, token, { content: "Search failed. Please try again." });
@@ -745,9 +772,21 @@ async function handleComponent(interaction: any): Promise<void> {
         }
       }
 
+      // Server visibility of THIS interaction's user (dbUser — resolved above from the
+      // component interaction, linked or shadow), not a global union: a copy on a
+      // restricted server they hold no grant for must not answer "already available" and
+      // leave them with no way to get it. dbUser's row is already loaded, so this only
+      // costs the two registry reads.
+      const mediaAccess = await getMediaInstanceAccessLists();
+      const visibleServers = visibleInstancesFor(
+        effPerms,
+        parseMediaServerGrants(dbUser.mediaServerGrants),
+        mediaAccess.plex,
+        mediaAccess.jellyfin,
+      );
       const [plexItem, jellyfinItem, arrAvailableRow] = await Promise.all([
-        prisma.plexLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
-        prisma.jellyfinLibraryItem.findUnique({ where: { tmdbId_mediaType: { tmdbId: selected.id, mediaType } } }),
+        prisma.plexLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType, serverInstance: { in: visibleServers.plex } } }),
+        prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType, serverInstance: { in: visibleServers.jellyfin } } }),
         // For a routed non-default instance, that instance's own availability also
         // short-circuits (the shared library only counts when !skipLibraryCheck).
         routedSlug !== ""
@@ -872,11 +911,13 @@ async function handleComponent(interaction: any): Promise<void> {
                     .filter((d): d is string => !!d && new Date(d) <= now);
                   if (pastDates.length === 0 && futureDates.length > 0) {
                     released = false;
-                    soonestReleaseDate = futureDates.sort()[0];
+                    // Chronological, not lexicographic — see the identical fix in
+                    // /api/requests/[id] and the comparator in the sync orchestrator.
+                    soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
                   }
                 }
               } else {
-                const firstAired = await getSeriesFirstAired(selected.id);
+                const firstAired = await getSeriesFirstAired(selected.id, routedSlug);
                 if (firstAired && new Date(firstAired) > now) {
                   released = false;
                   soonestReleaseDate = firstAired;

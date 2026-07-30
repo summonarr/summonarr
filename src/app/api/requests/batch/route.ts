@@ -40,7 +40,11 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
   try {
     const userIds = [...new Set(targets.map((t) => t.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds } },
+      // deactivatedAt: null — account removal disables rather than scrubs
+      // (guardrail 33), so a removed user keeps a live notification email and
+      // would otherwise still get emailed by a later batch approve/decline.
+      // Mirrors the same guard just added to the Discord/push plural notifiers.
+      where: { id: { in: userIds }, deactivatedAt: null },
       select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true },
     });
     const userMap = new Map(users.map((u) => [u.id, u]));

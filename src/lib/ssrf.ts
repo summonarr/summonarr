@@ -130,7 +130,7 @@ function isSafeAddr(addr: string): boolean {
   if (/^0\./.test(addr)) return false;
   if (isUnspecifiedV6(addr)) return false;
   // Link-local (APIPA)
-  if (/^fe80:/i.test(addr)) return false;
+  if (/^fe[89ab][0-9a-f]:/i.test(addr)) return false; // fe80::/10, not just fe80:
   if (/^169\.254\./.test(addr)) return false;
   // Deprecated IPv6 site-local (fec0::/10) — still in some stacks; treat as private
   if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
@@ -168,7 +168,7 @@ export function isSafeAddrForAdmin(addr: string): boolean {
   if (v4 !== null) return isSafeAddrForAdmin(v4);
 
   if (/^169\.254\./.test(addr)) return false;
-  if (/^fe80:/i.test(addr)) return false;
+  if (/^fe[89ab][0-9a-f]:/i.test(addr)) return false; // fe80::/10, not just fe80:
   // Deprecated IPv6 site-local (fec0::/10) is treated as link-local by some
   // stacks and could route off-LAN unexpectedly — keep it blocked even in
   // admin mode (admins use RFC1918 or ULA for LAN servers, not fec0::/10).
@@ -197,6 +197,17 @@ async function lookupHostCached(host: string, bypassCache = false): Promise<stri
     .lookup(host, { all: true, verbatim: true })
     .catch(() => [] as { address: string }[]);
   const addrs = results.map((r) => r.address);
+  // NEVER cache a failed lookup. An empty result means "resolution failed", not
+  // "this host has no safe addresses" — but every caller treats an empty set as a
+  // hard block (resolveToSafeUrlWithAddrs returns null → SafeFetchError
+  // "ssrf-blocked"). Caching it pinned a single transient DNS blip into a FULL
+  // DNS_CACHE_TTL_MS outage for that host: TMDB browse/search, the *arr syncs and
+  // web push would all keep failing for five minutes after DNS had recovered,
+  // behind an error message that blames the SSRF policy and sends the operator
+  // hunting the wrong thing. Re-querying on the next call costs one getaddrinfo,
+  // which is what an uncached host already pays, and the OS resolver caches
+  // NXDOMAIN itself so a genuinely-dead host is still cheap.
+  if (addrs.length === 0) return addrs;
   // Evict by insertion order (Map iteration is ordered) when the cache is full
   if (dnsCache.size >= DNS_CACHE_MAX) {
     const oldestKey = dnsCache.keys().next().value;
@@ -233,7 +244,17 @@ export async function resolveToSafeUrlWithAddrs(
   const check = opts.allowPrivate ? isSafeAddrForAdmin : isSafeAddr;
   if (!addrs.every(check)) return null;
 
-  return { url: url.toString().replace(/\/$/, ""), addrs };
+  // Collapse ONLY the empty-path marker ("https://h/" → "https://h"). Anchoring
+  // the strip to the end of the whole serialized URL also ate a meaningful
+  // trailing segment separator: "https://idp/application/o/token/" became
+  // ".../token", a DIFFERENT resource. safe-fetch's admin and user modes fetch
+  // this exact string, so every OIDC token/userinfo/JWKS call to an IdP whose
+  // endpoints canonically end in "/" (Authentik) hit the wrong path — and since
+  // the request is issued with redirect:"error", the upstream's 301 back to the
+  // canonical form surfaced as a SafeFetchError instead of following.
+  const serialized = url.toString();
+  const isBareOrigin = url.pathname === "/" && !url.search && !url.hash;
+  return { url: isBareOrigin ? serialized.replace(/\/$/, "") : serialized, addrs };
 }
 
 export async function resolveToSafeUrl(

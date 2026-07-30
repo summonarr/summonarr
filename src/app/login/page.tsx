@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { redirect } from "next/navigation";
 import { Film, Wrench } from "@/components/icons";
 import { LoginForm } from "./login-form";
@@ -14,17 +14,25 @@ export default async function LoginPage() {
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
   if (count === 0) redirect("/setup");
 
-  const [plexRow, jellyfinConfig, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-    getJellyfinConfig(),
+  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+    getSyncableMediaInstances("plex"),
+    getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "siteTitle" } }),
     prisma.setting.findUnique({ where: { key: "siteUrl" } }),
     prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
   ]);
-  const plexEnabled = !!plexRow?.value;
+  // Fully DB-configured, like Jellyfin below: the Plex tab appears once at least
+  // one instance has BOTH its ServerUrl and AdminToken stored. Deliberately
+  // tighter than the old plexAdminToken-only check — a token-without-URL
+  // deployment used to show the tab while every attempt refused
+  // (plex_server_not_configured); now the tab hides instead. No instance list
+  // reaches the client: Plex OAuth carries no server picker.
+  const plexEnabled = plexInstances.length > 0;
   // Mirror Plex: fully DB-configured. The Jellyfin tab appears only after an admin has
-  // completed the Jellyfin wiring in Admin → Settings → Media (server URL + API key stored).
-  const jellyfinEnabled = !!jellyfinConfig.url && !!jellyfinConfig.apiKey;
+  // completed the Jellyfin wiring (server URL + API key stored) for at least one
+  // instance — getSyncableMediaInstances already requires both per instance, so
+  // this is byte-for-byte the same gate a single-server deployment had before.
+  const jellyfinEnabled = jellyfinInstances.length > 0;
   const oidcEnabled = !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET);
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
   const localLoginDisabled = disableLocalRow?.value === "true";
@@ -106,7 +114,7 @@ export default async function LoginPage() {
           </p>
         </div>
 
-        <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
+        <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
       </div>
     </div>
   );

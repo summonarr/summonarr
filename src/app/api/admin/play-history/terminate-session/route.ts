@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 // Admin terminate-playback endpoint. POSTs to Plex's
 // /status/sessions/terminate, which prompts the client's player with `reason`
@@ -12,13 +13,16 @@ import { getPlexConfig } from "@/lib/plex-config";
 // inline — the normal finalize path handles it. Tautulli uses the same
 // endpoint (pmsconnect.py:108).
 //
-// Body: { sessionKey: string, reason?: string }
+// Body: { sessionKey: string, serverInstance?: string, reason?: string }
 // The sessionKey is the short integer Plex assigns per playback. Plex's
 // terminate endpoint actually wants Session.id (the long GUID); we resolve
 // sessionKey → Session.id via a snapshot of /status/sessions because storing
-// the GUID on ActiveSession would be a single-purpose column.
+// the GUID on ActiveSession would be a single-purpose column. serverInstance
+// picks which configured Plex server to resolve against (multi-server
+// support); omitted/absent defaults to the default instance so existing
+// callers (older admin UI builds) are unaffected.
 export const POST = withAdmin(async (req, _ctx, session) => {
-  const parsed = await readJsonCapped<{ sessionKey?: unknown; reason?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ sessionKey?: unknown; serverInstance?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
@@ -31,7 +35,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: "sessionKey is required" }, { status: 400 });
   }
 
-  const plexConfig = await getPlexConfig();
+  if (body.serverInstance !== undefined && (typeof body.serverInstance !== "string" || !isValidMediaInstanceSlug(body.serverInstance))) {
+    return NextResponse.json({ error: `invalid serverInstance: ${String(body.serverInstance)}` }, { status: 400 });
+  }
+  const serverInstance = typeof body.serverInstance === "string" ? body.serverInstance : DEFAULT_MEDIA_INSTANCE;
+
+  const plexConfig = await getPlexConfig(serverInstance);
   const serverUrl = plexConfig.url?.replace(/\/$/, "") ?? null;
   const token = plexConfig.token;
 
@@ -81,6 +90,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     target: sessionKey,
     details: {
       sessionKey,
+      serverInstance,
       reason,
       mediaTitle: match.title,
       accountName: match.accountName,

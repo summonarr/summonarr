@@ -7,19 +7,21 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { verifyPassword } from "@/lib/password-hash";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
+import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 
 // DELETE /api/profile — the signed-in user deletes their OWN account.
 //
-// Required by App Store Review Guideline 5.1.1(v). We satisfy it with
-// ANONYMIZE + DISABLE rather than a hard row delete: the user's personal data is
-// scrubbed (name / email / password / image / Discord / notification email +
-// the Plex/Jellyfin provider-subject keys + their OAuth Account rows), every
-// session is revoked, and the row is marked `deactivatedAt` so it can never sign
-// in again — but their requests / votes / issues stay attached to the now
-// de-identified "Deleted user" row so the instance keeps its history. A bare
-// "disable" that retained personal data would NOT satisfy 5.1.1(v); the PII scrub
-// is what makes this a deletion.
+// DISABLES the account: every session is revoked and sign-in is refused for every
+// provider, but nothing is scrubbed and nothing is cascade-deleted. Their
+// requests / votes / issues stay attached and — the reason this is a disable
+// rather than an anonymize — their MediaServerUser link stays intact, so watches
+// they keep racking up on Plex/Jellyfin are still attributed to them. An admin
+// can re-enable the account (POST /api/admin/users/[id]/reactivate).
+//
+// The irreversible PII scrub is a SEPARATE admin action
+// (POST /api/admin/users/[id]/purge). App Store Review Guideline 5.1.1(v) expects
+// an in-app deletion to actually remove the account's data, so a user who wants
+// that must have an admin follow up with a purge — see account-lifecycle.ts.
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
@@ -59,7 +61,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
 
   try {
     await prisma.$transaction(async (tx) => {
-      await anonymizeUserInTx(tx, id, target.role, now);
+      await deactivateUserInTx(tx, id, target.role, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
@@ -73,14 +75,14 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
 
   invalidateUserSession(id);
 
-  // Account already anonymized; a failed audit write must not 500 a successful
+  // Account already disabled; a failed audit write must not 500 a successful
   // destructive op (guardrail 26 — logAudit swallows write failures).
   void logAudit({
     userId: id,
     userName: target.name ?? target.email ?? "unknown",
-    action: "USER_DELETE",
+    action: "USER_DEACTIVATE",
     target: `user:${id}`,
-    details: { kind: "self-delete-anonymize", before: { role: target.role } },
+    details: { kind: "self-delete", before: { role: target.role } },
     ...auditContext(req, session),
   });
 

@@ -14,6 +14,8 @@ import {
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { getUserRecommendations } from "@/lib/recommendations";
+import { getFeatureFlags } from "@/lib/features";
 
 // Native-client mirror of the curated Discover home — src/app/(app)/page.tsx.
 // Returns the same trending heroes + 6 rails the web renders. Keep the rail
@@ -73,6 +75,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   try {
+    const flags = await getFeatureFlags();
+
     const [
       trendingRes,
       popMoviesRes,
@@ -81,6 +85,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       upTVRes,
       topMoviesRes,
       topTVRes,
+      forYouRes,
     ] = await Promise.allSettled([
       getTrending(),
       getPopularMovies(),
@@ -89,6 +94,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       getOnTheAirTV(),
       getTopRatedMovies(),
       getTopRatedTV(),
+      getUserRecommendations(session.user.id),
     ]);
 
     // A rail whose source rejected degrades to an omitted rail (better than
@@ -96,9 +102,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
     // diagnosable rather than silently absent.
     const sourceNames = [
       "trending", "popular-movies", "popular-tv",
-      "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv",
+      "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv", "for-you",
     ];
-    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes]
+    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes, forYouRes]
       .forEach((r, i) => {
         if (r.status === "rejected") {
           console.error(`[home] source ${sourceNames[i]} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
@@ -112,6 +118,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const upTV = settled(upTVRes).slice(0, RAIL_OVERFETCH);
     const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
     const topTV = settled(topTVRes).slice(0, RAIL_OVERFETCH);
+    const forYou = settled(forYouRes).slice(0, RAIL_OVERFETCH);
 
     // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
     // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
@@ -124,6 +131,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       upTV.slice(0, RAIL_OVERFETCH),
       topMovies.slice(0, RAIL_OVERFETCH),
       topTV.slice(0, RAIL_OVERFETCH),
+      forYou.slice(0, RAIL_OVERFETCH),
     ];
     const displaySet = dedupeUnion(candidateLists);
     const show4k = await getShow4kVisibility(session);
@@ -144,6 +152,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
     const carousels = [
       { id: "trending", title: "Trending this week", items: trendingRest },
+      ...(flags["feature.page.forYou"]
+        ? [{ id: "for-you", title: "For You", items: project(forYou, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) }]
+        : []),
       { id: "popular-movies", title: "Popular Movies", items: project(popMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
       { id: "popular-tv", title: "Popular TV", items: project(popTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
       { id: "upcoming-movies", title: "Upcoming Movies", items: project(upMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },

@@ -2,6 +2,8 @@ import { prisma } from "./prisma";
 import { getJellyfinAllUsers, setJellyfinDownloadPolicy } from "./jellyfin";
 import { getJellyfinConfig } from "./jellyfin-config";
 import { normalizeEmail } from "./email-normalize";
+import { type MediaInstanceKey, mediaInstanceLabel } from "./media-instances";
+import { getSyncableMediaInstances } from "./media-instance-registry";
 
 interface PolicySyncResult {
   source: string;
@@ -39,8 +41,8 @@ export function isSafeToReconcileJellyfinUsers(fetchedCount: number, priorActive
 export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   const results: PolicySyncResult[] = [];
 
-  const [jellyfinConfig, autoDisableRow] = await Promise.all([
-    getJellyfinConfig(),
+  const [instances, autoDisableRow] = await Promise.all([
+    getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
   ]);
 
@@ -49,22 +51,28 @@ export async function syncDownloadPolicies(): Promise<PolicySyncResult[]> {
   // Users already in the DB with downloadsEnabled=true are never touched.
   const autoDisableNew = autoDisableRow?.value === "true";
 
-  if (jellyfinConfig.url && jellyfinConfig.apiKey) {
+  // Sequential, not fan-out: the instance count is admin-configured and small
+  // (never library-scaled), so guardrail 31's bounded-concurrency concern
+  // doesn't apply — a straightforward loop keeps this simple and avoids two
+  // instances' full user-syncs interleaving their own internal work.
+  for (const instance of instances) {
+    const cfg = await getJellyfinConfig(instance.slug);
+    if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
     try {
-      results.push(await syncJellyfinPolicies(jellyfinConfig.url, jellyfinConfig.apiKey, autoDisableNew));
+      results.push(await syncJellyfinPolicies(instance.slug, cfg.url, cfg.apiKey, autoDisableNew));
     } catch (err) {
-      console.warn("[download-policy] Jellyfin sync task failed:", err instanceof Error ? err.message : String(err));
+      console.warn(`[download-policy] Jellyfin sync task failed for instance "${instance.slug}":`, err instanceof Error ? err.message : String(err));
       // Surface the task-level failure to the caller's error total so the cron
       // run is recorded as not-ok instead of silently reporting green.
-      results.push({ source: "jellyfin", upserted: 0, enforced: 0, errors: 1 });
+      results.push({ source: mediaInstanceLabel("jellyfin", instance.slug), upserted: 0, enforced: 0, errors: 1 });
     }
   }
 
   return results;
 }
 
-async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
-  const result: PolicySyncResult = { source: "jellyfin", upserted: 0, enforced: 0, errors: 0 };
+async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string, apiKey: string, autoDisableNew: boolean): Promise<PolicySyncResult> {
+  const result: PolicySyncResult = { source: mediaInstanceLabel("jellyfin", instance), upserted: 0, enforced: 0, errors: 0 };
 
   let users;
   try {
@@ -83,30 +91,48 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   // case from the local user's lowercase-stored email) still matches.
   const [existingRows, linkedUsers] = await Promise.all([
     prisma.mediaServerUser.findMany({
-      where: { source: "jellyfin" },
-      select: { sourceUserId: true, downloadsEnabled: true, active: true },
+      where: { source: "jellyfin", serverInstance: instance },
+      select: { sourceUserId: true, downloadsEnabled: true, active: true, manualUserLink: true },
     }),
     prisma.user.findMany({
       where: {
-        email: {
-          in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])),
-        },
+        OR: [
+          // Jellyfin's user id is what sign-in pins to User.jellyfinUserId, so it
+          // is the authoritative link. Email alone misses every Jellyfin account
+          // with no email set on the server (Jellyfin doesn't require one) and
+          // every Summonarr row carrying the synthetic jellyfin-<id>@jellyfin.local
+          // login address — those users would never be attributed at all.
+          { jellyfinUserId: { in: users.map((u) => u.id) } },
+          { email: { in: users.flatMap((u) => (u.email ? [normalizeEmail(u.email)] : [])) } },
+        ],
       },
-      select: { id: true, email: true, mediaServer: true },
+      select: { id: true, email: true, mediaServer: true, jellyfinUserId: true },
     }),
   ]);
 
   const existingMap = new Map(existingRows.map((r) => [r.sourceUserId, r]));
   const linkedMap = new Map(linkedUsers.map((u) => [u.email, u]));
+  const linkedBySubMap = new Map(
+    linkedUsers.flatMap((u) => (u.jellyfinUserId ? [[u.jellyfinUserId, u] as const] : [])),
+  );
 
   for (const u of users) {
     try {
       const existing = existingMap.get(u.id) ?? null;
-      const linked = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
-      const userId =
-        linked && (!linked.mediaServer || linked.mediaServer.toLowerCase() === "jellyfin")
-          ? linked.id
-          : null;
+      // Subject id first, email second. A subject match needs no mediaServer
+      // guard — jellyfinUserId is unique and only Jellyfin sign-in writes it, so
+      // there is no cross-provider collision to defend against (unlike an email
+      // match, which could be a Plex-pinned user who happens to share the address).
+      const linkedBySub = linkedBySubMap.get(u.id) ?? null;
+      const linkedByEmail = u.email ? (linkedMap.get(normalizeEmail(u.email)) ?? null) : null;
+      const resolved =
+        linkedBySub?.id ??
+        (linkedByEmail && (!linkedByEmail.mediaServer || linkedByEmail.mediaServer.toLowerCase() === "jellyfin")
+          ? linkedByEmail.id
+          : null);
+      // An admin set this row's account binding by hand — automatic resolution
+      // must not overwrite it on the next hourly run.
+      const userId = existing?.manualUserLink ? null : resolved;
 
       // For new/unsynced users: auto-disable if the setting is on, otherwise seed from server.
       // For existing users with an explicit value: keep it (honors manual flips to true).
@@ -114,9 +140,10 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
       const downloadsEnabled = existing?.downloadsEnabled ?? defaultForNew;
 
       await prisma.mediaServerUser.upsert({
-        where: { source_sourceUserId: { source: "jellyfin", sourceUserId: u.id } },
+        where: { source_serverInstance_sourceUserId: { source: "jellyfin", serverInstance: instance, sourceUserId: u.id } },
         create: {
           source: "jellyfin",
+          serverInstance: instance,
           sourceUserId: u.id,
           username: u.name,
           email: u.email ?? null,
@@ -161,13 +188,17 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
   const safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
   if (safeToReconcile) {
     const currentIds = users.map((u) => u.id);
+    // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
+    // user who exists only on a DIFFERENT Jellyfin server would look "absent"
+    // from THIS instance's fetch and get incorrectly soft-deleted, destroying
+    // their attribution to play history that survives on the other server.
     await prisma.mediaServerUser.updateMany({
-      where: { source: "jellyfin", sourceUserId: { notIn: currentIds }, active: true },
+      where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
       data: { active: false },
     });
   } else if (users.length > 0) {
     console.warn(
-      `[download-policy] Skipping Jellyfin user reconcile: fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response`,
+      `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response`,
     );
   }
 
@@ -181,13 +212,15 @@ async function syncJellyfinPolicies(baseUrl: string, apiKey: string, autoDisable
 export async function enforceUserDownloadPolicy(mediaServerUserId: string): Promise<void> {
   const record = await prisma.mediaServerUser.findUnique({
     where: { id: mediaServerUserId },
-    select: { source: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
+    select: { source: true, serverInstance: true, sourceUserId: true, downloadsEnabled: true, isServerAdmin: true, username: true },
   });
 
   if (!record || record.isServerAdmin || record.downloadsEnabled === null) return;
   if (record.source !== "jellyfin") return;
 
-  const { url, apiKey } = await getJellyfinConfig();
+  // Resolve THIS row's own server, not always the default — a toggle on a
+  // named-instance user must push to that instance, never instance "".
+  const { url, apiKey } = await getJellyfinConfig(record.serverInstance);
   if (!url || !apiKey) return;
   await setJellyfinDownloadPolicy(url, apiKey, record.sourceUserId, record.downloadsEnabled);
 }

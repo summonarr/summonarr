@@ -263,6 +263,120 @@ export function canAutoApproveInstance(
   return false;
 }
 
+// ─── Per-server visibility grants (multi-server Plex/Jellyfin) ──────────────
+// A Plex/Jellyfin server instance can be marked `restricted` in the registry
+// (media-instance-registry.ts). A restricted server's library contributes
+// availability ONLY for users granted `view` on it — so "is this watchable"
+// becomes a per-viewer question, for the badge AND for the request status that
+// follows from it. The default ("") server is never restricted (guardrail 35:
+// a single-server deployment must not be able to observe this generalization).
+//
+// Three deliberate divergences from the arr InstanceGrants above:
+//
+//  1. The access shape is smaller — { slug, restricted } only. There is no
+//     `serverAll` counterpart because arr's backs the request4kAll Setting and
+//     has no media analogue: "visible to everyone" is just restricted:false.
+//     There is no routing metadata either — nothing routes to a specific media
+//     server (guardrail 35), so there is nothing to route ON.
+//
+//  2. The grant map is SERVICE-NAMESPACED. Plex "remote" and Jellyfin "remote"
+//     are different servers holding different content, so a flat slug map
+//     would conflate them — granting view on one would silently grant the
+//     other. The arr map has this same latent collision today (radarr "anime"
+//     and sonarr "anime" share a key in canRequestInstance); it is unreachable
+//     there only because a request already knows its service and the two are
+//     conventionally configured in pairs. Not inherited here; the arr code is
+//     deliberately left alone rather than migrated under this feature.
+//
+//  3. One verb (`view`), not two — visibility has no auto-approve analogue.
+
+export interface MediaServerGrant {
+  view?: boolean;
+}
+export interface MediaServerGrants {
+  plex?: Record<string, MediaServerGrant>;
+  jellyfin?: Record<string, MediaServerGrant>;
+}
+
+// Minimal shape the check below reads off a media-instance registry entry.
+export interface MediaInstanceAccess {
+  slug: string;
+  restricted: boolean;
+}
+
+// The only legal service keys. An allowlist, which is strictly stronger than the
+// UNSAFE_GRANT_SLUGS denylist at this level — but the denylist is still applied
+// uniformly at BOTH nesting levels below, because a nested map has two
+// `__proto__`-own-property write surfaces and they must not be able to drift
+// apart under a later refactor.
+const MEDIA_GRANT_SERVICES = new Set(["plex", "jellyfin"]);
+
+// Parse the untrusted User.mediaServerGrants JSON into a well-formed grant map.
+// Unknown service keys, non-object values and unsafe keys at either level are
+// dropped rather than repaired — an unparseable grant is "no grant", which
+// fails closed (the user simply doesn't see the restricted server).
+export function parseMediaServerGrants(raw: unknown): MediaServerGrants {
+  if (!raw || typeof raw !== "object") return {};
+  const out: MediaServerGrants = {};
+  for (const [service, serviceMap] of Object.entries(raw as Record<string, unknown>)) {
+    if (UNSAFE_GRANT_SLUGS.has(service) || !MEDIA_GRANT_SERVICES.has(service)) continue;
+    if (!serviceMap || typeof serviceMap !== "object") continue;
+    const inner: Record<string, MediaServerGrant> = {};
+    for (const [slug, v] of Object.entries(serviceMap as Record<string, unknown>)) {
+      if (UNSAFE_GRANT_SLUGS.has(slug)) continue;
+      if (v && typeof v === "object") {
+        inner[slug] = { view: (v as Record<string, unknown>).view === true };
+      }
+    }
+    out[service as "plex" | "jellyfin"] = inner;
+  }
+  return out;
+}
+
+// Serialize a grant map for persistence: drops view:false entries and then any
+// service that ends up empty, so a user with no grants stores `{}` rather than
+// `{"plex":{},"jellyfin":{}}`. An absent service or slug means "no grant".
+export function serializeMediaServerGrants(grants: MediaServerGrants): MediaServerGrants {
+  const out: MediaServerGrants = {};
+  for (const [service, serviceMap] of Object.entries(grants)) {
+    // Same rejection as the parse side — this is the write path, so it also
+    // keeps such a key from ever reaching the stored JSON in the first place.
+    if (UNSAFE_GRANT_SLUGS.has(service) || !MEDIA_GRANT_SERVICES.has(service)) continue;
+    if (!serviceMap || typeof serviceMap !== "object") continue;
+    const inner: Record<string, MediaServerGrant> = {};
+    for (const [slug, g] of Object.entries(serviceMap as Record<string, MediaServerGrant>)) {
+      if (UNSAFE_GRANT_SLUGS.has(slug)) continue;
+      if (g && g.view) inner[slug] = { view: true };
+    }
+    if (Object.keys(inner).length > 0) out[service as "plex" | "jellyfin"] = inner;
+  }
+  return out;
+}
+
+// Can this user SEE the given media server's library?
+//   ADMIN            → always (superbit)
+//   default ("")      → always; the default server is never restricted
+//   named, open       → always
+//   named, restricted → per-user grant.view for THIS service
+//
+// Note the interaction with isValidMediaInstanceSlug: "constructor" and
+// "prototype" are legal instance slugs (lowercase alnum) but are rejected by
+// UNSAFE_GRANT_SLUGS on both codec paths, so such an instance can never be
+// granted and this returns false for it. That is the fail-closed direction —
+// the lookup below would otherwise read Object.prototype.constructor, whose
+// `.view` is undefined and therefore still not `=== true`.
+export function canViewMediaInstance(
+  userPerms: bigint,
+  instance: MediaInstanceAccess,
+  grants: MediaServerGrants,
+  service: "plex" | "jellyfin",
+): boolean {
+  if ((userPerms & Permission.ADMIN) !== 0n) return true;
+  if (instance.slug === "") return true;
+  if (!instance.restricted) return true;
+  return grants[service]?.[instance.slug]?.view === true;
+}
+
 // JWT boundary — permissions ride the token as a decimal string.
 export function parsePermissions(claim: string | undefined | null): bigint {
   if (!claim) return 0n;

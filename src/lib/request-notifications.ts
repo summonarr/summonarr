@@ -58,6 +58,25 @@ function writeInAppNotification(
   });
 }
 
+// `inPlex`/`inJellyfin` are COLLAPSED booleans — the instance that proved
+// presence is not carried here — and that stays sound under multi-server
+// per-user visibility grants for one structural reason: every caller of this
+// function probes the DEFAULT ("") server only. pollAndNotifyAvailable's
+// checkPlex/checkJellyfin closures are built in the Radarr/Sonarr webhook
+// handlers from getPlexConfig()/getJellyfinConfig() with no slug argument, which
+// resolve DEFAULT_MEDIA_INSTANCE; the default instance is visible to every user
+// by construction (defaultInstanceConfig hard-codes restricted:false and
+// canViewMediaInstance short-circuits true on slug ""). So `true` here already
+// means "present on a server this requester can see", for every requester.
+//
+// A restricted named instance can only enter the picture through the sync
+// orchestrator, which does carry per-instance presence and applies the
+// per-requester gate itself (presentForRequester in /api/sync/route.ts).
+//
+// If a caller ever probes a NAMED instance, this contract breaks and the two
+// booleans must become per-instance (an optional slug-set parameter, so the two
+// webhook call sites keep compiling) plus the same pre-CAS grants filter the
+// orchestrator applies. Do not widen the probe without doing that.
 export async function notifyAvailablePerServer(
   pending: PendingAvailableRequest[],
   inPlex: boolean,
@@ -246,6 +265,27 @@ export async function pollAndNotifyAvailable(
 }
 
 export function notifyRequestStatusChange(
+  status: "APPROVED" | "AVAILABLE" | "DECLINED",
+  request: RequestInfo,
+): void {
+  const { requestedBy } = request;
+
+  // Never notify a DISABLED account. Account removal disables rather than scrubs
+  // (see account-lifecycle.ts), so the row keeps a live notification email,
+  // Discord link and push subscriptions — without this gate an admin approving
+  // or declining a removed user's leftover request would still ping them. One
+  // lookup covers all four channels; the batch "now available" path has its own
+  // chokepoint in claimAvailableNotificationWinners.
+  void prisma.user
+    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
+    .then((u) => {
+      if (u?.deactivatedAt) return;
+      dispatchRequestStatusChange(status, request);
+    })
+    .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+}
+
+function dispatchRequestStatusChange(
   status: "APPROVED" | "AVAILABLE" | "DECLINED",
   request: RequestInfo,
 ): void {

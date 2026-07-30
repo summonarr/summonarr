@@ -168,6 +168,9 @@ function reqMatches(row: ReqRow, where: ReqWhere | undefined): boolean {
 // ── other in-memory stores ───────────────────────────────────────────────────
 type UserRow = {
   id: string; role: string; permissions: bigint; mediaServer: string | null;
+  // The multi-server per-user visibility grant blob (User.mediaServerGrants, a
+  // nullable Json column). null ⇒ no grant ⇒ restricted instances are invisible.
+  mediaServerGrants: unknown;
   sessionsRevokedAt: Date | null; passwordChangedAt: Date | null; deactivatedAt: Date | null;
   email: string | null; notificationEmail: string | null;
   emailOnAvailable: boolean; discordId: string | null; pushOnAvailable: boolean;
@@ -175,7 +178,7 @@ type UserRow = {
 const usersById = new Map<string, UserRow>();
 function defaultUser(id: string): UserRow {
   return {
-    id, role: "USER", permissions: 0n, mediaServer: null,
+    id, role: "USER", permissions: 0n, mediaServer: null, mediaServerGrants: null,
     sessionsRevokedAt: null, passwordChangedAt: null, deactivatedAt: null,
     email: null, notificationEmail: null, emailOnAvailable: false, discordId: null, pushOnAvailable: false,
   };
@@ -189,7 +192,15 @@ const auditRows: Array<Record<string, unknown>> = [];
 const notificationCreateManyData: Array<Record<string, unknown>> = [];
 const tmdbCacheDeleteManyCalls: unknown[] = [];
 const mediaRequestFindManyWheres: Array<ReqWhere | undefined> = [];
+const plexLibraryItemFindManyWheres: Array<Record<string, unknown> | undefined> = []; // the dedupe prior-mapping lookup
+// The de-registered-instance sweep runs OUTSIDE any transaction (top-level
+// prisma), so its deletes land here rather than in the TxRecord journal.
+const orphanSweepDeletes: Array<{ model: string; where: Record<string, unknown> | undefined }> = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
+// Every user.findMany, with its select — the grants gate must ride the requester
+// query the marking/notify passes ALREADY issue (extra columns, not an extra
+// round-trip), so the count of requester-shaped reads is itself a pin.
+const userFindManyCalls: Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }> = [];
 type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
 const casCalls: CasCall[] = [];
 
@@ -281,10 +292,19 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    findMany: async (args: { where?: { id?: { in: string[] } } }) => {
+    findMany: async (args: { where?: { id?: { in: string[] }; deactivatedAt?: unknown }; select?: Record<string, unknown> }) => {
+      userFindManyCalls.push({ where: args?.where, select: args?.select });
       const ids = args?.where?.id?.in;
       if (!ids) return []; // email-normalize / any non-id query resolves empty
-      return ids.map((id) => ({ ...(usersById.get(id) ?? defaultUser(id)) }));
+      const rows = ids.map((id) => ({ ...(usersById.get(id) ?? defaultUser(id)) }));
+      // claimAvailableNotificationWinners asks for the DISABLED subset so it can
+      // drop those recipients from the fan-out. Honour the predicate — returning
+      // every id here would read as "everyone is disabled" and silently suppress
+      // the notification this file exists to pin.
+      if (args?.where?.deactivatedAt !== undefined) {
+        return rows.filter((u) => (u as { deactivatedAt?: Date | null }).deactivatedAt != null);
+      }
+      return rows;
     },
     update: async () => ({}),
   },
@@ -309,7 +329,26 @@ const fakePrisma = {
   radarrWantedItem: { findMany: async () => [] },
   sonarrAvailableItem: { findMany: async () => [] },
   sonarrWantedItem: { findMany: async () => [] },
-  plexLibraryItem: { findMany: async () => [] }, // dedupe path (no ratingKey conflation in these fixtures)
+  plexLibraryItem: {
+    // The dedupe prior-mapping lookup. Wheres are recorded so the instance-scoping
+    // pin can assert the read carries serverInstance; no fixture seeds prior
+    // mappings, so conflation resolves via the keep-first-occurrence branch.
+    findMany: async (args?: { where?: Record<string, unknown> }) => {
+      plexLibraryItemFindManyWheres.push(args?.where);
+      return [];
+    },
+    // The end-of-run sweep for de-registered instances (top-level, not in a tx).
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "plexLibraryItem", where: args?.where });
+      return { count: 0 };
+    },
+  },
+  jellyfinLibraryItem: {
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "jellyfinLibraryItem", where: args?.where });
+      return { count: 0 };
+    },
+  },
   tmdbCache: {
     deleteMany: async (args: unknown) => { tmdbCacheDeleteManyCalls.push(args); return { count: 0 }; },
   },
@@ -464,6 +503,9 @@ beforeEach(() => {
   tmdbCacheDeleteManyCalls.length = 0;
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
+  userFindManyCalls.length = 0;
+  plexLibraryItemFindManyWheres.length = 0;
+  orphanSweepDeletes.length = 0;
   casCalls.length = 0;
   pgLockCalls.length = 0;
   requests.clear();
@@ -564,20 +606,22 @@ test("guardrail 13: a { recentOnly } / { full:false } / empty body never downgra
     assert.equal(plexTx.length, 1, `body ${body}: exactly one Plex library transaction`);
     assert.equal(jfTx.length, 1, `body ${body}: exactly one Jellyfin library transaction`);
 
-    // The FULL-replace signature: an UNCONDITIONAL deleteMany (args === null, i.e.
-    // no where filter) inside the same tx as the repopulate. recentOnly would be
-    // insert-only. The body must not have changed this.
+    // The FULL-replace signature. Both sources' deletes are scoped per-instance
+    // (serverInstance: "" for the default/only configured server here) rather than
+    // table-wide — multi-server support (Phase 1 Jellyfin, Phase 2 Plex) — but each
+    // is still an UNCONDITIONAL delete of that instance's rows (no recency/date
+    // filter), so recentOnly still can't have downgraded it to insert-only.
     const plexDeletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
     const jfDeletes = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "deleteMany");
     assert.deepEqual(
       plexDeletes.map((d) => d.args),
-      [null],
-      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional Plex library replace`,
+      [{ where: { serverInstance: "" } }],
+      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional (per-instance-scoped) Plex library replace`,
     );
     assert.deepEqual(
       jfDeletes.map((d) => d.args),
-      [null],
-      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional Jellyfin library replace`,
+      [{ where: { serverInstance: "" } }],
+      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional (per-instance-scoped) Jellyfin library replace`,
     );
     // And it repopulates inside the SAME transaction (full-replace atomicity).
     assert.ok(plexTx[0].ops.some((o) => o.model === "plexLibraryItem" && o.method === "createMany"));
@@ -685,6 +729,661 @@ test("guardrail 14: notifiedAvailable is flipped ONLY by the claim CAS (UPDATE �
     sneaky,
     [],
     "guardrail 14: notifiedAvailable must never be written by a plain mediaRequest.updateMany — only the CAS may flip it",
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-server Jellyfin (Phase 1) — union-availability + per-instance scoping
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A second, independently-configured Jellyfin server (media-instance-registry.ts's
+// JSON registry + its own jellyfinRemoteUrl/jellyfinRemoteApiKey Settings — see
+// media-instances.ts). Unlike the arr instance model, nothing routes a REQUEST
+// to a specific Jellyfin server — availability is a union across every
+// configured server of a type — so these tests pin that union directly,
+// alongside the per-instance-scoped library write it's built on.
+const JF_REMOTE_BASE = "http://10.77.0.3:8096";
+const JF_REMOTE_ORIGIN = new URL(JF_REMOTE_BASE).origin;
+
+function configureJellyfinMultiServer(): void {
+  settings.set("jellyfinUrl", JF_BASE);
+  settings.set("jellyfinApiKey", "jf-api-key-default");
+  settings.set("jellyfinRemoteUrl", JF_REMOTE_BASE);
+  settings.set("jellyfinRemoteApiKey", "jf-api-key-remote");
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+}
+
+test("multi-server: a request is marked AVAILABLE via the UNION of two independently-configured Jellyfin instances' libraries", async () => {
+  configureJellyfinMultiServer();
+  // Disjoint libraries — no overlap — so a match can only come from the UNION,
+  // never from either instance's map alone.
+  const defaultResponder = jellyfinResponder([300]);
+  const remoteResponder = jellyfinResponder([400]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "req-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    b.jellyfinMarked,
+    2,
+    "both requests matched the UNIONED jellyfin availability map — the downstream marking logic never changed, only how the map is populated",
+  );
+  assert.equal(requests.get("req-default-only")?.status, "AVAILABLE");
+  assert.equal(
+    requests.get("req-remote-only")?.status,
+    "AVAILABLE",
+    "a title that exists ONLY on the second, named instance is still marked available — proves the union, not just the default instance's library, backs the decision",
+  );
+});
+
+test("multi-server: two configured Jellyfin instances each get their OWN serverInstance-scoped deleteMany + createMany — never each other's rows", async () => {
+  configureJellyfinMultiServer();
+  const defaultResponder = jellyfinResponder([300]);
+  const remoteResponder = jellyfinResponder([400]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const jfTx = txTouching("jellyfinLibraryItem");
+  assert.equal(jfTx.length, 1, "both instances' scoped writes land inside ONE shared transaction (one lock acquisition — mirrors the arr instance loop)");
+
+  const deletes = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "deleteMany");
+  assert.equal(deletes.length, 2, "one scoped delete per configured instance — never a single unconditional wipe");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null).sort(),
+    ["", "remote"],
+    "each delete is scoped to its OWN instance slug",
+  );
+
+  const creates = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "createMany");
+  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  for (const c of creates) {
+    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    assert.ok(rows.length > 0);
+    assert.equal(
+      new Set(rows.map((r) => r.serverInstance)).size,
+      1,
+      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+    );
+  }
+  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-server Plex (Phase 2) — union-availability + per-instance scoping
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The Plex mirror of the Jellyfin block above: a second, independently-
+// configured Plex server (media-instance-registry.ts's JSON registry + its own
+// plexRemoteServerUrl/plexRemoteAdminToken Settings). Same contract — nothing
+// routes a REQUEST to a specific Plex server; availability is a union across
+// every configured server of a type, backed by a per-instance-scoped write.
+const PLEX_REMOTE_BASE = "http://10.77.0.4:32400";
+const PLEX_REMOTE_ORIGIN = new URL(PLEX_REMOTE_BASE).origin;
+
+function configurePlexMultiServer(): void {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-default");
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+}
+
+// Like plexResponder but takes raw /all Metadata items, for fixtures that need
+// full control of ratingKey/Guid shapes (the dedupe-scoping pin).
+function plexItemsResponder(items: unknown[]): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      return okJson({ MediaContainer: { totalSize: items.length, Metadata: items } });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}`);
+  };
+}
+
+test("multi-server: a request is marked AVAILABLE via the UNION of two independently-configured Plex instances' libraries", async () => {
+  configurePlexMultiServer();
+  // Disjoint libraries — no overlap — so a match can only come from the UNION,
+  // never from either instance's map alone.
+  const defaultResponder = plexResponder([300]);
+  const remoteResponder = plexResponder([400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "req-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    b.plexMarked,
+    2,
+    "both requests matched the UNIONED plex availability map — the downstream marking logic never changed, only how the map is populated",
+  );
+  assert.equal(requests.get("req-default-only")?.status, "AVAILABLE");
+  assert.equal(
+    requests.get("req-remote-only")?.status,
+    "AVAILABLE",
+    "a title that exists ONLY on the second, named instance is still marked available — proves the union, not just the default instance's library, backs the decision",
+  );
+});
+
+test("multi-server: two configured Plex instances each get their OWN serverInstance-scoped deleteMany + createMany — never each other's rows", async () => {
+  configurePlexMultiServer();
+  const defaultResponder = plexResponder([300]);
+  const remoteResponder = plexResponder([400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1, "both instances' scoped writes land inside ONE shared transaction (one lock acquisition — mirrors the Jellyfin arm)");
+
+  const deletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
+  assert.equal(deletes.length, 2, "one scoped delete per configured instance — never a single unconditional wipe");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null).sort(),
+    ["", "remote"],
+    "each delete is scoped to its OWN instance slug",
+  );
+
+  const creates = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "createMany");
+  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  for (const c of creates) {
+    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    assert.ok(rows.length > 0);
+    assert.equal(
+      new Set(rows.map((r) => r.serverInstance)).size,
+      1,
+      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+    );
+  }
+  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
+});
+
+test("multi-server: the conflated-ratingKey dedupe is instance-scoped — the prior-mapping read carries serverInstance, and the SAME ratingKey on two servers is NOT conflation", async () => {
+  configurePlexMultiServer();
+  // Default instance: ONE item carrying TWO tmdb guids — genuine conflation
+  // within that instance's batch (two rows share ratingKey "rk-shared").
+  // Remote instance: a single item that happens to reuse the SAME ratingKey —
+  // Plex ratingKeys are small server-local integers, so cross-instance equality
+  // is routine and legitimate, never conflation.
+  const defaultResponder = plexItemsResponder([
+    { ratingKey: "rk-shared", type: "movie", title: "Conflated", Guid: [{ id: "tmdb://601" }, { id: "tmdb://602" }] },
+  ]);
+  const remoteResponder = plexItemsResponder([
+    { ratingKey: "rk-shared", type: "movie", title: "Remote Movie", Guid: [{ id: "tmdb://400" }] },
+  ]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // Exactly ONE prior-mapping lookup fired — for the default instance's conflated
+  // MOVIE batch — and it is scoped to THAT instance. An unscoped read could import
+  // the remote server's rk-shared→400 mapping and wrongly drop the default's rows.
+  assert.deepEqual(
+    plexLibraryItemFindManyWheres,
+    [{ mediaType: "MOVIE", serverInstance: "", tmdbId: { in: [601, 602] } }],
+    "the dedupe's conflated-ratingKey DB read must be scoped to the instance batch being deduped",
+  );
+
+  // Dedupe resolved WITHIN the default instance (no prior mapping ⇒ keep first
+  // occurrence), while the remote instance's same-ratingKey row survived untouched.
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1);
+  const allCreatedRows = plexTx[0].ops
+    .filter((o) => o.model === "plexLibraryItem" && o.method === "createMany")
+    .flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number; plexRatingKey: string | null }> }).data);
+  assert.deepEqual(
+    allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId),
+    [601],
+    "conflation within one instance's batch keeps the first occurrence and drops the second",
+  );
+  assert.deepEqual(
+    allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId),
+    [400],
+    "a cross-instance ratingKey collision is legitimate — the remote row must NOT be deduped away",
+  );
+  assert.ok(allCreatedRows.every((r) => r.plexRatingKey === "rk-shared"));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Per-user media-server VISIBILITY grants — the AVAILABLE flip AND the
+// notification are per-requester once an instance is `restricted`
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Product contract: a request flips to AVAILABLE only when the title sits on a
+// server THAT REQUESTER can see, and the notification follows the same gate. A
+// requester who cannot see the only server holding the title keeps their request
+// OPEN (PENDING/APPROVED) and un-notified, and gets the normal "now available"
+// treatment later — when a copy lands somewhere they CAN see, or when the grant
+// is issued.
+//
+// The gate is PRE-CAS by construction (a JS filter over the candidate array,
+// before any id reaches claimAvailableNotificationWinners), which is what keeps
+// guardrail 14 intact AND leaves the once-only claim UN-BURNED for a gated
+// requester — the opposite of notify-available.ts's post-CAS deactivatedAt
+// filter, which burns it deliberately.
+
+// A restricted second Plex server: its library counts as availability only for
+// users holding mediaServerGrants.plex.remote.view === true.
+function configurePlexRestrictedRemote(): void {
+  configurePlexMultiServer();
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote", restricted: true }]));
+}
+function configureJellyfinRestrictedRemote(): void {
+  configureJellyfinMultiServer();
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote", restricted: true }]));
+}
+function seedUser(id: string, grants: unknown): void {
+  usersById.set(id, { ...defaultUser(id), mediaServerGrants: grants });
+}
+const GRANT_PLEX_REMOTE = { plex: { remote: { view: true } } };
+const GRANT_JF_REMOTE = { jellyfin: { remote: { view: true } } };
+function notifiedUserIds(): string[] {
+  return notificationCreateManyData.map((d) => d.userId as string);
+}
+// The requester reads the marking/notify passes issue — identified by the
+// `mediaServer` column, which no other user.findMany in the run selects
+// (claimAvailableNotificationWinners' disabled-check and the email-pref fetch
+// select different shapes).
+function requesterReads(): Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }> {
+  return userFindManyCalls.filter((c) => c.select?.mediaServer === true);
+}
+
+test("grants: a requester GRANTED the only instance holding the title flips to AVAILABLE and is notified", async () => {
+  configurePlexRestrictedRemote();
+  // The title exists ONLY on the restricted "remote" server; the default server's
+  // library is empty, so nothing but a grant can make this available.
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(b.plexMarked, 1, "the granted requester's request survives the visibility gate");
+  assert.equal(requests.get("req-granted")?.status, "AVAILABLE");
+  assert.equal(requests.get("req-granted")?.notifiedAvailable, true);
+  assert.deepEqual(notifiedUserIds(), ["u-granted"], "exactly one 'now available' notification, to the granted requester");
+});
+
+test("grants: an UNGRANTED requester does NOT flip, is NOT notified, and their claim is left UN-BURNED", async () => {
+  configurePlexRestrictedRemote();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  // Same title, same run, same restricted server — the ONLY difference is the grant.
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedUser("u-ungranted", null);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+  seedRequest({ id: "req-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(b.plexMarked, 1, "only the granted requester's request is counted as marked");
+  assert.equal(requests.get("req-granted")?.status, "AVAILABLE");
+  assert.equal(
+    requests.get("req-ungranted")?.status,
+    "APPROVED",
+    "the ungranted requester's request stays OPEN — availability is per-viewer, so an invisible server must not flip it",
+  );
+  assert.equal(
+    requests.get("req-ungranted")?.notifiedAvailable,
+    false,
+    "the once-only claim must be left UN-BURNED so a later grant can still deliver the notification",
+  );
+  assert.deepEqual(notifiedUserIds(), ["u-granted"], "the ungranted requester receives no 'now available' notification");
+});
+
+test("grants: the gate is PRE-CAS — a gated request id NEVER reaches claimAvailableNotificationWinners", async () => {
+  configurePlexRestrictedRemote();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedUser("u-ungranted", null);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+  seedRequest({ id: "req-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "PENDING" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  // Structural: the filter runs on the materialised candidate array BEFORE the
+  // UPDATE … RETURNING. A post-CAS filter would still suppress the notification
+  // but would BURN notifiedAvailable (and flip status), permanently stranding the
+  // requester even after a grant — so assert on the CAS inputs, not just outputs.
+  assert.ok(casCalls.length > 0, "the granted requester's claim did run (otherwise this pin proves nothing)");
+  const casSawGated = casCalls.filter((c) => c.ids.includes("req-ungranted"));
+  assert.deepEqual(
+    casSawGated,
+    [],
+    "the visibility gate must be applied BEFORE the CAS — a gated id must never appear in an UPDATE … RETURNING candidate list",
+  );
+  assert.ok(
+    casCalls.some((c) => c.ids.includes("req-granted")),
+    "the un-gated requester's id still reaches the CAS unchanged (guardrail 14's exactly-once mechanism is untouched)",
+  );
+  // No plain updateMany may flip the gated row either (the toMarkOnly / already-
+  // notified branches must be gated too, not just the notifying one).
+  const flippedGated = mediaRequestUpdateManyCalls.filter(
+    (c) => c.where?.id?.in?.includes("req-ungranted") && (c.data ?? {}).status === "AVAILABLE",
+  );
+  assert.deepEqual(flippedGated, [], "no non-CAS write may flip a gated request to AVAILABLE either");
+});
+
+test("grants RECOVERY: the NEXT run flips + notifies once the grant is issued", async () => {
+  configurePlexRestrictedRemote();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-late", null);
+  seedRequest({ id: "req-late", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-late", status: "PENDING" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(requests.get("req-late")?.status, "PENDING", "run 1: no grant, no flip");
+  assert.deepEqual(notifiedUserIds(), [], "run 1: no notification");
+
+  // The admin issues the grant; nothing else about the run changes.
+  seedUser("u-late", GRANT_PLEX_REMOTE);
+  notificationCreateManyData.length = 0;
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-late")?.status, "AVAILABLE", "run 2: the grant makes the same library the requester's own");
+  assert.equal(requests.get("req-late")?.notifiedAvailable, true);
+  assert.deepEqual(
+    notifiedUserIds(),
+    ["u-late"],
+    "run 2 delivers the 'now available' notification — proof run 1 left the once-only claim un-burned",
+  );
+});
+
+test("grants RECOVERY: the NEXT run flips + notifies once a copy lands on a VISIBLE instance (no grant needed)", async () => {
+  configurePlexRestrictedRemote();
+  const emptyDefault = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : emptyDefault(url));
+  seedUser("u-ungranted", null);
+  seedRequest({ id: "req-copy", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "PENDING" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(requests.get("req-copy")?.status, "PENDING", "run 1: only the invisible server holds it");
+
+  // The title is now on the DEFAULT server too — visible to everyone by
+  // construction (defaultInstanceConfig hard-codes restricted:false).
+  const stockedDefault = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : stockedDefault(url));
+  notificationCreateManyData.length = 0;
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-copy")?.status, "AVAILABLE");
+  assert.deepEqual(notifiedUserIds(), ["u-ungranted"], "a copy on a visible server delivers the notification with no grant at all");
+});
+
+test("grants: the Jellyfin arm carries its OWN per-instance presence map (not the Plex one, not the union)", async () => {
+  configureJellyfinRestrictedRemote();
+  const defaultResponder = jellyfinResponder([]);
+  const remoteResponder = jellyfinResponder([900]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-granted", GRANT_JF_REMOTE);
+  seedUser("u-ungranted", null);
+  // A plex-shaped grant must NOT unlock a jellyfin instance of the same slug —
+  // the grant map is keyed by service (see permissions.ts's two-level shape).
+  seedUser("u-wrong-service", GRANT_PLEX_REMOTE);
+  seedRequest({ id: "req-jf-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+  seedRequest({ id: "req-jf-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "PENDING" });
+  seedRequest({ id: "req-jf-wrong", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-wrong-service", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(b.jellyfinMarked, 1);
+  assert.equal(requests.get("req-jf-granted")?.status, "AVAILABLE");
+  assert.equal(requests.get("req-jf-ungranted")?.status, "PENDING");
+  assert.equal(requests.get("req-jf-wrong")?.status, "PENDING", "a plex grant on the same slug must not unlock the jellyfin instance");
+  assert.deepEqual(notifiedUserIds(), ["u-granted"]);
+});
+
+test("grants: the AVAILABLE-but-unnotified fallback notify is per-viewer too", async () => {
+  // The end-of-run fallback (status=AVAILABLE, notifiedAvailable=false) is a
+  // SECOND, independent notify gate — rows reach it via the webhook flip or the
+  // non-notifying toMarkOnly path, never via markLibraryRequests' claim. Seeded
+  // directly here because that is exactly the state those paths leave behind.
+  configurePlexRestrictedRemote();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedUser("u-ungranted", null);
+  seedRequest({ id: "av-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "AVAILABLE", notifiedAvailable: false });
+  seedRequest({ id: "av-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "AVAILABLE", notifiedAvailable: false });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("av-granted")?.notifiedAvailable, true, "the granted viewer's fallback notify fires");
+  assert.equal(
+    requests.get("av-ungranted")?.notifiedAvailable,
+    false,
+    "the ungranted viewer is not notified off a server they cannot see — and their claim stays un-burned",
+  );
+  assert.deepEqual(notifiedUserIds(), ["u-granted"]);
+  assert.deepEqual(
+    casCalls.filter((c) => c.ids.includes("av-ungranted")),
+    [],
+    "the fallback's grants filter is pre-CAS as well — a gated id never enters the claim",
+  );
+});
+
+test("grants: with NO restricted instance configured the run is byte-identical — every requester flips, notifies, and the requester read count is unchanged", async () => {
+  // Same two-instance topology and the same title-on-the-named-server-only
+  // fixture as the gated tests above; the ONLY difference is restricted:false.
+  configurePlexMultiServer(); // registry entry carries no `restricted` field ⇒ open
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-a", null);
+  seedUser("u-b", null);
+  seedRequest({ id: "req-a", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-a", status: "PENDING" });
+  seedRequest({ id: "req-b", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-b", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(b.plexMarked, 2, "no instance is restricted ⇒ the union IS the per-user answer ⇒ both requests mark");
+  assert.equal(requests.get("req-a")?.status, "AVAILABLE");
+  assert.equal(requests.get("req-b")?.status, "AVAILABLE");
+  assert.deepEqual(notifiedUserIds().sort(), ["u-a", "u-b"], "both requesters are notified, exactly as before grants existed");
+  // The gate must cost NO extra round-trip: the grant columns ride the requester
+  // read the marking pass already issued (one per source pass that has work).
+  assert.equal(
+    requesterReads().length,
+    1,
+    "exactly one requester read for the one marking pass with candidates — the grants columns are extra COLUMNS, never an extra query",
+  );
+  assert.deepEqual(
+    requesterReads()[0].select,
+    { id: true, mediaServer: true, role: true, permissions: true, mediaServerGrants: true },
+    "the requester read carries the grant columns alongside the pre-existing mediaServer preference column — `role` included because the gate must resolve effectivePermissions, never the raw column",
+  );
+});
+
+test("grants: a legacy ADMIN row (role=ADMIN, permissions=0) is gated by its ROLE, not its unseeded permissions column", async () => {
+  // `User.permissions` is @default(0) and only seeded by a MANUAL one-shot
+  // script, so an upgraded deployment really can hold role="ADMIN" with
+  // permissions=0 — every read path handles it via effectivePermissions. If the
+  // sync gate passed the raw column instead, the ADMIN short-circuit would miss
+  // HERE and only here: the badge would read "available" while the operator's
+  // own request stayed PENDING forever, with nothing surfacing the strand.
+  configurePlexRestrictedRemote();
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? plexResponder([700])(url) : plexResponder([])(url));
+  // Note defaultUser() already carries permissions: 0n — the unseeded state IS
+  // this harness's default, which is precisely why an ADMIN-role fixture is the
+  // one that exposes a raw-column read.
+  usersById.set("u-legacy-admin", { ...defaultUser("u-legacy-admin"), role: "ADMIN" });
+  seedRequest({ id: "req-legacy-admin", tmdbId: 700, mediaType: "MOVIE", requestedBy: "u-legacy-admin", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(
+    requests.get("req-legacy-admin")?.status,
+    "AVAILABLE",
+    "an ADMIN sees every instance regardless of grants — resolved from role, since the permissions column was never seeded",
+  );
+  assert.deepEqual(notifiedUserIds(), ["u-legacy-admin"]);
+});
+
+test("grants: a restricted-instance deployment still issues ONE requester read per marking pass", async () => {
+  configurePlexRestrictedRemote();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  // Enforced mode loads the requester rows at the wider CANDIDATE scope and then
+  // REUSES them for the mediaServer split — it must not add a second read
+  // (guardrail 31: never a per-requester round-trip).
+  assert.equal(
+    requesterReads().length,
+    1,
+    "the candidate-scope load is reused for the mediaServer split — enforcing grants must not double the requester reads",
+  );
+});
+
+test("multi-server PARTIAL failure: one instance's library fetch failing preserves its rows, suppresses the success stamp, and vetoes the whole-table episode rewrite", async () => {
+  configurePlexMultiServer();
+  // The named instance is down; the default is healthy. Every safeguard must
+  // treat this run's union as an INCOMPLETE picture.
+  const defaultResponder = plexResponder([300]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("boom", { status: 500 }) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  // (a) Only the healthy instance's scoped delete+rewrite ran — the failed
+  // instance never entered `writable`, so its existing library rows survive
+  // the run untouched (guardrail 13 per instance).
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1);
+  const deletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null),
+    [""],
+    "only the healthy (default) instance is deleted+rewritten; the down instance's rows must survive its outage",
+  );
+
+  // (b) THE load-bearing pin: the whole-table TVEpisodeCache rewrite must NOT
+  // run on an incomplete union. TVEpisodeCache has no serverInstance column, so
+  // a rewrite here would deleteMany({source:"plex"}) — wiping the DOWN server's
+  // episode rows — and reinsert only the healthy server's. The gate's
+  // `writable.length === fetched.length` term is what this asserts: an instance
+  // whose LIBRARY fetch failed never got an episode fetch at all, which the
+  // episode loop's own allEpisodesFetched flag cannot see.
+  assert.equal(
+    txTouching("tVEpisodeCache").length,
+    0,
+    "a library-fetch failure on ANY instance must veto the all-or-nothing episode rewrite",
+  );
+
+  // (c) The run is not stamped clean and the source is reported degraded —
+  // plexSyncSucceeded requires EVERY configured instance's fetch to succeed.
+  assert.ok(
+    !settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"),
+    "a partial run must not stamp lastPlexSyncSucceededAt",
+  );
+  assert.deepEqual(b.failedSources, ["plex"]);
+});
+
+test("de-registered instances are swept: the sweep targets exactly the slugs NOT in the registry, scoped per service", async () => {
+  // The orchestrator captures its instance list before a multi-minute library
+  // walk, so a removal landing mid-run can be re-inserted by the write that
+  // follows — and once the slug is de-registered nothing ever targets it
+  // again, so the rows would read "in library" forever. Re-reading the
+  // registry after the writes closes that window in the same run, and also
+  // repairs rows orphaned by a release predating the removal cleanup.
+  configurePlexMultiServer();
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? plexResponder([400])(url) : plexResponder([300])(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexSweep = orphanSweepDeletes.filter((d) => d.model === "plexLibraryItem");
+  assert.equal(plexSweep.length, 1, "exactly one sweep per service, after the library writes");
+  assert.deepEqual(
+    plexSweep[0].where,
+    { serverInstance: { notIn: ["", "remote"] } },
+    "the sweep spares every REGISTERED slug and targets the rest — a notIn over the registry, never a blanket delete",
+  );
+  const jfSweep = orphanSweepDeletes.filter((d) => d.model === "jellyfinLibraryItem");
+  assert.equal(jfSweep.length, 1);
+  assert.deepEqual(
+    jfSweep[0].where,
+    { serverInstance: { notIn: [""] } },
+    "each service sweeps against its OWN registry — a Plex slug must not spare a Jellyfin row or vice versa",
+  );
+});
+
+test("the sweep spares a REGISTERED but unconfigured instance — an admin mid-edit must not lose their library", async () => {
+  // getSyncableMediaInstances (what the sync arms fan out over) requires BOTH
+  // connection fields; getMediaInstances (what the sweep reads) requires only
+  // registration. That difference is the whole safety margin: an instance
+  // whose token is momentarily blank still appears in the registry, so its
+  // rows survive exactly as a failed instance's rows do.
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-default");
+  settings.set("plexInstances", JSON.stringify([{ slug: "halfway", name: "Halfway" }]));
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE); // a DIFFERENT slug's keys — "halfway" has none
+  respond = plexResponder([300]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexSweep = orphanSweepDeletes.filter((d) => d.model === "plexLibraryItem");
+  assert.deepEqual(
+    plexSweep[0].where,
+    { serverInstance: { notIn: ["", "halfway"] } },
+    "an unconfigured-but-registered slug is spared; only de-registration sweeps rows",
   );
 });
 

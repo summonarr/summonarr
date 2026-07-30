@@ -22,11 +22,18 @@ model User {
   // gives admins a one-shot "log this user out everywhere" primitive that is
   // honored on every replica's next refresh.
   sessionsRevokedAt DateTime?
-  // Set when the user self-deletes their account (App Store Guideline 5.1.1(v)).
-  // The row is ANONYMIZED in place — PII scrubbed, provider-subject keys + OAuth
-  // rows cleared — so their requests/votes/issues survive de-identified, but the
-  // account can never sign in again. Excluded from the "last active admin" count.
+  // Set when the account is removed — by the user (self-delete, App Store
+  // Guideline 5.1.1(v)) or by an admin. The row is DISABLED, not scrubbed: every
+  // session is revoked and sign-in is refused for every provider, but the
+  // identity and its data are retained so an admin can re-enable the account.
+  // Excluded from the "last active admin" count. Clearing it re-enables sign-in.
   deactivatedAt DateTime?
+  // Set when an admin PURGES a disabled account's personal data (the irreversible
+  // step). The row is anonymized in place — PII scrubbed, provider-subject keys +
+  // OAuth rows cleared — so requests/votes/issues survive de-identified. A purged
+  // row can never be re-enabled into a usable account: there is no identity left
+  // to sign in with. Always accompanied by a non-null deactivatedAt.
+  purgedAt      DateTime?
   role          Role      @default(USER)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -56,6 +63,16 @@ model User {
   // back-compat (see canRequestInstance in src/lib/permissions.ts). null/absent ⇒
   // no named-instance grants. ADMIN bypasses. Parsed via parseInstanceGrants().
   instanceGrants Json?
+  // Per-user VISIBILITY grants for RESTRICTED Plex/Jellyfin server instances
+  // (multi-server support). Unlike instanceGrants above this map is SERVICE-
+  // NAMESPACED — plex "remote" and jellyfin "remote" are different servers
+  // holding different content, so a flat slug map would conflate them:
+  // { "plex": { "remote": { "view": true } }, "jellyfin": { … } }. Only servers
+  // flagged `restricted` in the plexInstances/jellyfinInstances registry are
+  // gated; the default ("") server is never restricted and is visible to all.
+  // null/absent ⇒ no grants. ADMIN bypasses. Parsed via parseMediaServerGrants()
+  // (see canViewMediaInstance in src/lib/permissions.ts).
+  mediaServerGrants Json?
   // Per-user, per-media-type request-quota overrides. null ⇒ use the global
   // quotaLimit/quotaPeriod Settings. QUOTA_UNLIMITED (or ADMIN) bypasses both.
   movieQuotaLimit Int?
@@ -128,6 +145,7 @@ model User {
   watchlist         WatchlistItem[]
   hidden            HiddenItem[]
   notifications     Notification[]
+  recommendations   UserRecommendation[]
 }
 
 model PushSubscription {
@@ -277,6 +295,11 @@ model MediaRequest {
 model PlexLibraryItem {
   tmdbId        Int
   mediaType     MediaType
+  // Multi-server support: "" = the default Plex server (plexServerUrl/plexAdminToken);
+  // a named slug = an additional configured server (src/lib/media-instance-registry.ts).
+  // Existing rows land on "" via the column default — a plain ADD COLUMN, no backfill,
+  // since there's no legacy discriminator to interpret (contrast is4k→arrInstance).
+  serverInstance String    @default("")
   filePath      String?
   plexRatingKey String? // Plex internal ratingKey — needed to call fix-match API
   title         String?
@@ -285,9 +308,10 @@ model PlexLibraryItem {
   contentRating String? // e.g. "PG-13", "R", "TV-MA" — from Plex contentRating field
   addedAt       DateTime? // when the item was added to the Plex library
 
-  @@id([tmdbId, mediaType])
+  @@id([tmdbId, mediaType, serverInstance])
   @@index([plexRatingKey]) // play-history sync filters on plexRatingKey every poll
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
+  @@index([serverInstance])
 }
 
 // ─── Jellyfin Library Cache ───────────────────────────────────────────────────
@@ -295,6 +319,8 @@ model PlexLibraryItem {
 model JellyfinLibraryItem {
   tmdbId          Int
   mediaType       MediaType
+  // Multi-server support — see PlexLibraryItem.serverInstance for the full rationale.
+  serverInstance  String    @default("")
   filePath        String?
   jellyfinItemId  String? // Jellyfin internal item UUID — needed to call fix-match API
   title           String?
@@ -304,9 +330,10 @@ model JellyfinLibraryItem {
   communityRating Float? // Jellyfin community rating (0–10)
   addedAt         DateTime? // when the item was added to Jellyfin (DateCreated)
 
-  @@id([tmdbId, mediaType])
+  @@id([tmdbId, mediaType, serverInstance])
   @@index([jellyfinItemId]) // play-history sync filters on jellyfinItemId every poll
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
+  @@index([serverInstance])
 }
 
 // ─── TV Episode Cache ─────────────────────────────────────────────────────────
@@ -654,6 +681,9 @@ enum AuditAction {
   USER_ROLE_CHANGE
   USER_PERMISSIONS_CHANGE
   USER_DELETE
+  USER_DEACTIVATE
+  USER_REACTIVATE
+  USER_PURGE
   SETTINGS_CHANGE
   LIBRARY_SYNC
   ISSUE_STATUS_CHANGE
@@ -678,6 +708,7 @@ enum AuditAction {
   BATCH_REQUEST_DECLINE
   VOTE_DISMISS_ALL
   SERVER_USERS_BULK
+  SERVER_USER_LINK
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
   BLACKLIST_CHANGE
@@ -689,6 +720,12 @@ enum AuditAction {
 model MediaServerUser {
   id               String   @id @default(cuid(2))
   source           String // "plex" | "jellyfin"
+  // Multi-server support. Plex's sourceUserId (the plex.tv cloud accountId) is
+  // stable across every Plex server that account can see, so without this a
+  // shared account on two Plex servers would collide onto one row and fight
+  // over per-server facts (isServerAdmin, downloadsEnabled). Distinct from
+  // serverMachineId below (still dormant, not repurposed). "" = default server.
+  serverInstance   String   @default("")
   sourceUserId     String // Plex accountID or Jellyfin userId UUID
   // Server machineIdentifier (Plex) or System/Info Id (Jellyfin) the row was first
   // observed on. Currently DORMANT scaffolding: the only writer is the trusted
@@ -703,6 +740,15 @@ model MediaServerUser {
   thumbUrl         String?
   userId           String? // FK to User — nullable for unlinked server users
   user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  // An admin set `userId` by hand (PATCH /api/admin/server-users/[id]), so the
+  // automatic linkers MUST leave it alone — both resolveMediaServerUser (every
+  // 5s poll) and the hourly Jellyfin user sync re-derive `userId` from the
+  // provider subject id / email and would otherwise overwrite the override on
+  // the next run, which is exactly the mis-binding an admin is correcting.
+  // Also set when an admin deliberately UNLINKS (userId → null), so automatic
+  // linking can't immediately re-bind it. Clearing this flag hands the row back
+  // to automatic resolution.
+  manualUserLink   Boolean  @default(false)
   downloadsEnabled Boolean? // null = not yet synced; true = allowed; false = enforced-disabled
   isServerAdmin    Boolean  @default(false) // cached from server — admins are never touched by bulk enforcement
   // false = removed from the media server (soft-deleted). NEVER hard-delete a
@@ -716,14 +762,17 @@ model MediaServerUser {
   playHistory    PlayHistory[]
   activeSessions ActiveSession[]
 
-  @@unique([source, sourceUserId])
+  @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
   @@index([source])
+  @@index([source, serverInstance])
 }
 
 model PlayHistory {
   id     String @id @default(cuid(2))
   source String @db.VarChar(16) // "plex" | "jellyfin"
+  // Multi-server support — see PlexLibraryItem.serverInstance / MediaServerUser.serverInstance.
+  serverInstance String @default("") @db.VarChar(32)
 
   // Session timing
   startedAt      DateTime
@@ -800,7 +849,7 @@ model PlayHistory {
 
   createdAt DateTime @default(now())
 
-  @@unique([source, sourceSessionId])
+  @@unique([source, serverInstance, sourceSessionId])
   @@index([mediaServerUserId, startedAt(sort: Desc)])
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
@@ -817,11 +866,20 @@ model PlayHistory {
   // 30+ range-scoped aggregate queries from a smaller heap when filters are set.
   @@index([source, startedAt(sort: Desc)])
   @@index([mediaType, startedAt(sort: Desc)])
+  @@index([source, serverInstance])
 }
 
 model ActiveSession {
-  id     String @id @db.VarChar(256) // source:sessionKey composite
+  // Default instance: "source:sessionKey" (unchanged, byte-identical to today).
+  // Named instance: "source:serverInstance:sessionKey" — see activeSessionId()/
+  // parseActiveSessionId() in src/lib/media-instances.ts. Slugs can't contain
+  // ":" and sessionKey is a bare integer, so the 2-vs-3-part split is unambiguous.
+  id     String @id @db.VarChar(256)
   source String @db.VarChar(16) // "plex" | "jellyfin"
+  // Multi-server support — see PlexLibraryItem.serverInstance. Fixes a real
+  // collision risk: two Plex servers reusing the same low-cardinality
+  // sessionKey would otherwise collide on both this PK and the unique index below.
+  serverInstance String @default("") @db.VarChar(32)
 
   sessionKey String   @db.VarChar(256)
   startedAt  DateTime
@@ -886,8 +944,9 @@ model ActiveSession {
   creditsStartMs Int?
   creditsEndMs   Int?
 
-  @@unique([source, sessionKey])
+  @@unique([source, serverInstance, sessionKey])
   @@index([source])
+  @@index([source, serverInstance])
 }
 
 // ─── IP Geolocation Cache ────────────────────────────────────────────────────
@@ -1027,6 +1086,42 @@ model HiddenItem {
 
   @@unique([userId, tmdbId, mediaType]) // one hide entry per user per item
   @@index([userId, createdAt])
+}
+
+// Per-user "For You" recommendation cache, precomputed by the
+// warm-recommendations cron (src/lib/recommendations.ts) from the user's own
+// watched PlayHistory + WatchlistItem seeds fanned out through TMDB's
+// similar/recommendations endpoints. Read directly by the home page — no live
+// TMDB call on that hot path. Fields are denormalized from the TmdbMedia the
+// suggestions call already returned (same rationale as WatchlistItem/HiddenItem:
+// a suggestion-only tmdbId isn't guaranteed a TmdbMediaCore/TmdbCache row) —
+// enough of them to reconstruct a valid TmdbMedia without a second fetch.
+// releaseYear is NOT stored; it's derived from releaseDate at read time,
+// matching normalizeMovie/normalizeTV's convention everywhere else.
+model UserRecommendation {
+  id        String   @id @default(cuid(2))
+  computedAt DateTime @default(now())
+
+  tmdbId       Int
+  mediaType    MediaType
+  title        String  @db.VarChar(500)
+  overview     String?
+  posterPath   String? @db.VarChar(500)
+  backdropPath String? @db.VarChar(500)
+  releaseDate  String? @db.VarChar(16)
+  voteAverage  Float   @default(0)
+
+  // score = seed-type-weight × recency-weight, summed across every seed that
+  // surfaced this candidate; rank is score's sort position (read path orders
+  // by rank directly instead of re-deriving it).
+  score Float
+  rank  Int
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tmdbId, mediaType])
+  @@index([userId, rank])
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event

@@ -318,7 +318,10 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
 async function getAdminSubscriptions(excludeUserId?: string) {
   // Bitmask: MANAGE_REQUESTS holders (new requests, deletion votes, manual arr interaction).
   const subs = await prisma.pushSubscription.findMany({
-    where: excludeUserId ? { userId: { not: excludeUserId } } : {},
+    // A disabled account keeps its PushSubscription rows (guardrail 33 — the
+    // deactivate write set is exactly two fields), so its devices would keep
+    // buzzing with other people's requests indefinitely.
+    where: { user: { deactivatedAt: null }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
     include: { user: { select: { role: true, permissions: true } } },
   });
   return subs.filter((s) => {
@@ -339,7 +342,7 @@ async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restri
   const subs = await prisma.pushSubscription.findMany({
     where: {
       ...userIdFilter,
-      user: { notifyOnIssue: true },
+      user: { notifyOnIssue: true, deactivatedAt: null }, // see getAdminSubscriptions
     },
     include: { user: { select: { role: true, permissions: true } } },
   });
@@ -697,7 +700,10 @@ export async function notifyUsersRequestsApprovedPush(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, pushOnApproved: true },
+      // deactivatedAt: null — account removal disables rather than scrubs
+      // (guardrail 33), so a removed user keeps live push subscriptions and
+      // would otherwise still get pinged by a later batch approve/decline.
+      where: { id: { in: userIds }, pushOnApproved: true, deactivatedAt: null },
       select: { id: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
@@ -746,7 +752,8 @@ export async function notifyUsersRequestsDeclinedPush(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, pushOnDeclined: true },
+      // deactivatedAt: null — see notifyUsersRequestsApprovedPush.
+      where: { id: { in: userIds }, pushOnDeclined: true, deactivatedAt: null },
       select: { id: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));

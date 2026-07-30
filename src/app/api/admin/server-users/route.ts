@@ -15,6 +15,9 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
       select: {
         id: true,
         source: true,
+        // Multi-server support — distinguishes same-named/same-sourceUserId rows
+        // across two independently-configured servers of the same provider.
+        serverInstance: true,
         sourceUserId: true,
         username: true,
         email: true,
@@ -22,6 +25,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
         downloadsEnabled: true,
         isServerAdmin: true,
         userId: true,
+        manualUserLink: true, // admin pinned this binding — automatic linking skips the row
         user: { select: { name: true, email: true } },
       },
       orderBy: [{ source: "asc" }, { username: "asc" }],

@@ -12,6 +12,12 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import {
+  DEFAULT_MEDIA_INSTANCE,
+  isValidMediaInstanceSlug,
+  mediaInstanceLabel,
+  type MediaInstanceKey,
+} from "@/lib/media-instances";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -22,6 +28,11 @@ type FixMatchBody = {
   correctTmdbId:  number;
 
   canonicalGuid?: string;
+  // Multi-server support: which configured server's library row to remap.
+  // Optional + defaults to the default server ("") so an existing caller that
+  // doesn't send it yet keeps targeting the only server that existed before
+  // this field was added.
+  serverInstance?: string;
 };
 
 interface PlexSearchResult {
@@ -35,18 +46,24 @@ interface PlexSearchResult {
 // GUID search across imdb/tmdb agents, else a raw tmdb:// fallback), then poll
 // until Plex confirms — throws if it never confirms. Returns conflated=true when
 // Plex has permanently merged two TMDB ids into one hash but IMDB confirms the film.
+//
+// `instance` selects WHICH configured Plex server gets rewritten and MUST be the
+// same slug the caller used to read the library row: a Plex ratingKey is a small
+// server-local integer, so replaying one server's key against another server's
+// API remaps an unrelated item. It is threaded, never defaulted, for that reason.
 async function fixPlexMatch(
   ratingKey: string,
   correctTmdbId: number,
   mediaType: "MOVIE" | "TV",
+  instance: MediaInstanceKey,
   preselectedGuid?: string,
 ): Promise<{ conflated: boolean; serverUrl: string; token: string }> {
   // Plex rating keys are always integers; coerce to break taint from a DB-read
   // string before it's interpolated into any admin-token URL below.
   const safeKey = String(parseInt(ratingKey, 10) || 0);
-  const tag = `[fix-match/plex ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
+  const tag = `[fix-match/${mediaInstanceLabel("plex", instance)} ratingKey=${safeKey} target=tmdb://${correctTmdbId}]`;
 
-  const plexConfig = await getPlexConfig();
+  const plexConfig = await getPlexConfig(instance);
   if (!plexConfig.url || !plexConfig.token) throw new Error("Plex server not configured");
 
   const serverUrl = plexConfig.url.replace(/\/$/, "");
@@ -342,18 +359,23 @@ async function fixPlexMatch(
 // Remaps a Jellyfin library item to the correct TMDB id: remote-search for a
 // candidate carrying correctTmdbId, apply it, refresh, then poll until Jellyfin
 // confirms — throws if it never confirms. Returns the (possibly new) item id.
+//
+// `instance` selects WHICH configured Jellyfin server gets rewritten — same rule
+// as the Plex path: the item id came from one server's library row and is only
+// meaningful against that server.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
   mediaType: "MOVIE" | "TV",
+  instance: MediaInstanceKey,
   filePath: string | null,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
-  const tag = `[fix-match/jellyfin itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
+  const tag = `[fix-match/${mediaInstanceLabel("jellyfin", instance)} itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
 
-  const jellyfinConfig = await getJellyfinConfig();
+  const jellyfinConfig = await getJellyfinConfig(instance);
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) throw new Error("Jellyfin server not configured");
 
   const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
@@ -501,6 +523,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   if (tmdbId === correctTmdbId) {
     return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
   }
+  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
+  }
+  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
 
   // The remap is inherently two-phase: the remote library server must be
   // rewritten first (to learn the new item id), then the local cache row is
@@ -512,14 +538,14 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   let remoteRemapped = false;
   try {
     if (server === "plex") {
-      const item = await prisma.plexLibraryItem.findUnique({
-        where: { tmdbId_mediaType: { tmdbId, mediaType } },
+      const item = await prisma.plexLibraryItem.findFirst({
+        where: { tmdbId, mediaType, serverInstance },
         select: { plexRatingKey: true, filePath: true },
       });
       if (!item?.plexRatingKey) {
         return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
       }
-      const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, canonicalGuid);
+      const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
 
       await prisma.$transaction(async (tx) => {
@@ -528,16 +554,16 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // remap. Acquire 2001 before 2002 (one consistent global order → no deadlock).
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
         await tx.plexLibraryItem.upsert({
-          where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
-          create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
+          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
           update: { plexRatingKey: item.plexRatingKey },
         });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
@@ -560,14 +586,14 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
 
     } else {
-      const item = await prisma.jellyfinLibraryItem.findUnique({
-        where: { tmdbId_mediaType: { tmdbId, mediaType } },
+      const item = await prisma.jellyfinLibraryItem.findFirst({
+        where: { tmdbId, mediaType, serverInstance },
         select: { jellyfinItemId: true, filePath: true },
       });
       if (!item?.jellyfinItemId) {
         return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
       }
-      const jellyfinResult = await fixJellyfinMatch(item.jellyfinItemId, correctTmdbId, mediaType, item.filePath);
+      const jellyfinResult = await fixJellyfinMatch(item.jellyfinItemId, correctTmdbId, mediaType, serverInstance, item.filePath);
       const resolvedItemId = jellyfinResult.newItemId;
       remoteRemapped = true;
 
@@ -576,16 +602,16 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // 2002, so a concurrent sync can't clobber/interleave this manual remap.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType: { tmdbId, mediaType } } });
+        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
         await tx.jellyfinLibraryItem.upsert({
-          where: { tmdbId_mediaType: { tmdbId: correctTmdbId, mediaType } },
-          create: { tmdbId: correctTmdbId, mediaType, filePath: item.filePath, jellyfinItemId: resolvedItemId },
+          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, jellyfinItemId: resolvedItemId },
           update: { jellyfinItemId: resolvedItemId },
         });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType } });
+      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)
@@ -606,7 +632,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     // Log the real detail server-side only — the message can carry the
     // configured Plex/Jellyfin server URL, internal paths, or upstream
     // response bodies. Return a generic error to the client.
-    const serverLabel = server === "plex" ? "plex" : "jellyfin";
+    const serverLabel = mediaInstanceLabel(server, serverInstance);
     const errClass = err instanceof Error ? err.constructor.name : "Error";
     console.error("[fix-match]", `${serverLabel} error (${errClass})`, err instanceof Error ? err.message : err);
     // When the remote remap already committed, the failure is in the DB phase:
@@ -614,7 +640,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     // still references the old one. Tell the operator so they can re-sync (which
     // rebuilds the cache from the library) instead of assuming the op was a no-op.
     if (remoteRemapped) {
-      const serverName = server === "plex" ? "Plex" : "Jellyfin";
+      // Name the instance too — on a multi-server deployment the operator needs
+      // to know WHICH server now disagrees with the cache to pick the re-sync.
+      const base = server === "plex" ? "Plex" : "Jellyfin";
+      const serverName = serverInstance === DEFAULT_MEDIA_INSTANCE ? base : `${base} (${serverInstance})`;
       console.warn("[fix-match]", `${serverLabel} remapped remotely but the DB update failed for tmdb:${tmdbId} → ${correctTmdbId}; cache is out of sync until a re-sync runs`);
       return NextResponse.json(
         {

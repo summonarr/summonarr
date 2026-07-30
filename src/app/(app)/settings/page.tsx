@@ -10,6 +10,7 @@ import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
+import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
@@ -36,6 +37,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   media: [
     { id: "plex",             label: "Plex",               group: "Media Servers" },
     { id: "jellyfin",         label: "Jellyfin",           group: "Media Servers" },
+    { id: "media-instances",  label: "Extra Servers",      group: "Media Servers" },
     { id: "play-history",     label: "Play History",       group: "Media Servers" },
     { id: "library-matching", label: "Library Matching",   group: "Media Servers" },
     { id: "radarr",           label: "Radarr",             group: "Automation" },
@@ -552,6 +554,17 @@ export default async function SettingsPage({
                 initialApiKey={cfg.jellyfinApiKey ? "••••••••" : ""}
                 initialJellyfinLibraries={cfg.jellyfinLibraries ?? ""}
               />
+            </div>
+
+            <div id="media-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Additional media servers</h2>
+                <p className="text-sm text-zinc-500 mt-1">Connect extra Plex/Jellyfin servers (e.g. a friend&apos;s separate server). Availability and activity are combined across every configured server of a type.</p>
+              </div>
+              <div className="space-y-8">
+                <MediaInstancesManager service="plex" />
+                <MediaInstancesManager service="jellyfin" />
+              </div>
             </div>
 
             <div id="play-history" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>

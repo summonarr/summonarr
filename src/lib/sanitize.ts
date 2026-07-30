@@ -11,8 +11,23 @@ export function sanitizeText(input: string): string {
     .trim();
 }
 
+// The Prisma `contains` filter emits an ILIKE with NO ESCAPE clause, so any
+// %/_ in the search term stay wildcards and a wildcard-laden string forces an
+// unindexable pattern scan (a search-box DoS). Strip the metacharacters (and
+// the escape char) and bound the length, leaving a literal substring match for
+// normal text. Also safe to use before binding a search term into a raw ILIKE
+// query — the wildcard concern is the same regardless of how the SQL is built.
+const CONTAINS_SEARCH_MAX_LEN = 100;
+export function sanitizeContainsSearch(input: string): string {
+  return input.replace(/[%_\\]/g, "").slice(0, CONTAINS_SEARCH_MAX_LEN);
+}
+
 export function sanitizeOptional(input: string | undefined | null): string | null {
-  if (input == null) return null;
+  // Runtime-guard the type, don't just trust it. These values come from JSON
+  // request bodies, where the declared body type is a compile-time claim only —
+  // a client sending `{"title": 123}` reached `.replace` on a number and threw,
+  // turning what should be a 400 into a 500.
+  if (typeof input !== "string") return null;
   const cleaned = sanitizeText(input);
   return cleaned || null;
 }

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getTVSeasonEpisodes } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -38,12 +39,19 @@ export const GET = withAuth(async (
   }
 
   const provider = session.user.provider;
-  let sources: string[];
-  if (provider === "plex") sources = ["plex"];
-  else if (provider === "jellyfin" || provider === "jellyfin-quickconnect") sources = ["jellyfin"];
-  else sources = ["plex", "jellyfin"];
+  let providerSources: string[];
+  if (provider === "plex") providerSources = ["plex"];
+  else if (provider === "jellyfin" || provider === "jellyfin-quickconnect") providerSources = ["jellyfin"];
+  else providerSources = ["plex", "jellyfin"];
 
-  const ownedRows = await prisma.tVEpisodeCache.findMany({
+  // TVEpisodeCache has no serverInstance column, so `source` alone would report
+  // a RESTRICTED server's per-episode holdings to an ungranted caller — as raw
+  // JSON on this route. Gate on whether the viewer can see any server of that
+  // type actually holding the title. See media-visibility.ts.
+  const visible = await getVisibleServerInstances(session);
+  const sources = await visibleEpisodeSourcesFor(tmdbId, visible, providerSources);
+
+  const ownedRows = sources.length === 0 ? [] : await prisma.tVEpisodeCache.findMany({
     where: { tmdbId, seasonNumber, source: { in: sources } },
     select: { episodeNumber: true, source: true },
   });

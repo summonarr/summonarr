@@ -31,20 +31,30 @@
 // advisory stops, viewOffset override into PlayHistory, the GR27
 // ledger-after-write rule, unknown-session ledgering), the 30s
 // timeline-resync debounce into the /api/sync loopback, reachability
-// persistence dedupe/retry, and stream-end reconnection.
+// persistence dedupe/retry, and stream-end reconnection. Phase J at the
+// bottom pins the Phase-2 multi-instance surface: the registry-driven manager
+// map, per-instance ActiveSession ids + ledger + bootstrap isolation,
+// default-only reachability, registry-removal stop, and the config-read shape
+// contract (one plexInstances findUnique per map pass, one connection-keys
+// findMany per manager reconcile).
 //
 // Harness: no DB, network, or DNS. globalThis.prisma is pre-seeded with a
 // recording fake BEFORE the module graph loads (the poster-cache pattern), so
 // plex-events AND the play-history module underneath it share one in-memory
 // surface — play-history's internals are the sibling suite's job; here they
-// are only observed through the prisma calls they issue. globalThis.fetch is
-// scripted per URL: /status/sessions serves a scriptable snapshot,
-// /:/eventsource/notifications hands out hand-controlled ReadableStreams
-// (push/end), and 127.0.0.1/api/sync records the internal-trigger loopback
+// are only observed through the prisma calls they issue. The fake setting
+// delegate serves the connection keys from scriptable vars via findMany and
+// the "plexInstances" registry via findUnique (null by default ⇒ default-only
+// map, which is why every single-server phase runs byte-identical to the
+// singleton era). globalThis.fetch is scripted per URL: /status/sessions
+// serves a scriptable snapshot, /:/eventsource/notifications hands out
+// hand-controlled ReadableStreams (push/end, tagged with their origin so the
+// two-instance tests can address each server's stream), and
+// 127.0.0.1/api/sync records the internal-trigger loopback
 // (tests/internal-trigger.test.mts owns that module's internals; here we only
-// pin WHEN it fires). The Plex URL is an RFC1918 IP literal, which
-// safeFetchAdminConfigured admits with allowPrivate=true and — being an IP
-// literal — never resolves via DNS; dns.lookup is stubbed anyway as a
+// pin WHEN it fires). Both Plex URLs are RFC1918 IP literals, which
+// safeFetchAdminConfigured admits with allowPrivate=true and — being IP
+// literals — never resolve via DNS; dns.lookup is stubbed anyway as a
 // belt-and-braces guard. Mock timers are used ONLY for the 30s timeline
 // debounce; the reconnect tests run on real timers because a connection torn
 // down under mock timers can't clear its pre-mock (real) 22h recycle timer —
@@ -88,6 +98,7 @@ function rec(model: string, op: string, args: unknown): void {
 interface FakeSessionRow {
   id: string;
   source: string;
+  serverInstance: string;
   sessionKey: string;
   startedAt: Date;
   lastSeenAt: Date;
@@ -134,6 +145,10 @@ interface FakeSessionRow {
 // Scriptable state the fake serves from.
 let plexServerUrl: string | null = null;
 let plexAdminToken: string | null = null;
+// The named-instance registry Setting ("plexInstances") — null = row absent.
+let plexInstancesJson: string | null = null;
+// Named-instance connection Settings, e.g. plexRemoteServerUrl → url.
+const namedInstanceSettings = new Map<string, string>();
 let bootstrapRows: FakeSessionRow[] = []; // activeSession.findMany({ where: { source: "plex" } })
 const liveRows = new Map<string, FakeSessionRow>(); // activeSession.findUnique by id
 let settingUpsertError: Error | null = null;
@@ -142,7 +157,7 @@ const settingUpserts: Array<{ key: string; value: string }> = [];
 
 interface SettingFindManyArgs { where?: { key?: { in?: string[] } } }
 interface SettingUpsertArgs { where: { key: string }; create: { key: string; value: string } }
-interface ActiveWhereArgs { where?: { id?: string; source?: string; lastSeenAt?: Date } }
+interface ActiveWhereArgs { where?: { id?: string; source?: string; serverInstance?: string; lastSeenAt?: Date } }
 interface UpdateManyArgs extends ActiveWhereArgs { data: Record<string, unknown> }
 interface CreateManyArgs { data: Array<Record<string, unknown>>; skipDuplicates?: boolean }
 
@@ -159,8 +174,20 @@ const fakePrisma = {
         // enable flags are pinned "true" for the whole file; reconcile gating
         // is exercised through the (uncached) url/token settings instead.
         else if (k === "playHistoryEnabled" || k === "playHistoryPlexEnabled") rows.push({ key: k, value: "true" });
+        else if (namedInstanceSettings.has(k)) rows.push({ key: k, value: namedInstanceSettings.get(k)! });
       }
       return rows;
+    },
+    // The media-instance registry read (getMediaInstances → "plexInstances").
+    // null by default ⇒ registry absent ⇒ default-only manager map, which
+    // keeps every pre-Phase-J single-server test byte-identical to the
+    // singleton era.
+    findUnique: async (args: { where: { key: string } }) => {
+      rec("setting", "findUnique", args);
+      if (args.where.key === "plexInstances" && plexInstancesJson !== null) {
+        return { key: "plexInstances", value: plexInstancesJson };
+      }
+      return null;
     },
     upsert: async (args: SettingUpsertArgs) => {
       rec("setting", "upsert", args);
@@ -177,7 +204,16 @@ const fakePrisma = {
     },
     findMany: async (args?: ActiveWhereArgs) => {
       rec("activeSession", "findMany", args);
-      if (args?.where?.source === "plex") return bootstrapRows;
+      const w = args?.where;
+      if (w?.source === "plex") {
+        // bootstrapReconcile's stale-sweep read. Honor the serverInstance
+        // filter when present so the cross-instance isolation test can prove
+        // instance A's bootstrap never reads instance B's rows; an UNSCOPED
+        // read (the bug the filter prevents) returns every instance's rows.
+        return w.serverInstance !== undefined
+          ? bootstrapRows.filter((r) => r.serverInstance === w.serverInstance)
+          : bootstrapRows;
+      }
       return []; // emitActiveSessionsSnapshot's select-shaped read
     },
     findUnique: async (args: { where: { id: string } }) => {
@@ -209,10 +245,12 @@ const fakePrisma = {
 
 // ── scripted fetch: /status/sessions, the SSE endpoint, the sync loopback ───
 const PLEX_URL = "http://192.168.77.10:32400"; // IP literal: SSRF admin policy passes it without DNS
+const PLEX2_URL = "http://192.168.77.11:32400"; // the named ("remote") instance's server — same SSRF admit, no DNS
 const TOKEN1 = "sse token/1+2"; // needs URL-encoding — pins the encodeURIComponent in the SSE URL
 const TOKEN2 = "rotated token/2";
+const TOKEN_R = "remote token/9"; // the named instance's token
 
-interface StreamHandle { push(text: string): void; end(): void; ended: boolean }
+interface StreamHandle { origin: string; push(text: string): void; end(): void; ended: boolean }
 const sseStreams: StreamHandle[] = [];
 let plexSnapshotSessions: Array<Record<string, unknown>> = [];
 
@@ -220,7 +258,7 @@ type FetchRecord = { url: string; headers: Headers; init: RequestInit };
 const fetchLog: FetchRecord[] = [];
 const encoder = new TextEncoder();
 
-function makeSseResponse(): Response {
+function makeSseResponse(origin: string): Response {
   let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   const stream = new ReadableStream<Uint8Array>({
     start(c) { controller = c; },
@@ -228,6 +266,7 @@ function makeSseResponse(): Response {
   if (!controller) throw new Error("ReadableStream start() did not run synchronously");
   const c = controller;
   const handle: StreamHandle = {
+    origin,
     ended: false,
     push(text: string) { c.enqueue(encoder.encode(text)); },
     end() {
@@ -252,7 +291,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     });
   }
   if (parsed.pathname === "/:/eventsource/notifications") {
-    return makeSseResponse();
+    return makeSseResponse(parsed.origin);
   }
   if (parsed.hostname === "127.0.0.1" && parsed.pathname === "/api/sync") {
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -261,6 +300,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 const sseFetches = () => fetchLog.filter((c) => c.url.includes("/:/eventsource/notifications"));
+const sseFetchesFor = (origin: string) => sseFetches().filter((c) => c.url.startsWith(origin));
 const sessionFetches = () => fetchLog.filter((c) => c.url.includes("/status/sessions"));
 const syncFetches = () => fetchLog.filter((c) => c.url.includes("/api/sync"));
 
@@ -320,6 +360,7 @@ function activeRow(key: string, over: Partial<FakeSessionRow> = {}): FakeSession
   return {
     id: `plex:${key}`,
     source: "plex",
+    serverInstance: "", // default instance; named-instance rows override id + serverInstance together
     sessionKey: key,
     startedAt: new Date(now - 2_000_000),
     lastSeenAt: new Date(now - 30_000),
@@ -375,6 +416,15 @@ function currentStream(): StreamHandle {
   const s = sseStreams[sseStreams.length - 1];
   if (!s) throw new Error("no SSE stream has been opened yet");
   return s;
+}
+
+// Newest stream opened against a specific server — the multi-instance tests
+// must address each instance's connection explicitly (two are live at once).
+function currentStreamFor(origin: string): StreamHandle {
+  for (let i = sseStreams.length - 1; i >= 0; i--) {
+    if (sseStreams[i].origin === origin) return sseStreams[i];
+  }
+  throw new Error(`no SSE stream has been opened for ${origin}`);
 }
 
 function pushFrame(text: string): void {
@@ -435,11 +485,11 @@ test("finalized ledger: mark/check round-trips and prune is strict-greater on th
   assert.equal(isPlexSessionRecentlyFinalized("plex:ledger-a"), false, "an entry older than the 1h TTL must be pruned");
 });
 
-test("clearFinalizedNotInCurrentSnapshot releases only plex:-prefixed keys absent from the snapshot", () => {
+test("clearFinalizedNotInCurrentSnapshot releases only plex keys absent from the snapshot", () => {
   markPlexSessionFinalized("plex:kept");
   markPlexSessionFinalized("plex:gone");
   markPlexSessionFinalized("jellyfin:other"); // non-plex ids are never touched by the Plex snapshot
-  clearFinalizedNotInCurrentSnapshot(new Set(["kept"]));
+  clearFinalizedNotInCurrentSnapshot("", new Set(["kept"]));
   assert.equal(isPlexSessionRecentlyFinalized("plex:kept"), true, "a key Plex still reports stays ledgered (the ghost is still in /status/sessions)");
   assert.equal(isPlexSessionRecentlyFinalized("plex:gone"), false, "a key Plex dropped is released so a future play reusing it is visible");
   assert.equal(isPlexSessionRecentlyFinalized("jellyfin:other"), true, "non-plex ledger entries are out of scope for the Plex snapshot");
@@ -448,6 +498,38 @@ test("clearFinalizedNotInCurrentSnapshot releases only plex:-prefixed keys absen
   pruneRecentlyFinalized(Number.MAX_SAFE_INTEGER);
   assert.equal(isPlexSessionRecentlyFinalized("plex:kept"), false);
   assert.equal(isPlexSessionRecentlyFinalized("jellyfin:other"), false);
+});
+
+test("cross-instance ledger isolation: one instance's snapshot clear never touches another instance's entries, and 3-segment ids match on the BARE key", () => {
+  markPlexSessionFinalized("plex:iso-def"); // default instance, 2-segment id
+  markPlexSessionFinalized("plex:remote:iso-rem"); // named instance, 3-segment id
+  markPlexSessionFinalized("plex:remote:iso-keep");
+
+  // The DEFAULT instance's (empty) snapshot releases only default-instance ids.
+  clearFinalizedNotInCurrentSnapshot("", new Set());
+  assert.equal(isPlexSessionRecentlyFinalized("plex:iso-def"), false, "a default-instance key absent from the default snapshot is released");
+  assert.equal(
+    isPlexSessionRecentlyFinalized("plex:remote:iso-rem"),
+    true,
+    "a named instance's entries must survive the DEFAULT instance's clear — its keys are never in that server's snapshot, so an unscoped clear would release (and un-suppress) another server's ghosts",
+  );
+
+  // The named instance's snapshot holds BARE sessionKeys: "iso-keep" must
+  // match the parsed 3rd segment. (A slice(5)-style prefix strip would compare
+  // against "remote:iso-keep" and wrongly release it.)
+  clearFinalizedNotInCurrentSnapshot("remote", new Set(["iso-keep"]));
+  assert.equal(isPlexSessionRecentlyFinalized("plex:remote:iso-keep"), true, "a bare key the named server still reports stays ledgered — the snapshot set matches the parsed sessionKey segment, not an instance-prefixed string");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:remote:iso-rem"), false, "a named-instance key absent from ITS OWN snapshot is released");
+
+  // And vice versa: default entries survive a named instance's clear.
+  markPlexSessionFinalized("plex:iso-def2");
+  clearFinalizedNotInCurrentSnapshot("remote", new Set());
+  assert.equal(isPlexSessionRecentlyFinalized("plex:iso-def2"), true, "the default instance's entries survive a NAMED instance's clear");
+
+  // Leave the ledger empty for the connection phases below.
+  pruneRecentlyFinalized(Number.MAX_SAFE_INTEGER);
+  assert.equal(isPlexSessionRecentlyFinalized("plex:iso-def2"), false);
+  assert.equal(isPlexSessionRecentlyFinalized("plex:remote:iso-keep"), false);
 });
 
 // ═══ Phase B — reconcile gating before any connection ═══════════════════════
@@ -906,4 +988,200 @@ test("removing the Plex config stops the loop for good, with no crash and no con
   assert.ok(!warns.some((w) => w.includes("loop crashed")), "the run loop must never crash during the whole scenario");
   assert.ok(!warns.some((w) => w.includes("connection failing repeatedly")), "no persistent-outage warns — every disconnect in this suite was orderly");
   assert.deepEqual(errors, [], "plex-events must never console.error (warn-only logging convention)");
+});
+
+// ═══ Phase J — multi-instance activation (Phase 2: N Plex servers) ══════════
+//
+// Entry state: the default manager exists in the module map but is STOPPED
+// (the previous test cleared its config), every SSE stream is ended, and the
+// "plexInstances" registry Setting has been absent all along (findUnique →
+// null ⇒ default-only map) — which is exactly why every phase above ran
+// byte-identical to the singleton era.
+
+test("cross-instance bootstrap isolation: the default manager's absence sweep reads ONLY its own serverInstance rows and never finalizes a named instance's session", async () => {
+  // Register "remote" WITHOUT its connection Settings: the map reconcile
+  // creates its manager, but that manager's own doReconcile decides
+  // shouldRun=false — so only the DEFAULT manager (re)connects and bootstraps
+  // in this test.
+  plexInstancesJson = JSON.stringify([{ slug: "remote", name: "Remote" }]);
+  plexServerUrl = PLEX_URL;
+  plexAdminToken = TOKEN2;
+  plexSnapshotSessions = []; // neither row below is in the default server's snapshot
+
+  const remoteRow = activeRow("iso-c", {
+    id: "plex:remote:iso-c",
+    serverInstance: "remote",
+    lastSeenAt: new Date(Date.now() - 120_000), // far past the 60s grace — bait for an unscoped sweep
+  });
+  const defaultRow = activeRow("iso-d", { lastSeenAt: new Date(Date.now() - 120_000) });
+  bootstrapRows = [remoteRow, defaultRow];
+
+  const sseBefore = sseFetches().length;
+  const histBefore = historyRows().length;
+  await reconcilePlexEventStream();
+  await waitFor(() => sseFetches().length === sseBefore + 1, "the default manager's reconnect (bootstrap completes before the subscribe)");
+  await drain(20);
+
+  const newRows = historyRows().slice(histBefore);
+  assert.equal(newRows.length, 1, "exactly one bootstrap finalize — the default instance's own stale row");
+  assert.equal(newRows[0].sourceSessionId, `iso-d:${defaultRow.startedAt.toISOString()}`);
+  assert.equal(isPlexSessionRecentlyFinalized("plex:iso-d"), true, "the default instance's own stale row is finalized and ledgered");
+  assert.equal(
+    isPlexSessionRecentlyFinalized("plex:remote:iso-c"),
+    false,
+    "a serverInstance:'remote' row must be INVISIBLE to the default manager's sweep — its key is never in the default server's snapshot, so an unscoped read would finalize (and ledger-lock) a session that is still playing on the other server",
+  );
+  assert.equal(sseFetchesFor(PLEX2_URL).length, 0, "the unconfigured named instance must not open a connection");
+
+  bootstrapRows = []; // keep later bootstraps quiet
+});
+
+// Reachability baselines, captured in the activation test BEFORE the named
+// manager's first bootstrap and asserted in the silence test after it.
+let reachabilityUpsertsBaseline = -1;
+let reachabilityEventsBaseline = -1;
+const reachabilityUpserts = () => settingUpserts.filter((u) => u.key === "plexServerReachable");
+const reachabilityEvents = () => sseEvents.filter((e) => e.type === "plex:reachability");
+
+test("named-instance activation: a second manager connects to ITS origin/token and addresses rows by 3-segment ids while the default stays 2-segment", async () => {
+  reachabilityUpsertsBaseline = reachabilityUpserts().length;
+  reachabilityEventsBaseline = reachabilityEvents().length;
+
+  namedInstanceSettings.set("plexRemoteServerUrl", PLEX2_URL);
+  namedInstanceSettings.set("plexRemoteAdminToken", TOKEN_R);
+  plexSnapshotSessions = [];
+
+  await reconcilePlexEventStream();
+  await waitFor(() => sseFetchesFor(PLEX2_URL).length === 1, "the named instance's SSE subscribe");
+
+  // Wire shape: the named manager talks to ITS server with ITS token; the
+  // default manager's live connection is untouched (no restart).
+  const remoteSse = new URL(sseFetchesFor(PLEX2_URL)[0].url);
+  assert.equal(remoteSse.origin, "http://192.168.77.11:32400");
+  assert.equal(remoteSse.searchParams.get("X-Plex-Token"), TOKEN_R);
+  assert.equal(remoteSse.searchParams.get("filters"), "playing,timeline");
+
+  // A playing event on the REMOTE stream lands on the 3-segment id.
+  armLiveRow("r-live", { id: "plex:remote:r-live", serverInstance: "remote", state: "playing", progressMs: 1_000n });
+  currentStreamFor(PLEX2_URL).push(playingFrame({ sessionKey: "r-live", state: "playing", viewOffset: 2_000 }));
+  await waitFor(() => updatesFor("plex:remote:r-live").length === 1, "remote live-state update on the instance-qualified id");
+  assert.equal(updatesFor("plex:r-live").length, 0, "the remote event must NOT touch the 2-segment (default-instance) id");
+
+  // A playing event on the DEFAULT stream still lands on the legacy 2-segment id.
+  armLiveRow("d-live", { state: "playing", progressMs: 1_000n });
+  currentStreamFor(PLEX_URL).push(playingFrame({ sessionKey: "d-live", state: "playing", viewOffset: 2_000 }));
+  await waitFor(() => updatesFor("plex:d-live").length === 1, "default live-state update on the legacy id");
+
+  // A real stop on the remote stream finalizes + ledgers under the 3-segment
+  // id (cross-check against ITS /status/sessions confirms the session is gone).
+  const rRow = armLiveRow("r-live", { id: "plex:remote:r-live", serverInstance: "remote", state: "paused" });
+  currentStreamFor(PLEX2_URL).push(playingFrame({ sessionKey: "r-live", state: "stopped", viewOffset: 900_000 }));
+  await waitFor(() => isPlexSessionRecentlyFinalized("plex:remote:r-live"), "remote stop ledger mark");
+  assert.equal(isPlexSessionRecentlyFinalized("plex:r-live"), false, "the ledger key carries the instance segment");
+  assert.ok(
+    historyRows().some((r) => r.sourceSessionId === `r-live:${rRow.startedAt.toISOString()}`),
+    "the remote stop writes its PlayHistory row",
+  );
+  await waitFor(() => deletesFor("plex:remote:r-live").length === 2, "CAS delete + force-clean, both addressing the 3-segment id");
+});
+
+test("named-instance reachability silence: a named manager never writes plexServerReachable nor emits plex:reachability (default-only Phase 2 scoping)", async () => {
+  // The named manager has bootstrapped successfully at least once by now
+  // (previous test). Without the default-only gate, its FIRST bootstrap would
+  // have upserted the Setting (fresh manager ⇒ lastReachable=null ⇒ no dedupe)
+  // and broadcast the event — the baselines were captured before activation.
+  assert.equal(
+    reachabilityUpserts().length,
+    reachabilityUpsertsBaseline,
+    "no plexServerReachable upsert since the named instance activated — that Setting is the DEFAULT server's status, and a named manager writing it would clobber the admin badge",
+  );
+  assert.equal(reachabilityEvents().length, reachabilityEventsBaseline, "no plex:reachability broadcast from the named manager");
+
+  // Belt and braces: force ANOTHER remote bootstrap (stream end → real-timer
+  // backoff → reconnect) and re-assert — the gate must hold on every
+  // bootstrap, not just the first.
+  const remoteSseBefore = sseFetchesFor(PLEX2_URL).length;
+  currentStreamFor(PLEX2_URL).end();
+  await waitForMs(() => sseFetchesFor(PLEX2_URL).length === remoteSseBefore + 1, "the remote reconnect");
+  await drain(30);
+  assert.equal(reachabilityUpserts().length, reachabilityUpsertsBaseline, "still no upsert after a fresh named-instance bootstrap");
+  assert.equal(reachabilityEvents().length, reachabilityEventsBaseline, "still no broadcast after a fresh named-instance bootstrap");
+});
+
+test("registry removal: dropping the slug stops (aborts) its manager on the next reconcile, nothing reconnects, and the default stream stays live", async () => {
+  const remoteSseBefore = sseFetchesFor(PLEX2_URL).length;
+  const lastRemote = sseFetchesFor(PLEX2_URL)[remoteSseBefore - 1];
+  const sig = lastRemote.init.signal;
+  if (!(sig instanceof AbortSignal)) throw new Error("remote SSE request carried no AbortSignal");
+  assert.equal(sig.aborted, false, "sanity: the live remote connection is not yet aborted");
+
+  plexInstancesJson = null; // slug leaves the registry — its connection Settings intentionally stay in place
+  await reconcilePlexEventStream();
+
+  assert.equal(
+    sig.aborted,
+    true,
+    "the map reconcile must stop() the removed manager — registry removal is the only map-level removal trigger, and it aborts the in-flight SSE request",
+  );
+
+  // Release the (fake) pending read, then give a would-be surviving loop its
+  // ~2s backoff window on the REAL clock: a manager merely dropped from the
+  // map without stop() would reconnect here — its connection Settings still
+  // exist and its runLoop still owns `running`.
+  currentStreamFor(PLEX2_URL).end();
+  await sleepMs(2_600);
+  await drain(30);
+  assert.equal(sseFetchesFor(PLEX2_URL).length, remoteSseBefore, "no reconnect after removal");
+
+  // A later map pass must not resurrect it either: the slug is gone from the
+  // registry even though its Setting rows remain.
+  await reconcilePlexEventStream();
+  await drain(30);
+  assert.equal(sseFetchesFor(PLEX2_URL).length, remoteSseBefore, "a later reconcile does not re-create a de-registered instance's manager");
+
+  // The default manager is untouched by a named instance's removal.
+  armLiveRow("post-removal", { state: "playing", progressMs: 1_000n });
+  currentStreamFor(PLEX_URL).push(playingFrame({ sessionKey: "post-removal", state: "playing", viewOffset: 5_000 }));
+  await waitFor(() => updatesFor("plex:post-removal").length === 1, "the default stream must stay live through a named-instance removal");
+});
+
+test("config-read contract: one plexInstances findUnique per map pass + one connection-keys findMany per manager reconcile, nothing else", async () => {
+  // The poller's test harness (the later Phase 2 worker) distinguishes this
+  // module's DB reads from the route's own BY SHAPE — pin it: a steady-state
+  // reconcile (sole remaining manager: default, unchanged config) issues
+  // exactly one registry findUnique and exactly one two-key connection
+  // findMany. getSyncableMediaInstances here would add per-instance
+  // isMediaInstanceConfigured findMany probes (a second two-key read for the
+  // default instance) and fail this; so would a getPlexConfig findUnique.
+  const before = dbCalls.length;
+  await reconcilePlexEventStream();
+  const settingCalls = dbCalls.slice(before).filter((c) => c.model === "setting");
+  const registryReads = settingCalls.filter(
+    (c) => c.op === "findUnique" && (c.args as { where: { key: string } }).where.key === "plexInstances",
+  );
+  assert.equal(registryReads.length, 1, "exactly one plexInstances findUnique per map pass");
+  const connReads = settingCalls.filter((c) => {
+    if (c.op !== "findMany") return false;
+    const keys = (c.args as SettingFindManyArgs).where?.key?.in ?? [];
+    return keys.length === 2 && keys.includes("plexServerUrl") && keys.includes("plexAdminToken");
+  });
+  assert.equal(connReads.length, 1, "exactly one connection-keys findMany for the default manager — the legacy findMany shape, not getPlexConfig's findUnique");
+});
+
+test("phase J teardown: clearing config + registry stops everything — no stray traffic, no console.error across the whole suite", async () => {
+  // Without this the default manager's live connection (pending read + ref'd
+  // 22h recycle timer) keeps the test process alive forever at exit — the
+  // same reason the single-server phases ended with a stop test.
+  plexServerUrl = null;
+  plexAdminToken = null;
+  namedInstanceSettings.clear();
+  await reconcilePlexEventStream(); // default manager: shouldRun=false ⇒ stop()
+  for (const s of sseStreams) s.end(); // release every pending read so each connection's finally runs
+
+  await drain(60);
+  const trafficAfterStop = fetchLog.length;
+  await drain(60);
+  assert.equal(fetchLog.length, trafficAfterStop, "no further traffic once every manager is stopped");
+  assert.ok(!warns.some((w) => w.includes("loop crashed")), "no run loop ever crashed, multi-instance phases included");
+  assert.deepEqual(errors, [], "plex-events must never console.error across the whole suite");
 });

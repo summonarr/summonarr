@@ -11,10 +11,12 @@ import {
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData } from "@/lib/jellyfin";
+import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { type MediaInstanceKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -27,6 +29,8 @@ import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } f
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
+import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
+import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -57,6 +61,18 @@ async function runConcurrent<T>(
 // tmdbId) — a Plex/Jellyfin hit marks every instance's request for that title AVAILABLE.
 const vkey = (tmdbId: number, arrInstance: string) => `${tmdbId}:${arrInstance}`;
 
+// Per-instance presence accumulator: tmdbId → the set of server slugs that hold it.
+// The union maps below answer "is this title anywhere", which is no longer a
+// sufficient answer once a restricted instance's library counts as availability
+// ONLY for the users granted `view` on it — a per-requester decision has to know
+// WHICH server holds the title. Populated from the same per-instance fetch
+// results as the union, so it can never disagree with it and costs no extra query.
+const addPresence = (m: Map<number, Set<string>>, tmdbId: number, slug: string): void => {
+  const existing = m.get(tmdbId);
+  if (existing) existing.add(slug);
+  else m.set(tmdbId, new Set([slug]));
+};
+
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -81,10 +97,16 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
 // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge.
 // Prefer the previously stored mapping so ownership doesn't flip-flop on every sync.
 // Mirrors deduplicateByRatingKey in /api/sync/plex so the two writers agree on the row set.
+// Scoped per instance: ratingKeys are small server-local integers, so the SAME key on two
+// independently-administered servers is routine and legitimate — NOT conflation. Callers run
+// this per instance batch, and the prior-mapping lookup consults only THAT instance's stored
+// rows (an unscoped read could import another server's ratingKey→tmdbId mapping and wrongly
+// drop this server's row).
 type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
 async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   rows: T[],
   mediaType: "MOVIE" | "TV",
+  serverInstance: MediaInstanceKey,
 ): Promise<T[]> {
   const ratingKeyCount = new Map<string, number>();
   for (const r of rows) {
@@ -95,7 +117,7 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
 
   const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
   const existing = await prisma.plexLibraryItem.findMany({
-    where: { mediaType, tmdbId: { in: conflatedTmdbIds } },
+    where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
     select: { tmdbId: true, plexRatingKey: true },
   });
   const fixedIdByRatingKey = new Map<string, number>();
@@ -249,7 +271,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           }
         }
       } else {
-        const firstAired = await getSeriesFirstAired(req.tmdbId);
+        const firstAired = await getSeriesFirstAired(req.tmdbId, req.arrInstance);
         if (firstAired && new Date(firstAired) > now) {
           released = false;
           soonestReleaseDate = firstAired;
@@ -567,17 +589,32 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [plexConfig, jellyfinConfig, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
-    getPlexConfig(),
-    getJellyfinConfig(),
+  const [plexInstances, jellyfinInstances, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+    // Every configured, connection-ready Plex/Jellyfin server (multi-server support) —
+    // each instance's own url/token is resolved via getPlexConfig(instance.slug) /
+    // getJellyfinConfig(instance.slug) inside its arm below.
+    getSyncableMediaInstances("plex"),
+    getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
-  let plexMovieIds = new Map<number, PlexLibraryItemData>();
-  let plexTvIds    = new Map<number, PlexLibraryItemData>();
-  let jfMovieIds   = new Map<number, JellyfinLibraryItemData>();
-  let jfTvIds      = new Map<number, JellyfinLibraryItemData>();
+  // Never reassigned — each configured instance's results are merged in via .set()
+  // rather than replacing the map wholesale (union across servers of a type).
+  const plexMovieIds = new Map<number, PlexLibraryItemData>();
+  const plexTvIds    = new Map<number, PlexLibraryItemData>();
+  const jfMovieIds = new Map<number, JellyfinLibraryItemData>();
+  const jfTvIds    = new Map<number, JellyfinLibraryItemData>();
+  // Per-instance presence, kept ALONGSIDE the union maps above (never replacing
+  // them — ~300 lines of downstream availability logic ask the union "is this
+  // tmdbId present" and must keep behaving identically). These answer the
+  // narrower question the per-user visibility gate needs: WHICH servers hold it.
+  // Same key set as the union by construction — both are filled from the same
+  // per-instance loop below.
+  const plexMovieSlugs = new Map<number, Set<string>>();
+  const plexTvSlugs    = new Map<number, Set<string>>();
+  const jfMovieSlugs   = new Map<number, Set<string>>();
+  const jfTvSlugs      = new Map<number, Set<string>>();
   let plexSyncSucceeded = false;
   let jellyfinSyncSucceeded = false;
 
@@ -593,114 +630,292 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ),
     (async () => {
       if (!plexEnabled) return;
-      if (!plexConfig.url || !plexConfig.token) return;
-      try {
-        const serverUrl = plexConfig.url.replace(/\/$/, "");
-        const token = plexConfig.token;
-        // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
-        // this the scheduled full sync ingested EVERY section, marking media in an
-        // excluded library as owned → availability false positives on every cron tick.
-        const selectedPlexKeys = plexLibrariesRow?.value
-          ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-          : undefined;
-        const sections = await getPlexLibrarySections(serverUrl, token);
-        [plexMovieIds, plexTvIds] = await Promise.all([
-          getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
-          getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
-        ]);
-        const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-        const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-        const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE");
-        const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV");
-        // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the same write.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-          await tx.plexLibraryItem.deleteMany();
-          if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
-          if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        plexSyncSucceeded = true;
-        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+      if (plexInstances.length === 0) return;
+
+      // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
+      // this the scheduled full sync ingested EVERY section, marking media in an
+      // excluded library as owned → availability false positives on every cron tick.
+      // One admin-facing setting, shared across every instance.
+      const selectedPlexKeys = plexLibrariesRow?.value
+        ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+        : undefined;
+
+      // Fan out over every configured, connection-ready Plex server (multi-server
+      // support). Unlike arr, there's no per-request instance to attribute a fetch
+      // failure to — availability here is a union across all configured servers, not
+      // per-instance routing (see media-instances.ts) — so a failed instance simply
+      // contributes nothing to the write below, and plexSyncSucceeded (used only by
+      // the revert/stale-fallback checks further down, which need to know this run's
+      // union data is a COMPLETE picture) requires every configured instance's fetch AND
+      // the write to have both succeeded.
+      const fetched = await Promise.all(
+        plexInstances.map(async (instance) => {
+          try {
+            const cfg = await getPlexConfig(instance.slug);
+            if (!cfg.url || !cfg.token) return { slug: instance.slug, result: null }; // defensive; getSyncableMediaInstances already filters to configured ones
+            const serverUrl = cfg.url.replace(/\/$/, "");
+            const token = cfg.token;
+            const sections = await getPlexLibrarySections(serverUrl, token);
+            const [movieIds, tvIds] = await Promise.all([
+              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
+              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
+            ]);
+            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds } };
+          } catch (err) {
+            console.error(`[sync] Plex check failed for instance "${instance.slug}":`, err);
+            return { slug: instance.slug, result: null };
+          }
+        }),
+      );
+      const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, ...f.result }] : []));
+
+      // Union into the shared maps the ~300 lines of downstream availability logic
+      // already expect — they only ever ask "is this tmdbId in the map," so a plain
+      // per-key merge is correct regardless of which instance's value wins a collision.
+      // The parallel `*Slugs` maps record WHICH instance contributed each key: the
+      // union's collision-winner is arbitrary, so it cannot answer "does the
+      // requester see a server that actually holds this title" once an instance is
+      // restricted. Filled here, inside the same loop, while the per-instance
+      // results are still separate.
+      for (const { slug, movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) {
+          plexMovieIds.set(tmdbId, d);
+          addPresence(plexMovieSlugs, tmdbId, slug);
+        }
+        for (const [tmdbId, d] of tvIds) {
+          plexTvIds.set(tmdbId, d);
+          addPresence(plexTvSlugs, tmdbId, slug);
+        }
+      }
+
+      let libraryWriteSucceeded = true;
+      if (writable.length > 0) {
+        try {
+          // Rows are built + deduped per instance BEFORE the transaction (the dedupe is
+          // a DB read; doing it in-tx would hold the advisory lock across it for nothing).
+          // Dedupe runs per instance batch (never across instances): two servers reusing
+          // the same small integer ratingKey is legitimate, not conflation.
+          const rowsByInstance = await Promise.all(
+            writable.map(async ({ slug, movieIds, tvIds }) => {
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              return {
+                slug,
+                finalMovieRows: await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug),
+                finalTvRows:    await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug),
+              };
+            }),
+          );
+          // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the
+          // same write. Per-instance scoped delete (mirrors the Jellyfin arm below) so one
+          // instance's rewrite never touches another's rows; only instances whose fetch
+          // succeeded are touched at all (G13 — a failed instance's existing rows are left
+          // intact, never wiped).
+          await prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+            for (const { slug, finalMovieRows, finalTvRows } of rowsByInstance) {
+              await tx.plexLibraryItem.deleteMany({ where: { serverInstance: slug } });
+              if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
+              if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
+            }
+          }, { timeout: BATCH_TX_TIMEOUT });
+        } catch (err) {
+          console.error("[sync] Plex library write failed:", err);
+          libraryWriteSucceeded = false;
+        }
+      }
+
+      plexSyncSucceeded = libraryWriteSucceeded && fetched.every((f) => f.result !== null);
+      if (plexSyncSucceeded) {
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale
+        // source. Means "every configured instance synced clean this run."
         await prisma.setting.upsert({
           where: { key: "lastPlexSyncSucceededAt" },
           update: { value: String(Date.now()) },
           create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
         }).catch((err) => console.error("[sync] failed to stamp lastPlexSyncSucceededAt:", err));
+      }
+
+      // TVEpisodeCache has no serverInstance column (episodes are TMDB-anchored, shared
+      // data — see media-instances.ts) — a per-instance episode-fetch failure can't be
+      // handled by leaving just THAT instance's rows stale the way the scoped
+      // PlexLibraryItem delete above does, so any single failure here skips the WHOLE
+      // write and leaves existing rows untouched — the same all-or-nothing contract the
+      // pre-multi-instance code already had (getPlexTVEpisodes throwing skipped the
+      // delete+insert entirely; reaching the write with an empty result means the
+      // libraries genuinely have no episodes, so the stale rows must be cleared rather
+      // than left as phantom ownership). Looping the delete+insert TOGETHER per instance
+      // would also have each instance's pass wipe the previous instance's just-written
+      // rows, so every instance's rows are accumulated and the delete+insert runs ONCE
+      // at the end. Each fetch runs against ITS OWN instance's sections list — Plex
+      // ratingKeys are server-local and never leave the per-instance fetch, so nothing
+      // can resolve episodes onto another server's show.
+      let allEpisodesFetched = true;
+      const allPlexEpisodeRows: Array<{ source: "plex" } & PlexTVEpisodeData> = [];
+      for (const { slug, serverUrl, token, sections } of writable) {
         try {
-          // Full replace: clear unconditionally then insert. getPlexTVEpisodes THROWS on
-          // a fetch failure (caught below → no clear), so reaching here with an empty
-          // result means the library genuinely has no episodes — clear the stale ones
-          // rather than leaving phantom ownership (the old `if (>0)` guard never cleared).
           const episodes = await getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections);
-          const episodeRows = episodes.map((e) => ({ source: "plex" as const, ...e }));
+          allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
+        } catch (err) {
+          console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);
+          allEpisodesFetched = false;
+        }
+      }
+      // The `writable.length === fetched.length` term is load-bearing: an instance
+      // whose LIBRARY fetch failed never enters `writable`, so its episodes were
+      // never fetched at all — without this term the whole-table rewrite below
+      // would proceed and wipe that server's episode rows for the length of its
+      // outage while every other safeguard in this arm correctly preserves its
+      // data. A library-WRITE failure deliberately does not veto (the fetched
+      // episode data is still a complete picture).
+      if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
+        try {
           await prisma.$transaction(async (tx) => {
             // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
             // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+            if (allPlexEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allPlexEpisodeRows);
           }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Plex TV episode cache failed:", err);
         }
-      } catch (err) {
-        console.error("[sync] Plex check failed:", err);
       }
     })(),
     (async () => {
       if (!jellyfinEnabled) return;
-      if (!jellyfinConfig.url || !jellyfinConfig.apiKey) return;
-      try {
-        const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
-        const apiKey  = jellyfinConfig.apiKey;
-        // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
-        // otherwise the scheduled full sync ingests every library and marks excluded
-        // media as owned.
-        const selectedJellyfinIds = jfLibrariesRow?.value
-          ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-          : undefined;
-        [jfMovieIds, jfTvIds] = await Promise.all([
-          getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
-          getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
-        ]);
-        const movieRows = Array.from(jfMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-        const tvRows    = Array.from(jfTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-        // Advisory lock 2001,2 — matches /api/sync/jellyfin so the two callers can't race the same write.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-          await tx.jellyfinLibraryItem.deleteMany();
-          if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
-          if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        jellyfinSyncSucceeded = true;
-        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+      if (jellyfinInstances.length === 0) return;
+
+      // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
+      // otherwise the scheduled full sync ingests every library and marks excluded
+      // media as owned. One admin-facing setting, shared across every instance.
+      const selectedJellyfinIds = jfLibrariesRow?.value
+        ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+        : undefined;
+
+      // Fan out over every configured, connection-ready Jellyfin server (multi-server
+      // support). Unlike arr, there's no per-request instance to attribute a fetch
+      // failure to — availability here is a union across all configured servers, not
+      // per-instance routing (see media-instances.ts) — so a failed instance simply
+      // contributes nothing to the write below, and jellyfinSyncSucceeded (used only by
+      // the revert/stale-fallback checks further down, which need to know this run's
+      // union data is a COMPLETE picture) requires every configured instance's fetch AND
+      // the write to have both succeeded.
+      const fetched = await Promise.all(
+        jellyfinInstances.map(async (instance) => {
+          try {
+            const cfg = await getJellyfinConfig(instance.slug);
+            if (!cfg.url || !cfg.apiKey) return { slug: instance.slug, result: null }; // defensive; getSyncableMediaInstances already filters to configured ones
+            const baseUrl = cfg.url.replace(/\/$/, "");
+            const apiKey = cfg.apiKey;
+            const [movieIds, tvIds] = await Promise.all([
+              getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
+              getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
+            ]);
+            return { slug: instance.slug, result: { baseUrl, apiKey, movieIds, tvIds } };
+          } catch (err) {
+            console.error(`[sync] Jellyfin check failed for instance "${instance.slug}":`, err);
+            return { slug: instance.slug, result: null };
+          }
+        }),
+      );
+      const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, ...f.result }] : []));
+
+      // Union into the shared maps the ~300 lines of downstream availability logic
+      // already expect — they only ever ask "is this tmdbId in the map," so a plain
+      // per-key merge is correct regardless of which instance's value wins a collision.
+      // The parallel `*Slugs` maps record WHICH instance contributed each key — see
+      // the identical comment in the Plex arm above for why the union alone can no
+      // longer answer the per-requester visibility question.
+      for (const { slug, movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) {
+          jfMovieIds.set(tmdbId, d);
+          addPresence(jfMovieSlugs, tmdbId, slug);
+        }
+        for (const [tmdbId, d] of tvIds) {
+          jfTvIds.set(tmdbId, d);
+          addPresence(jfTvSlugs, tmdbId, slug);
+        }
+      }
+
+      let libraryWriteSucceeded = true;
+      if (writable.length > 0) {
+        try {
+          // Advisory lock 2001,2 — matches /api/sync/jellyfin. Per-instance scoped delete
+          // (mirrors the arr side's per-slug scoping above) so one instance's rewrite
+          // never touches another's rows; only instances whose fetch succeeded are
+          // touched at all (G13 — a failed instance's existing rows are left intact,
+          // never wiped).
+          await prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
+            for (const { slug, movieIds, tvIds } of writable) {
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+              await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: slug } });
+              if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
+              if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
+            }
+          }, { timeout: BATCH_TX_TIMEOUT });
+        } catch (err) {
+          console.error("[sync] Jellyfin library write failed:", err);
+          libraryWriteSucceeded = false;
+        }
+      }
+
+      jellyfinSyncSucceeded = libraryWriteSucceeded && fetched.every((f) => f.result !== null);
+      if (jellyfinSyncSucceeded) {
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale
+        // source. Means "every configured instance synced clean this run."
         await prisma.setting.upsert({
           where: { key: "lastJellyfinSyncSucceededAt" },
           update: { value: String(Date.now()) },
           create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
         }).catch((err) => console.error("[sync] failed to stamp lastJellyfinSyncSucceededAt:", err));
+      }
 
+      // TVEpisodeCache has no serverInstance column (episodes are TMDB-anchored, shared
+      // data — see media-instances.ts) — a per-instance episode-fetch failure can't be
+      // handled by leaving just THAT instance's rows stale the way the scoped
+      // JellyfinLibraryItem delete above does, so any single failure here skips the WHOLE
+      // write and leaves existing rows untouched — the same all-or-nothing contract the
+      // pre-multi-instance code already had (getJellyfinTVEpisodes throwing skipped the
+      // delete+insert entirely). Looping the delete+insert TOGETHER per instance would
+      // also have each instance's pass wipe the previous instance's just-written rows, so
+      // every instance's rows are accumulated and the delete+insert runs ONCE at the end.
+      let allEpisodesFetched = true;
+      const allEpisodeRows: Array<{ source: "jellyfin" } & JellyfinTVEpisodeData> = [];
+      for (const { slug, baseUrl, apiKey, tvIds } of writable) {
+        // Built from THIS instance's own TV map, never the cross-instance union: Jellyfin
+        // item ids are server-local and can collide across independently-administered
+        // servers, so a global series map could resolve episodes onto the wrong show.
         const jfSeriesMap = new Map<string, number>();
-        for (const [tmdbId, data] of jfTvIds) {
+        for (const [tmdbId, data] of tvIds) {
           if (data.itemId) jfSeriesMap.set(data.itemId, tmdbId);
         }
         try {
-          // Full replace: clear then insert (see the Plex block above). getJellyfinTVEpisodes
-          // throws on a fetch failure (caught below → no clear), so an empty result here is a
-          // genuinely-empty library and the stale episode ownership should be cleared.
           const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, jfSeriesMap);
-          const episodeRows = episodes.map((e) => ({ source: "jellyfin" as const, ...e }));
+          allEpisodeRows.push(...episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+        } catch (err) {
+          console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);
+          allEpisodesFetched = false;
+        }
+      }
+      // `writable.length === fetched.length` — same load-bearing term as the Plex
+      // arm above: a library-fetch failure keeps the instance out of `writable`,
+      // so its episodes were never fetched; the whole-table rewrite must not run
+      // on that incomplete union or the down server's episode rows are wiped for
+      // the length of its outage.
+      if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
+        try {
           await prisma.$transaction(async (tx) => {
             // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
-            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+            if (allEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allEpisodeRows);
           }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Jellyfin TV episode cache failed:", err);
         }
-      } catch (err) {
-        console.error("[sync] Jellyfin check failed:", err);
       }
     })(),
   ]);
@@ -708,6 +923,40 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     if (result.status === "rejected") {
       console.error("[sync] Unexpected top-level sync rejection:", result.reason);
     }
+  }
+
+  // Sweep library rows belonging to servers that are no longer REGISTERED.
+  //
+  // Availability readers are an unscoped union across every row, and no sync
+  // path ever targets a de-registered slug again — so an orphaned row makes
+  // that server's whole catalogue read "in library" forever (guardrail 35).
+  // /api/admin/media-instances deletes on removal, but two cases slip past it:
+  // a removal that lands DURING this run (the arms above captured the instance
+  // list before their multi-minute library walk, so the write can re-insert
+  // rows for a slug removed in the meantime), and rows orphaned by a release
+  // that predates that cleanup. Re-reading the registry here — after the
+  // writes, in the same run — closes both.
+  //
+  // Scoped to REGISTERED (getMediaInstances), never merely syncable: an
+  // instance that is registered but temporarily unconfigured (an admin
+  // mid-edit, a blanked token) must keep its rows, exactly as the arms above
+  // leave a failed instance's rows intact.
+  try {
+    const [registeredPlex, registeredJellyfin] = await Promise.all([
+      getMediaInstances("plex"),
+      getMediaInstances("jellyfin"),
+    ]);
+    const [orphanedPlex, orphanedJellyfin] = await Promise.all([
+      prisma.plexLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredPlex.map((i) => i.slug) } } }),
+      prisma.jellyfinLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredJellyfin.map((i) => i.slug) } } }),
+    ]);
+    if (orphanedPlex.count > 0 || orphanedJellyfin.count > 0) {
+      console.warn(
+        `[sync] Swept library rows for de-registered servers — plex: ${orphanedPlex.count}, jellyfin: ${orphanedJellyfin.count}`,
+      );
+    }
+  } catch (err) {
+    console.error("[sync] De-registered-instance sweep failed:", err);
   }
 
   // Demote AVAILABLE requests that have dropped out of *both* the *arr caches and the
@@ -722,8 +971,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // proof of absence — reading it as "not in library" would false-demote an item that's
   // actually present in the unreached library. Only trust a library map when its source
   // synced; skip the demote entirely while a configured source is down.
-  const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
-  const jellyfinConfiguredEnabled = jellyfinEnabled && !!(jellyfinConfig.url && jellyfinConfig.apiKey);
+  const plexConfiguredEnabled = plexEnabled && plexInstances.length > 0;
+  const jellyfinConfiguredEnabled = jellyfinEnabled && jellyfinInstances.length > 0;
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed
     // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
@@ -780,14 +1029,156 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ? stillPendingAll
     : stillPendingAll.filter((r) => !revertedIds.has(r.id));
 
+  // ── Per-user media-server visibility (multi-server grants) ─────────────────
+  //
+  // A `restricted` Plex/Jellyfin instance contributes availability ONLY to users
+  // granted `view` on it, so "is this request's title available" stopped being
+  // one global answer: the SAME title on the SAME server is available to a
+  // granted requester and not-yet-available to an ungranted one. The AVAILABLE
+  // flip and the notification both follow that per-requester answer — an
+  // ungranted requester's row stays PENDING/APPROVED and un-notified until a
+  // copy lands on a server they can see, or until the grant is issued.
+  //
+  // Cost: no extra round-trip. plexInstances/jellyfinInstances were read once at
+  // the top of this run (getSyncableMediaInstances → MediaInstanceConfig carries
+  // `restricted`), and the two grant columns ride the user.findMany the
+  // marking/notify passes already issue — never a per-requester query
+  // (guardrail 31). visibleInstancesFor is the PURE resolver built for exactly
+  // this many-requesters-one-registry-read shape.
+  //
+  // NOT applied to the two ARR marking passes above, deliberately: Radarr/Sonarr
+  // availability is server-agnostic (the *arr knows a file exists in a root
+  // folder, not which media server indexes it), so there is no per-instance
+  // presence to gate on. In every real topology the *arr feeds the DEFAULT
+  // server, which is visible to everyone by construction.
+  //
+  // visibilityEnforced is the byte-identical escape hatch (guardrail 35): with
+  // no restricted instance configured — every single-server deployment, and
+  // every multi-server one that hasn't opted in — every configured slug is
+  // visible to everyone, the per-user answer collapses to the union, and every
+  // decision below short-circuits to the pre-grants code path.
+  const visibilityEnforced =
+    plexInstances.some((i) => i.restricted) || jellyfinInstances.some((i) => i.restricted);
+
+  type RequesterRow = { id: string; mediaServer: string | null; role: string; permissions: bigint; mediaServerGrants: unknown };
+  // One batched read of the requester columns every per-user decision below
+  // needs. `mediaServer` is the pre-existing preference filter; `role` +
+  // `permissions` + `mediaServerGrants` are the grants gate's inputs — extra
+  // COLUMNS on a query that already ran, not a new query. `role` is NOT
+  // optional: the raw `permissions` column is `@default(0)` and is only seeded
+  // by a MANUAL one-shot script, so an upgraded deployment can hold a
+  // role="ADMIN" row with permissions=0. Passing that raw would deny an admin
+  // the ADMIN short-circuit HERE while every read path grants it (they all go
+  // through effectivePermissions), stranding the operator's own requests as
+  // PENDING while the UI insists the title is available.
+  const loadRequesters = async (userIds: string[]): Promise<Map<string, RequesterRow>> => {
+    const rows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(userIds)] } },
+      select: { id: true, mediaServer: true, role: true, permissions: true, mediaServerGrants: true },
+    });
+    const byId = new Map<string, RequesterRow>();
+    for (const u of rows) byId.set(u.id, u);
+    return byId;
+  };
+
+  // A requester's visible slugs, memoised for the whole run: a title present in
+  // several libraries asks the same question about the same user repeatedly.
+  const visibilityCache = new Map<string, VisibleServerInstances>();
+  const visibilityOf = (requesters: Map<string, RequesterRow>, userId: string): VisibleServerInstances => {
+    const hit = visibilityCache.get(userId);
+    if (hit) return hit;
+    // A requester whose row is missing (deleted between the snapshot and now)
+    // resolves as 0n permissions + no grants — the least-privileged answer, so an
+    // absent row can never WIDEN visibility. Mirrors getVisibleServerInstances'
+    // null-session branch. Safe to memoise: within a run a row can only go away,
+    // never appear, so a cached least-privileged answer can never be the stale
+    // one that matters.
+    const u = requesters.get(userId);
+    const vis = visibleInstancesFor(
+      // effectivePermissions, never the raw column — see loadRequesters. This
+      // is what makes the sync gate agree with every read path for a legacy
+      // ADMIN row whose permissions were never seeded.
+      u ? effectivePermissions(u.role, u.permissions) : 0n,
+      parseMediaServerGrants(u?.mediaServerGrants),
+      plexInstances,
+      jellyfinInstances,
+    );
+    visibilityCache.set(userId, vis);
+    return vis;
+  };
+
+  // "Is this title on a <service> server THIS requester can see?" — the
+  // per-viewer replacement for the union map's `.has()`. The union check runs
+  // FIRST and unchanged: a title absent from every configured server is absent
+  // for everyone and no grant can conjure it, so the overwhelmingly common
+  // "not present" answer costs exactly what it did before.
+  const presentForRequester = (
+    req: { tmdbId: number; mediaType: string; requestedBy: string },
+    service: "plex" | "jellyfin",
+    requesters: Map<string, RequesterRow>,
+  ): boolean => {
+    const isMovie = req.mediaType === "MOVIE";
+    const union = service === "plex"
+      ? (isMovie ? plexMovieIds : plexTvIds)
+      : (isMovie ? jfMovieIds : jfTvIds);
+    if (!union.has(req.tmdbId)) return false;
+    if (!visibilityEnforced) return true; // nothing restricted ⇒ the union IS the per-user answer
+    const holders = (service === "plex"
+      ? (isMovie ? plexMovieSlugs : plexTvSlugs)
+      : (isMovie ? jfMovieSlugs : jfTvSlugs)
+    ).get(req.tmdbId);
+    // Unreachable — the union and presence maps are filled in the same loop — but
+    // fail CLOSED rather than fall back to the union if they ever diverge.
+    if (!holders) return false;
+    const vis = visibilityOf(requesters, req.requestedBy);
+    return (service === "plex" ? vis.plex : vis.jellyfin).some((slug) => holders.has(slug));
+  };
+
   const markLibraryRequests = async (
     movieIds: Map<number, unknown>,
     tvIds: Map<number, unknown>,
     source: "plex" | "jellyfin",
   ): Promise<number> => {
-    const toMark = stillPending.filter((req) =>
+    const candidates = stillPending.filter((req) =>
       req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
     );
+    if (candidates.length === 0) return 0;
+
+    // GRANTS GATE — PRE-CAS BY CONSTRUCTION.
+    //
+    // This is a plain JS filter over the already-materialised candidate array,
+    // and its position is the whole correctness argument:
+    //   • guardrail 14 holds untouched. claimAvailableNotificationWinners is
+    //     still the ONLY writer of notifiedAvailable; it simply never receives a
+    //     gated id, so the exactly-once claim across the Plex and Jellyfin
+    //     passes is unchanged.
+    //   • the claim is NOT burned for a gated requester. (Contrast
+    //     notify-available.ts's deactivatedAt filter, which sits AFTER the
+    //     UPDATE … RETURNING and deliberately burns the claim so a re-enabled
+    //     account can't replay a stale backlog. For grants that would be exactly
+    //     wrong — an ungranted requester would permanently lose the
+    //     notification even after being granted.) A gated row stays
+    //     PENDING/APPROVED with notifiedAvailable=false, so the next run
+    //     re-evaluates it and flips + notifies as soon as the grant lands or a
+    //     copy appears on a server they can see.
+    //   • guardrail 15 holds untouched. `stillPending` is still READ exactly once
+    //     per run and both passes still share that one snapshot; the invariant
+    //     constrains the read, not what a pass filters out of it afterwards.
+    //
+    // Gating `candidates` (rather than the later toNotify/toMarkOnly splits)
+    // covers all three downstream branches at once — notify, flip-without-notify,
+    // and the already-notified flip — so an invisible title can never move a
+    // requester's row to AVAILABLE by any route.
+    let requesters = new Map<string, RequesterRow>();
+    let toMark = candidates;
+    if (visibilityEnforced) {
+      // Loaded at the CANDIDATE scope (wider than the `unnotified` scope the
+      // pre-grants code used) because the gate must run before toMark is settled;
+      // the same rows are then reused for the mediaServer split below, so this is
+      // still ONE user query per pass.
+      requesters = await loadRequesters(candidates.map((r) => r.requestedBy));
+      toMark = candidates.filter((req) => presentForRequester(req, source, requesters));
+    }
     if (toMark.length === 0) return 0;
 
     // Re-fetch notifiedAvailable to catch any updates the concurrent Plex pass may have committed
@@ -800,22 +1191,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const unnotified = toMark.filter((r) => !alreadyNotifiedIds.has(r.id));
     if (unnotified.length > 0) {
 
-      const userRows = await prisma.user.findMany({
-        where: { id: { in: unnotified.map((r) => r.requestedBy) } },
-        select: { id: true, mediaServer: true },
-      });
-      const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+      // Already loaded at the candidate scope when the grants gate ran above;
+      // otherwise issue exactly the query the pre-grants code issued.
+      if (!visibilityEnforced) {
+        requesters = await loadRequesters(unnotified.map((r) => r.requestedBy));
+      }
 
       // Users with a mediaServer preference only get notified by their preferred source;
       // users with no preference get notified by whichever source sees the item first
       const toNotify = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        const ms = requesters.get(r.requestedBy)?.mediaServer ?? null;
         return !ms || ms === source;
       });
 
       // Mark available without notifying users whose preferred server is a different source
       const toMarkOnly = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        const ms = requesters.get(r.requestedBy)?.mediaServer ?? null;
         return !!ms && ms !== source;
       });
 
@@ -904,19 +1295,21 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const jellyfinStale = jellyfinConfigured && !jellyfinSyncSucceeded &&
       lastJellyfinSuccessAt != null && (nowMs - lastJellyfinSuccessAt) > STALE_SYNC_FALLBACK_MS;
 
-    const userRows = await prisma.user.findMany({
-      where: { id: { in: pendingAvailableNotify.map((r) => r.requestedBy) } },
-      select: { id: true, mediaServer: true },
-    });
-    const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+    const requesters = await loadRequesters(pendingAvailableNotify.map((r) => r.requestedBy));
 
     // Collect candidate ids, then do a single CAS updateMany + a single notify per channel
     // rather than one-DB-roundtrip-per-request and one-notify-call-per-request.
     const toNotify: typeof pendingAvailableNotify = [];
     for (const req of pendingAvailableNotify) {
-      const ms = userMediaServer.get(req.requestedBy) ?? null;
-      const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
-      const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
+      const ms = requesters.get(req.requestedBy)?.mediaServer ?? null;
+      // Per-viewer presence (grants): "in Plex" means "on a Plex server THIS
+      // requester can see", so the notification follows the same gate as the
+      // AVAILABLE flip in markLibraryRequests. Also pre-CAS — the filter builds
+      // toNotify, and only that array reaches claimAvailableNotificationWinners,
+      // so a gated row's claim is never burned and the next run re-offers it.
+      // With nothing restricted this is exactly the union `.has()` it replaced.
+      const inPlex = presentForRequester(req, "plex", requesters);
+      const inJellyfin = presentForRequester(req, "jellyfin", requesters);
       // "Unusable" = this source cannot prove presence either way: not configured/enabled
       // at all, OR its sync has been failing past the 24h stale window. A source that
       // synced fine this run is NOT unusable, so its empty result still blocks a false
@@ -925,8 +1318,19 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // never contribute and a permanently-broken Plex starved every plex-pinned user's
       // "now available" notification forever, which is exactly what the fallback above
       // was written to prevent.
-      const plexUnusable = !plexConfigured || plexStale;
-      const jellyfinUnusable = !jellyfinConfigured || jellyfinStale;
+      // Grants extend "unusable" per requester: someone who can see NO configured
+      // server of a type is in exactly the position of a deployment with that type
+      // unconfigured — it can never prove presence for them either way, so it must
+      // not block the OTHER source's notify. Reachable when the DEFAULT instance of
+      // a type is unconfigured and only a restricted named one exists (the default
+      // is visible to everyone by construction, so a configured default always
+      // makes this false). Folding grants into the existing unusable term — not
+      // just into inPlex/inJellyfin — is what preserves the fallback's
+      // anti-starvation contract for a per-user answer.
+      const noVisiblePlex = visibilityEnforced && visibilityOf(requesters, req.requestedBy).plex.length === 0;
+      const noVisibleJellyfin = visibilityEnforced && visibilityOf(requesters, req.requestedBy).jellyfin.length === 0;
+      const plexUnusable = !plexConfigured || plexStale || noVisiblePlex;
+      const jellyfinUnusable = !jellyfinConfigured || jellyfinStale || noVisibleJellyfin;
       const shouldNotify = !ms
         ? inPlex || inJellyfin || (plexUnusable && jellyfinUnusable)
         : ms === "plex"

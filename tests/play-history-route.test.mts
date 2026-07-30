@@ -54,12 +54,24 @@
 // dns.lookup is stubbed as belt-and-braces for the plex.tv owner fetch.
 //
 // The one deliberate fiction (documented at the fake): the route fires
-// reconcilePlexEventStream() fire-and-forget on every run. Reconcile shares the
-// plexServerUrl/plexAdminToken settings and, satisfied, would open a real SSE
-// connection whose 22h recycle timer leaks under the test process AND whose
-// bootstrap would double-finalize the very rows this file seeds. Reconcile is
-// tested in plex-events.test.mts; here its 2-key settings read is STARVED so it
-// early-returns shouldRun=false, keeping this file focused on the poller writer.
+// reconcilePlexEventStream() fire-and-forget on every run. Satisfied, reconcile
+// would open a real SSE connection whose 22h recycle timer leaks under the test
+// process AND whose bootstrap would double-finalize the very rows this file
+// seeds. Reconcile is tested in plex-events.test.mts; here it is STARVED — and
+// the two callers' DB reads are told apart BY SHAPE, not by counting:
+//   - plex-events reads the registry via ONE findUnique on `plexInstances`
+//     (served — an absent key yields a default-only manager map) and each
+//     manager's connection config via ONE findMany over
+//     [plex<Slug>ServerUrl, plex<Slug>AdminToken] (doReconcile). That findMany
+//     shape is starved UNCONDITIONALLY below, so every manager resolves
+//     shouldRun=false and no SSE loop ever opens.
+//   - the route reads its own Plex config via getMediaInstances (the same
+//     served `plexInstances` findUnique) + per-instance getPlexConfig — two
+//     findUniques — which the findUnique stub serves from syncSettings. The
+//     route deliberately does NOT use getSyncableMediaInstances for Plex:
+//     its isMediaInstanceConfigured check would issue a findMany
+//     byte-identical to doReconcile's and collapse this shape split (the old
+//     harness needed a fragile odd/even parity counter for exactly that).
 // Real timers throughout; every source read is a bounded findMany, so short
 // setImmediate drains suffice for the fire-and-forget markers/logAudit tails.
 import { test, beforeEach } from "node:test";
@@ -108,6 +120,7 @@ function rec(model: string, op: string, args: unknown): void {
 interface ActiveRow {
   id: string;
   source: string;
+  serverInstance: string;
   sessionKey: string;
   startedAt: Date;
   lastSeenAt: Date;
@@ -155,11 +168,17 @@ const activeStore = new Map<string, ActiveRow>();
 let playHistoryCreateError: Error | null = null;
 
 // Settings live in two maps to keep the reconcile-starvation fiction honest:
-//   - `settings`      : play-history enable flags + thresholds (loadSettings read)
-//   - `syncSettings`  : the 4 connection URLs/keys, served ONLY to the route's
-//                        4-key SYNC read (the ONE read that includes jellyfinUrl).
-//     reconcile's 2-key {plexServerUrl,plexAdminToken} read never sees a url →
-//     shouldRun=false → no SSE connection opens.
+//   - `settings`      : play-history enable flags + thresholds (loadSettings
+//                        read) and the instance registries
+//                        (plexInstances/jellyfinInstances), served to any read.
+//   - `syncSettings`  : the per-instance connection URLs/keys. Served to
+//                        findUnique reads (getPlexConfig / getJellyfinConfig —
+//                        the route's own config path) and to jellyfin-shaped
+//                        findManys (getSyncableMediaInstances' configured
+//                        check), but NEVER to a plex-connection-shaped findMany
+//                        — that shape belongs exclusively to plex-events'
+//                        per-manager doReconcile and is starved unconditionally
+//                        so shouldRun=false and no SSE connection opens.
 const settings = new Map<string, string>();
 const syncSettings = new Map<string, string>();
 const settingUpserts: Array<{ key: string; value: string }> = [];
@@ -177,6 +196,7 @@ const sessionRows = new Set<string>();
 interface ActiveWhere {
   id?: string | { in: string[] };
   source?: string;
+  serverInstance?: string;
   lastSeenAt?: Date | { lt: Date };
   OR?: unknown[];
 }
@@ -191,6 +211,9 @@ function matchesFindMany(row: ActiveRow, where?: ActiveWhere): boolean {
   if (typeof where.id === "object" && "in" in where.id) return where.id.in.includes(row.id);
   if (typeof where.id === "string") return row.id === where.id;
   if (where.source !== undefined && row.source !== where.source) return false;
+  // Both sources' absence sweeps are serverInstance-scoped — honoring the
+  // filter is what makes the cross-instance isolation tests below meaningful.
+  if (where.serverInstance !== undefined && row.serverInstance !== where.serverInstance) return false;
   if (where.lastSeenAt && typeof where.lastSeenAt === "object" && "lt" in where.lastSeenAt) {
     return row.lastSeenAt.getTime() < where.lastSeenAt.lt.getTime();
   }
@@ -202,9 +225,24 @@ const fakePrisma = {
     findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
       rec("setting", "findMany", args);
       const keys = args?.where?.key?.in ?? [];
-      // The route's SYNC read is the ONLY read that asks for jellyfinUrl; only
-      // it may see the connection URLs (see the syncSettings comment above).
-      const isSyncRead = keys.includes("jellyfinUrl");
+      // A findMany over plex<Slug>ServerUrl/plex<Slug>AdminToken is, by
+      // construction, plex-events' per-manager doReconcile connection read —
+      // the route's own Plex config path is findUnique-shaped (getPlexConfig)
+      // precisely so this starvation can be UNCONDITIONAL. Serving these keys
+      // here would let reconcile open a real SSE connection under test (22h
+      // recycle timer leak + a bootstrap that double-finalizes seeded rows).
+      // Side benefit: if the route ever regresses to a plex findMany read
+      // (e.g. getSyncableMediaInstances("plex")), every plex test in this
+      // file fails loudly instead of the two callers silently interleaving.
+      const isPlexEventsRead = keys.some((k) => /^plex([A-Z][A-Za-z0-9]*)?(ServerUrl|AdminToken)$/.test(k));
+      if (isPlexEventsRead) return [];
+      // The media-instance registry's isMediaInstanceConfigured("jellyfin", slug)
+      // check is the only OTHER caller of this bulk path; it asks for
+      // jellyfin<Slug>Url/jellyfin<Slug>ApiKey (jellyfinUrl/jellyfinApiKey for the
+      // default instance, jellyfinRemoteUrl/jellyfinRemoteApiKey for a named one —
+      // see jellyfinSettingKey in media-instances.ts) and must keep seeing them
+      // for EVERY instance, not just the default's exact key spelling.
+      const isSyncRead = keys.some((k) => /^jellyfin([A-Z][A-Za-z0-9]*)?(Url|ApiKey)$/.test(k));
       const rows: Array<{ key: string; value: string }> = [];
       for (const k of keys) {
         if (isSyncRead && syncSettings.has(k)) rows.push({ key: k, value: syncSettings.get(k)! });
@@ -217,6 +255,23 @@ const fakePrisma = {
       settingUpserts.push({ key: args.where.key, value: args.create.value });
       settings.set(args.where.key, args.create.value);
       return args.create;
+    },
+    // getJellyfinConfig, getPlexConfig (the route's per-instance connection
+    // reads), and the media-instance registry all read single keys via
+    // findUnique rather than the bulk findMany above. Connection URLs/keys
+    // live in syncSettings; a registry key (jellyfinInstances/plexInstances)
+    // with nothing seeded returns null, so the instance list resolves to just
+    // the default ("") instance — exactly what every single-server test here
+    // assumes. NOTE: the registry findUnique is shared by the route AND
+    // plex-events' map reconcile — serving it to both is fine, because each
+    // manager it spawns starves on the findMany above and never starts.
+    findUnique: async (args?: { where?: { key?: string } }) => {
+      rec("setting", "findUnique", args);
+      const key = args?.where?.key;
+      if (!key) return null;
+      if (syncSettings.has(key)) return { key, value: syncSettings.get(key)! };
+      if (settings.has(key)) return { key, value: settings.get(key)! };
+      return null;
     },
   },
   activeSession: {
@@ -337,11 +392,23 @@ const fakePrisma = {
 // ── scripted fetch: /status/sessions, /Sessions, plex.tv owner, markers ─────
 const PLEX_URL = "http://10.66.0.1:32400"; // RFC1918 literal: admin SSRF, no DNS
 const JF_URL = "http://10.66.0.2:8096";
+// A second, independently-configured Jellyfin server (multi-server support —
+// the guardrail-20-style session-id-collision test uses this). Unconfigured
+// (no registry/connection Settings seeded) by default, so every existing
+// single-instance test is unaffected — getSyncableMediaInstances resolves to
+// just the default instance unless a test explicitly seeds jellyfinInstances.
+const JF_REMOTE_URL = "http://10.66.0.3:8096";
+// Second Plex server, same deal: dormant until a test seeds `plexInstances` +
+// the plexRemoteServerUrl/plexRemoteAdminToken connection keys.
+const PLEX_REMOTE_URL = "http://10.66.0.4:32400";
 type FetchRecord = { url: string; method: string };
 const fetchLog: FetchRecord[] = [];
 let plexSnapshot: Array<Record<string, unknown>> = [];
+let plexRemoteSnapshot: Array<Record<string, unknown>> = [];
 let jfSnapshot: Array<Record<string, unknown>> = [];
+let jfRemoteSnapshot: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
+let plexRemoteSessionsStatus = 200;
 let jfSessionsStatus = 200;
 
 const okJson = (body: unknown, status = 200) =>
@@ -354,12 +421,16 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return okJson({ id: 9, email: "owner@plex.tv", username: "owner", thumb: "" });
   }
   if (url.pathname === "/status/sessions") {
+    if (url.origin === PLEX_REMOTE_URL) {
+      return okJson({ MediaContainer: { Metadata: plexRemoteSnapshot } }, plexRemoteSessionsStatus);
+    }
     return okJson({ MediaContainer: { Metadata: plexSnapshot } }, plexSessionsStatus);
   }
   if (url.pathname.startsWith("/library/metadata/")) {
     return okJson({ MediaContainer: { Metadata: [{}] } }); // no markers → no marker updateMany
   }
   if (url.pathname === "/Sessions") {
+    if (url.origin === JF_REMOTE_URL) return okJson(jfRemoteSnapshot, jfSessionsStatus);
     return okJson(jfSnapshot, jfSessionsStatus);
   }
   throw new Error(`unexpected fetch in test: ${String(input)}`);
@@ -424,6 +495,7 @@ function makeRow(sessionKey: string, over: Partial<ActiveRow> = {}): ActiveRow {
   return {
     id: `plex:${sessionKey}`,
     source: "plex",
+    serverInstance: "", // default instance; named-instance rows override id + serverInstance together
     sessionKey,
     startedAt: agoReal(2_000_000),
     lastSeenAt: agoReal(30_000),
@@ -563,8 +635,10 @@ beforeEach(() => {
   settingUpserts.length = 0;
   activeStore.clear();
   plexSnapshot = [];
+  plexRemoteSnapshot = [];
   jfSnapshot = [];
   plexSessionsStatus = 200;
+  plexRemoteSessionsStatus = 200;
   jfSessionsStatus = 200;
   playHistoryCreateError = null;
   // Clear the process-global recently-finalized ledger so a mark from a prior
@@ -912,6 +986,190 @@ test("a brand-new jellyfin session is created from the /Sessions snapshot", asyn
   assert.equal(created[0].progressMs, 30_000n, "positionTicks (100ns) convert to ms");
 });
 
+test("multi-server: two Jellyfin instances reporting the SAME raw playSessionId in one tick create TWO distinct ActiveSession rows, not a collision", async () => {
+  // Register a second, independently-configured Jellyfin server (media-
+  // instance-registry.ts's JSON registry + its own connection Settings —
+  // jellyfinRemoteUrl/jellyfinRemoteApiKey, see media-instances.ts). getSyncableMediaInstances
+  // then resolves BOTH the default and "remote" as syncable.
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  syncSettings.set("jellyfinRemoteUrl", JF_REMOTE_URL);
+  syncSettings.set("jellyfinRemoteApiKey", "jf-api-key-remote");
+  try {
+    // Two unrelated, independently-administered Jellyfin servers can each
+    // mint the same low-cardinality PlaySessionId — there's nothing coordinating
+    // them. Before activeSessionId's instance-qualified id format (guardrail:
+    // "two Plex servers reusing the same low-cardinality sessionKey would
+    // collide on both the PK and the unique index"), the second instance's
+    // createMany({skipDuplicates}) would silently no-op onto the first
+    // instance's already-created row and that session would never get its own
+    // ActiveSession at all.
+    jfSnapshot = [jfSnap("collide-123", { positionTicks: 100_000_000, durationTicks: 72_000_000_000 })];
+    jfRemoteSnapshot = [jfSnap("collide-123", { positionTicks: 200_000_000, durationTicks: 72_000_000_000 })];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    const body = await bodyOf(res);
+    assert.deepEqual(body.jellyfin, { started: 1, updated: 0, ended: 0 }, "the default instance's session was created");
+    assert.deepEqual(body["jellyfin:remote"], { started: 1, updated: 0, ended: 0 }, "the named instance's session was ALSO created, independently");
+    await settle();
+
+    assert.equal(activeStore.has("jellyfin:collide-123"), true, "default-instance session keeps the legacy 2-segment id");
+    assert.equal(activeStore.has("jellyfin:remote:collide-123"), true, "named-instance session gets its own 3-segment id — no collision");
+    assert.equal(activeStore.size, 2, "both rows coexist; neither create silently no-op'd onto the other via skipDuplicates");
+
+    const defaultRow = activeStore.get("jellyfin:collide-123")!;
+    const remoteRow = activeStore.get("jellyfin:remote:collide-123")!;
+    assert.equal(defaultRow.sessionKey, "collide-123");
+    assert.equal(remoteRow.sessionKey, "collide-123", "the raw sessionKey column is identical on both rows — only the composite id disambiguates them");
+    assert.equal(defaultRow.progressMs, 10_000n);
+    assert.equal(remoteRow.progressMs, 20_000n, "the two servers' independent playheads were not merged into one row");
+  } finally {
+    // Restore single-instance-only state for every later test in this file.
+    settings.delete("jellyfinInstances");
+    syncSettings.delete("jellyfinRemoteUrl");
+    syncSettings.delete("jellyfinRemoteApiKey");
+    jfRemoteSnapshot = [];
+  }
+});
+
+// ═══ Multi-server Plex (Phase 2 activation) ═════════════════════════════════
+// Same fixture discipline as the Jellyfin multi-instance test above: register
+// the second server inside the test, restore single-instance state in finally.
+
+// Register/unregister the second Plex server. The registry Setting also
+// reaches plex-events' map reconcile (it shares the served `plexInstances`
+// findUnique), which then holds a "remote" manager too — harmless, because
+// every manager's doReconcile connection findMany is starved (see the stub).
+function seedRemotePlex(): void {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  syncSettings.set("plexRemoteServerUrl", PLEX_REMOTE_URL);
+  syncSettings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+}
+function unseedRemotePlex(): void {
+  settings.delete("plexInstances");
+  syncSettings.delete("plexRemoteServerUrl");
+  syncSettings.delete("plexRemoteAdminToken");
+}
+
+test("multi-server: two Plex instances reporting the SAME raw sessionKey in one tick create TWO distinct ActiveSession rows, not a collision", async () => {
+  seedRemotePlex();
+  try {
+    // Two unrelated, independently-administered Plex servers each mint
+    // sessionKeys from their own small-integer counter — identical keys are
+    // routine, not exotic. Before the instance-qualified id format (and the
+    // serverInstance column in the create), the second instance's
+    // createMany({skipDuplicates}) would silently no-op onto the first
+    // instance's row (same [source, serverInstance, sessionKey] unique key),
+    // so that watch never got an ActiveSession — and with the poller among
+    // the finalize writers, its history was silently wrong or lost.
+    plexSnapshot = [plexSnap("collide-7", { viewOffset: 100_000 })];
+    plexRemoteSnapshot = [plexSnap("collide-7", { viewOffset: 200_000 })];
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    const body = await bodyOf(res);
+    // Result labels: the default instance keeps the legacy `plex` key
+    // (response-shape compatibility), a named instance reports as `plex:<slug>`.
+    assert.deepEqual(body.plex, { started: 1, updated: 0, ended: 0 }, "the default instance's session was created");
+    assert.deepEqual(body["plex:remote"], { started: 1, updated: 0, ended: 0 }, "the named instance's session was ALSO created, independently, under its own result label");
+    await settle();
+
+    assert.equal(activeStore.has("plex:collide-7"), true, "default-instance session keeps the legacy 2-segment id");
+    assert.equal(activeStore.has("plex:remote:collide-7"), true, "named-instance session gets its own 3-segment id — no collision");
+    assert.equal(activeStore.size, 2, "both rows coexist; neither create silently no-op'd onto the other via skipDuplicates");
+
+    const defaultRow = activeStore.get("plex:collide-7")!;
+    const remoteRow = activeStore.get("plex:remote:collide-7")!;
+    assert.equal(defaultRow.serverInstance, "", "the create stamps the default instance's serverInstance");
+    assert.equal(remoteRow.serverInstance, "remote", "the create stamps the named instance's serverInstance — the unique-key collision fix");
+    assert.equal(defaultRow.sessionKey, "collide-7");
+    assert.equal(remoteRow.sessionKey, "collide-7", "the raw sessionKey column is identical on both rows — only id + serverInstance disambiguate them");
+    assert.equal(defaultRow.progressMs, 100_000n);
+    assert.equal(remoteRow.progressMs, 200_000n, "the two servers' independent playheads were not merged into one row");
+  } finally {
+    unseedRemotePlex();
+    plexRemoteSnapshot = [];
+  }
+});
+
+test("multi-server: the default instance's absence sweep must NOT finalize a live named-instance row", async () => {
+  seedRemotePlex();
+  try {
+    // Same raw sessionKey on both instances, both rows past the 60s grace by
+    // lastSeenAt. The default server's snapshot is EMPTY (its session really
+    // ended); the remote server still reports its session. An UNSCOPED
+    // source:"plex" sweep in the default pass would read the remote row too,
+    // see its key absent from the DEFAULT snapshot, and finalize + ledger-lock
+    // a stream that is live and healthy on the other server.
+    const gone = seed(makeRow("iso-1", { lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 10_000) }));
+    seed(makeRow("iso-1", {
+      id: "plex:remote:iso-1",
+      serverInstance: "remote",
+      progressMs: 400_000n,
+      lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 10_000),
+      progressUpdatedAt: agoReal(SESSION_ABSENCE_GRACE_MS + 10_000),
+    }));
+    plexSnapshot = [];
+    plexRemoteSnapshot = [plexSnap("iso-1", { viewOffset: 460_000 })]; // moved → plain update on remote
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    const body = await bodyOf(res);
+    assert.deepEqual(body.plex, { started: 0, updated: 0, ended: 1 }, "the default instance finalizes ITS OWN absent session");
+    assert.deepEqual(body["plex:remote"], { started: 0, updated: 1, ended: 0 }, "the named instance just updates its live session");
+    await settle();
+
+    const rows = historyRows();
+    assert.equal(rows.length, 1, "exactly ONE finalize — the default instance's own row, never the other server's");
+    assert.equal(rows[0].sourceSessionId, `iso-1:${gone.startedAt.toISOString()}`);
+    assert.equal(rows[0].serverInstance, "", "the history row is stamped with the instance the watch happened on");
+    assert.equal(isPlexSessionRecentlyFinalized("plex:iso-1"), true, "the finalized default row is ledgered");
+    assert.equal(activeStore.has("plex:iso-1"), false);
+
+    assert.equal(isPlexSessionRecentlyFinalized("plex:remote:iso-1"), false, "the live named-instance row must NOT be ledger-locked by the default pass");
+    assert.ok(activeStore.has("plex:remote:iso-1"), "the live named-instance row survives the poll");
+    assert.equal(activeUpdatesFor("plex:remote:iso-1").length, 1, "the named instance's pass took the update path for it");
+  } finally {
+    unseedRemotePlex();
+    plexRemoteSnapshot = [];
+  }
+});
+
+// ORDER-SENSITIVE: this test must run AFTER a successful default-instance poll
+// (the first full run persisted plexServerReachable=true, so the manager's
+// dedup state going in is `true`) and BEFORE the Plex-outage degraded test
+// below (which flips it to false). With lastReachable=true, a regression that
+// calls setPlexReachable from a named instance's failing pass MUST surface as
+// a `"reachable":false` write here — it can't hide behind the dedup.
+test("multi-server: a NAMED-instance outage never flips the default server's reachability, and degrades only its own result label", async () => {
+  seedRemotePlex();
+  try {
+    plexSnapshot = []; // default healthy but idle
+    plexRemoteSessionsStatus = 500; // remote's getPlexSessions throws
+
+    const res = await POST(phReq({ headers: AS_CRON }));
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("X-Cron-Degraded"), "plex:remote", "only the failing instance's label is flagged");
+    const body = await bodyOf(res);
+    assert.deepEqual(body.plex, { started: 0, updated: 0, ended: 0 }, "the default instance stays healthy");
+    assert.ok((body["plex:remote"] as { error?: string }).error, "the failing instance records its error under its own label");
+    await settle();
+
+    // Reachability is DEFAULT-instance-only in Phase 2: setPlexReachable
+    // always addresses the DEFAULT manager's plexServerReachable Setting, so
+    // the named instance's failure must not write through it. The default's
+    // own healthy probe re-reports true, which dedups to no write.
+    const reachabilityWrites = settingUpserts.filter((u) => u.key === "plexServerReachable");
+    assert.ok(
+      !reachabilityWrites.some((u) => u.value.includes('"reachable":false')),
+      "a named-instance outage must never mark the DEFAULT Plex server unreachable",
+    );
+    assert.ok(
+      warns.some((w) => w.includes('[play-history] Plex session sync failed for instance "remote":')),
+      "the per-instance failure warns with the [play-history] scope and names the instance",
+    );
+  } finally {
+    unseedRemotePlex();
+  }
+});
+
 // ═══ Degraded run — a single-source outage stays 200 but flags the ledger ═══
 
 test("a Plex outage sets results.plex.error, stamps X-Cron-Degraded, and stays 200 (the 5s poller must not spam non-2xx)", async () => {
@@ -926,8 +1184,8 @@ test("a Plex outage sets results.plex.error, stamps X-Cron-Degraded, and stays 2
   assert.ok(body.jellyfin, "the healthy source still reports its counts");
   await settle();
   assert.ok(
-    warns.some((w) => w.includes("[play-history] Plex session sync failed:")),
-    "the source failure warns with the [play-history] scope",
+    warns.some((w) => w.includes('[play-history] Plex session sync failed for instance "":')),
+    "the source failure warns with the [play-history] scope (the default instance's slug is the empty string)",
   );
   // setPlexReachable(false) persists the reachability flip.
   assert.ok(settingUpserts.some((u) => u.key === "plexServerReachable"), "a failed getPlexSessions marks the server unreachable");

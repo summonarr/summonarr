@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
+import { AccountDeactivatedError, findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
   exchangeOidcCode,
@@ -113,6 +113,13 @@ export async function GET(req: NextRequest) {
       providerId: "oidc",
     });
   } catch (err) {
+    // A disabled account is an expected refusal, not a fault — the OIDC identity
+    // still resolves to a real row (account removal disables rather than scrubs,
+    // see account-lifecycle.ts), so it reaches the mint chokepoint and is turned
+    // away there. Distinct code, and no error log.
+    if (err instanceof AccountDeactivatedError) {
+      return loginErrorRedirect(req, "account_disabled");
+    }
     // Don't let a transient DB failure during mint throw out of the handler and
     // strand the OIDC state cookie — redirect to login with an error like the
     // other failure paths in this route.

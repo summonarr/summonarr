@@ -69,6 +69,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "pages",
     defaultEnabled: true,
   },
+  {
+    key: "feature.page.forYou",
+    label: "For You carousel",
+    description: "Show a personalized \"For You\" row on the home page, seeded from watch history and watchlist. Off by default until the warm-recommendations cron has built up cache data.",
+    category: "pages",
+    defaultEnabled: false,
+  },
 
   // ── Behaviors ─────────────────────────────────────────────────────────
   {

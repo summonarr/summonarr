@@ -143,6 +143,15 @@ function AuditLogFilters({
     ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === currentGroup)
     : ALL_ACTIONS;
 
+  // Follow the URL on a SOFT navigation (Back/Forward). The inputs seed from the
+  // props once, but a soft nav doesn't remount this component — so after pressing
+  // Back, `userInput` still held the old query while `currentUser` had reverted,
+  // the debounce effect below saw them differ, and 500 ms later it router.push'ed
+  // the stale filter as a NEW history entry. Back was effectively dead on this
+  // page: the list flashed unfiltered and snapped straight back.
+  useEffect(() => { setUserInput(currentUser); }, [currentUser]);
+  useEffect(() => { setTargetInput(currentTarget); }, [currentTarget]);
+
   useEffect(() => {
     clearTimeout(userTimer.current);
     userTimer.current = setTimeout(() => {
@@ -678,7 +687,13 @@ export function AuditLogView({
     if (saved === "timeline" || saved === "table") setViewMode(saved);
   }, []);
 
+  // Bumped whenever a filter navigation replaces the server-rendered page, so an
+  // in-flight loadMore() can tell its response is stale. Without it, a slow
+  // "Load more" landed after this resync and re-appended the PREVIOUS query's rows
+  // beneath the new list, then installed that query's cursor.
+  const filterGen = useRef(0);
   useEffect(() => {
+    filterGen.current += 1;
     setLogs(initialLogs);
     setNextCursor(initialNextCursor);
     setHasMore(initialHasMore);
@@ -691,6 +706,7 @@ export function AuditLogView({
 
   async function loadMore() {
     if (!nextCursor || loading) return;
+    const myGen = filterGen.current;
     setLoading(true);
     setLoadError(false);
     try {
@@ -710,6 +726,7 @@ export function AuditLogView({
         return;
       }
       const data = (await res.json()) as { logs: AuditRow[]; nextCursor: string | null; hasMore: boolean };
+      if (filterGen.current !== myGen) return; // filters navigated mid-flight
       setLogs((prev) => [...prev, ...data.logs]);
       setNextCursor(data.nextCursor);
       setHasMore(data.hasMore);

@@ -17,6 +17,10 @@ import {
 } from "@/lib/play-history";
 import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } from "@/lib/plex";
 import { getJellyfinSessions } from "@/lib/jellyfin";
+import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getPlexConfig } from "@/lib/plex-config";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId } from "@/lib/media-instances";
+import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
@@ -31,6 +35,20 @@ import {
 } from "@/lib/plex-events";
 
 type SyncResult = { started: number; updated: number; ended: number };
+
+// Both session helpers compose an episode's display title as
+// `${show} — ${episode}` (plex.ts / jellyfin.ts). Recover the episode half by
+// removing that exact prefix, NOT by splitting on the separator: the show name
+// can contain " — " too, and splitting left its tail glued to the episode name.
+// Falls back to the composed title when the prefix isn't there (nothing to strip).
+const TITLE_SEP = " — ";
+function stripShowPrefix(composed: string, show: string | null | undefined): string | null {
+  if (show && composed.startsWith(show + TITLE_SEP)) {
+    return composed.slice(show.length + TITLE_SEP.length) || null;
+  }
+  const idx = composed.indexOf(TITLE_SEP);
+  return idx === -1 ? null : composed.slice(idx + TITLE_SEP.length) || null;
+}
 
 // DLNA clients open phantom sessions just from *browsing* the library — the
 // session appears in /status/sessions for one tick with platform="DLNA" and
@@ -56,57 +74,70 @@ const PROGRESS_JITTER_TOLERANCE_MS = 10_000;
 
 // The admin Plex user id (used only to flag MediaServerUser.isServerAdmin) effectively
 // never changes for a given token, yet the poller runs every 5s. Memoize it per-token
-// with a long TTL so a healthy poll doesn't hit plex.tv ~17k×/day. Best-effort: a failed
-// lookup returns null and is not cached, so the next poll retries.
+// with a long TTL so a healthy poll doesn't hit plex.tv ~17k×/day. A Map (not a single
+// slot): with N configured Plex instances the per-tick calls alternate tokens, and a
+// one-slot cache would miss on every call and hammer plex.tv. Stale entries are pruned
+// opportunistically on each call — a handful of instances, no LRU needed. Best-effort:
+// a failed lookup returns null and is not cached, so the next poll retries.
 const PLEX_ADMIN_ID_TTL_MS = 60 * 60 * 1000;
-let plexAdminIdCache: { token: string; id: string; expiresAt: number } | null = null;
+const plexAdminIdCache = new Map<string, { id: string; expiresAt: number }>();
 async function getCachedPlexAdminId(token: string): Promise<string | null> {
   const now = Date.now();
-  if (plexAdminIdCache && plexAdminIdCache.token === token && plexAdminIdCache.expiresAt > now) {
-    return plexAdminIdCache.id;
+  for (const [cachedToken, entry] of plexAdminIdCache) {
+    if (entry.expiresAt <= now) plexAdminIdCache.delete(cachedToken);
   }
+  const hit = plexAdminIdCache.get(token);
+  if (hit) return hit.id;
   const id = await getPlexUser(token)
     .then((u) => u.id)
     .catch(() => null);
   if (id != null) {
-    plexAdminIdCache = { token, id, expiresAt: now + PLEX_ADMIN_ID_TTL_MS };
+    plexAdminIdCache.set(token, { id, expiresAt: now + PLEX_ADMIN_ID_TTL_MS });
   }
   return id;
 }
 
-async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncResult> {
+async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, token: string): Promise<SyncResult> {
   // getPlexSessions is the authoritative local-reachability probe — it runs
   // every poll. Report the result so the UI's reachability badge reflects
   // whether Summonarr can actually reach the Plex server (not plex.tv remote
   // access). Fire-and-forget; the persist is deduped + only writes on change.
+  // DEFAULT-instance-only in Phase 2 (matches persistReachability's own gate in
+  // plex-events.ts): setPlexReachable always addresses the DEFAULT manager's
+  // plexServerReachable Setting/badge, so a named instance's probe result must
+  // never flip the default server's status. Per-instance reachability is
+  // deferred (Phase 3 polish).
   let sessions;
   try {
     sessions = await getPlexSessions(serverUrl, token);
   } catch (err) {
-    void setPlexReachable(false);
+    if (instance === DEFAULT_MEDIA_INSTANCE) void setPlexReachable(false);
     throw err;
   }
-  void setPlexReachable(true);
+  if (instance === DEFAULT_MEDIA_INSTANCE) void setPlexReachable(true);
   const now = new Date();
   const nowMs = now.getTime();
   pruneRecentlyFinalized(nowMs);
 
-  // Release ledger entries Plex has stopped reporting before the create-gate
-  // checks it. The ledger exists to suppress re-creation while Plex keeps a
-  // ghost in /status/sessions; once Plex drops the key, a new play reusing it
-  // (rare, but possible after a Plex server restart) shouldn't be blocked.
+  // Release ledger entries THIS instance's Plex server has stopped reporting
+  // before the create-gate checks it. The ledger exists to suppress re-creation
+  // while Plex keeps a ghost in /status/sessions; once Plex drops the key, a new
+  // play reusing it (rare, but possible after a Plex server restart) shouldn't
+  // be blocked. The set holds this server's BARE sessionKeys — the helper only
+  // touches ledger entries whose parsed id belongs to `instance`, so instance
+  // A's (possibly empty) snapshot can never release instance B's entries.
   const allReportedKeys = new Set<string>();
   for (const s of sessions) {
     if (s.sessionKey) allReportedKeys.add(s.sessionKey);
   }
-  clearFinalizedNotInCurrentSnapshot(allReportedKeys);
+  clearFinalizedNotInCurrentSnapshot(instance, allReportedKeys);
 
   // Filter sessions with required identifiers up front so prefetch sets are accurate.
   // Skip sessions Plex is still reporting after we've already finalized them via
   // SSE stop, stall detection, or the stale loop — they'd otherwise be re-created
   // on every poll.
   const valid = sessions.filter(
-    (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(`plex:${s.sessionKey}`),
+    (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(activeSessionId("plex", instance, s.sessionKey)),
   );
   if (valid.length === 0) {
     // Still need the cleanup sweep below to finalize any stale rows.
@@ -122,19 +153,24 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   for (const s of valid) seenSessionKeys.add(s.sessionKey);
 
   // Bulk prefetch: existing ActiveSession rows for these IDs in a single query.
-  const sessionIds = valid.map((s) => `plex:${s.sessionKey}`);
+  // Ids are instance-qualified ("plex:<key>" default / "plex:<instance>:<key>"
+  // named), so this read is instance-scoped by construction.
+  const sessionIds = valid.map((s) => activeSessionId("plex", instance, s.sessionKey));
   const existingRows = sessionIds.length > 0
     ? await prisma.activeSession.findMany({ where: { id: { in: sessionIds } } })
     : [];
   const existingMap = new Map(existingRows.map((r) => [r.id, r]));
 
   // Bulk prefetch: PlexLibraryItem fallbacks for movies whose TMDB id isn't in Guid.
+  // serverInstance-scoped: ratingKeys are small server-local integers, so two
+  // Plex servers legitimately reuse the same key for different titles — an
+  // unscoped lookup could attribute this instance's watch to another server's title.
   const ratingKeysNeedingLookup = valid
     .filter((s) => s.type !== "episode" && extractTmdbIdFromGuids(s.Guid) == null && !!s.ratingKey)
     .map((s) => s.ratingKey);
   const libRows = ratingKeysNeedingLookup.length > 0
     ? await prisma.plexLibraryItem.findMany({
-        where: { plexRatingKey: { in: ratingKeysNeedingLookup } },
+        where: { plexRatingKey: { in: ratingKeysNeedingLookup }, serverInstance: instance },
         select: { plexRatingKey: true, tmdbId: true, mediaType: true },
       })
     : [];
@@ -151,6 +187,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const userIds = await mapLimit(valid, 4, (s) =>
     resolveMediaServerUser({
       source: "plex",
+      serverInstance: instance,
       sourceUserId: s.accountId,
       username: s.accountName,
       thumbUrl: s.accountThumb || null,
@@ -161,13 +198,13 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   // Resolve TMDB ids per session (TV episodes hit DB, movies are mostly in-memory).
   const resolved = await Promise.all(
     valid.map(async (s, i) => {
-      const sessionId = `plex:${s.sessionKey}`;
+      const sessionId = activeSessionId("plex", instance, s.sessionKey);
       let tmdbId: number | null = null;
       let mediaType: string | null = s.type === "episode" ? "TV" : s.type === "movie" ? "MOVIE" : null;
 
       if (s.type === "episode") {
         // For episodes, resolve the TMDB ID from the show (grandparent), not the episode item itself
-        tmdbId = await resolveShowTmdbId("plex", s.grandparentRatingKey);
+        tmdbId = await resolveShowTmdbId("plex", s.grandparentRatingKey, instance);
       } else {
         tmdbId = extractTmdbIdFromGuids(s.Guid);
         if (tmdbId == null && s.ratingKey) {
@@ -199,10 +236,16 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
     : [];
   const posterMap = new Map(posterRows.map((r) => [`${r.tmdbId}:${r.mediaType}`, r.posterPath]));
 
-  // Drop DLNA gate entries Plex is no longer reporting — the phantom is
-  // gone and the slot shouldn't keep a future *real* session waiting.
-  const seenInThisPoll = new Set(valid.map((s) => `plex:${s.sessionKey}`));
+  // Drop DLNA gate entries THIS instance's Plex is no longer reporting — the
+  // phantom is gone and the slot shouldn't keep a future *real* session
+  // waiting. Same per-instance filter as clearFinalizedNotInCurrentSnapshot:
+  // seenInThisPoll only holds THIS instance's ids, so an unfiltered sweep
+  // would delete every OTHER instance's pending entries each tick and a real
+  // DLNA playback on a named instance could never pass its two-snapshot grace.
+  const seenInThisPoll = new Set(valid.map((s) => activeSessionId("plex", instance, s.sessionKey)));
   for (const pending of pendingDlnaSessions) {
+    const parsed = parseActiveSessionId(pending);
+    if (parsed.source !== "plex" || parsed.serverInstance !== instance) continue;
     if (!seenInThisPoll.has(pending)) pendingDlnaSessions.delete(pending);
   }
 
@@ -341,6 +384,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
         data: [{
           id: sessionId,
           source: "plex",
+          serverInstance: instance,
           sessionKey: s.sessionKey,
           startedAt: now,
           lastSeenAt: now,
@@ -355,10 +399,11 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
           seasonNumber: s.parentIndex ?? null,
           episodeNumber: s.index ?? null,
           // getPlexSessions composes an episode title as `${grandparentTitle} — ${title}`.
-          // Taking only [1] truncated at the first separator, so an episode (or show) name
-          // containing " — " stored a fragment — permanently, since episodeTitle is
-          // write-once here and copied verbatim into PlayHistory. Mirror the Jellyfin form.
-          episodeTitle: s.type === "episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
+          // Strip that exact prefix rather than splitting: `slice(1).join(" — ")`
+          // survived an EPISODE name containing " — " but not a SHOW name
+          // containing one ("Foo — Bar" + "Pilot" stored "Bar — Pilot"), and this
+          // is write-once here and copied verbatim into PlayHistory.
+          episodeTitle: s.type === "episode" ? stripShowPrefix(s.title, s.grandparentTitle) : null,
           sourceItemId: s.ratingKey,
           posterPath,
           progressPercent,
@@ -414,8 +459,12 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   const updated = writeResults.filter((r) => r === "updated").length;
   const stallEnded = writeResults.filter((r) => r === "ended").length;
 
+  // serverInstance-scoped: two instances legitimately reuse the same raw
+  // sessionKey, and seenSessionKeys only holds THIS server's keys — an
+  // unscoped read would let instance A's pass absence-finalize instance B's
+  // perfectly live rows (mirrors the Jellyfin sweep's scoping below).
   const activePlexSessions = await prisma.activeSession.findMany({
-    where: { source: "plex" },
+    where: { source: "plex", serverInstance: instance },
   });
 
   // Grace window: only finalize sessions that have been missing from
@@ -450,7 +499,7 @@ async function syncPlexSessions(serverUrl: string, token: string): Promise<SyncR
   return { started, updated, ended };
 }
 
-async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<SyncResult> {
+async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string, apiKey: string): Promise<SyncResult> {
   const sessions = await getJellyfinSessions(baseUrl, apiKey);
   const now = new Date();
 
@@ -466,6 +515,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const userIds = await mapLimit(valid, 4, (s) =>
     resolveMediaServerUser({
       source: "jellyfin",
+      serverInstance: instance,
       sourceUserId: s.userId,
       username: s.userName,
     }),
@@ -474,22 +524,50 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   // Bulk prefetch: existing ActiveSession rows. Three lookup keys per session — primary id,
   // alternate id (when sessionId !== playSessionId), and the (msUserId, sourceItemId) fallback
   // that handles webhook-vs-polling PlaySessionId drift.
-  const primaryIds = valid.map((s) => `jellyfin:${s.playSessionId}`);
+  const primaryIds = valid.map((s) => activeSessionId("jellyfin", instance, s.playSessionId));
   const altIds = valid
     .filter((s) => s.sessionId && s.sessionId !== s.playSessionId)
-    .map((s) => `jellyfin:${s.sessionId}`);
+    .map((s) => activeSessionId("jellyfin", instance, s.sessionId));
   const allIds = [...new Set([...primaryIds, ...altIds])];
-  const idRows = allIds.length > 0
-    ? await prisma.activeSession.findMany({ where: { id: { in: allIds } } })
+  // A row's `id` is frozen at create ("jellyfin:<playSessionId-then>", or
+  // "jellyfin:<instance>:<playSessionId-then>" for a named instance) but the
+  // update branch REWRITES its `sessionKey` to the current playSessionId. After
+  // that the two disagree, so an id-only lookup misses the row — and since
+  // ActiveSession is @@unique([source, serverInstance, sessionKey]), the create
+  // branch's createMany({skipDuplicates}) then silently swallowed the conflict
+  // (ON CONFLICT DO NOTHING, no target) and returned "started" for a row that
+  // was never inserted. The next episode got no ActiveSession at all, was never
+  // finalized, and — the poller being the sole Jellyfin writer (guardrail 19) —
+  // that watch was unrecoverable, while the stale row kept the now-playing card
+  // pinned until cleanupStaleSessions reaped it 30 minutes later. Match on the
+  // live sessionKey too so the itemId-change finalize below runs instead.
+  const allKeys = [...new Set(valid.flatMap((s) => [s.playSessionId, s.sessionId].filter((k): k is string => !!k)))];
+  const idRows = allIds.length > 0 || allKeys.length > 0
+    ? await prisma.activeSession.findMany({
+        where: {
+          // sessionKey is only unique WITH (source, serverInstance) — two
+          // instances can report the same raw playSessionId, so the
+          // serverInstance filter must apply to BOTH the id and sessionKey
+          // branches or a same-key row on a different instance could leak in.
+          source: "jellyfin",
+          serverInstance: instance,
+          OR: [{ id: { in: allIds } }, { sessionKey: { in: allKeys } }],
+        },
+      })
     : [];
   const idRowMap = new Map(idRows.map((r) => [r.id, r]));
+  const keyRowMap = new Map(idRows.map((r) => [r.sessionKey, r]));
+  // Every row already owned by id OR by live sessionKey — the fallback must not
+  // hand any of them to a different session (see the notIn note below).
+  const claimedIds = idRows.map((r) => r.id);
 
   // Fallback rows: only fetch for sessions that didn't match the primary or alternate id.
   const fallbackPairs = valid
     .map((s, i) => {
-      const sessionId = `jellyfin:${s.playSessionId}`;
-      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      const sessionId = activeSessionId("jellyfin", instance, s.playSessionId);
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? activeSessionId("jellyfin", instance, s.sessionId) : null;
       if (idRowMap.has(sessionId) || (altSessionId && idRowMap.has(altSessionId))) return null;
+      if (keyRowMap.has(s.playSessionId) || (s.sessionId && keyRowMap.has(s.sessionId))) return null;
       return { msUserId: userIds[i], itemId: s.itemId };
     })
     .filter((p): p is { msUserId: string; itemId: string } => !!p && !!p.itemId);
@@ -498,12 +576,15 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   // tablet) otherwise resolves the tablet's new PlaySessionId onto the TV's live row, which
   // rewrites that row instead of creating one — so the second stream never gets an
   // ActiveSession, is never finalized, and (poller being the sole Jellyfin writer, guardrail
-  // 19) its watch is unrecoverable.
+  // 19) its watch is unrecoverable. serverInstance scoped too (belt-and-suspenders — mediaServerUserId
+  // already pins to one instance's MediaServerUser row transitively, since resolveMediaServerUser
+  // never resolves across instances).
   const fallbackRows = fallbackPairs.length > 0
     ? await prisma.activeSession.findMany({
         where: {
           source: "jellyfin",
-          id: { notIn: allIds },
+          serverInstance: instance,
+          id: { notIn: claimedIds.length > 0 ? claimedIds : allIds },
           OR: fallbackPairs.map((p) => ({ mediaServerUserId: p.msUserId, sourceItemId: p.itemId })),
         },
       })
@@ -534,7 +615,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       let mediaType: string | null = s.itemType === "Episode" ? "TV" : s.itemType === "Movie" ? "MOVIE" : null;
 
       if (s.itemType === "Episode") {
-        tmdbId = await resolveShowTmdbId("jellyfin", s.seriesId);
+        tmdbId = await resolveShowTmdbId("jellyfin", s.seriesId, instance);
       } else {
         const tmdbRaw = s.providerIds?.Tmdb ?? s.providerIds?.tmdb;
         const parsed = tmdbRaw ? parseInt(tmdbRaw, 10) : NaN;
@@ -569,8 +650,8 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
 
   const writeResults = await Promise.all(
     resolved.map(async ({ s, msUserId, tmdbId, mediaType }): Promise<"started" | "updated"> => {
-      const sessionId = `jellyfin:${s.playSessionId}`;
-      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? `jellyfin:${s.sessionId}` : null;
+      const sessionId = activeSessionId("jellyfin", instance, s.playSessionId);
+      const altSessionId = s.sessionId && s.sessionId !== s.playSessionId ? activeSessionId("jellyfin", instance, s.sessionId) : null;
       const positionMs = Math.floor(s.positionTicks / 10_000);
       const durationMs = Math.floor(s.durationTicks / 10_000);
       const progressPercent = durationMs > 0 ? (positionMs / durationMs) * 100 : 0;
@@ -591,7 +672,9 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
       // callback before it looks up.
       const idMatch =
         idRowMap.get(sessionId) ??
-        (altSessionId ? idRowMap.get(altSessionId) : undefined);
+        (altSessionId ? idRowMap.get(altSessionId) : undefined) ??
+        keyRowMap.get(s.playSessionId) ??
+        (s.sessionId ? keyRowMap.get(s.sessionId) : undefined);
       const fallbackKey = `${msUserId}:${s.itemId ?? ""}`;
       const fallbackRow = idMatch ? undefined : fallbackMap.get(fallbackKey);
       if (fallbackRow) fallbackMap.delete(fallbackKey);
@@ -652,6 +735,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
         data: [{
           id: sessionId,
           source: "jellyfin",
+          serverInstance: instance,
           sessionKey: s.playSessionId,
           startedAt: now,
           lastSeenAt: now,
@@ -665,7 +749,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
           year: s.year != null ? String(s.year) : null,
           seasonNumber: s.seasonNumber ?? null,
           episodeNumber: s.episodeNumber ?? null,
-          episodeTitle: s.itemType === "Episode" ? (s.title.split(" — ").slice(1).join(" — ") || null) : null,
+          episodeTitle: s.itemType === "Episode" ? stripShowPrefix(s.title, s.seriesName) : null,
           sourceItemId: s.itemId,
           posterPath: jfPosterPath,
           progressPercent,
@@ -693,7 +777,7 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
   const updated = writeResults.filter((r) => r === "updated").length;
 
   const activeJfSessions = await prisma.activeSession.findMany({
-    where: { source: "jellyfin" },
+    where: { source: "jellyfin", serverInstance: instance },
   });
 
   // Grace window: only finalize sessions missing from /Sessions for
@@ -722,8 +806,6 @@ async function syncJellyfinSessions(baseUrl: string, apiKey: string): Promise<Sy
 
   return { started, updated, ended };
 }
-
-const SYNC_SETTING_KEYS = ["plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey"] as const;
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -760,58 +842,106 @@ async function syncPlayHistory(request: NextRequest) {
     // syncs read their ActiveSession rows below.
     await reanchorActiveSessionsOnBoot();
 
-    const [plexEnabled, jellyfinEnabled, settingRows] = await Promise.all([
+    const [plexEnabled, jellyfinEnabled] = await Promise.all([
       isSourceEnabled("plex"),
       isSourceEnabled("jellyfin"),
-      prisma.setting.findMany({
-        where: { key: { in: SYNC_SETTING_KEYS as unknown as string[] } },
-        select: { key: true, value: true },
-      }),
     ]);
-
-    const settingMap = new Map(settingRows.map((r) => [r.key, r.value]));
-    const plexServerUrl = settingMap.get("plexServerUrl")?.replace(/\/$/, "") ?? null;
-    const plexAdminToken = settingMap.get("plexAdminToken") ?? null;
-    const jellyfinUrl = settingMap.get("jellyfinUrl")?.replace(/\/$/, "") ?? null;
-    const jellyfinApiKey = settingMap.get("jellyfinApiKey") ?? null;
 
     const syncPromises: Promise<void>[] = [];
 
-    if (plexEnabled && plexServerUrl && plexAdminToken) {
-      syncPromises.push(
-        syncPlexSessions(plexServerUrl, plexAdminToken)
-          .then((r) => { results.plex = r; })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn("[play-history] Plex session sync failed:", msg);
-            results.plex = { error: msg };
-          })
-      );
+    if (plexEnabled) {
+      // Fixed single call widened to a loop over every configured Plex server
+      // (multi-server support), mirroring the Jellyfin loop below with ONE
+      // deliberate asymmetry: the instance list comes from getMediaInstances
+      // (a single registry findUnique on `plexInstances`) + a per-instance
+      // getPlexConfig read (two findUniques) + the skip-if-unconfigured
+      // `continue` below — NOT getSyncableMediaInstances, whose
+      // isMediaInstanceConfigured check issues a connection-keys findMany
+      // byte-identical in shape to plex-events' own per-manager doReconcile
+      // read. The route's test harness starves plex-events' reads BY SHAPE
+      // (any findMany over plex connection keys) so reconcile never opens a
+      // real SSE stream under test; the route's own config reads must
+      // therefore stay findUnique-shaped. The `continue` reproduces
+      // getSyncableMediaInstances' filter semantics exactly.
+      const plexInstances = await getMediaInstances("plex");
+      for (const instance of plexInstances) {
+        const label = mediaInstanceLabel("plex", instance.slug);
+        let cfg: { url: string | null; token: string | null };
+        try {
+          cfg = await getPlexConfig(instance.slug);
+        } catch (err) {
+          // Isolate a config-read failure to just this instance — see the
+          // Jellyfin loop below for the full rationale.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[play-history] Plex config read failed for instance "${instance.slug}":`, msg);
+          results[label] = { error: msg };
+          continue;
+        }
+        if (!cfg.url || !cfg.token) continue; // unconfigured instance — the getSyncableMediaInstances-equivalent filter (see above)
+        const serverUrl = cfg.url.replace(/\/$/, "");
+        const token = cfg.token;
+        syncPromises.push(
+          syncPlexSessions(instance.slug, serverUrl, token)
+            .then((r) => { results[label] = r; })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.warn(`[play-history] Plex session sync failed for instance "${instance.slug}":`, msg);
+              results[label] = { error: msg };
+            })
+        );
+      }
     }
 
-    if (jellyfinEnabled && jellyfinUrl && jellyfinApiKey) {
-      syncPromises.push(
-        syncJellyfinSessions(jellyfinUrl, jellyfinApiKey)
-          .then((r) => { results.jellyfin = r; })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn("[play-history] Jellyfin session sync failed:", msg);
-            results.jellyfin = { error: msg };
-          })
-      );
+    if (jellyfinEnabled) {
+      // Fixed single call widened to a loop over every configured, connection-
+      // ready Jellyfin server (multi-server support). Sequential resolution of
+      // each instance's config, but the actual session syncs still run
+      // concurrently (same syncPromises array as the Plex pass above).
+      const jellyfinInstances = await getSyncableMediaInstances("jellyfin");
+      for (const instance of jellyfinInstances) {
+        const label = mediaInstanceLabel("jellyfin", instance.slug);
+        let cfg: { url: string | null; apiKey: string | null };
+        try {
+          cfg = await getJellyfinConfig(instance.slug);
+        } catch (err) {
+          // Isolate a config-read failure to just this instance, matching every
+          // other failure mode below. An uncaught throw here would abort the
+          // loop entirely and 500 the whole poll tick via the outer catch,
+          // discarding Plex's and any earlier instances' already-queued results
+          // over a transient blip on one instance's Settings read.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[play-history] Jellyfin config read failed for instance "${instance.slug}":`, msg);
+          results[label] = { error: msg };
+          continue;
+        }
+        if (!cfg.url || !cfg.apiKey) continue; // defensive; getSyncableMediaInstances already filters to configured ones
+        const url = cfg.url.replace(/\/$/, "");
+        const apiKey = cfg.apiKey;
+        syncPromises.push(
+          syncJellyfinSessions(instance.slug, url, apiKey)
+            .then((r) => { results[label] = r; })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.warn(`[play-history] Jellyfin session sync failed for instance "${instance.slug}":`, msg);
+              results[label] = { error: msg };
+            })
+        );
+      }
     }
 
     await Promise.all(syncPromises);
 
-    // Single batched activity:history-updated after both source loops complete.
-    // recordCompletedSession is called with skipSSE inside each loop to avoid
-    // N+1 events. Emit only when at least one session actually ended.
-    // Parens are load-bearing: `+` binds tighter than `??`, so without them
-    // `a?.x ?? 0 + b?.y ?? 0` parses as `a?.x ?? (0 + (b?.y ?? 0))` and a
-    // defined `plex.ended = 0` would short-circuit, silently dropping Jellyfin's count.
-    const totalEnded =
-      ((results.plex as { ended?: number } | undefined)?.ended ?? 0) +
-      ((results.jellyfin as { ended?: number } | undefined)?.ended ?? 0);
+    // Single batched activity:history-updated after every source loop completes
+    // (one entry per configured Plex and Jellyfin instance). recordCompletedSession
+    // is called with skipSSE inside each loop to avoid N+1 events. Emit only when
+    // at least one session actually ended. Summed generically over `results`'
+    // current keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) rather than
+    // two hardcoded fields, since both sources now contribute a variable number
+    // of entries.
+    const totalEnded = Object.values(results).reduce((sum: number, r) => {
+      const ended = (r as { ended?: unknown } | null)?.ended;
+      return sum + (typeof ended === "number" ? ended : 0);
+    }, 0);
     if (totalEnded > 0) {
       emitSSE({ type: "activity:history-updated" });
     }
@@ -846,11 +976,13 @@ async function syncPlayHistory(request: NextRequest) {
   // (a failed source previously still recorded ok:true, hiding the outage from
   // the admin System tab). Status stays 200 — this route runs every 5s from the
   // entrypoint poller, and a non-2xx during a media-server outage would spam the
-  // docker logs with a failure line per tick.
-  const degraded = [
-    ...((results.plex as { error?: string } | undefined)?.error !== undefined ? ["plex"] : []),
-    ...((results.jellyfin as { error?: string } | undefined)?.error !== undefined ? ["jellyfin"] : []),
-  ];
+  // docker logs with a failure line per tick. Checked generically over `results`'
+  // keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) — `results.purged` (a bare number,
+  // set above on the retention-purge path) safely fails the object/error checks
+  // below and is never mistaken for a degraded source.
+  const degraded = Object.entries(results)
+    .filter(([, r]) => typeof r === "object" && r !== null && (r as { error?: unknown }).error !== undefined)
+    .map(([key]) => key);
   return NextResponse.json(
     results,
     degraded.length > 0 ? { headers: { "X-Cron-Degraded": degraded.join(",") } } : undefined,

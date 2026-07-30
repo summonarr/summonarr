@@ -7,7 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, sanitizeOptional, sanitizeForLog } from "../src/lib/sanitize.ts";
+import { sanitizeText, sanitizeOptional, sanitizeForLog, sanitizeContainsSearch } from "../src/lib/sanitize.ts";
 
 const RTL_OVERRIDE = String.fromCharCode(0x202e); // U+202E, a bidi override
 
@@ -148,4 +148,33 @@ test("sanitizeForLog keeps the exact replace form CodeQL's barrier matches", () 
 test("sanitizeForLog stringifies undefined and plain objects", () => {
   assert.equal(sanitizeForLog(undefined), "undefined");
   assert.equal(sanitizeForLog({}), "[object Object]");
+});
+
+// Prisma `contains` emits ILIKE with NO ESCAPE clause, so %/_ left in a search
+// term stay live wildcards — an unindexable pattern-scan DoS. This is the
+// shared helper every `contains:`-filtered search box now routes through.
+test("sanitizeContainsSearch strips LIKE wildcard metacharacters and the escape char", () => {
+  assert.equal(sanitizeContainsSearch("50% off_the_wall\\path"), "50 offthewallpath");
+  assert.equal(sanitizeContainsSearch("normal title"), "normal title");
+});
+
+test("sanitizeContainsSearch bounds the length at 100 chars", () => {
+  const long = "a".repeat(150);
+  assert.equal(sanitizeContainsSearch(long).length, 100);
+  assert.equal(sanitizeContainsSearch(long), "a".repeat(100));
+});
+
+test("sanitizeOptional runtime-guards non-strings instead of throwing", () => {
+  // The declared param type is a compile-time claim only — every caller feeds it a
+  // field off a parsed JSON request body. `{"title": 123}` reached .replace on a
+  // number and threw, turning a 400 into a 500 on /api/hidden, /api/push/apns and
+  // /api/push/subscribe.
+  for (const bad of [123, true, {}, [], 0, NaN] as unknown as (string | undefined | null)[]) {
+    assert.equal(sanitizeOptional(bad), null);
+  }
+  // Genuine strings are unaffected, including the empty-string → null contract.
+  assert.equal(sanitizeOptional("  Dune  "), "Dune");
+  assert.equal(sanitizeOptional("   "), null);
+  assert.equal(sanitizeOptional(null), null);
+  assert.equal(sanitizeOptional(undefined), null);
 });

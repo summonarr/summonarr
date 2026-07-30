@@ -70,9 +70,13 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      # CMD-SHELL so ${BASE_PATH} expands from the container env (baked in at build for
-      # sub-path images); empty for the default root deployment.
-      test: ["CMD-SHELL", "wget -qO- \"http://127.0.0.1:3000${BASE_PATH}/api/health\" >/dev/null 2>&1 || exit 1"]
+      # $$ escapes the $ so COMPOSE leaves it alone and the CONTAINER shell expands
+      # it. A bare ${BASE_PATH} is interpolated by Compose from the HOST env at parse
+      # time, which is empty for a sub-path image (BASE_PATH is baked in at build via
+      # the Dockerfile ARG, not set on the host) — the probe then hit /api/health
+      # instead of <base>/api/health, 404'd, and the container never went healthy.
+      # PORT is escaped for the same reason; mirrors the Dockerfile HEALTHCHECK.
+      test: ["CMD-SHELL", "wget -qO- \"http://127.0.0.1:$${PORT:-3000}$${BASE_PATH}/api/health\" >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

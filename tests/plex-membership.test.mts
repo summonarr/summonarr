@@ -1,8 +1,8 @@
 // Unit tests for getCachedPlexAllowlist (src/lib/plex-membership.ts) — the
-// per-replica cache of the Plex server's shared-user allowlist that
-// verifyAndRefreshSession consults on the slow path to lock out users who were
-// un-shared from the server. The contracts pinned here are the ones a wrong
-// refactor would turn into a mass logout or a dead lockout:
+// per-replica, per-instance cache of the Plex servers' shared-user allowlist
+// that verifyAndRefreshSession consults on the slow path to lock out users who
+// were un-shared from every server. The contracts pinned here are the ones a
+// wrong refactor would turn into a mass logout or a dead lockout:
 //   - null means "no opinion" and callers fail OPEN: unconfigured settings, a
 //     failed plex.tv fetch, an unresolvable machineId, and an EMPTY friend set
 //     (which would otherwise lock out every Plex user) all yield null — and
@@ -11,21 +11,32 @@
 //   - a prior good set is served STALE during an outage or on an empty
 //     re-fetch (keeps enforcing last-known membership) instead of reverting to
 //     "no opinion";
-//   - one plex.tv fetch per replica per 30-min TTL window: fresh cache ⇒ zero
-//     upstream traffic; expired cache ⇒ stale served instantly while ONE
-//     background refresh runs; concurrent cold callers share one in-flight
-//     fetch; failed attempts arm a 5-min retry backoff;
-//   - membership emails arrive lowercased (plex.ts) and the configured admin
-//     email is appended lowercased+trimmed.
+//   - one plex.tv fetch per instance per replica per 30-min TTL window: fresh
+//     cache ⇒ zero upstream traffic; expired cache ⇒ stale served instantly
+//     while ONE background refresh runs; concurrent cold callers share one
+//     in-flight fetch; failed attempts arm a 5-min retry backoff — all PER
+//     SLUG (the multi-instance block at the bottom);
+//   - multi-instance: the returned Set is the UNION of every configured
+//     instance's scoped set, an UNCONFIGURED registry entry contributes
+//     nothing without poisoning, and a configured-but-COLD instance whose
+//     fetch fails or comes back empty poisons the WHOLE call to null (a
+//     partial union would mass-revoke the down server's users);
+//   - a slug that leaves the registry has its cached state EVICTED, so
+//     re-adding the slug against a different server can't serve the old
+//     server's members out of a still-fresh cache;
+//   - membership emails arrive lowercased (plex.ts) and each instance's
+//     configured admin email is appended lowercased+trimmed to ITS OWN set.
 //
 // The cache/backoff state is module-global and deliberately has no reset API,
 // so THESE TESTS ARE ORDER-DEPENDENT: they advance a stubbed Date.now through
-// one scripted timeline (cold failures → first good set → TTL → stale-serve).
-// No DB, network, or DNS: prisma is pre-seeded on globalThis with a fake
-// (poster-cache.test pattern) before the module graph loads, globalThis.fetch
-// is scripted per URL (the /identity and plex.tv/api/users hops that
-// getPlexFriendEmails really makes), and dns/promises.lookup is stubbed for
-// the plex.tv SSRF resolve.
+// one scripted timeline (cold failures → first good set → TTL → stale-serve →
+// the multi-instance block, which introduces fresh slugs where it needs fresh
+// state). No DB, network, or DNS: prisma is pre-seeded on globalThis with a
+// fake (poster-cache.test pattern) before the module graph loads,
+// globalThis.fetch is scripted per URL (the per-server /identity and
+// plex.tv/api/users hops that getPlexFriendEmails really makes — plex.tv
+// responses discriminate on the X-Plex-Token header), and dns/promises.lookup
+// is stubbed for the plex.tv SSRF resolve.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
@@ -70,15 +81,50 @@ const SERVER_URL = "http://203.0.113.10:32400"; // IP-literal: no DNS hop for th
 const MACHINE_ID = "machine-abc";
 const ADMIN_TOKEN = "admin-plex-token";
 
+// Additional named-instance servers for the multi-instance block. Each server
+// gets its own /identity endpoint keyed by URL; the single plex.tv/api/users
+// endpoint discriminates responses on the per-instance admin token.
+const REMOTE_URL = "http://203.0.113.20:32400";
+const REMOTE_MACHINE = "machine-remote";
+const REMOTE_TOKEN = "remote-plex-token";
+const ARCTIC_URL = "http://203.0.113.30:32400";
+const ARCTIC_TOKEN = "arctic-plex-token";
+const BRINE_URL = "http://203.0.113.40:32400";
+const BRINE_MACHINE = "machine-brine";
+const BRINE_TOKEN = "brine-plex-token";
+const TARDY_URL = "http://203.0.113.50:32400";
+const TARDY_MACHINE = "machine-tardy";
+const TARDY_TOKEN = "tardy-plex-token";
+// Two DIFFERENT servers reachable under the SAME slug, for the deregistration
+// eviction test at the end of the timeline.
+const SWAP_A_URL = "http://203.0.113.60:32400";
+const SWAP_A_MACHINE = "machine-swap-a";
+const SWAP_A_TOKEN = "swap-a-plex-token";
+const SWAP_B_URL = "http://203.0.113.70:32400";
+const SWAP_B_MACHINE = "machine-swap-b";
+const SWAP_B_TOKEN = "swap-b-plex-token";
+
 type FetchCall = { url: string; headers: Headers };
+type Responder = () => Response | Promise<Response>;
 const identityCalls: FetchCall[] = [];
 const usersCalls: FetchCall[] = [];
-let identityResponder: () => Response | Promise<Response> = () =>
-  new Response(JSON.stringify({ MediaContainer: { machineIdentifier: MACHINE_ID } }), {
+const identityJson = (machine: string) =>
+  new Response(JSON.stringify({ MediaContainer: { machineIdentifier: machine } }), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
-let usersResponder: () => Response | Promise<Response> = () => {
+let identityResponder: Responder = () => identityJson(MACHINE_ID);
+const remoteIdentityResponder: Responder = () => identityJson(REMOTE_MACHINE);
+let arcticIdentityResponder: Responder = () => {
+  throw new Error("unexpected arctic /identity fetch — script a responder for this test");
+};
+const brineIdentityResponder: Responder = () => identityJson(BRINE_MACHINE);
+const tardyIdentityResponder: Responder = () => identityJson(TARDY_MACHINE);
+const swapAIdentityResponder: Responder = () => identityJson(SWAP_A_MACHINE);
+const swapBIdentityResponder: Responder = () => identityJson(SWAP_B_MACHINE);
+// usersResponder receives the recorded call so multi-instance tests can key
+// the response off headers.get("x-plex-token"); single-server tests ignore it.
+let usersResponder: (call: FetchCall) => Response | Promise<Response> = () => {
   throw new Error("unexpected /api/users fetch — script a responder for this test");
 };
 
@@ -89,9 +135,33 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     identityCalls.push(call);
     return identityResponder();
   }
+  if (url.startsWith(`${REMOTE_URL}/identity`)) {
+    identityCalls.push(call);
+    return remoteIdentityResponder();
+  }
+  if (url.startsWith(`${ARCTIC_URL}/identity`)) {
+    identityCalls.push(call);
+    return arcticIdentityResponder();
+  }
+  if (url.startsWith(`${BRINE_URL}/identity`)) {
+    identityCalls.push(call);
+    return brineIdentityResponder();
+  }
+  if (url.startsWith(`${TARDY_URL}/identity`)) {
+    identityCalls.push(call);
+    return tardyIdentityResponder();
+  }
+  if (url.startsWith(`${SWAP_A_URL}/identity`)) {
+    identityCalls.push(call);
+    return swapAIdentityResponder();
+  }
+  if (url.startsWith(`${SWAP_B_URL}/identity`)) {
+    identityCalls.push(call);
+    return swapBIdentityResponder();
+  }
   if (url.startsWith("https://plex.tv/api/users")) {
     usersCalls.push(call);
-    return usersResponder();
+    return usersResponder(call);
   }
   throw new Error(`unexpected fetch to ${url}`);
 }) as typeof fetch;
@@ -145,19 +215,41 @@ const { getCachedPlexAllowlist } = await import("../src/lib/plex-membership.ts")
 
 // ── the scripted timeline ───────────────────────────────────────────────────
 
-test("unconfigured → null (fail open) after reading exactly the three plex settings, no upstream call", async () => {
+test("unconfigured → null (fail open) after reading exactly the registry + the default instance's three settings, no upstream call", async () => {
   settings = {};
   assert.equal(await getCachedPlexAllowlist(), null);
-  assert.deepEqual(settingReadKeys.sort(), ["plexAdminEmail", "plexAdminToken", "plexServerUrl"]);
+  // The instance registry (plexInstances) is one findUnique per call; the
+  // default instance's attempt reads its connection pair + admin email.
+  assert.deepEqual(settingReadKeys.sort(), [
+    "plexAdminEmail",
+    "plexAdminToken",
+    "plexInstances",
+    "plexServerUrl",
+  ]);
   assert.equal(identityCalls.length, 0);
   assert.equal(usersCalls.length, 0);
 });
 
-test("a failed attempt arms the 5-min backoff: a call inside the window doesn't even re-read settings", async () => {
+test("an UNCONFIGURED attempt does NOT arm the backoff: the next call re-reads the instance settings (still null, still zero upstream)", async () => {
+  // The backoff exists to protect plex.tv; an unconfigured attempt never
+  // reached plex.tv, and caching its verdict would keep serving "skip this
+  // instance" after an admin finishes configuring it — in a multi-instance
+  // union that stale skip is an ENFORCING partial result (the mass-revoke
+  // shape pinned by the transition test at the end of this file). So the
+  // repeat call must re-derive: registry + the instance's three settings
+  // again, and still no server contact. (A genuinely FAILED fetch DOES arm
+  // the backoff — pinned in the POISON test's backoff-interaction block.)
   fakeNow += 1 * MIN;
   settingReadKeys.length = 0;
   assert.equal(await getCachedPlexAllowlist(), null);
-  assert.equal(settingReadKeys.length, 0); // no new fetchAllowlist attempt at all
+  assert.deepEqual(settingReadKeys.sort(), [
+    "plexAdminEmail",
+    "plexAdminToken",
+    "plexInstances",
+    "plexServerUrl",
+  ]);
+  assert.equal(identityCalls.length, 0);
+  assert.equal(usersCalls.length, 0);
 });
 
 test("whitespace-only token still reads as unconfigured (trim guard) → null, server never contacted", async () => {
@@ -293,4 +385,265 @@ test("an empty re-fetch after a good set also serves stale — a truncated frien
   const after = await getCachedPlexAllowlist();
   assert.ok(after, "the empty result must not replace the cached set");
   assert.deepEqual([...after].sort(), ["admin@example.com", "newuser@example.com"]);
+});
+
+// ── multi-instance (the timeline continues; new slugs start cold) ───────────
+
+const registryJson = (...slugs: string[]) => JSON.stringify(slugs.map((slug) => ({ slug, name: slug })));
+
+test("an outage instance serves STALE into the union while a healthy instance contributes fresh — the outage never blanks the other server", async () => {
+  fakeNow += 6 * MIN; // past the default instance's backoff from the empty re-fetch above
+  settings = {
+    plexAdminToken: ADMIN_TOKEN,
+    plexAdminEmail: " Admin@Example.COM ",
+    plexServerUrl: SERVER_URL,
+    plexInstances: registryJson("remote"),
+    plexRemoteServerUrl: REMOTE_URL,
+    plexRemoteAdminToken: REMOTE_TOKEN,
+    plexRemoteAdminEmail: "RAdmin@Example.com",
+  };
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    // Default instance: plex.tv outage — its background refresh fails, so its
+    // STALE set must keep being served into the union.
+    if (token === ADMIN_TOKEN) return new Response("outage", { status: 503 });
+    // Remote instance: healthy. sneak@ rides the response on the DEFAULT
+    // server's machine id — remote's scoping must exclude it.
+    if (token === REMOTE_TOKEN)
+      return xmlResponse(
+        usersXml([
+          { email: "rfriend@example.com", machine: REMOTE_MACHINE },
+          { email: "sneak@example.com", machine: MACHINE_ID },
+        ]),
+      );
+    throw new Error(`unexpected plex.tv token ${token}`);
+  };
+
+  // Cold remote is awaited; stale default is served without waiting for its
+  // (failing) refresh. The union carries BOTH — this is the pin that one
+  // server's outage doesn't blank the other's membership.
+  const union = await getCachedPlexAllowlist();
+  assert.ok(union, "an outage on one instance must not fail the whole union open");
+  assert.deepEqual(
+    [...union].sort(),
+    ["admin@example.com", "newuser@example.com", "radmin@example.com", "rfriend@example.com"],
+    "stale default ∪ fresh remote, each instance's admin in its own contribution, sneak scoped out",
+  );
+  await flushAsync(); // default's failed refresh settles; its cache is retained
+  assert.ok(
+    warns.some((w) => w.includes("[plex-membership]") && w.includes("Failed to fetch Plex users")),
+    "the failed per-instance refresh must warn with the [plex-membership] scope",
+  );
+});
+
+test("union across two healthy instances, each scoped to its OWN machineIdentifier", async () => {
+  fakeNow += 6 * MIN; // past the default instance's backoff armed by the failed refresh above
+  const identityBefore = identityCalls.length;
+  const usersBefore = usersCalls.length;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    // evil@ rides the DEFAULT server's response on the REMOTE machine id —
+    // the default's scoping must exclude it.
+    if (token === ADMIN_TOKEN)
+      return xmlResponse(
+        usersXml([
+          { email: "dfriend@example.com", machine: MACHINE_ID },
+          { email: "evil@example.com", machine: REMOTE_MACHINE },
+        ]),
+      );
+    // Remote is inside its 30-min TTL — it must not refetch at all (also
+    // pinned by the call-count deltas below; this throw alone would be
+    // swallowed into a stale-serve).
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+
+  // The default is stale → served stale while ONE background refresh lands.
+  const first = await getCachedPlexAllowlist();
+  assert.ok(first);
+  await flushAsync();
+
+  const union = await getCachedPlexAllowlist();
+  assert.ok(union);
+  assert.deepEqual(
+    [...union].sort(),
+    ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
+    "fresh ∪ fresh: evil@ (wrong machine in default's response) and sneak@ (wrong machine in remote's) both scoped out",
+  );
+  assert.equal(identityCalls.length - identityBefore, 1, "only the default instance refetches");
+  assert.equal(usersCalls.length - usersBefore, 1, "the remote instance must serve its TTL-fresh cache");
+});
+
+test("POISON: a configured-but-COLD instance whose fetch can't produce a set nulls the WHOLE call — the healthy sets must NOT be returned", async () => {
+  fakeNow += 1 * MIN; // default + remote both TTL-fresh
+  settings.plexInstances = registryJson("remote", "arctic");
+  settings.plexArcticServerUrl = ARCTIC_URL;
+  settings.plexArcticAdminToken = ARCTIC_TOKEN;
+  // The admin email is deliberately configured: if it were appended BEFORE the
+  // empty-set guard, arctic would masquerade as a healthy one-member instance
+  // and defeat the poison — this test would fail with a non-null union.
+  settings.plexArcticAdminEmail = "IceAdmin@Example.com";
+  arcticIdentityResponder = () => new Response("nope", { status: 500 }); // machineId unresolvable → empty set
+
+  const result = await getCachedPlexAllowlist();
+  assert.equal(
+    result,
+    null,
+    "a cold indeterminate instance must poison the whole union — returning the healthy servers' sets would let session-refresh mass-revoke every user whose only membership is on the down server",
+  );
+
+  // Backoff interaction: still cold, still indeterminate INSIDE the 5-min
+  // retry window (no new attempt is even made) — the call stays null.
+  fakeNow += 1 * MIN;
+  const identityBefore = identityCalls.length;
+  const usersBefore = usersCalls.length;
+  const inBackoff = await getCachedPlexAllowlist();
+  assert.equal(inBackoff, null, "a cold instance inside its backoff window is still indeterminate");
+  assert.equal(identityCalls.length, identityBefore, "no re-attempt inside the backoff window");
+  assert.equal(usersCalls.length, usersBefore);
+});
+
+test("an UNCONFIGURED registry entry contributes nothing and does NOT poison", async () => {
+  fakeNow += 1 * MIN;
+  // The admin removed arctic from the registry (this call also EVICTS its slug
+  // state — see the deregistration test at the end of the file) and registered
+  // "ghost" without ever entering a server url/token for it.
+  settings.plexInstances = registryJson("remote", "ghost");
+  settingReadKeys.length = 0;
+  const identityBefore = identityCalls.length;
+  const usersBefore = usersCalls.length;
+
+  const union = await getCachedPlexAllowlist();
+  assert.ok(union, "an unconfigured instance must be skipped, not treated as indeterminate");
+  assert.deepEqual(
+    [...union].sort(),
+    ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
+  );
+  assert.equal(identityCalls.length, identityBefore, "an unconfigured instance never contacts a server");
+  assert.equal(usersCalls.length, usersBefore);
+  // ghost's attempt read exactly its own keys (proving it was considered and
+  // then skipped); the TTL-fresh default/remote instances read nothing.
+  assert.deepEqual(settingReadKeys.sort(), [
+    "plexGhostAdminEmail",
+    "plexGhostAdminToken",
+    "plexGhostServerUrl",
+    "plexInstances",
+  ]);
+});
+
+test("a cold instance whose SCOPED set is empty is indeterminate — its admin email must not masquerade as a one-member allowlist (guard before append, per slug)", async () => {
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "brine");
+  settings.plexBrineServerUrl = BRINE_URL;
+  settings.plexBrineAdminToken = BRINE_TOKEN;
+  settings.plexBrineAdminEmail = "BrineAdmin@Example.com";
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    // plex.tv answers brine's query fine, but the only shared user is on the
+    // DEFAULT server's machine — brine's scoped set is EMPTY.
+    if (token === BRINE_TOKEN)
+      return xmlResponse(usersXml([{ email: "elsewhere@example.com", machine: MACHINE_ID }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+
+  const result = await getCachedPlexAllowlist();
+  // If brine's admin email were appended before ITS OWN empty-set guard, brine
+  // would look healthy ({brineadmin@example.com}) and this would be a union
+  // instead of null.
+  assert.equal(result, null, "a cold empty-set instance must poison the call, not contribute its admin email");
+
+  // Poison is registry-driven, not sticky: drop brine and the union returns.
+  settings.plexInstances = registryJson("remote");
+  const recovered = await getCachedPlexAllowlist();
+  assert.ok(recovered, "removing the sick instance from the registry restores the union");
+  assert.deepEqual(
+    [...recovered].sort(),
+    ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
+  );
+});
+
+test("unconfigured→configured transition: an 'unconfigured' verdict never arms the backoff — the next call re-reads config and the new instance joins the union immediately", async () => {
+  // The mass-revoke regression this pins: an admin registers an instance
+  // before its token is saved (the media-instances route writes the registry
+  // and the connection Settings in separate awaits, so this state is real). If
+  // the "unconfigured" attempt armed the 5-min backoff, the recheck would keep
+  // serving that stale verdict after the token lands — an ENFORCING partial
+  // union missing the new server's members, revoking them for the rest of the
+  // window. Legacy single-server behavior for this transition was fail-open
+  // (null); per-slug state must not turn it fail-closed-partial.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "tardy");
+  settings.plexTardyServerUrl = TARDY_URL;
+  // No plexTardyAdminToken yet — registered but unconfigured.
+  const usersBefore = usersCalls.length;
+
+  const during = await getCachedPlexAllowlist();
+  assert.ok(during, "an unconfigured instance is skipped, not poisoned");
+  assert.ok(!warns.some((w) => w.includes("tardy")), "an unconfigured skip is silent");
+  assert.equal(usersCalls.length, usersBefore, "no upstream traffic for an unconfigured instance");
+
+  // The admin saves the token 60s later — deep inside what a failed fetch's
+  // 5-min backoff window would be.
+  fakeNow += 1 * MIN;
+  settings.plexTardyAdminToken = TARDY_TOKEN;
+  settings.plexTardyAdminEmail = "TardyAdmin@Example.com";
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === TARDY_TOKEN)
+      return xmlResponse(usersXml([{ email: "tfriend@example.com", machine: TARDY_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+
+  const after = await getCachedPlexAllowlist();
+  assert.ok(after, "the newly-configured instance must be fetched, not skipped on a stale verdict");
+  assert.ok(
+    after.has("tfriend@example.com") && after.has("tardyadmin@example.com"),
+    "the new instance's members must join the union on the FIRST call after configuration — a stale 'unconfigured' skip here is the enforcing-partial-union mass-revoke bug",
+  );
+  assert.equal(usersCalls.length - usersBefore, 1, "the transition call performed a real fetch for the new instance");
+});
+
+test("deregistering a slug EVICTS its cached state — re-adding the same slug against a DIFFERENT server serves the new server's members, not the old cache", async () => {
+  // The per-slug cache is keyed on the slug alone, not on the server it was
+  // fetched from, and its TTL is 30 minutes. Without eviction on deregistration,
+  // remove-then-re-add ("I pointed 'backup' at a new box") kept enforcing the
+  // OLD server's machineId-scoped allowlist for up to half an hour: members of
+  // the new server get locked out, members of a server that is no longer
+  // attached stay admitted. plex-events.ts prunes its per-slug manager map the
+  // same way.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "swap");
+  settings.plexSwapServerUrl = SWAP_A_URL;
+  settings.plexSwapAdminToken = SWAP_A_TOKEN;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === SWAP_A_TOKEN) return xmlResponse(usersXml([{ email: "olduser@example.com", machine: SWAP_A_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  const withSwapA = await getCachedPlexAllowlist();
+  assert.ok(withSwapA?.has("olduser@example.com"), "the first server's members join the union");
+
+  // Removed from the registry — this call is where the eviction happens.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote");
+  const withoutSwap = await getCachedPlexAllowlist();
+  assert.ok(withoutSwap && !withoutSwap.has("olduser@example.com"), "a deregistered instance stops contributing");
+
+  // Re-added under the SAME slug, pointing at a DIFFERENT server. Its cache
+  // would still be TTL-fresh (~2 min old) if it had survived deregistration.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "swap");
+  settings.plexSwapServerUrl = SWAP_B_URL;
+  settings.plexSwapAdminToken = SWAP_B_TOKEN;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === SWAP_B_TOKEN) return xmlResponse(usersXml([{ email: "newuser2@example.com", machine: SWAP_B_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  const withSwapB = await getCachedPlexAllowlist();
+  assert.ok(withSwapB, "the re-added instance must fetch cold, not poison");
+  assert.ok(withSwapB.has("newuser2@example.com"), "the NEW server's members must be enforced immediately");
+  assert.ok(
+    !withSwapB.has("olduser@example.com"),
+    "stale state from the previous registration of this slug must not survive deregistration — that is a lockout of the new server's users",
+  );
 });

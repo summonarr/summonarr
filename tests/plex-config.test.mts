@@ -118,3 +118,35 @@ test("no memoization — an admin edit is visible on the very next call", async 
   assert.deepEqual(await getPlexConfig(), { url: "http://new.example.com", token: "new-token" });
   assert.equal(findUniqueCalls.length, 4); // two Setting reads per call, no cache
 });
+
+// ── instance parameterization (Phase 2) ─────────────────────────────────────
+
+test("a named instance reads its OWN key pair, not the default's", async () => {
+  seed(); // default keys deliberately absent
+  rows.set("plexRemoteServerUrl", { key: "plexRemoteServerUrl", value: "http://remote-plex:32400" });
+  rows.set("plexRemoteAdminToken", { key: "plexRemoteAdminToken", value: "remote-token" });
+  assert.deepEqual(await getPlexConfig("remote"), { url: "http://remote-plex:32400", token: "remote-token" });
+  assert.deepEqual(findUniqueCalls, ["plexRemoteServerUrl", "plexRemoteAdminToken"]);
+});
+
+test("the default instance ('') is byte-identical to the legacy zero-arg call", async () => {
+  seed("http://default-plex:32400", "default-token");
+  const viaExplicitDefault = await getPlexConfig("");
+  const viaZeroArg = await getPlexConfig();
+  assert.deepEqual(viaExplicitDefault, { url: "http://default-plex:32400", token: "default-token" });
+  assert.deepEqual(viaZeroArg, viaExplicitDefault);
+  assert.deepEqual(findUniqueCalls, ["plexServerUrl", "plexAdminToken", "plexServerUrl", "plexAdminToken"]);
+});
+
+test("two different instances never see each other's keys", async () => {
+  seed("http://default-plex:32400", "default-token");
+  rows.set("plexRemoteServerUrl", { key: "plexRemoteServerUrl", value: "http://remote-plex:32400" });
+  rows.set("plexRemoteAdminToken", { key: "plexRemoteAdminToken", value: "remote-token" });
+  assert.deepEqual(await getPlexConfig(""), { url: "http://default-plex:32400", token: "default-token" });
+  assert.deepEqual(await getPlexConfig("remote"), { url: "http://remote-plex:32400", token: "remote-token" });
+});
+
+test("an unconfigured named instance → { url: null, token: null } (missing rows, not the default's values)", async () => {
+  seed("http://default-plex:32400", "default-token"); // default IS configured
+  assert.deepEqual(await getPlexConfig("remote"), { url: null, token: null });
+});

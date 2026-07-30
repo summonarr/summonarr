@@ -38,7 +38,12 @@
 //     jellyfin provider; the missing-sessionId guard (null, zero DB);
 //   - the plex-provider membership hook failing OPEN when unconfigured (the
 //     allowlist returns "no opinion" — an unreachable plex.tv must never mass
-//     log out; the allowlist's own semantics live in plex-membership.test).
+//     log out; the allowlist's own semantics live in plex-membership.test);
+//   - the multi-instance membership recheck THROUGH the real plex-membership
+//     module: a plex USER shared on NO instance is revoked (teeth), and — the
+//     accepted Phase-2.5 trade-off — membership on ANY instance keeps the
+//     session even when the sign-in-era server dropped the user (the union
+//     doesn't know which server a session was signed in against).
 //
 // No DB or network: the model delegates are shadowed in-memory (tests/
 // _helpers.mts), fetch throws, and every JWT is a REAL jose token. Cutoff and
@@ -47,14 +52,25 @@
 // fixes on both sides (iat vs a Date it also chooses), which are drift-free.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.NEXTAUTH_SECRET = "session-refresh-slide-test-secret-0123456789";
 
 // No network, ever: the plex fail-open test must fail open WITHOUT plex.tv.
+// The two multi-instance membership tests at the bottom temporarily swap in a
+// scripted fetch (and restore this throwing default afterwards).
 globalThis.fetch = (() => {
   throw new Error("unexpected network call from session-refresh tests");
 }) as unknown as typeof fetch;
+
+// The scripted plex.tv hop resolves through safe-fetch's DNS check — stub it so
+// no real DNS query leaves the process (the trakt.test rationale).
+const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+(dns as { lookup: unknown }).lookup = fakeLookup;
+if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
+  throw new Error("could not stub dns.lookup — aborting before a real DNS query can leave the process");
+}
 
 const warns: string[] = [];
 const errors: string[] = [];
@@ -127,12 +143,18 @@ shadowPrismaModel(prisma, "user", {
   },
 });
 
-// getCachedPlexAllowlist reads plexAdminToken/plexAdminEmail/plexServerUrl.
-// Always unconfigured here → the allowlist answers "no opinion" (fail open).
+// getCachedPlexAllowlist reads the plex instance registry plus each instance's
+// connection settings + admin email — all via setting.findUnique ONLY (this
+// stub deliberately defines nothing else, so a findMany creeping into that
+// module's path fails loudly here). Default: empty map → every key reads null
+// → unconfigured → the allowlist answers "no opinion" (fail open). The
+// multi-instance membership tests at the bottom seed rows.
+let membershipSettings: Record<string, string | undefined> = {};
 shadowPrismaModel(prisma, "setting", {
-  findUnique: async () => {
+  findUnique: async (args: { where: { key: string } }) => {
     settingReads++;
-    return null;
+    const value = membershipSettings[args.where.key];
+    return value === undefined ? null : { key: args.where.key, value };
   },
 });
 
@@ -614,4 +636,117 @@ test("a plex-provider session fails OPEN when membership can't be determined (un
   assert.ok(result, "an indeterminate allowlist must fail open");
   assert.equal(result.claims.id, userId);
   assert.ok(settingReads > 0, "the membership hook must actually have been consulted");
+});
+
+// ── multi-instance membership, through the REAL plex-membership module ──────
+// These run AFTER the fail-open test above, whose attempt left the DEFAULT
+// instance's slug state cold + unconfigured — so the default is skipped here
+// whether or not its 5-min retry backoff has lapsed (its connection keys are
+// never seeded). Each test registers its own named instance: the registry is
+// re-read per call and a fresh slug starts cold, which is what lets one
+// order-dependent module cache serve two different fixtures.
+
+const AWAY_URL = "http://203.0.113.50:32400"; // IP literals: no DNS hop for /identity
+const ROAM_URL = "http://203.0.113.60:32400";
+
+// Minimal scripted fetch for one Plex server: its /identity hop plus the
+// plex.tv/api/users XML listing `friendEmails` as shared on `machine` (the
+// same two hops getPlexFriendEmails really makes — see plex-membership.test).
+function plexFixtureFetch(serverUrl: string, machine: string, friendEmails: string[]): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith(`${serverUrl}/identity`)) {
+      return new Response(JSON.stringify({ MediaContainer: { machineIdentifier: machine } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.startsWith("https://plex.tv/api/users")) {
+      const blocks = friendEmails
+        .map(
+          (email, i) =>
+            `<User id="${i + 1}" title="u${i + 1}" email="${email}">` +
+            `<Server id="${i + 1}" machineIdentifier="${machine}"/></User>`,
+        )
+        .join("");
+      return new Response(
+        `<?xml version="1.0"?><MediaContainer size="${friendEmails.length}">${blocks}</MediaContainer>`,
+        { status: 200, headers: { "content-type": "application/xml" } },
+      );
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  }) as typeof fetch;
+}
+
+test("membership TEETH: a plex USER shared on NO instance is revoked on the slow path (all devices)", async (t) => {
+  const throwingFetch = globalThis.fetch;
+  membershipSettings = {
+    plexInstances: JSON.stringify([{ slug: "away", name: "Away" }]),
+    plexAwayServerUrl: AWAY_URL,
+    plexAwayAdminToken: "away-admin-token",
+  };
+  // The "away" instance shares with other@example.com only — never with the
+  // minted user's u@example.com.
+  globalThis.fetch = plexFixtureFetch(AWAY_URL, "machine-away", ["other@example.com"]);
+  t.after(() => {
+    globalThis.fetch = throwingFetch;
+    membershipSettings = {};
+  });
+
+  const { userId, token } = await mint({ provider: "plex", role: "USER" });
+  assert.equal(
+    await verifyAndRefreshSession(token),
+    null,
+    "an email absent from every instance's set must be rejected",
+  );
+  // The revoke firing also proves the allowlist was a real set (a poisoned /
+  // unconfigured null would have failed open instead).
+  assert.ok(
+    usersById.get(userId)?.sessionsRevokedAt instanceof Date,
+    "the recheck must revoke ALL the user's sessions by advancing sessionsRevokedAt",
+  );
+});
+
+test("ACCEPTED TRADE-OFF: membership on ANY instance keeps a plex session — even when the sign-in-era server dropped the user", async (t) => {
+  // The allowlist is a UNION and a session doesn't record which server it was
+  // signed in against. Stand-ins: "away" (the sign-in-era server) still holds
+  // its TTL-fresh cached set from the test above, WITHOUT u@example.com; the
+  // new "roam" instance shares with u. Union ∋ u ⇒ the session survives. If
+  // the union ever narrowed to the sign-in-era instance (or dropped a sibling
+  // instance's contribution), this user would be mass-revoked here.
+  const throwingFetch = globalThis.fetch;
+  membershipSettings = {
+    plexInstances: JSON.stringify([
+      { slug: "away", name: "Away" },
+      { slug: "roam", name: "Roam" },
+    ]),
+    plexAwayServerUrl: AWAY_URL,
+    plexAwayAdminToken: "away-admin-token",
+    plexRoamServerUrl: ROAM_URL,
+    plexRoamAdminToken: "roam-admin-token",
+  };
+  // Only roam's hops are scripted: away is inside its 30-min TTL and must not
+  // refetch (an attempted away fetch would throw → poison → a vacuous
+  // fail-open pass, which the no-warn assertion below rules out).
+  globalThis.fetch = plexFixtureFetch(ROAM_URL, "machine-roam", ["u@example.com", "other@example.com"]);
+  t.after(() => {
+    globalThis.fetch = throwingFetch;
+    membershipSettings = {};
+  });
+
+  const warnsBefore = warns.length;
+  const { userId, token } = await mint({ provider: "plex", role: "USER" });
+  const result = await verifyAndRefreshSession(token);
+  assert.ok(result, "membership on a sibling instance must keep the session alive");
+  assert.equal(result.claims.id, userId);
+  assert.equal(
+    usersById.get(userId)?.sessionsRevokedAt,
+    null,
+    "no revocation may be written when any instance still shares with the user",
+  );
+  assert.equal(
+    warns.slice(warnsBefore).filter((w) => w.includes("[plex-membership]")).length,
+    0,
+    "no instance fetch may have failed — the survival must come from the union, not a poisoned fail-open",
+  );
 });

@@ -17,6 +17,7 @@ import { TrailerButton } from "@/components/media/trailer-button";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
@@ -48,6 +49,11 @@ export default async function MovieDetailPage({
   }
 
   const session = await sessionPromise;
+  // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
+  // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
+  // in-library gates on the "report issue" / "vote to delete" actions — so scoping the
+  // QUERIES (not their results) is what keeps a restricted server invisible end to end.
+  const visible = await getVisibleServerInstances(session);
 
   const [
     plexItem,
@@ -69,11 +75,11 @@ export default async function MovieDetailPage({
     onWatchlist,
     onHidden,
   ] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId: media.id, mediaType: "MOVIE", serverInstance: { in: visible.plex } },
     }),
-    prisma.jellyfinLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId: media.id, mediaType: "MOVIE" } },
+    prisma.jellyfinLibraryItem.findFirst({
+      where: { tmdbId: media.id, mediaType: "MOVIE", serverInstance: { in: visible.jellyfin } },
     }),
     prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
     session ? prisma.mediaRequest.findFirst({

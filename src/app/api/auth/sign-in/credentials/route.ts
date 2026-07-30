@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
-import { buildSignInResponse } from "@/lib/sign-in-response";
+import { AccountDeactivatedError, authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
+import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
 
 // Summonarr-native credentials sign-in: authorize(), then mint a Summonarr JWT we own.
@@ -30,6 +30,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
 
-  const result = await signInAndMintSession({ user, providerId: "credentials" });
+  let result;
+  try {
+    result = await signInAndMintSession({ user, providerId: "credentials" });
+  } catch (err) {
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    throw err;
+  }
   return buildSignInResponse(req, result);
 }

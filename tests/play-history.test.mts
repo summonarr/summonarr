@@ -26,7 +26,9 @@
 //    completion 90, arc gap 14), and the 15s TTL + in-flight coalescing (one
 //    Setting.findMany serves every getter).
 //  - resolveShowTmdbId: source-native show key → tmdbId via the cached
-//    library tables, TV-scoped, null for empty/unmapped keys, and no
+//    library tables, TV-scoped AND serverInstance-scoped (Plex ratingKeys are
+//    small server-local integers, so two instances legitimately reuse the
+//    same key for different shows), null for empty/unmapped keys, and no
 //    cross-source table bleed.
 //  - resolveMediaServerUser: advisory-lock serialization (namespace 2020,
 //    31-bit-masked FNV-1a key — Postgres has no (int, bigint) overload),
@@ -36,7 +38,9 @@
 //    promote false→true but NEVER demote.
 //  - recordCompletedSession: the `${sessionKey}:${startedAt.toISOString()}`
 //    dedup key + createMany({ skipDuplicates: true }) — with the backfill
-//    crons gone this is the WHOLE dedup story (guardrail 19) — plus the
+//    crons gone this is the WHOLE dedup story (guardrail 19; uniqueness is
+//    [source, serverInstance, sourceSessionId], with serverInstance stamped
+//    through from the ActiveSession row) — plus the
 //    lastSeenAt CAS delete, the sub-90s drop, the wall-clock cap on the
 //    progressMs fallback (a seek-to-credits-and-quit can't mint watch time),
 //    the Tautulli-style 10s end-of-file clamp, credits-aware
@@ -151,7 +155,7 @@ shadowPrismaModel(prisma, "activeSession", {
 type HistoryCreateArgs = { data: Array<Record<string, unknown>>; skipDuplicates?: boolean };
 const historyCreates: HistoryCreateArgs[] = [];
 const historyFindFirstCalls: Array<Record<string, unknown>> = [];
-let priorUnwatchedRow: { id: string; referenceId: string | null } | null = null;
+let priorPlayRow: { id: string; referenceId: string | null; watched: boolean } | null = null;
 let historyFindFirstError = false;
 const historyDeleteManyCalls: Array<{ where: { startedAt: { lt: Date } } }> = [];
 let historyDeleteCount = 0;
@@ -163,7 +167,7 @@ shadowPrismaModel(prisma, "playHistory", {
   findFirst: async (args: Record<string, unknown>) => {
     historyFindFirstCalls.push(args);
     if (historyFindFirstError) throw new Error("history lookup down");
-    return priorUnwatchedRow;
+    return priorPlayRow;
   },
   deleteMany: async (args: { where: { startedAt: { lt: Date } } }) => {
     historyDeleteManyCalls.push(args);
@@ -186,15 +190,20 @@ shadowPrismaModel(prisma, "tmdbCache", {
 // $transaction: run the callback against an in-memory tx facade.
 type UserRow = { id: string; mediaServer: string | null; deactivatedAt: Date | null };
 type MsuUpsertArgs = {
-  where: { source_sourceUserId: { source: string; sourceUserId: string } };
+  where: { source_serverInstance_sourceUserId: { source: string; serverInstance: string; sourceUserId: string } };
   create: Record<string, unknown>;
   update: Record<string, unknown>;
 };
 const lockSqls: string[] = [];
-const userFindCalls: Array<{ where: { email: string } }> = [];
+// Every user lookup the resolver issues, in order — the email fallback AND the
+// provider-subject lookup that now precedes it.
+const userFindCalls: Array<{ where: { email?: string; plexUserId?: string; jellyfinUserId?: string } }> = [];
+// Row returned for the EMAIL lookup. `userBySub` is the (authoritative)
+// provider-subject match; null means no account is bound to that subject id.
 let userRow: UserRow | null = null;
+let userBySub: { id: string } | null = null;
 const msuFindCalls: Array<Record<string, unknown>> = [];
-let msuExisting: { id: string; serverMachineId: string | null } | null = null;
+let msuExisting: { id: string; serverMachineId: string | null; manualUserLink?: boolean } | null = null;
 const msuUpserts: MsuUpsertArgs[] = [];
 let txOptions: unknown;
 const txStub = {
@@ -203,8 +212,9 @@ const txStub = {
     return 0;
   },
   user: {
-    findUnique: async (args: { where: { email: string } }) => {
+    findUnique: async (args: { where: { email?: string; plexUserId?: string; jellyfinUserId?: string } }) => {
       userFindCalls.push(args);
+      if (args.where.plexUserId !== undefined || args.where.jellyfinUserId !== undefined) return userBySub;
       return userRow;
     },
   },
@@ -243,7 +253,7 @@ beforeEach(() => {
   activeSessionUpdateManyError = null;
   historyCreates.length = 0;
   historyFindFirstCalls.length = 0;
-  priorUnwatchedRow = null;
+  priorPlayRow = null;
   historyFindFirstError = false;
   historyDeleteManyCalls.length = 0;
   historyDeleteCount = 0;
@@ -253,6 +263,7 @@ beforeEach(() => {
   lockSqls.length = 0;
   userFindCalls.length = 0;
   userRow = null;
+  userBySub = null;
   msuFindCalls.length = 0;
   msuExisting = null;
   msuUpserts.length = 0;
@@ -270,6 +281,7 @@ function makeSession(overrides: Partial<ActiveSession> = {}): ActiveSession {
   return {
     id: "plex:key-1",
     source: "plex",
+    serverInstance: "",
     sessionKey: "key-1",
     startedAt: BASE_STARTED_AT,
     lastSeenAt: new Date(BASE_STARTED_AT.getTime() + 40 * 60_000),
@@ -604,32 +616,42 @@ test("settings getters: concurrent callers after a cache expiry coalesce onto on
 // ═══ resolveShowTmdbId ══════════════════════════════════════════════════════
 
 test("resolveShowTmdbId: empty show keys resolve to null without touching either library table", async () => {
-  assert.equal(await resolveShowTmdbId("plex", null), null);
-  assert.equal(await resolveShowTmdbId("plex", undefined), null);
-  assert.equal(await resolveShowTmdbId("jellyfin", ""), null);
+  assert.equal(await resolveShowTmdbId("plex", null, ""), null);
+  assert.equal(await resolveShowTmdbId("plex", undefined, ""), null);
+  assert.equal(await resolveShowTmdbId("jellyfin", "", ""), null);
   assert.equal(plexLibCalls.length, 0);
   assert.equal(jellyfinLibCalls.length, 0);
 });
 
-test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV-scoped, and never touch the Jellyfin table", async () => {
+test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstance-scoped, and never touch the Jellyfin table", async () => {
   plexLibRow = { tmdbId: 1399 };
-  assert.equal(await resolveShowTmdbId("plex", "rk-1399"), 1399);
+  assert.equal(await resolveShowTmdbId("plex", "rk-1399", ""), 1399);
   assert.equal(plexLibCalls.length, 1);
-  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV" });
+  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV", serverInstance: "" });
   assert.equal(jellyfinLibCalls.length, 0);
 
   // Unmapped: a row without a tmdbId and no row at all both read as null.
   plexLibRow = { tmdbId: null };
-  assert.equal(await resolveShowTmdbId("plex", "rk-unmapped"), null);
+  assert.equal(await resolveShowTmdbId("plex", "rk-unmapped", ""), null);
   plexLibRow = null;
-  assert.equal(await resolveShowTmdbId("plex", "rk-missing"), null);
+  assert.equal(await resolveShowTmdbId("plex", "rk-missing", ""), null);
 });
 
-test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem and never touch the Plex table", async () => {
+test("resolveShowTmdbId: a named instance's lookup carries ITS serverInstance in the where — ratingKeys are server-local integers, so an unscoped lookup can hit another server's show", async () => {
+  plexLibRow = { tmdbId: 4589 };
+  assert.equal(await resolveShowTmdbId("plex", "42", "remote"), 4589);
+  assert.deepEqual(
+    plexLibCalls[0].where,
+    { plexRatingKey: "42", mediaType: "TV", serverInstance: "remote" },
+    "dropping the serverInstance term would attribute the remote server's episode watches to whichever instance's show holds ratingKey 42 in the cache",
+  );
+});
+
+test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem, serverInstance-scoped for consistency, and never touch the Plex table", async () => {
   jellyfinLibRow = { tmdbId: 66732 };
-  assert.equal(await resolveShowTmdbId("jellyfin", "jf-item-1"), 66732);
+  assert.equal(await resolveShowTmdbId("jellyfin", "jf-item-1", ""), 66732);
   assert.equal(jellyfinLibCalls.length, 1);
-  assert.deepEqual(jellyfinLibCalls[0].where, { jellyfinItemId: "jf-item-1", mediaType: "TV" });
+  assert.deepEqual(jellyfinLibCalls[0].where, { jellyfinItemId: "jf-item-1", mediaType: "TV", serverInstance: "" });
   assert.equal(plexLibCalls.length, 0);
 });
 
@@ -644,8 +666,8 @@ test("MediaServerMismatchError: a real Error subclass carrying the (source, sour
   assert.match(err.message, /plex:u-9 bound to a different server/);
 });
 
-test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, no user lookup without an email, no binding pre-check without a machineId", async () => {
-  const id = await resolveMediaServerUser({ source: "plex", sourceUserId: "u-1", username: "alice" });
+test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, subject lookup only (no email), row read carries the manual-link pin", async () => {
+  const id = await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-1", username: "alice" });
   assert.equal(id, "msu-row-1");
   assert.deepEqual(txOptions, { timeout: 15_000 });
 
@@ -658,19 +680,31 @@ test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020
   assert.ok(Number.isInteger(key) && key >= 0 && key <= 0x7fffffff, `lock key out of int32 range: ${key}`);
 
   // Deterministic per (source, sourceUserId); distinct identities get distinct keys.
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-1", username: "alice" });
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-2", username: "bob" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-1", username: "alice" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-2", username: "bob" });
   const keys = lockSqls.map((s) => Number(s.match(/\((\d+), (\d+)\)/)![2]));
   assert.equal(keys[0], keys[1]);
   assert.notEqual(keys[0], keys[2]);
 
-  assert.equal(userFindCalls.length, 0); // no email → no User lookup
-  assert.equal(msuFindCalls.length, 0); // no machineId → no binding pre-check
-  assert.deepEqual(msuUpserts[0].where, { source_sourceUserId: { source: "plex", sourceUserId: "u-1" } });
+  // Three calls for the three resolves above: the subject lookup ALWAYS runs (it
+  // is the authoritative link), the email fallback only when an email exists.
+  assert.equal(userFindCalls.length, 3);
+  assert.ok(userFindCalls.every((c) => "plexUserId" in c.where), "no email → subject lookup only");
+  // The existing-row read is UNCONDITIONAL (once per resolve): it carries
+  // `manualUserLink`, which every upsert needs so an admin's hand-set binding
+  // survives. The server-binding CHECK inside it is what stays gated on a
+  // supplied machineId — with none offered here, nothing is refused.
+  assert.equal(msuFindCalls.length, 3);
+  assert.deepEqual(msuFindCalls[0], {
+    where: { source_serverInstance_sourceUserId: { source: "plex", serverInstance: "", sourceUserId: "u-1" } },
+    select: { id: true, serverMachineId: true, manualUserLink: true },
+  });
+  assert.deepEqual(msuUpserts[0].where, { source_serverInstance_sourceUserId: { source: "plex", serverInstance: "", sourceUserId: "u-1" } });
   // Exact create/update shapes: deepEqual pins key ABSENCE too — no
   // isServerAdmin key may appear when the caller didn't send one.
   assert.deepEqual(msuUpserts[0].create, {
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-1",
     username: "alice",
     email: null,
@@ -685,15 +719,19 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
   userRow = { id: "user-7", mediaServer: "PLEX", deactivatedAt: null }; // case-insensitive server match
   await resolveMediaServerUser({
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-2",
     username: "Bob",
     email: "  Bob@Example.COM ",
     thumbUrl: "https://plex.tv/thumb.png",
   });
-  assert.equal(userFindCalls.length, 1);
-  assert.deepEqual(userFindCalls[0].where, { email: "bob@example.com" }); // NFKC+lowercase+trim
+  // Subject lookup first (no account bound to "u-2"), then the email fallback.
+  assert.equal(userFindCalls.length, 2);
+  assert.deepEqual(userFindCalls[0].where, { plexUserId: "u-2" });
+  assert.deepEqual(userFindCalls[1].where, { email: "bob@example.com" }); // NFKC+lowercase+trim
   assert.deepEqual(msuUpserts[0].create, {
     source: "plex",
+    serverInstance: "",
     sourceUserId: "u-2",
     username: "Bob",
     email: "bob@example.com", // normalized copy is what round-trips later lookups
@@ -709,18 +747,91 @@ test("resolveMediaServerUser: emails are normalized once and used for BOTH the U
   });
 });
 
-test("resolveMediaServerUser: deactivated accounts and other-server accounts are NEVER linked", async () => {
-  // Admin-deactivated account keeps its email — fresh watches must not attribute to it.
+test("resolveMediaServerUser: a DISABLED account still gets linked — its watch history keeps flowing", async () => {
+  // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
+  // and the person behind a disabled account usually keeps watching on the media
+  // server. Refusing the link here orphaned their MediaServerUser row, so every
+  // watch from that moment on stopped being attributed to them — blanking both
+  // the admin per-user views and getMyWatchHistory, permanently, even after an
+  // admin re-enabled the account. A PURGED account is excluded by construction
+  // instead: its email becomes deleted-<id>@deleted.invalid, which no media
+  // server will ever report.
   userRow = { id: "user-8", mediaServer: null, deactivatedAt: new Date("2026-01-01T00:00:00.000Z") };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
-  assert.equal(msuUpserts[0].create.userId, null);
-  assert.ok(!("userId" in msuUpserts[0].update), "update must not carry a userId for a deactivated account");
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-3", username: "carol", email: "carol@example.com" });
+  assert.equal(msuUpserts[0].create.userId, "user-8");
+  assert.equal(msuUpserts[0].update.userId, "user-8");
+});
 
+test("resolveMediaServerUser: the provider SUBJECT id links a user with no email on either side", async () => {
+  // The linkage hole email-only matching left open: a Jellyfin account needs no
+  // email at all, and a Jellyfin-provisioned Summonarr row carries the synthetic
+  // jellyfin-<id>@jellyfin.local login address that no media server will ever
+  // report. Both sides null ⇒ the old code skipped the lookup entirely and the
+  // user's watches were never attributed to anyone. sourceUserId IS the value
+  // sign-in pinned to User.jellyfinUserId, so it links them exactly.
+  userBySub = { id: "user-sub" };
+  await resolveMediaServerUser({ source: "jellyfin", serverInstance: "", sourceUserId: "jf-uuid-1", username: "erin" });
+  assert.deepEqual(userFindCalls[0].where, { jellyfinUserId: "jf-uuid-1" });
+  assert.equal(userFindCalls.length, 1, "a subject hit must short-circuit the email fallback");
+  assert.equal(msuUpserts[0].create.userId, "user-sub");
+  assert.equal(msuUpserts[0].update.userId, "user-sub");
+});
+
+test("resolveMediaServerUser: the subject id WINS over a conflicting email match", async () => {
+  // Email is user-changeable on both sides and can collide; the provider subject
+  // is unique and written only by that provider's sign-in. When they disagree,
+  // the subject is the identity.
+  userBySub = { id: "user-correct" };
+  userRow = { id: "user-stale-email-owner", mediaServer: null, deactivatedAt: null };
+  await resolveMediaServerUser({
+    source: "plex",
+    serverInstance: "",
+    sourceUserId: "plex-acct-9",
+    username: "frank",
+    email: "shared@example.com",
+  });
+  assert.equal(msuUpserts[0].create.userId, "user-correct");
+});
+
+test("resolveMediaServerUser: a PURGED account can't be relinked by either key", async () => {
+  // Purge nulls plexUserId/jellyfinUserId AND rewrites the email to
+  // deleted-<id>@deleted.invalid, so both branches miss by construction — the
+  // new subject path must not reopen the door a purge is meant to close.
+  userBySub = null; // the subject columns were nulled
+  userRow = null; // and no media server reports a .invalid address
+  await resolveMediaServerUser({
+    source: "plex",
+    serverInstance: "",
+    sourceUserId: "plex-acct-purged",
+    username: "gone",
+    email: "real@example.com",
+  });
+  assert.equal(msuUpserts[0].create.userId, null);
+  assert.ok(!("userId" in msuUpserts[0].update));
+});
+
+test("resolveMediaServerUser: an admin's MANUAL link is never overwritten by automatic resolution", async () => {
+  // The pin is what makes the manual link/unlink admin action usable at all:
+  // this resolver runs every 5s, so an unpinned correction would be undone
+  // within seconds of the admin making it.
+  msuExisting = { id: "row-manual", serverMachineId: null, manualUserLink: true };
+  userBySub = { id: "user-auto-would-pick" };
+  await resolveMediaServerUser({
+    source: "plex",
+    serverInstance: "",
+    sourceUserId: "plex-acct-manual",
+    username: "hank",
+    email: "hank@example.com",
+  });
+  assert.ok(!("userId" in msuUpserts[0].update), "a pinned row's binding must not be rewritten");
+});
+
+test("resolveMediaServerUser: other-server accounts are NEVER linked", async () => {
   // A user pinned to jellyfin must not be linked by a plex identity with the same email.
   userRow = { id: "user-9", mediaServer: "jellyfin", deactivatedAt: null };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-4", username: "dave", email: "dave@example.com" });
-  assert.equal(msuUpserts[1].create.userId, null);
-  assert.ok(!("userId" in msuUpserts[1].update));
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-4", username: "dave", email: "dave@example.com" });
+  assert.equal(msuUpserts[0].create.userId, null);
+  assert.ok(!("userId" in msuUpserts[0].update));
 });
 
 test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMismatchError before any upsert; first-seen and matching machineIds proceed", async () => {
@@ -728,6 +839,7 @@ test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMisma
   await assert.rejects(
     resolveMediaServerUser({
       source: "plex",
+      serverInstance: "",
       sourceUserId: "u-5",
       username: "eve",
       serverMachineId: "machine-B",
@@ -747,24 +859,24 @@ test("resolveMediaServerUser: a serverMachineId mismatch throws MediaServerMisma
 
   // A row that never recorded a machineId accepts the first one offered…
   msuExisting = { id: "row-1", serverMachineId: null };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
   assert.equal(msuUpserts[0].create.serverMachineId, "machine-B");
   assert.equal(msuUpserts[0].update.serverMachineId, "machine-B");
   // …and the same machineId keeps working.
   msuExisting = { id: "row-1", serverMachineId: "machine-B" };
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-5", username: "eve", serverMachineId: "machine-B" });
   assert.equal(msuUpserts.length, 2);
 });
 
 test("resolveMediaServerUser: isServerAdmin is set-only — create records false, but an update may only ever promote to true", async () => {
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-6", username: "frank", isServerAdmin: false });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-6", username: "frank", isServerAdmin: false });
   assert.equal(msuUpserts[0].create.isServerAdmin, false);
   assert.ok(
     !("isServerAdmin" in msuUpserts[0].update),
     "false must NEVER demote an existing admin row (token rotation / fresh-client transients)",
   );
 
-  await resolveMediaServerUser({ source: "plex", sourceUserId: "u-6", username: "frank", isServerAdmin: true });
+  await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-6", username: "frank", isServerAdmin: true });
   assert.equal(msuUpserts[1].create.isServerAdmin, true);
   assert.equal(msuUpserts[1].update.isServerAdmin, true);
 });
@@ -782,6 +894,7 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
   assert.equal(historyCreates[0].data.length, 1);
   assert.deepEqual(historyCreates[0].data[0], {
     source: "plex",
+    serverInstance: "", // stamped from the ActiveSession row (multi-server attribution)
     startedAt: session.startedAt,
     stoppedAt: session.lastSeenAt, // lastSeenAt > startedAt → it is the stop anchor
     duration: 2400,
@@ -828,6 +941,24 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
   // The delete is a CAS on the lastSeenAt the caller read — never a blind id delete.
   assert.equal(activeSessionDeletes.length, 1);
   assert.deepEqual(activeSessionDeletes[0].where, { id: "plex:key-1", lastSeenAt: session.lastSeenAt });
+});
+
+test("recordCompletedSession: a named-instance session's watch lands with ITS serverInstance stamped — multi-server history attribution", async () => {
+  setSettings({});
+  // The ActiveSession row carries serverInstance from create (both pollers and
+  // the SSE writer stamp it); the finalize must copy it through, or every
+  // named-instance watch collapses onto serverInstance:"" — mis-attributed to
+  // the default server AND sharing its dedup namespace, where the unique key
+  // [source, serverInstance, sourceSessionId] would let an identical raw
+  // sessionKey:startedAt pair from another server silently swallow this row.
+  const session = makeSession({ id: "plex:remote:key-1", serverInstance: "remote" });
+  await recordCompletedSession(session, { skipSSE: true });
+  assert.equal(historyCreates.length, 1);
+  assert.equal(historyCreates[0].data[0].serverInstance, "remote", "the history row records which server the watch happened on");
+  // The dedup key itself stays the bare sessionKey:startedAt — the instance
+  // lives in its own column, not smuggled into the key.
+  assert.equal(historyCreates[0].data[0].sourceSessionId, "key-1:2026-07-01T20:00:00.000Z");
+  assert.deepEqual(activeSessionDeletes[0].where, { id: "plex:remote:key-1", lastSeenAt: session.lastSeenAt });
 });
 
 test("recordCompletedSession: sub-90s watches are dropped with no history row — but STILL CAS-delete the ActiveSession; 90s exactly is kept", async () => {
@@ -971,26 +1102,29 @@ test("recordCompletedSession: opts.stoppedAt wins over lastSeenAt; a degenerate 
 test("recordCompletedSession: resume-grouping chains onto the prior unwatched watch — root id first, then the shared referenceId; exact 7-day lookback query", async () => {
   setSettings({});
   const session = makeSession();
-  priorUnwatchedRow = { id: "prior-1", referenceId: null }; // the prior row IS the chain root
+  priorPlayRow = { id: "prior-1", referenceId: null, watched: false }; // the prior row IS the chain root
   await recordCompletedSession(session, { skipSSE: true });
   assert.equal(historyCreates[0].data[0].referenceId, "prior-1");
+  // `watched` is NOT a WHERE term: the rule is "chain only if the MOST RECENT
+  // prior play was unwatched". Filtering it in SQL instead skips over a completed
+  // watch to reach an older unwatched one, which merged a rewatch into a finished
+  // chain. Fetch the latest row and decide in JS — hence watched in the select.
   assert.deepEqual(historyFindFirstCalls[0], {
     where: {
       source: "plex",
       sourceItemId: "item-1",
       mediaServerUserId: "msu-1",
-      watched: false, // a watched prior means the next play is a rewatch, not a resume
       startedAt: {
         gte: new Date(session.lastSeenAt.getTime() - 7 * 24 * 60 * 60 * 1000), // stoppedAt − 7d
         lt: session.startedAt,
       },
     },
     orderBy: { startedAt: "desc" },
-    select: { id: true, referenceId: true },
+    select: { id: true, referenceId: true, watched: true },
   });
 
   // A prior row already inside a chain shares its root, not its own id.
-  priorUnwatchedRow = { id: "prior-2", referenceId: "chain-root" };
+  priorPlayRow = { id: "prior-2", referenceId: "chain-root", watched: false };
   await recordCompletedSession(makeSession(), { skipSSE: true });
   assert.equal(historyCreates[1].data[0].referenceId, "chain-root");
 
@@ -999,6 +1133,22 @@ test("recordCompletedSession: resume-grouping chains onto the prior unwatched wa
   await recordCompletedSession(makeSession({ sourceItemId: null }), { skipSSE: true });
   assert.equal(historyFindFirstCalls.length, lookupsSoFar);
   assert.equal(historyCreates[2].data[0].referenceId, null);
+});
+
+test("recordCompletedSession: a REWATCH starts its own chain — the most recent prior play being watched terminates the chain", async () => {
+  setSettings({});
+  // Mon: paused at 30min (unwatched) → Tue: finished (watched, chained to Mon) →
+  // Sat: full rewatch. Saturday's most recent prior play is Tuesday's COMPLETED
+  // row, so it must root its own chain rather than joining {Mon, Tue}. Otherwise
+  // the grouped history view (which partitions on COALESCE(referenceId, id))
+  // renders all three as one 3-segment viewing and the rewatch vanishes.
+  priorPlayRow = { id: "tuesday-finish", referenceId: "monday-start", watched: true };
+  await recordCompletedSession(makeSession(), { skipSSE: true });
+  assert.equal(
+    historyCreates[0].data[0].referenceId,
+    null,
+    "a rewatch after a completed watch must not inherit the finished chain's referenceId",
+  );
 });
 
 test("recordCompletedSession: poster comes from the TmdbCache details blob (tv: key for TV), never the session's own posterPath; miss and malformed JSON degrade to null", async () => {

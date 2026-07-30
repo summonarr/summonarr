@@ -120,8 +120,11 @@ function WebMergeFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ code: code.trim() }),
       });
-      const data = (await res.json()) as { migrated?: number; error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Verification failed");
+      // `message` first: several routes answer { error: "<slug>", message: "<sentence>" },
+      // and rendering `error` alone showed the raw machine code — e.g. literally
+      // "rate_limit" instead of "Too many attempts. Wait 10 minutes and try again."
+      const data = (await res.json()) as { migrated?: number; error?: string; message?: string };
+      if (!res.ok) throw new Error(data.message ?? data.error ?? "Verification failed");
       setMigrated(data.migrated ?? 0);
       setStep("done");
       router.refresh();

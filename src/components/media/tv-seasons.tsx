@@ -25,6 +25,10 @@ interface SeasonState {
   owned: Set<number>;
 }
 
+// Uses the browser's own locale/timezone (no pinned args), which is only safe
+// post-hydration — the sole call site below gates on `mounted` for exactly
+// this reason (guardrail 16). Do not call this from an SSR-visible spot
+// without also gating it, or the server/client render will disagree.
 function formatAirDate(iso: string | null): string | null {
   if (!iso) return null;
   try {

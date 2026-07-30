@@ -23,10 +23,11 @@ import { createCipheriv, randomBytes } from "node:crypto";
 
 // MUST match SETTINGS_SENSITIVE_KEYS in src/lib/settings-sensitive-keys.ts
 // (the canonical source-of-truth that prisma.ts and settings/route.ts both
-// import). This file can't import from TS, so the list is duplicated — but
-// the boot-time assertion in src/app/api/settings/route.ts catches schema
-// drift, and unused entries here are harmless (the LIKE query just returns
-// no rows for them).
+// import). This file can't import from TS, so the list is duplicated — and it
+// HAD drifted: radarr4k/sonarr4k ApiKey+WebhookSecret and apnsRelayKey were all
+// missing, so this migration left those rows in PLAINTEXT while the Prisma
+// extension treated them as encrypted. Unused entries are harmless (the lookup
+// just returns no rows), so err toward listing too many.
 const SENSITIVE_KEYS = [
   "plexAdminToken",
   "jellyfinApiKey",
@@ -37,6 +38,10 @@ const SENSITIVE_KEYS = [
   "discordBotToken",
   "radarrApiKey",
   "sonarrApiKey",
+  "radarr4kApiKey",
+  "sonarr4kApiKey",
+  "radarr4kWebhookSecret",
+  "sonarr4kWebhookSecret",
   "omdbApiKey",
   "mdblistApiKey",
   "traktClientId",
@@ -44,7 +49,14 @@ const SENSITIVE_KEYS = [
   "resendApiKey",
   "smtpPassword",
   "trashGithubToken",
+  "apnsRelayKey",
 ];
+
+// Named Radarr/Sonarr instances are admin-defined at runtime, so their secret
+// keys (radarrAnimeApiKey, sonarr4kWebhookSecret, …) cannot be enumerated
+// statically. Mirrors ARR_INSTANCE_SECRET_RE in settings-sensitive-keys.ts —
+// the same shape gate the Prisma extension uses to decide what to encrypt.
+const ARR_INSTANCE_SECRET_RE = /^(radarr|sonarr)([A-Z0-9][A-Za-z0-9]*)?(ApiKey|WebhookSecret)$/;
 
 const ENC_PREFIX = "enc:v1:";
 
@@ -100,7 +112,17 @@ async function main() {
     let settingsAlreadyEncrypted = 0;
     let settingsEmpty = 0;
 
-    for (const skey of SENSITIVE_KEYS) {
+    // Union the static list with every Setting row whose KEY SHAPE marks it as a
+    // per-instance arr secret, so admin-defined instances are migrated too.
+    const allKeys = await client.query('SELECT key FROM "Setting"');
+    const targetKeys = [
+      ...new Set([
+        ...SENSITIVE_KEYS,
+        ...allKeys.rows.map((r) => r.key).filter((k) => ARR_INSTANCE_SECRET_RE.test(k)),
+      ]),
+    ];
+
+    for (const skey of targetKeys) {
       const r = await client.query('SELECT value FROM "Setting" WHERE key = $1', [skey]);
       if (r.rowCount === 0) continue;
       const value = r.rows[0].value;

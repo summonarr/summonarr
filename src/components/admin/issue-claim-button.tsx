@@ -29,8 +29,10 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
     try {
       const res = await fetch(withBasePath(`/api/issues/${issueId}/claim`), { method: "POST" });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Failed");
+        // `message` first — a claim CAS miss answers { error: "claim-conflict",
+        // message: "<who claimed it>" }, and showing the slug hid the useful half.
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setError(data.message ?? data.error ?? "Failed");
         return;
       }
       router.refresh();

@@ -87,6 +87,34 @@ export function serializeClearedSessionCookies(): string[] {
   return out;
 }
 
+// Rewrites the Summonarr session cookie's value inside an incoming `Cookie`
+// header, leaving every other cookie byte-identical. Parsing mirrors
+// parseSessionCookie so the two can never disagree about which piece is ours.
+//
+// The proxy needs this because verifyAndRefreshSession runs TWICE per request
+// (once in proxy(), once downstream in authenticateRequest/authActive) and the
+// first pass can ROTATE the AuthSession's sessionId. A rotation kills the old
+// token immediately, so unless the freshly-minted one is put on the FORWARDED
+// request, the second pass presents a dead token and the user is 401'd or
+// redirected to /login right after an admin edits their role or permissions.
+// Appending `Set-Cookie` to the response is not enough — that only reaches the
+// browser on the NEXT request.
+export function replaceSessionCookie(cookieHeader: string | null, token: string): string {
+  const name = getSessionCookieName();
+  const pieces = (cookieHeader ?? "").split(/;\s*/).filter(Boolean);
+  let replaced = false;
+  const out = pieces.map((piece) => {
+    const eq = piece.indexOf("=");
+    if (eq !== -1 && piece.slice(0, eq) === name) {
+      replaced = true;
+      return `${name}=${token}`;
+    }
+    return piece;
+  });
+  if (!replaced) out.push(`${name}=${token}`);
+  return out.join("; ");
+}
+
 export function parseSessionCookie(cookieHeader: string | null): string | null {
   if (!cookieHeader) return null;
   const name = getSessionCookieName();

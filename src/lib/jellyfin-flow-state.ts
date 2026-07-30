@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { type MediaInstanceKey } from "@/lib/media-instances";
 
 // Server-side state binding for the Jellyfin QuickConnect sign-in flow.
 //
@@ -29,6 +30,12 @@ export interface QcFlowState {
   // cookie, since stuffing a high-entropy upstream token into our own JWT
   // expands its blast-radius unnecessarily.
   secretHash: string;
+  // Which Jellyfin instance the secret was issued against, pinned at initiate
+  // time. The finalize route (sign-in/jellyfin-quickconnect) reads this back
+  // out of the VERIFIED cookie rather than trusting a client-supplied
+  // instance field — mirrors how plexId/clientId are pinned in
+  // plex-flow-state.ts.
+  instance: MediaInstanceKey;
 }
 
 export function hashQuickConnectSecret(secret: string): string {
@@ -47,10 +54,10 @@ export async function signQcFlowCookie(state: QcFlowState): Promise<string> {
 export async function verifyQcFlowCookie(token: string): Promise<QcFlowState | null> {
   try {
     const { payload } = await jwtVerify(token, getSecret(), { algorithms: ["HS256"] });
-    if (typeof payload.secretHash !== "string") {
+    if (typeof payload.secretHash !== "string" || typeof payload.instance !== "string") {
       return null;
     }
-    return { secretHash: payload.secretHash };
+    return { secretHash: payload.secretHash, instance: payload.instance };
   } catch {
     return null;
   }

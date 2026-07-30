@@ -18,6 +18,7 @@ import {
   serializeSessionCookie,
   serializeClearedSessionCookies,
   parseSessionCookie,
+  replaceSessionCookie,
 } from "../src/lib/session-cookie.ts";
 
 const SECURE_NAME = "__Host-summonarr-session";
@@ -264,6 +265,56 @@ test("serialize → parse roundtrip in both contexts", () => {
       // A browser echoes back just the name=value pair.
       const pair = setCookie.split("; ")[0];
       assert.equal(parseSessionCookie(pair), token);
+    });
+  }
+});
+
+// ── replaceSessionCookie ─────────────────────────────────────────────────────
+// The proxy verifies the session, and so does the route wrapper / page render
+// downstream — BOTH off the forwarded request. When the first pass rotates the
+// AuthSession's sessionId (any role or permission change), the incoming cookie is
+// dead the instant that commits, so the second pass found no AuthSession row and
+// 401'd the API call or redirected the page to /login. Appending Set-Cookie only
+// reaches the browser on the NEXT request; the forwarded cookie has to be
+// rewritten in-place. These pin that rewrite.
+
+test("replaceSessionCookie swaps only our cookie and leaves every other one byte-identical", () => {
+  withEnv({ AUTH_URL: "http://localhost:3000" }, () => {
+    assert.equal(
+      replaceSessionCookie(`theme=dark; ${INSECURE_NAME}=OLD; other=1`, "NEW"),
+      `theme=dark; ${INSECURE_NAME}=NEW; other=1`,
+    );
+    // Order is preserved wherever ours sits.
+    assert.equal(replaceSessionCookie(`${INSECURE_NAME}=OLD; a=1`, "NEW"), `${INSECURE_NAME}=NEW; a=1`);
+  });
+});
+
+test("replaceSessionCookie appends when absent and handles an empty/missing header", () => {
+  withEnv({ AUTH_URL: "http://localhost:3000" }, () => {
+    assert.equal(replaceSessionCookie("theme=dark", "NEW"), `theme=dark; ${INSECURE_NAME}=NEW`);
+    assert.equal(replaceSessionCookie(null, "NEW"), `${INSECURE_NAME}=NEW`);
+    assert.equal(replaceSessionCookie("", "NEW"), `${INSECURE_NAME}=NEW`);
+  });
+});
+
+test("replaceSessionCookie targets the name the CURRENT context uses (__Host- under https)", () => {
+  withEnv({ AUTH_URL: "https://summonarr.example.com" }, () => {
+    // The secure-context name is the one rewritten...
+    assert.equal(replaceSessionCookie(`${SECURE_NAME}=OLD`, "NEW"), `${SECURE_NAME}=NEW`);
+    // ...and a plain-named cookie is NOT honoured here (parseSessionCookie refuses
+    // it too), so it is left alone and ours is appended.
+    assert.equal(
+      replaceSessionCookie(`${INSECURE_NAME}=OLD`, "NEW"),
+      `${INSECURE_NAME}=OLD; ${SECURE_NAME}=NEW`,
+    );
+  });
+});
+
+test("the rewritten header round-trips through parseSessionCookie — the property the proxy relies on", () => {
+  for (const authUrl of ["http://localhost:3000", "https://summonarr.example.com"]) {
+    withEnv({ AUTH_URL: authUrl }, () => {
+      const rewritten = replaceSessionCookie("theme=dark; sm_plex_flow=xyz", "ROTATED.JWT.VALUE");
+      assert.equal(parseSessionCookie(rewritten), "ROTATED.JWT.VALUE");
     });
   }
 });

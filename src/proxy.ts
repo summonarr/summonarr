@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { isLocalHost } from "@/lib/local-only";
 import {
   parseSessionCookie,
+  replaceSessionCookie,
   serializeSessionCookie,
   serializeClearedSessionCookies,
 } from "@/lib/session-cookie";
@@ -326,6 +327,24 @@ export async function proxy(request: NextRequest) {
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);
   requestHeaders.set("Content-Security-Policy", cspValue);
+
+  // Hand the refreshed JWT to the DOWNSTREAM verifier in THIS pass. The session
+  // is verified twice per request (here, then again in authenticateRequest for
+  // API routes / authActive() for page renders), and both read the token off the
+  // forwarded request. When this pass ROTATED the sessionId (a role/permission
+  // change), the incoming cookie is already dead — the second pass would find no
+  // AuthSession row and 401 the route or redirect the page to /login.
+  //
+  // Must be set BEFORE NextResponse.next(): Next snapshots these headers into
+  // x-middleware-request-* at construction time, so mutating afterwards is a
+  // no-op. Cookie sessions only — a bearer client sends no cookie and rides its
+  // original token (guardrail 6b).
+  if (refreshResult?.refreshed && !bearerToken) {
+    requestHeaders.set(
+      "cookie",
+      replaceSessionCookie(request.headers.get("cookie"), refreshResult.refreshed.token),
+    );
+  }
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });
   response.headers.set("Content-Security-Policy", cspValue);

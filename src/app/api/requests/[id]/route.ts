@@ -334,11 +334,17 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
 
             if (pastDates.length === 0 && futureDates.length > 0) {
               released = false;
-              soonestReleaseDate = futureDates.sort()[0];
+              // Sort CHRONOLOGICALLY, not lexicographically. A bare .sort() is
+              // string-ordering: it agrees with date order only while every value
+              // is the same ISO-8601 shape in the same zone. Radarr returning one
+              // date with an offset (…T02:00:00+02:00) and one in Z would pick the
+              // later release as "soonest" and tell the user the wrong date.
+              // Matches the comparator the sync orchestrator uses on this exact data.
+              soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
             }
           }
         } else {
-          const firstAired = await getSeriesFirstAired(updated.tmdbId);
+          const firstAired = await getSeriesFirstAired(updated.tmdbId, variant);
           if (firstAired && new Date(firstAired) > now) {
             released = false;
             soonestReleaseDate = firstAired;

@@ -170,3 +170,36 @@ test("CGNAT top inside edge (100.127.x) is blocked", async () => {
   // of the CGNAT regex would pass every existing assertion.
   assert.equal(await resolveToSafeUrl("http://100.127.255.255/"), null);
 });
+
+test("a MEANINGFUL trailing slash on the path is preserved — only a bare origin is collapsed", async () => {
+  // The strip was anchored to the end of the whole serialized URL, so it ate the
+  // final separator of a real path: ".../application/o/token/" became
+  // ".../application/o/token", a DIFFERENT resource. safe-fetch's admin and user
+  // modes fetch this exact string, so every OIDC token/userinfo/JWKS call to an
+  // IdP whose endpoints canonically end in "/" (Authentik) hit the wrong path —
+  // and redirect:"error" turned the upstream's 301 back into a thrown
+  // SafeFetchError rather than following it.
+  assert.equal(
+    await resolveToSafeUrl("https://8.8.8.8/application/o/token/"),
+    "https://8.8.8.8/application/o/token/",
+  );
+  assert.equal(await resolveToSafeUrl("https://8.8.8.8/a/b/"), "https://8.8.8.8/a/b/");
+  // Bare origin still normalizes (the case the strip was written for)...
+  assert.equal(await resolveToSafeUrl("https://8.8.8.8/"), "https://8.8.8.8");
+  // ...and a query/fragment on the root path is not an empty path.
+  assert.equal(await resolveToSafeUrl("https://8.8.8.8/?a=1"), "https://8.8.8.8/?a=1");
+});
+
+test("link-local is blocked across the whole fe80::/10, not just the fe80: hextet", async () => {
+  // Link-local is fe80::–febf::. The guard matched only the literal `fe80:`
+  // hextet, leaving fe81–febf allowed in BOTH policies while the file header and
+  // CLAUDE.md both claim link-local is blocked outright.
+  for (const addr of ["fe80::1", "fe81::1", "fe90::1", "fea0::1", "febf::1"]) {
+    assert.equal(isSafeAddrForAdmin(addr), false, `${addr} must be blocked (admin mode)`);
+    assert.equal(await verifyResolvedHost(addr), false, `${addr} must be blocked (user mode)`);
+  }
+  // The neighbouring site-local range stays blocked, and fe7f/fec0 boundaries hold.
+  assert.equal(isSafeAddrForAdmin("fec0::1"), false);
+  // Just below the range is a normal global address and must still pass.
+  assert.equal(isSafeAddrForAdmin("fe7f::1"), true);
+});

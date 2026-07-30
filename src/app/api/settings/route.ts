@@ -299,6 +299,23 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "donationBuyMeACoffee",
   ]);
 
+  // The Donations form resubmits all six fields together on every save, not
+  // just the one the admin is editing. A field can hold a pre-existing
+  // http(s)-agnostic value saved before the https-only rule below existed —
+  // without this exemption, that one untouched legacy field would 400 EVERY
+  // future save on the whole tab (including edits to unrelated fields), with
+  // no indication in the UI of which field is blocking it. Only a genuinely
+  // new/changed value is held to the rule; resubmitting the unchanged stored
+  // value is a no-op. This doesn't weaken /donate's own safeUrl() render-time
+  // guard (the actual XSS boundary), which still drops anything non-https
+  // regardless of what's stored.
+  const submittedDonationKeys = Object.keys(body).filter((k) => DONATION_URL_KEYS.has(k));
+  const currentDonationValues = new Map(
+    submittedDonationKeys.length > 0
+      ? (await prisma.setting.findMany({ where: { key: { in: submittedDonationKeys } } })).map((r) => [r.key, r.value])
+      : [],
+  );
+
   const SECRET_KEY_SUFFIXES = ["ApiKey", "Secret", "Token"] as const;
   const isSecretShapedKey = (k: string) =>
     SECRET_KEY_SUFFIXES.some((suffix) => k.endsWith(suffix));
@@ -363,19 +380,25 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
-    if (DONATION_URL_KEYS.has(key)) {
+    if (DONATION_URL_KEYS.has(key) && value !== currentDonationValues.get(key)) {
       // donationAmazon must always be a full URL; the others may be a plain handle
       // (e.g. "@alice"). Apply scheme guard when value looks URL-shaped (contains "://").
       const looksLikeUrl = value.includes("://");
       const requireUrl = key === "donationAmazon";
       if (looksLikeUrl || requireUrl) {
+        // https ONLY, matching the renderer. /donate's safeUrl() drops anything
+        // that isn't https:, so an http:// link saved cleanly here and then
+        // silently rendered as dead text — the admin got a success toast for a
+        // link that could never work. Reject at write time instead. (Tightening
+        // this side rather than loosening the page: a donation link is exactly
+        // where an http downgrade matters.)
         try {
           const parsed = new URL(value);
-          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          if (parsed.protocol !== "https:") {
             return NextResponse.json(
               {
                 error: "invalid-url",
-                message: "Donation URL must be http:// or https://",
+                message: "Donation URL must be https://",
               },
               { status: 400 },
             );
@@ -384,7 +407,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           return NextResponse.json(
             {
               error: "invalid-url",
-              message: "Donation URL must be http:// or https://",
+              message: "Donation URL must be https://",
             },
             { status: 400 },
           );

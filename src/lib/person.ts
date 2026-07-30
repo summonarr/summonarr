@@ -5,6 +5,7 @@ import { attachRatingsUnified } from "@/lib/omdb-availability";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { getBlacklistSet, blacklistKey } from "@/lib/blacklist";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 import type { SummonarrSession } from "@/lib/api-auth";
 
 // Fetch a person's filmography and enrich each credit with THIS viewer's
@@ -30,13 +31,20 @@ export async function getEnrichedPerson(
   const movieIds = person.credits.filter((c) => c.mediaType === "movie").map((c) => c.id);
   const tvIds = person.credits.filter((c) => c.mediaType === "tv").map((c) => c.id);
 
-  const ratedCredits = await attachRatingsUnified(person.credits as unknown as TmdbMedia[], { blocking: true });
+  // Which Plex/Jellyfin servers THIS viewer may see. Resolved alongside the ratings pass so
+  // it costs no extra round-trip, and applied to the library queries below rather than to
+  // their results: a restricted server the viewer holds no grant for must never reach the
+  // response body at all (getBadgeVisibility, applied further down, is a cosmetic mask).
+  const [ratedCredits, visible] = await Promise.all([
+    attachRatingsUnified(person.credits as unknown as TmdbMedia[], { blocking: true }),
+    getVisibleServerInstances(session),
+  ]);
   const ratingByKey = new Map<string, TmdbMedia>();
   for (const r of ratedCredits) ratingByKey.set(`${r.mediaType}:${r.id}`, r);
 
   const [plexRows, jfRows, requestRows, mineRows, radarrRows, sonarrRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({ where: { OR: orClause }, select: { tmdbId: true, mediaType: true } }),
-    prisma.jellyfinLibraryItem.findMany({ where: { OR: orClause }, select: { tmdbId: true, mediaType: true } }),
+    prisma.plexLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.plex } }, select: { tmdbId: true, mediaType: true } }),
+    prisma.jellyfinLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.jellyfin } }, select: { tmdbId: true, mediaType: true } }),
     prisma.mediaRequest.findMany({
       where: { status: { not: "DECLINED" }, OR: orClause },
       select: { tmdbId: true, mediaType: true },

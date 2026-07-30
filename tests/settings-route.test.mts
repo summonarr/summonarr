@@ -437,6 +437,42 @@ test("PATCH: writing the same key twice in quick succession → 429 per-key writ
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// PATCH — donation URL https-only rule, and the grandfather exemption for it
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: a NEW http:// donation value is rejected — https-only", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ donationAmazon: "http://amazon.com/hz/wishlist/ls/X" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 400);
+  const body = (await res.json()) as { error: string; message: string };
+  assert.equal(body.error, "invalid-url");
+  assert.match(body.message, /https/);
+  assert.equal(upsertFor("donationAmazon").length, 0, "a rejected value must not be persisted");
+});
+
+test("PATCH: resubmitting an unchanged legacy http:// donation value doesn't block saving a different field in the same request", async () => {
+  // The Donations form always resubmits all six fields together, not just the
+  // one being edited. Seed donationVenmo as a pre-existing http:// value (as if
+  // saved before the https-only rule above existed) directly into the store —
+  // bypassing PATCH, which would reject writing it fresh today.
+  settings.set("donationVenmo", "http://venmo.com/legacy-handle");
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(
+      JSON.stringify({ donationVenmo: "http://venmo.com/legacy-handle", donationZelle: "new@zelle.example" }),
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 200, "an untouched legacy http:// field must not block saving an unrelated field");
+  assert.equal(upsertFor("donationZelle").length, 1);
+  assert.equal(upsertFor("donationVenmo")[0]?.create.value, "http://venmo.com/legacy-handle");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // PATCH — connection-test side effect (reached when URL+key present; gated otherwise)
 // RFC1918 IP literals ⇒ admin SSRF mode, isIP short-circuit, no DNS.
 // ════════════════════════════════════════════════════════════════════════════

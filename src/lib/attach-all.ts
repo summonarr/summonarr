@@ -6,6 +6,7 @@ import { attachRequestedStatus } from "./request-availability";
 import { attachRatingsUnified } from "./omdb-availability";
 import { getBlacklistSet, blacklistKey } from "./blacklist";
 import { getUserHiddenSet } from "./hidden";
+import { getVisibleServerInstancesForUserId } from "./media-visibility";
 import type { TmdbMedia } from "./tmdb-types";
 
 // All five enrichment passes run in parallel against the same input slice; results are merged by
@@ -26,15 +27,22 @@ export async function attachAllAvailability(
   // every discovery surface at once. Opt out with includeHidden for the few callers
   // that must still show a hidden title: the item the user is actively viewing and
   // their own requests list. Anonymous callers (no userId) are never filtered.
+  //
+  // Per-user media-server visibility is resolved HERE for the same reason: a Plex/Jellyfin
+  // server marked `restricted` contributes availability only to users granted `view` on it,
+  // and this chokepoint already carries the userId every one of its 28 call sites passes.
+  // Enforcing in the data layer (rather than masking in the UI the way badge-visibility.ts
+  // does) is what keeps a restricted server out of the raw JSON these routes return.
   const wantHidden = !!userId && !options?.includeHidden;
-  const [blSet, hiddenSet] = await Promise.all([
+  const [blSet, hiddenSet, visible] = await Promise.all([
     getBlacklistSet(),
     wantHidden ? getUserHiddenSet(userId as string) : Promise.resolve<Set<string>>(new Set()),
+    getVisibleServerInstancesForUserId(userId),
   ]);
 
   const [withPlex, withJellyfin, withArr, withRequests, withRatings] = await Promise.all([
-    attachPlexAvailability(items),
-    attachJellyfinAvailability(items),
+    attachPlexAvailability(items, visible.plex),
+    attachJellyfinAvailability(items, visible.jellyfin),
     attachArrPending(items, { include4k: options?.show4k ?? false }),
     attachRequestedStatus(items, userId),
     options?.skipRatings

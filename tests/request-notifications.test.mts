@@ -128,9 +128,21 @@ const discordUserReads: FindUniqueArgs[] = [];
 const pushUserReads: FindUniqueArgs[] = [];
 const emailUserReads: FindUniqueArgs[] = [];
 let emailUserRow: Record<string, unknown> | null = null;
+const activeGateReads: FindUniqueArgs[] = [];
+let requesterDisabled = false;
+const disabledRecipientQueries: FindManyArgs[] = [];
+let disabledRequesterIds: string[] = [];
 
 shadowPrismaModel(prisma, "user", {
   findMany: async (args: FindManyArgs) => {
+    // claimAvailableNotificationWinners' disabled-recipient filter — the batch
+    // chokepoint that drops removed users from all four channels at once. It
+    // asks for exactly the disabled ids; an empty result means everyone is
+    // active, which is what these fan-out tests assume unless stated otherwise.
+    if (args.where.deactivatedAt !== undefined) {
+      disabledRecipientQueries.push(args);
+      return disabledRequesterIds.map((id) => ({ id }));
+    }
     if (args.where.notifyOnAvailable === true) {
       discordAvailableQueries.push(args);
       return []; // no linked Discord users — the channel stops before its wire
@@ -143,6 +155,13 @@ shadowPrismaModel(prisma, "user", {
     return emailPrefImpl(args);
   },
   findUnique: async (args: FindUniqueArgs) => {
+    // notifyRequestStatusChange's disabled-account gate: one lookup that decides
+    // whether ANY channel runs for this requester (account removal disables
+    // rather than scrubs, so the row keeps a live email + push subscriptions).
+    if (args.select.deactivatedAt) {
+      activeGateReads.push(args);
+      return { deactivatedAt: requesterDisabled ? new Date("2026-07-01T00:00:00.000Z") : null };
+    }
     if (args.select.discordId) {
       discordUserReads.push(args);
       return null; // unlinked — discord stops after recipient resolution
@@ -254,6 +273,10 @@ beforeEach(() => {
   pushUserReads.length = 0;
   emailUserReads.length = 0;
   emailUserRow = null;
+  activeGateReads.length = 0;
+  requesterDisabled = false;
+  disabledRecipientQueries.length = 0;
+  disabledRequesterIds = [];
   notifCreates.length = 0;
   createManyCalls.length = 0;
   createManyImpl = async (args) => ({ count: args.data.length });
@@ -652,5 +675,58 @@ test("AVAILABLE: routes push through the batch helper and mails via emailOnAvail
   assert.equal(discordUserReads.length, 1); // discord's per-user path also ran
   assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnAvailable: true });
   assert.equal(resendPosts[0].body.to, "av@example.com");
+  assert.deepEqual(errors, []);
+});
+
+test("batch fan-out: a DISABLED requester's winner is dropped from every channel", async () => {
+  // The batch counterpart of the single-request gate below — suppression happens
+  // once, in claimAvailableNotificationWinners, so all four channels inherit it.
+  configureChannels();
+  const pending = [reqRow("a", null), reqRow("b", null)];
+  claimImpl = async () => [{ id: "a" }, { id: "b" }]; // both won the CAS…
+  disabledRequesterIds = ["user-a"]; // …but user-a's account is disabled
+
+  await notifyAvailablePerServer(pending, true, false, true, true, "scope");
+
+  assert.equal(disabledRecipientQueries.length, 1);
+  await waitFor(
+    () => discordAvailableQueries.length === 1 && pushAvailableQueries.length === 1 && createManyCalls.length === 1,
+    "winner fan-out",
+  );
+  assert.deepEqual(discordAvailableQueries[0].where.id?.in, ["user-b"]);
+  assert.deepEqual(pushAvailableQueries[0].where.id?.in, ["user-b"]);
+  assert.deepEqual(emailPrefQueries[0].where.id?.in, ["user-b"]);
+  assert.deepEqual(createManyCalls[0].data.map((r) => r.userId), ["user-b"]);
+  const everything = JSON.stringify([discordAvailableQueries, pushAvailableQueries, emailPrefQueries, createManyCalls]);
+  assert.ok(!everything.includes("user-a"), "the disabled requester must reach no channel");
+  await quiesce();
+});
+
+test("a DISABLED requester reaches NO channel — one gate read and nothing else", async () => {
+  // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
+  // so this row still has a live notification email, a Discord link and push
+  // subscriptions. An admin clearing out a removed user's leftover requests must
+  // not ping them on any of the four channels.
+  configureChannels();
+  requesterDisabled = true;
+  emailUserRow = { email: "gone@example.com", notificationEmail: null, emailOnApproved: true };
+
+  notifyRequestStatusChange("APPROVED", {
+    requestedBy: "u-gone",
+    title: "Dune",
+    mediaType: "MOVIE",
+    tmdbId: 438631,
+  });
+
+  await waitFor(() => activeGateReads.length === 1, "disabled-account gate read");
+  await quiesce();
+
+  assert.deepEqual(activeGateReads[0], { where: { id: "u-gone" }, select: { deactivatedAt: true } });
+  // Not one channel resolved a recipient, and no inbox row was written.
+  assert.equal(notifCreates.length, 0, "in-app");
+  assert.equal(discordUserReads.length, 0, "discord");
+  assert.equal(pushUserReads.length, 0, "push");
+  assert.equal(emailUserReads.length, 0, "email");
+  assert.equal(resendPosts.length, 0);
   assert.deepEqual(errors, []);
 });

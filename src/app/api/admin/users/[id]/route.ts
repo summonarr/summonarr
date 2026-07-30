@@ -6,13 +6,17 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
-import { anonymizeUserInTx, LastAdminError } from "@/lib/anonymize-user";
+import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 
 // Thrown by the DELETE tx when the in-transaction role re-read shows the target became
 // ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
 class TargetBecameAdminError extends Error {}
+
+// Module-scoped so the self-escalation gate below and the quota branch read the
+// SAME list — a second copy would drift and silently reopen the hole.
+const QUOTA_FIELDS = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;
 
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
@@ -38,6 +42,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     mediaServer?: string | null;
     maxContentRating?: string | null;
     instanceGrants?: unknown;
+    mediaServerGrants?: unknown;
   } & Partial<Record<NotifKey, boolean>>;
   const parsedBody = await readJsonCapped<UpdateBody>(req, 32768);
   if (parsedBody instanceof NextResponse) return parsedBody;
@@ -61,6 +66,29 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const targetForAuth = await prisma.user.findUnique({ where: { id }, select: { role: true } });
     if (targetForAuth?.role === "ADMIN") {
       return NextResponse.json({ error: "Only an admin can modify an admin account" }, { status: 403 });
+    }
+  }
+
+  // MANAGE_USERS delegates management of OTHER accounts. The `role` and
+  // `permissions` branches each carry their own isSelf gate; these fields are
+  // privilege-bearing too and had none, so a delegate could PATCH their OWN
+  // row to grant themselves request + auto-approve on a RESTRICTED named instance,
+  // visibility into a RESTRICTED Plex/Jellyfin server's library, lift their own
+  // quota to an effectively unlimited value, or raise their own content-rating
+  // cap. Each branch ends in invalidateUserSession(id), which re-signs the JWT
+  // from the DB column, so the self-grant lands on their very next request. Gate
+  // them all in one place, mirroring those branches.
+  if (!callerIsAdmin && isSelf) {
+    const selfPrivilegeEdit =
+      "maxContentRating" in body ||
+      body.instanceGrants !== undefined ||
+      body.mediaServerGrants !== undefined ||
+      QUOTA_FIELDS.some((k) => k in body);
+    if (selfPrivilegeEdit) {
+      return NextResponse.json(
+        { error: "Cannot change your own instance access, server visibility, quota, or content rating cap" },
+        { status: 403 },
+      );
     }
   }
 
@@ -109,6 +137,23 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const parsed = parseAndValidatePermissions(body.permissions);
     if (parsed === null) {
       return NextResponse.json({ error: "permissions must be a decimal bitmask within the known permission set" }, { status: 400 });
+    }
+    // A stored mask of exactly 0 is the "row was never seeded" sentinel:
+    // effectivePermissions() maps it back to the ROLE PRESET (permissions.ts).
+    // So writing 0 does the opposite of what the editor shows — unchecking the
+    // last box would silently restore REQUEST/REQUEST_MOVIE/REQUEST_TV while the
+    // modal, the DB column and the audit row all read "no permissions". Refuse it
+    // rather than store an unrepresentable intent. Mirrors the quota branch below,
+    // which rejects a limit of 0 for exactly this class of footgun.
+    if (parsed === 0n) {
+      return NextResponse.json(
+        {
+          error:
+            "A mask of 0 means \"unseeded\" and resolves back to the role's default preset, not \"no access\". " +
+            "Leave at least one bit set, or disable the account to remove access entirely.",
+        },
+        { status: 400 },
+      );
     }
     const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
     if (!targetUser) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -180,8 +225,40 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ id, instanceGrants: grants });
   }
 
-  const quotaFields = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;
-  const quotaField = quotaFields.find((k) => k in body);
+  // Per-server VISIBILITY grants for RESTRICTED Plex/Jellyfin instances. A
+  // SERVICE-NAMESPACED JSON map { plex: { "<slug>": { view? } }, jellyfin: {…} }
+  // — plex "remote" and jellyfin "remote" are different servers, so this
+  // deliberately does NOT reuse instanceGrants' flat shape. Only `restricted`
+  // instances are gated (the default "" server is never restricted); stored on
+  // User.mediaServerGrants and consulted by canViewMediaInstance.
+  //
+  // parseMediaServerGrants is the whole validator: it drops unknown service
+  // keys, non-object entries and the prototype-pollution keys at BOTH nesting
+  // levels, so nothing a client sends can reach the column unfiltered. The
+  // array check is separate because Array.isArray(x) && typeof x === "object"
+  // is true — a bare `[]` would otherwise serialize to `{}` and silently clear
+  // every grant instead of being rejected as malformed.
+  if (body.mediaServerGrants !== undefined) {
+    if (body.mediaServerGrants !== null && (typeof body.mediaServerGrants !== "object" || Array.isArray(body.mediaServerGrants))) {
+      return NextResponse.json({ error: "mediaServerGrants must be an object map or null" }, { status: 400 });
+    }
+    const grants = serializeMediaServerGrants(parseMediaServerGrants(body.mediaServerGrants));
+    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
+    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    try {
+      await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+      throw err;
+    }
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    invalidateUserSession(id);
+    return NextResponse.json({ id, mediaServerGrants: grants });
+  }
+
+  const quotaField = QUOTA_FIELDS.find((k) => k in body);
   if (quotaField !== undefined) {
     const val = body[quotaField];
     if (val !== null && val !== undefined && (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 100_000)) {
@@ -314,8 +391,12 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });
   }
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true, deactivatedAt: true } });
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  // Idempotent, and load-bearing: re-running deactivateUserInTx on an already
+  // disabled ADMIN would see its own row excluded from the active-admin count
+  // and throw LastAdminError spuriously.
+  if (target.deactivatedAt) return NextResponse.json({ ok: true });
 
   // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
@@ -328,16 +409,18 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     prisma.deletionVote.count({ where: { userId: id } }),
   ]);
 
-  // Admin delete ANONYMIZES rather than hard-deletes, mirroring the self-delete
+  // Admin delete DISABLES rather than hard-deletes, mirroring the self-delete
   // path (/api/profile): a hard delete cascades and destroys the user's
-  // requests/issues/votes, whereas anonymization preserves that instance history
-  // behind a de-identified row. Both paths share anonymizeUserInTx.
+  // requests/issues/votes, and even an anonymize-in-place severs the
+  // MediaServerUser link so their future watches stop being attributed. Disabling
+  // keeps everything and is reversible via the reactivate route; the irreversible
+  // scrub is the separate purge route. Both paths share deactivateUserInTx.
   const now = new Date();
 
   try {
     await prisma.$transaction(async (tx) => {
       // The role read above is three DB round-trips stale by the time the tx opens, and
-      // anonymizeUserInTx only arms the advisory lock + last-admin CAS when the role it is
+      // deactivateUserInTx only arms the advisory lock + last-admin CAS when the role it is
       // HANDED is ADMIN. A promotion landing in that window would otherwise slip past both
       // that CAS and the caller-authority gate, letting a non-admin MANAGE_USERS holder
       // deactivate the instance's last admin. Re-resolve the role inside the tx, under the
@@ -348,11 +431,11 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
       if (freshRole === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
         throw new TargetBecameAdminError();
       }
-      await anonymizeUserInTx(tx, id, freshRole, now);
+      await deactivateUserInTx(tx, id, freshRole, now);
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
-      return NextResponse.json({ error: "Cannot delete the last admin" }, { status: 400 });
+      return NextResponse.json({ error: "Cannot disable the last admin" }, { status: 400 });
     }
     if (err instanceof TargetBecameAdminError) {
       return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
@@ -362,9 +445,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   invalidateUserSession(id);
 
-  // Account already anonymized; a failed audit write must not 500 it (guardrail 26
-  // — logAudit swallows write failures). History (requests/issues/votes) is
-  // preserved on the de-identified row, not cascade-deleted.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DELETE", target: `user:${id}`, details: { kind: "admin-delete-anonymize", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
+  // Account already disabled; a failed audit write must not 500 it (guardrail 26
+  // — logAudit swallows write failures). Everything (requests/issues/votes, the
+  // identity itself) is preserved — the account is off, not erased.
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
   return NextResponse.json({ ok: true });
 });

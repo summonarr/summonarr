@@ -11,6 +11,14 @@
 //    situation) still compare equal; Windows backslash paths normalise to
 //    forward slashes and match a Linux twin; rows with no filePath are
 //    ignored entirely;
+//  - multi-server: that mount inference is PER serverInstance. Two Plex
+//    servers with unrelated roots used to be prefix-inferred as one flat set,
+//    collapsing the shared prefix to "" so nothing was stripped and the join
+//    missed every item — the report went empty and read as "no problems
+//    found". Each instance's strip prefix is read from its own
+//    plex<Slug>MoviePathStripPrefix/… Setting, falling back to the shared
+//    default-instance key when it has none, and instances merge into one
+//    keyspace with the default winning a same-relative-path collision;
 //  - agreement (same tmdbId + mediaType at the same relative path) is never
 //    reported; a tmdbId mismatch is, carrying both sides' metadata and the
 //    server-native keys (plexRatingKey/jellyfinItemId) the fix-match UI needs;
@@ -58,10 +66,12 @@ type MediaType = "MOVIE" | "TV";
 type PlexRow = {
   tmdbId: number; mediaType: MediaType; filePath: string | null;
   plexRatingKey: string | null; title: string | null; year: string | null;
+  serverInstance: string;
 };
 type JfRow = {
   tmdbId: number; mediaType: MediaType; filePath: string | null;
   jellyfinItemId: string | null; title: string | null; year: string | null;
+  serverInstance: string;
 };
 
 let plexRows: PlexRow[] = [];
@@ -116,11 +126,13 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 // ── fixture helpers ─────────────────────────────────────────────────────────
-function plexItem(tmdbId: number, mediaType: MediaType, filePath: string | null): PlexRow {
-  return { tmdbId, mediaType, filePath, plexRatingKey: `plex-${tmdbId}`, title: `Plex ${tmdbId}`, year: "2020" };
+// serverInstance defaults to "" — the single-server shape every existing
+// deployment has, and a non-null column so the row always carries a string.
+function plexItem(tmdbId: number, mediaType: MediaType, filePath: string | null, serverInstance = ""): PlexRow {
+  return { tmdbId, mediaType, filePath, plexRatingKey: `plex-${tmdbId}`, title: `Plex ${tmdbId}`, year: "2020", serverInstance };
 }
-function jfItem(tmdbId: number, mediaType: MediaType, filePath: string | null): JfRow {
-  return { tmdbId, mediaType, filePath, jellyfinItemId: `jf-${tmdbId}`, title: `JF ${tmdbId}`, year: "2020" };
+function jfItem(tmdbId: number, mediaType: MediaType, filePath: string | null, serverInstance = ""): JfRow {
+  return { tmdbId, mediaType, filePath, jellyfinItemId: `jf-${tmdbId}`, title: `JF ${tmdbId}`, year: "2020", serverInstance };
 }
 
 // Seed a FRESH arr path-map cache row so buildArrPathMap takes the cache-hit
@@ -190,9 +202,11 @@ test("a tmdbId disagreement at the same relative path is reported with both side
   assert.deepEqual(matches, [
     {
       relativePath: "Alpha (2020)/Alpha.mkv", // mount-stripped, identical on both servers
-      plex: { tmdbId: 100, mediaType: "MOVIE", title: "Plex 100", posterPath: null, releaseYear: "2020" },
+      // serverInstance rides on each side beside its server-local id: a client
+      // applying the fix must target the server the ratingKey/itemId came from.
+      plex: { tmdbId: 100, mediaType: "MOVIE", title: "Plex 100", posterPath: null, releaseYear: "2020", serverInstance: "" },
       plexRatingKey: "plex-100",
-      jellyfin: { tmdbId: 999, mediaType: "MOVIE", title: "JF 999", posterPath: null, releaseYear: "2020" },
+      jellyfin: { tmdbId: 999, mediaType: "MOVIE", title: "JF 999", posterPath: null, releaseYear: "2020", serverInstance: "" },
       jellyfinItemId: "jf-999",
       arrTmdbId: null, // ARR unconfigured — no tie-breaker available
       arrVerdict: null,
@@ -221,6 +235,116 @@ test("rows with null or empty filePath are ignored — no phantom matches, no cr
   jfRows.push(jfItem(3999, "MOVIE", null));
   const matches = await getBadMatches();
   assert.deepEqual(matches.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
+});
+
+// ── multi-server (serverInstance) path normalisation ────────────────────────
+
+test("a second Plex server on an unrelated mount root still reports its bad match", async () => {
+  // THE regression pin. /plexmedia/… and /mnt/nas/video/… share no leading
+  // segment, so inferring one mount across both servers collapses it to "",
+  // nothing is stripped, every Plex key stays absolute and the Jellyfin join
+  // misses EVERY item — the whole report comes back [] and reads as "no
+  // problems found". Per-instance inference keeps both roots correct.
+  plexRows = [
+    plexItem(100, "MOVIE", "/plexmedia/movies/Alpha (2020)/Alpha.mkv"),
+    plexItem(200, "MOVIE", "/plexmedia/movies/Beta (2019)/Beta.mkv"),
+    plexItem(777, "MOVIE", "/mnt/nas/video/Gamma (2021)/Gamma.mkv", "remote"),
+    plexItem(300, "MOVIE", "/mnt/nas/video/Delta (2018)/Delta.mkv", "remote"),
+  ];
+  jfRows = [
+    jfItem(100, "MOVIE", "/data/movies/Alpha (2020)/Alpha.mkv"),
+    jfItem(200, "MOVIE", "/data/movies/Beta (2019)/Beta.mkv"),
+    jfItem(999, "MOVIE", "/data/movies/Gamma (2021)/Gamma.mkv"),
+    jfItem(300, "MOVIE", "/data/movies/Delta (2018)/Delta.mkv"),
+  ];
+
+  const matches = await getBadMatches();
+  assert.deepEqual(matches.map((m) => m.relativePath), ["Gamma (2021)/Gamma.mkv"]);
+  assert.equal(matches[0].plex.tmdbId, 777); // the named server's row
+  assert.equal(matches[0].plexRatingKey, "plex-777");
+  assert.equal(matches[0].jellyfin.tmdbId, 999);
+});
+
+test("a named instance's own strip prefix is applied to its rows, not the default's", async () => {
+  // Each server keeps two library dirs so the inferred mount stops above them
+  // and the library dir survives into the relative path — which is exactly what
+  // the *PathStripPrefix settings exist to peel. The two servers spell that dir
+  // differently ("movies" vs "films"), so only a per-instance key can align both.
+  settingRows = [
+    { key: "plexMoviePathStripPrefix", value: "movies" },
+    { key: "plexRemoteMoviePathStripPrefix", value: "films" },
+  ];
+  plexRows = [
+    plexItem(100, "MOVIE", "/plexmedia/movies/Alpha (2020)/Alpha.mkv"),
+    plexItem(200, "MOVIE", "/plexmedia/kids/Beta (2019)/Beta.mkv"),
+    plexItem(777, "MOVIE", "/srv/media/films/Gamma (2021)/Gamma.mkv", "remote"),
+    plexItem(300, "MOVIE", "/srv/media/docs/Delta (2018)/Delta.mkv", "remote"),
+  ];
+  jfRows = [
+    jfItem(101, "MOVIE", "/data/movies/Alpha (2020)/Alpha.mkv"),
+    jfItem(999, "MOVIE", "/data/movies/Gamma (2021)/Gamma.mkv"),
+  ];
+
+  // Sorted: report order follows the merge order (named instances, then the
+  // default) and is incidental — what matters is that BOTH servers aligned.
+  const matches = await getBadMatches();
+  assert.deepEqual(
+    matches.map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]).sort(),
+    [["Alpha (2020)/Alpha.mkv", 100, 101], ["Gamma (2021)/Gamma.mkv", 777, 999]],
+  );
+});
+
+test("a named instance with no strip prefix of its own inherits the shared default key", async () => {
+  // Only the legacy plexMoviePathStripPrefix row exists — the shape of every
+  // deployment that has never configured a per-server prefix. The named server
+  // must still get "movies" peeled or it never joins.
+  settingRows = [{ key: "plexMoviePathStripPrefix", value: "movies" }];
+  plexRows = [
+    plexItem(100, "MOVIE", "/plexmedia/movies/Alpha (2020)/Alpha.mkv"),
+    plexItem(200, "MOVIE", "/plexmedia/kids/Beta (2019)/Beta.mkv"),
+    plexItem(777, "MOVIE", "/srv/media/movies/Gamma (2021)/Gamma.mkv", "remote"),
+    plexItem(300, "MOVIE", "/srv/media/docs/Delta (2018)/Delta.mkv", "remote"),
+  ];
+  jfRows = [
+    jfItem(101, "MOVIE", "/data/movies/Alpha (2020)/Alpha.mkv"),
+    jfItem(999, "MOVIE", "/data/movies/Gamma (2021)/Gamma.mkv"),
+  ];
+
+  const matches = await getBadMatches();
+  assert.deepEqual(
+    matches.map((m) => [m.relativePath, m.plex.tmdbId]).sort(),
+    [["Alpha (2020)/Alpha.mkv", 100], ["Gamma (2021)/Gamma.mkv", 777]],
+  );
+});
+
+test("two Plex servers mirroring one relative path collapse to a single row, default winning", async () => {
+  // A mirrored library: the same relative paths on both servers under different
+  // roots. The Plex↔Jellyfin join is relative-path keyed and cannot be
+  // instance-scoped, so the two entries for one physical file collapse — that
+  // must report ONE bad match, not two, and the mirror must not perturb the
+  // agreeing title next to it.
+  plexRows = [
+    plexItem(100, "MOVIE", "/plexmedia/movies/Alpha (2020)/Alpha.mkv"),
+    plexItem(200, "MOVIE", "/plexmedia/movies/Beta (2019)/Beta.mkv"),
+    plexItem(100, "MOVIE", "/mnt/nas/video/Alpha (2020)/Alpha.mkv", "remote"),
+    plexItem(200, "MOVIE", "/mnt/nas/video/Beta (2019)/Beta.mkv", "remote"),
+  ];
+  jfRows = [
+    jfItem(999, "MOVIE", "/data/movies/Alpha (2020)/Alpha.mkv"),
+    jfItem(200, "MOVIE", "/data/movies/Beta (2019)/Beta.mkv"),
+  ];
+
+  const matches = await getBadMatches();
+  assert.deepEqual(matches.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
+  assert.equal(matches[0].plex.tmdbId, 100);
+
+  // Same collision, but the two servers disagree about the file. The merge order
+  // is deterministic — default instance last, so it wins — rather than whatever
+  // order the rows happened to come back in.
+  plexRows[2] = plexItem(101, "MOVIE", "/mnt/nas/video/Alpha (2020)/Alpha.mkv", "remote");
+  const [contested] = await getBadMatches();
+  assert.equal(contested.plex.tmdbId, 100);
+  assert.equal(contested.plexRatingKey, "plex-100");
 });
 
 // ── ARR verdicts (via the cached path map) ──────────────────────────────────

@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { getMyPlayStats } from "@/lib/my-watch-history";
+import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,12 @@ export const GET = withAuth(async (_req, _ctx, session) => {
   }
   const { linked, stats } = await getMyPlayStats(session.user.id);
   if (!stats) return NextResponse.json({ linked, stats: null });
+  // Live TmdbCache/TmdbMediaCore posters, exactly like the web /my-stats page.
+  // The PlayHistory.posterPath snapshot alone is not enough: it's captured at
+  // finalize time from the title's `:details` cache row, which usually doesn't
+  // exist yet for something nobody opened in the app — so most top-media rows
+  // carried a null path and the client rendered a placeholder.
+  const posterPaths = await resolvePosterPathMap(stats.topMedia);
   return NextResponse.json({
     linked,
     stats: {
@@ -43,7 +50,12 @@ export const GET = withAuth(async (_req, _ctx, session) => {
         tmdbId: m.tmdbId,
         mediaType: m.mediaType,
         count: m.count,
-        posterPath: m.posterPath,
+        // Resolved path first, stored snapshot as the fallback. Stays a raw
+        // TMDB path (not a URL) so the client picks its own image size, and so
+        // already-shipped builds are fixed without a client update.
+        posterPath:
+          (m.tmdbId != null ? posterPaths[posterPathKey(m.tmdbId, m.mediaType)] : undefined) ??
+          m.posterPath,
       })),
     },
   });

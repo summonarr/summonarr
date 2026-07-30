@@ -5,6 +5,7 @@ import { applySpecs, describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { isFeatureEnabled } from "@/lib/features";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 function busyResponse() {
   return NextResponse.json(
@@ -34,6 +35,12 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
   // integration must block it. (GET is a read-only preview and stays open.)
   if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
     return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+  }
+  // Per-admin rate limit, matching apply/refresh — this route applies the same
+  // kind of Radarr/Sonarr writes as /api/admin/trash-guides/apply and shouldn't
+  // be a lighter-gated way to trigger the same burst.
+  if (!checkRateLimit(`admin-trash-starter-pack:${session.user.id}`, 10, 5 * 60 * 1000)) {
+    return NextResponse.json({ error: "Too many requests — try again shortly." }, { status: 429 });
   }
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,

@@ -17,6 +17,7 @@ import { Suspense } from "react";
 import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getFeatureFlags } from "@/lib/features";
+import { getUserRecommendations } from "@/lib/recommendations";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -76,6 +77,7 @@ export default async function DiscoverPage({
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
+  const forYouEnabled = flags["feature.page.forYou"];
 
   // Start the 4K-visibility read concurrently with the TMDB fan-out; awaited
   // just before attachAllAvailability consumes it. The no-op catch only marks
@@ -92,6 +94,7 @@ export default async function DiscoverPage({
     upTVRes,
     topMoviesRes,
     topTVRes,
+    forYouRes,
   ] = await Promise.allSettled([
     getTrending(),
     getPopularMovies(),
@@ -100,6 +103,7 @@ export default async function DiscoverPage({
     getOnTheAirTV(),
     getTopRatedMovies(),
     getTopRatedTV(),
+    getUserRecommendations(session.user.id),
   ]);
 
   const trending  = settled(trendingRes);
@@ -109,6 +113,7 @@ export default async function DiscoverPage({
   const upTV      = settled(upTVRes).slice(0, RAIL_OVERFETCH);
   const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
   const topTV     = settled(topTVRes).slice(0, RAIL_OVERFETCH);
+  const forYou    = settled(forYouRes).slice(0, RAIL_OVERFETCH);
 
   // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
   // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
@@ -121,6 +126,7 @@ export default async function DiscoverPage({
     { raw: upTV, limit: RAIL_OVERFETCH },
     { raw: topMovies, limit: RAIL_OVERFETCH },
     { raw: topTV, limit: RAIL_OVERFETCH },
+    { raw: forYou, limit: RAIL_OVERFETCH },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
   const show4k = await show4kPromise;
@@ -138,7 +144,10 @@ export default async function DiscoverPage({
   const trendingRest = trendingItems.filter(
     (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
   );
-  const rails: { title: string; subtitle: string; href: string; items: TmdbMedia[] }[] = [
+  const rails: { title: string; subtitle: string; href?: string; items: TmdbMedia[] }[] = [
+    ...(forYouEnabled
+      ? [{ title: "For You", subtitle: "Picked based on what you watch", items: project(forYou, emap, hideAvailable, RAIL_SIZE) }]
+      : []),
     { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
     { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
     ...(upcomingEnabled

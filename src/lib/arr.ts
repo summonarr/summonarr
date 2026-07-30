@@ -169,7 +169,16 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = ""): P
   return {
     url: map[urlKey].replace(/\/$/, ""),
     apiKey: map[keyKey],
-    rootFolder: map[folderKey],
+    // Same hazard as qualityProfileId above, one type down: a stored EMPTY string
+    // is the instance manager's documented "— use the server's default —" choice
+    // (its select ships `<option value="">`), and it is written verbatim as a
+    // Setting row. `""` is falsy — so the add's `needRootFolders` guards fetch the
+    // fallback list — but it SURVIVES `??`, so `cfg.rootFolder ?? rootFolders[0].path`
+    // yields `""` and the add POSTs `"rootFolderPath": ""`, which Radarr/Sonarr
+    // reject with a 400. Every request routed to that instance then bounces
+    // APPROVED→PENDING forever. Normalise to undefined so `??` behaves as the
+    // guards already assume.
+    rootFolder: map[folderKey] || undefined,
     qualityProfileId: Number.isInteger(storedProfileId) && storedProfileId > 0 ? storedProfileId : undefined,
   };
 }
@@ -608,11 +617,15 @@ export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant
     );
     if (!lookup.length) return false;
     const { tvdbId } = lookup[0];
-    const library = await arrFetch<{ tvdbId: number; statistics: { episodeFileCount: number } }[]>(
+    const library = await arrFetch<{ tvdbId: number; statistics?: { episodeFileCount: number } }[]>(
       cfg, "/api/v3/series"
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
-    return !!match && match.statistics.episodeFileCount === 0;
+    // Guard `statistics` like getSonarrWantedTmdbIds and isSeriesDownloadedInSonarr
+    // do: one anomalous /api/v3/series row without the block would throw, hit the
+    // catch below, and report `wantedLive: false` with no error — silently
+    // misleading the arr-state diagnostic that CLAUDE.md points operators at.
+    return !!match && (match.statistics?.episodeFileCount ?? 0) === 0;
   } catch {
     return false;
   }

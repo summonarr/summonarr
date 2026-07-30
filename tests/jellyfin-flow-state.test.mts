@@ -27,6 +27,8 @@ process.env.NEXTAUTH_SECRET = SECRET;
 
 const QC_SECRET = "AbCdEf123456QuickConnectSecret";
 const QC_HASH = hashQuickConnectSecret(QC_SECRET);
+// The default instance — every existing (pre-Phase-1.5) flow implicitly meant this.
+const QC_INSTANCE = "";
 
 function decodePayload(token: string): Record<string, unknown> {
   return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
@@ -48,21 +50,21 @@ test("hashQuickConnectSecret is deterministic SHA-256 hex", () => {
 });
 
 test("sign → verify roundtrip returns exactly the stored secretHash", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const state = await verifyQcFlowCookie(token);
-  assert.deepEqual(state, { secretHash: QC_HASH });
+  assert.deepEqual(state, { secretHash: QC_HASH, instance: QC_INSTANCE });
 });
 
 test("the cookie JWT never carries the raw QuickConnect secret", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const payload = decodePayload(token);
-  assert.deepEqual(Object.keys(payload).sort(), ["exp", "iat", "secretHash"]);
+  assert.deepEqual(Object.keys(payload).sort(), ["exp", "iat", "instance", "secretHash"]);
   assert.equal(payload.secretHash, QC_HASH);
   assert.ok(!token.includes(QC_SECRET));
 });
 
 test("cookie lifetime is pinned to 10 minutes (exp - iat)", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const payload = decodePayload(token);
   assert.equal(typeof payload.iat, "number");
   assert.equal(payload.exp, (payload.iat as number) + 600);
@@ -70,7 +72,7 @@ test("cookie lifetime is pinned to 10 minutes (exp - iat)", async () => {
 
 test("expired flow cookie verifies to null", async () => {
   const now = Math.floor(Date.now() / 1000);
-  const expired = await new SignJWT({ secretHash: QC_HASH })
+  const expired = await new SignJWT({ secretHash: QC_HASH, instance: QC_INSTANCE })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt(now - 700)
     .setExpirationTime(now - 60)
@@ -79,7 +81,7 @@ test("expired flow cookie verifies to null", async () => {
 });
 
 test("cookie signed with a different secret is rejected", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   process.env.NEXTAUTH_SECRET = "a-completely-different-secret-9876543210";
   try {
     assert.equal(await verifyQcFlowCookie(token), null);
@@ -90,7 +92,7 @@ test("cookie signed with a different secret is rejected", async () => {
 });
 
 test("tampered secretHash breaks the signature (phished-secret swap)", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const [header, , sig] = token.split(".");
   const body = decodePayload(token);
   body.secretHash = hashQuickConnectSecret("attacker-phished-secret");
@@ -109,18 +111,44 @@ test("alg:none forgery is rejected (pinned HS256 list)", async () => {
 
 test("validly-signed token without a string secretHash verifies to null", async () => {
   const key = new TextEncoder().encode(SECRET);
-  const missing = await new SignJWT({ sub: "not-a-flow" })
+  // instance is present and valid on both fixtures — isolates the failure to
+  // the secretHash defect being tested, not an incidentally-missing instance.
+  const missing = await new SignJWT({ sub: "not-a-flow", instance: QC_INSTANCE })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt()
     .setExpirationTime("10m")
     .sign(key);
   assert.equal(await verifyQcFlowCookie(missing), null);
-  const wrongType = await new SignJWT({ secretHash: 12345 })
+  const wrongType = await new SignJWT({ secretHash: 12345, instance: QC_INSTANCE })
     .setProtectedHeader({ alg: "HS256", typ: "JWT" })
     .setIssuedAt()
     .setExpirationTime("10m")
     .sign(key);
   assert.equal(await verifyQcFlowCookie(wrongType), null);
+});
+
+test("validly-signed token without a string instance verifies to null", async () => {
+  // Mirrors the secretHash-shape test above, for the instance field added in
+  // Phase 1.5 — a missing or wrong-typed instance must fail closed exactly
+  // like a missing/wrong-typed secretHash, not be silently defaulted.
+  const key = new TextEncoder().encode(SECRET);
+  const missing = await new SignJWT({ secretHash: QC_HASH })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt()
+    .setExpirationTime("10m")
+    .sign(key);
+  assert.equal(await verifyQcFlowCookie(missing), null);
+  const wrongType = await new SignJWT({ secretHash: QC_HASH, instance: 42 })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuedAt()
+    .setExpirationTime("10m")
+    .sign(key);
+  assert.equal(await verifyQcFlowCookie(wrongType), null);
+});
+
+test("a named instance round-trips exactly (not hardcoded to the default)", async () => {
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: "remote" });
+  assert.deepEqual(await verifyQcFlowCookie(token), { secretHash: QC_HASH, instance: "remote" });
 });
 
 test("a Plex flow cookie does not verify as QC flow state (cross-flow confusion)", async () => {
@@ -137,10 +165,10 @@ test("garbage tokens verify to null, never throw", async () => {
 });
 
 test("sign throws without NEXTAUTH_SECRET; verify fails closed to null", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   delete process.env.NEXTAUTH_SECRET;
   try {
-    await assert.rejects(signQcFlowCookie({ secretHash: QC_HASH }), /NEXTAUTH_SECRET/);
+    await assert.rejects(signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE }), /NEXTAUTH_SECRET/);
     assert.equal(await verifyQcFlowCookie(token), null);
   } finally {
     process.env.NEXTAUTH_SECRET = SECRET;
@@ -188,13 +216,13 @@ test("buildQcFlowClearedSetCookie clears the same name+path it set", () => {
 });
 
 test("full flow: set-cookie → echoed Cookie header → verified state matches", async () => {
-  const token = await signQcFlowCookie({ secretHash: QC_HASH });
+  const token = await signQcFlowCookie({ secretHash: QC_HASH, instance: QC_INSTANCE });
   const setCookie = buildQcFlowSetCookie(token, true);
   // Browser echoes back only the name=value pair, alongside other cookies.
   const echoed = `theme=dark; ${setCookie.split("; ")[0]}; lang=en`;
   const read = readQcFlowCookie(echoed);
   assert.equal(read, token);
-  assert.deepEqual(await verifyQcFlowCookie(read as string), { secretHash: QC_HASH });
+  assert.deepEqual(await verifyQcFlowCookie(read as string), { secretHash: QC_HASH, instance: QC_INSTANCE });
   // The sign-in route's binding check: the submitted secret must hash to the
   // cookie's stored hash — a phished-but-different secret fails.
   assert.equal(hashQuickConnectSecret(QC_SECRET), QC_HASH);

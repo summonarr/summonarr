@@ -14,6 +14,7 @@ import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { Chip, PageHeader } from "@/components/ui/design";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 const PAGE_SIZE = 40;
 const VALID_SORTS = ["votes", "recent"] as const;
@@ -31,7 +32,10 @@ export default async function VotesPage({
   const sort = VALID_SORTS.includes(sp.sort as typeof VALID_SORTS[number])
     ? (sp.sort as typeof VALID_SORTS[number])
     : "votes";
-  const q = (sp.q ?? "").trim();
+  // Feeds both the Prisma `contains` below (ILIKE, no ESCAPE clause) and the raw
+  // ILIKE further down — strip wildcard metacharacters and bound the length for
+  // both at once (search-box DoS, matches /api/votes).
+  const q = sanitizeContainsSearch((sp.q ?? "").trim());
 
   const where: Prisma.DeletionVoteWhereInput = {
     ...(mine && session ? { userId: session.user.id } : {}),

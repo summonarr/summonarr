@@ -14,6 +14,7 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, PageHeader } from "@/components/ui/design";
 import { REQUEST_STATUS_TONE, REQUEST_STATUS_LABEL } from "@/lib/status-labels";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +40,9 @@ export default async function RequestsPage({
   const sort = VALID_SORTS.includes(sortParam as typeof VALID_SORTS[number])
     ? (sortParam as typeof VALID_SORTS[number])
     : "newest";
-  const q = (qParam ?? "").trim();
+  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
+  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.MediaRequestWhereInput = {
     requestedBy: session.user.id,

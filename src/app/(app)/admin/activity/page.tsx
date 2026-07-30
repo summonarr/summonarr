@@ -378,6 +378,10 @@ export default async function ActivityPage({
   const serializedRecentPlays = recentPlays.map((p: typeof recentPlays[0]) => ({
     id: p.id,
     source: p.source,
+    // Which media server the play came from. "" for the default/only server
+    // (and for every row written before multi-server support) — the table
+    // badges it only when non-empty.
+    serverInstance: p.serverInstance,
     title: p.title,
     tmdbId: p.tmdbId,
     mediaType: p.mediaType,

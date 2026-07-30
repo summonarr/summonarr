@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
 
 export interface TVSeasonInfo {
   seasonNumber: number;
@@ -27,14 +28,22 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
   const provider = session.user.provider;
 
-  let sources: string[];
+  let providerSources: string[];
   if (provider === "plex") {
-    sources = ["plex"];
+    providerSources = ["plex"];
   } else if (provider === "jellyfin" || provider === "jellyfin-quickconnect") {
-    sources = ["jellyfin"];
+    providerSources = ["jellyfin"];
   } else {
-    sources = ["plex", "jellyfin"];
+    providerSources = ["plex", "jellyfin"];
   }
+
+  // TVEpisodeCache has no serverInstance column, so `source` alone would report
+  // a RESTRICTED server's per-episode holdings to an ungranted caller — and this
+  // route returns them as raw JSON. Gate on whether the viewer can see any
+  // server of that type actually holding the title. See media-visibility.ts.
+  const visible = await getVisibleServerInstances(session);
+  const sources = await visibleEpisodeSourcesFor(tmdbId, visible, providerSources);
+  if (sources.length === 0) return NextResponse.json({ source: null, seasons: [] });
 
   const rows = await prisma.tVEpisodeCache.findMany({
     where: { tmdbId, source: { in: sources } },

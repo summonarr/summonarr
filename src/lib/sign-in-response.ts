@@ -12,6 +12,18 @@ import type { SignInResult } from "@/lib/auth";
 // The token is gated on the header (not returned unconditionally) so a browser
 // login never exposes the session JWT to JavaScript — preserving the HttpOnly
 // guarantee for the web app. Browsers don't send X-Summonarr-Client.
+//
+// Shown when signInAndMintSession throws AccountDeactivatedError — i.e. the
+// credential was valid but the account is disabled (see account-lifecycle.ts).
+// 403, not 401: retrying with different credentials for the same account will
+// never help, and the client should stop offering "try again".
+export const DISABLED_ACCOUNT_MESSAGE =
+  "This account has been disabled. Contact an administrator.";
+
+export function disabledAccountResponse(): NextResponse {
+  return NextResponse.json({ error: DISABLED_ACCOUNT_MESSAGE }, { status: 403 });
+}
+
 export function buildSignInResponse(
   req: NextRequest,
   result: SignInResult,

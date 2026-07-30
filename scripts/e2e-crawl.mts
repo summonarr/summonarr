@@ -40,6 +40,13 @@ const NAV_TIMEOUT_MS = Number(process.env.E2E_NAV_TIMEOUT_MS || 30_000);
 // this branch plus the components named in CLAUDE.md guardrail 16. Dynamic
 // routes needing a real id (e.g. /admin/activity/play/[id]) are omitted: a
 // fresh CI database has no rows to address them.
+//
+// Entries may carry a query string: several pages are tab-switched off a
+// searchParam and mount an entirely different client subtree per tab, so the
+// bare path never renders those components (e.g. /settings only mounts
+// MediaInstancesManager on ?tab=media, /admin/activity only mounts the history
+// table on ?tab=history). A hydration error in one of those would otherwise go
+// uncaught.
 const ROUTES = [
   "/",
   "/movies",
@@ -52,8 +59,10 @@ const ROUTES = [
   "/votes",
   "/profile",
   "/settings",
+  "/settings?tab=media",
   "/donate",
   "/admin/activity",
+  "/admin/activity?tab=history",
   "/admin/activity/recent",
   "/admin/activity/users",
   "/admin/users",

@@ -290,14 +290,14 @@ shadowPrismaModel(prisma, "auditLog", {
 let plexHas = false;
 let jellyfinHas = false;
 shadowPrismaModel(prisma, "plexLibraryItem", {
-  findUnique: async (args: unknown) => {
-    rec("plexLibraryItem.findUnique", args);
+  findFirst: async (args: unknown) => {
+    rec("plexLibraryItem.findFirst", args);
     return plexHas ? { tmdbId: 603 } : null;
   },
 });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", {
-  findUnique: async (args: unknown) => {
-    rec("jellyfinLibraryItem.findUnique", args);
+  findFirst: async (args: unknown) => {
+    rec("jellyfinLibraryItem.findFirst", args);
     return jellyfinHas ? { tmdbId: 603 } : null;
   },
 });

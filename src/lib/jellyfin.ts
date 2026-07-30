@@ -240,7 +240,9 @@ async function fetchPage<T>(
   limit: number,
   retries = PAGE_RETRY_ATTEMPTS,
   headers?: Record<string, string>,
-): Promise<{ items: T[]; total: number }> {
+// `total` is null when the response carried no TotalRecordCount — callers must
+// treat that as "unknown", never as 0.
+): Promise<{ items: T[]; total: number | null }> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (attempt > 0) {
@@ -263,7 +265,7 @@ async function fetchPage<T>(
         throw err;
       }
       const data = (await res.json()) as { Items?: T[]; TotalRecordCount?: number };
-      return { items: data.Items ?? [], total: data.TotalRecordCount ?? 0 };
+      return { items: data.Items ?? [], total: data.TotalRecordCount ?? null };
     } catch (err) {
       lastErr = err;
       if ((err as { noRetry?: boolean }).noRetry) break;
@@ -281,6 +283,32 @@ async function fetchJellyfinPages<T>(
 ): Promise<void> {
   const first = await fetchPage<T>(baseQuery, apiKey, 0, pageSize);
   processItems(first.items);
+
+  // An ABSENT TotalRecordCount is not a count of zero. Some Jellyfin versions and
+  // endpoints omit the field entirely, and the old `?? 0` turned that into
+  // `total = 0` → an empty startIndexes list → return after the FIRST page. The
+  // sync then wrote a library truncated to `pageSize` items and reported success,
+  // and the next full sync's deleteMany+repopulate (guardrail 13) made that
+  // truncation durable. Without a total we cannot fan out, so walk sequentially
+  // until a short page marks the end — the same end-of-results signal
+  // fetchJellyfinPagesSequential uses.
+  if (first.total === null) {
+    if (first.items.length < pageSize) return;
+    let startIndex = pageSize;
+    // Bounded by the same cap as the fan-out path so a server that never returns
+    // a short page can't loop forever.
+    const maxPages = Math.ceil(MAX_LIBRARY_ITEMS / pageSize);
+    for (let page = 1; page < maxPages; page++) {
+      const next = await fetchPage<T>(baseQuery, apiKey, startIndex, pageSize);
+      processItems(next.items);
+      if (next.items.length < pageSize) return;
+      startIndex += next.items.length;
+    }
+    console.warn(
+      `[jellyfin] page walk hit the ${MAX_LIBRARY_ITEMS}-item cap with no TotalRecordCount; library may be incomplete`,
+    );
+    return;
+  }
 
   // Cap the upstream-reported total before deriving page indexes — a hostile
   // TotalRecordCount would otherwise pre-allocate an unbounded startIndexes array.
@@ -307,20 +335,43 @@ async function fetchJellyfinPagesSequential<T>(
   pageSize = EPISODE_PAGE_SIZE,
 ): Promise<void> {
   let startIndex = 0;
-  let total = Infinity;
+  // Absent TotalRecordCount ⇒ walk until a short page ends the results (the
+  // checks below), rather than `startIndex < null` exiting immediately. The
+  // starting value is the CAP, not Infinity: an unbounded `total` leaves the
+  // short-page break as the only exit, so a server that ignores StartIndex (or
+  // otherwise never returns a partial page) spins forever — holding the sync's
+  // advisory lock while processItems accumulates every page into memory. The
+  // parallel paginator bounds its own no-total walk the same way.
+  let total = MAX_LIBRARY_ITEMS;
   let pageNum = 0;
+  // Second, independent bound: `startIndex` only advances by what the server
+  // actually returned, so the `total` guard alone can't bound a server that
+  // returns full pages without advancing.
+  const maxPages = Math.ceil(MAX_LIBRARY_ITEMS / pageSize);
+  let endedNaturally = false;
 
-  while (startIndex < total) {
+  while (startIndex < total && pageNum < maxPages) {
     const page = await fetchPage<T>(baseQuery, apiKey, startIndex, pageSize);
-    if (pageNum === 0) {
-      total = page.total;
+    // Clamp the upstream-reported total the same way the fan-out path does — a
+    // hostile or buggy TotalRecordCount must not drive an unbounded walk.
+    if (pageNum === 0 && page.total !== null) {
+      total = Math.min(page.total, MAX_LIBRARY_ITEMS);
     }
     processItems(page.items);
     startIndex += page.items.length;
     pageNum++;
 
-    if (page.items.length === 0) break;
-    if (page.items.length < pageSize) break;
+    if (page.items.length === 0) { endedNaturally = true; break; }
+    if (page.items.length < pageSize) { endedNaturally = true; break; }
+  }
+  // Warn only on a genuine truncation. Keying on `startIndex >= MAX_LIBRARY_ITEMS`
+  // rather than `!endedNaturally` alone matters: a library whose size is an exact
+  // multiple of pageSize also exits via the `startIndex < total` guard without a
+  // short page, and that is a complete, correct walk — not something to warn about.
+  if (!endedNaturally && startIndex >= MAX_LIBRARY_ITEMS) {
+    console.warn(
+      `[jellyfin] sequential page walk hit the ${MAX_LIBRARY_ITEMS}-item cap; results may be incomplete`,
+    );
   }
 }
 

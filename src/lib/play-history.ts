@@ -3,6 +3,7 @@ import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
 import { posterUrl } from "./tmdb-types";
+import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -102,20 +103,26 @@ export async function getArcGapDays(): Promise<number> {
 
 // Map a source-native show key (Plex ratingKey / Jellyfin itemId) to its tmdbId
 // via the cached library tables. Returns null when unmapped or the key is empty.
+// serverInstance-scoped (multi-server support): Plex ratingKeys are small
+// server-local integers, so two instances legitimately reuse the same key for
+// different shows — an unscoped lookup could attribute one server's watch to
+// another server's title. Jellyfin item ids are UUIDs (near-zero collision
+// risk) but are scoped identically for consistency.
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
+  serverInstance: string,
 ): Promise<number | null> {
   if (!showKey) return null;
   if (source === "plex") {
     const item = await prisma.plexLibraryItem.findFirst({
-      where: { plexRatingKey: showKey, mediaType: "TV" },
+      where: { plexRatingKey: showKey, mediaType: "TV", serverInstance },
       select: { tmdbId: true },
     });
     return item?.tmdbId ?? null;
   }
   const item = await prisma.jellyfinLibraryItem.findFirst({
-    where: { jellyfinItemId: showKey, mediaType: "TV" },
+    where: { jellyfinItemId: showKey, mediaType: "TV", serverInstance },
     select: { tmdbId: true },
   });
   return item?.tmdbId ?? null;
@@ -156,6 +163,7 @@ function fnv1a32(s: string): number {
 // User by normalized email, serialized under an advisory lock. Returns the row id.
 export async function resolveMediaServerUser(params: {
   source: string;
+  serverInstance: string;
   sourceUserId: string;
   username: string;
   email?: string | null;
@@ -163,7 +171,7 @@ export async function resolveMediaServerUser(params: {
   serverMachineId?: string | null;
   isServerAdmin?: boolean;
 }): Promise<string> {
-  const { source, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
+  const { source, serverInstance, sourceUserId, username, thumbUrl, serverMachineId, isServerAdmin } = params;
   // Normalize once and use the same value for both lookup AND the upserted column,
   // so existing User rows (lowercase-stored) match Plex/Jellyfin server-reported
   // emails that vary in case, and so we don't write mixed-case copies into
@@ -184,19 +192,48 @@ export async function resolveMediaServerUser(params: {
   // 1-bit entropy loss is acceptable: collisions across distinct
   // (source, sourceUserId) pairs serialize unrelated upserts on the same
   // lock — a tiny throughput cost, not a correctness issue.
-  const lockKey = fnv1a32(`mediaServerUser:${source}:${sourceUserId}`) & 0x7fffffff;
+  const lockKey = fnv1a32(`mediaServerUser:${source}:${serverInstance}:${sourceUserId}`) & 0x7fffffff;
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(2020, ${lockKey})`);
 
+    // Resolve which Summonarr account this media-server identity belongs to.
+    // Neither branch filters on `deactivatedAt`: a DISABLED account still owns
+    // its watch history, and the person behind it usually keeps watching on the
+    // server, so their plays must keep landing on their row — otherwise the admin
+    // per-user views and getMyWatchHistory go blank from the moment they were
+    // removed and STAY blank after an admin re-enables the account. A PURGED
+    // account is excluded by construction on both branches instead: the purge
+    // nulls plexUserId/jellyfinUserId and rewrites the email to
+    // deleted-<id>@deleted.invalid, neither of which a media server can report.
     let userId: string | null = null;
-    if (email) {
-      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true, deactivatedAt: true } });
-      // Never relink play history to a deactivated account. A deleted user's email
-      // is rewritten to deleted-<id>@deleted.invalid so it can't match here, but an
-      // admin-deactivated (not deleted) account keeps its email — without this guard
-      // the poller would attribute fresh watches to that dead account.
-      if (user && !user.deactivatedAt && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
+    // 1. Provider subject id — the AUTHORITATIVE binding. `sourceUserId` is the
+    // Plex accountID / Jellyfin userId, which is exactly what sign-in pins to
+    // User.plexUserId / User.jellyfinUserId, so a match here is the same identity
+    // by construction. Email is a weak key by comparison: a Jellyfin account
+    // needs no email at all (so both sides are null and nothing ever links), a
+    // Jellyfin-provisioned Summonarr row often carries the synthetic
+    // jellyfin-<id>@jellyfin.local login address that no media server will ever
+    // report, and either side can be changed by the user at any time. Without
+    // this path those users' watches are never attributed to anyone.
+    //
+    // No mediaServer guard is needed on this branch: the subject columns are
+    // unique and written only by the matching provider's sign-in, so unlike an
+    // email match there is no cross-provider collision to defend against.
+    const bySub =
+      source.toLowerCase() === "plex"
+        ? await tx.user.findUnique({ where: { plexUserId: sourceUserId }, select: { id: true } })
+        : source.toLowerCase() === "jellyfin"
+          ? await tx.user.findUnique({ where: { jellyfinUserId: sourceUserId }, select: { id: true } })
+          : null;
+    if (bySub) userId = bySub.id;
+
+    // 2. Email fallback — covers accounts provisioned before the subject id was
+    // bound (e.g. a local/OIDC user who watches on the server under the same
+    // address, or a Plex row awaiting the plexUserId backfill).
+    if (!userId && email) {
+      const user = await tx.user.findUnique({ where: { email }, select: { id: true, mediaServer: true } });
+      if (user && (!user.mediaServer || user.mediaServer.toLowerCase() === source.toLowerCase())) {
         userId = user.id;
       }
     }
@@ -210,23 +247,28 @@ export async function resolveMediaServerUser(params: {
     // user linkage) to a server they control. Pinning the first-seen machineId and
     // rejecting mismatches keeps each media-server user bound to the one server that
     // originally established it.
-    if (serverMachineId) {
-      const existing = await tx.mediaServerUser.findUnique({
-        where: { source_sourceUserId: { source, sourceUserId } },
-        select: { id: true, serverMachineId: true },
-      });
-      if (existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
-        console.warn(
-          `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
-        );
-        throw new MediaServerMismatchError(source, sourceUserId);
-      }
+    // Read unconditionally (not just when a machineId is offered): `manualUserLink`
+    // is needed on every upsert so an admin's hand-set binding survives this poll.
+    const existing = await tx.mediaServerUser.findUnique({
+      where: { source_serverInstance_sourceUserId: { source, serverInstance, sourceUserId } },
+      select: { id: true, serverMachineId: true, manualUserLink: true },
+    });
+    if (serverMachineId && existing?.serverMachineId && existing.serverMachineId !== serverMachineId) {
+      console.warn(
+        `[play-history] refusing MediaServerUser upsert: source=${sanitizeForLog(source)} sourceUserId=${sanitizeForLog(sourceUserId)} bound to a different server`,
+      );
+      throw new MediaServerMismatchError(source, sourceUserId);
     }
+    // An admin corrected (or deliberately cleared) this row's account binding.
+    // Automatic resolution must not overwrite it — this poll runs every 5s, so
+    // without the guard a manual fix would survive for seconds at most.
+    if (existing?.manualUserLink) userId = null;
 
     const record = await tx.mediaServerUser.upsert({
-      where: { source_sourceUserId: { source, sourceUserId } },
+      where: { source_serverInstance_sourceUserId: { source, serverInstance, sourceUserId } },
       create: {
         source,
+        serverInstance,
         sourceUserId,
         username,
         email: email ?? null,
@@ -443,17 +485,23 @@ export async function recordCompletedSession(
   let referenceId: string | null = null;
   if (session.sourceItemId) {
     const lookbackCutoff = new Date(stoppedAt.getTime() - RESUME_GROUPING_LOOKBACK_MS);
-    const priorUnwatched = await prisma.playHistory.findFirst({
+    // Ask for the most recent prior play and THEN test whether it was unwatched.
+    // Putting `watched: false` in the WHERE instead (as this did) doesn't
+    // implement the rule above — it just skips over watched rows to find an older
+    // unwatched one, so a rewatch chains onto the completed watch that preceded
+    // it: "paused Monday / finished Tuesday / rewatched Saturday" collapsed into a
+    // single 3-segment viewing and the rewatch stopped counting as its own.
+    const prior = await prisma.playHistory.findFirst({
       where: {
         source: session.source,
         sourceItemId: session.sourceItemId,
         mediaServerUserId: session.mediaServerUserId,
-        watched: false,
         startedAt: { gte: lookbackCutoff, lt: session.startedAt },
       },
       orderBy: { startedAt: "desc" },
-      select: { id: true, referenceId: true },
+      select: { id: true, referenceId: true, watched: true },
     }).catch(() => null);
+    const priorUnwatched = prior && !prior.watched ? prior : null;
     if (priorUnwatched) {
       // Chain to the previous row's referenceId (already a chain root) or to
       // the row's own id (it's the root). Either way, every row in the chain
@@ -464,6 +512,12 @@ export async function recordCompletedSession(
 
   const historyData = {
     source: session.source,
+    // Multi-server support: stamp which instance the watch happened on. The
+    // ActiveSession row carries it from create (both pollers and the SSE
+    // writer). PlayHistory's dedup unique key is [source, serverInstance,
+    // sourceSessionId], so the same raw sessionKey on two instances can never
+    // collide — and history attribution/debugging stays per-server.
+    serverInstance: session.serverInstance,
     startedAt: session.startedAt,
     stoppedAt,
     duration: durationS,
@@ -1498,6 +1552,32 @@ const RESOLUTION_BUCKET_SQL = `CASE
   ELSE 'Other'
 END`;
 
+// Shared tail of the two leaderboard queries: swap the row's stored
+// `PlayHistory.posterPath` for the LIVE TmdbMediaCore/TmdbCache path.
+//
+// The stored value is a snapshot taken at finalize time from the title's
+// `:details` cache row, so it's null for anything nobody had opened in the app
+// before watching it — which left the admin Statistics page and the iOS Admin
+// Activity leaderboards on placeholder tiles. It stays as the fallback for
+// titles the caches no longer hold. Two extra indexed reads per leaderboard,
+// and `getMostRewatched` memoizes its result anyway.
+async function withLivePosterPaths(
+  rows: { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[],
+) {
+  const livePaths = await resolvePosterPathMap(rows);
+  return rows.map((r) => ({
+    tmdbId: r.tmdbId,
+    mediaType: r.mediaType,
+    title: r.title,
+    // Namespaced key: these two leaderboards partition by mediaType, so a movie
+    // row and a TV row with the same tmdbId can both rank — a bare-id lookup
+    // would hand them the same (one of them wrong) poster.
+    posterPath: livePaths[posterPathKey(r.tmdbId, r.mediaType)] ?? r.posterPath,
+    plays: Number(r.plays),
+    viewers: Number(r.viewers),
+  }));
+}
+
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
   // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index.
@@ -1508,8 +1588,8 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   const rows = await prisma.$queryRawUnsafe<
     { tmdbId: number; mediaType: string; title: string; posterPath: string | null; plays: bigint; viewers: bigint }[]
   >(
-    // Carry the stored posterPath (like getTopWatchedUncached) so the rewatched
-    // rows render real cover art instead of a placeholder — no TmdbCache round-trip.
+    // Carry the stored posterPath (like getTopWatchedUncached) as the fallback
+    // beneath the live lookup below.
     `SELECT "tmdbId", "mediaType"::text, MAX("title") AS title,
             MAX("posterPath") AS "posterPath",
             COUNT(*)::bigint AS plays,
@@ -1523,22 +1603,14 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
     ...params,
   );
 
-  return rows.map((r) => ({
-    tmdbId: r.tmdbId,
-    mediaType: r.mediaType,
-    title: r.title,
-    posterPath: r.posterPath,
-    plays: Number(r.plays),
-    viewers: Number(r.viewers),
-  }));
+  return withLivePosterPaths(rows);
 }
 
 // Top-watched titles split per media type. Unlike getMostRewatchedUncached
 // this has NO `HAVING COUNT(*) > 1` rewatch filter — a movie watched once
 // still ranks — and partitions by mediaType so movies can't be starved out
 // of a global top-N by TV shows (whose tmdbId aggregates every episode).
-// Carries the stored posterPath so callers get real cover art without a
-// TmdbCache round-trip.
+// Posters resolve the same way (withLivePosterPaths).
 async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limitPerType = 8) {
   const { where, params } = buildStatsFilters(filters);
   // Push then read length so a future param insertion can't shift the $-index (cf. 803cd11).
@@ -1566,14 +1638,7 @@ async function getTopWatchedUncached(filters: PlayHistoryStatsFilters = {}, limi
     ...params,
   );
 
-  return rows.map((r) => ({
-    tmdbId: r.tmdbId,
-    mediaType: r.mediaType,
-    title: r.title,
-    posterPath: r.posterPath,
-    plays: Number(r.plays),
-    viewers: Number(r.viewers),
-  }));
+  return withLivePosterPaths(rows);
 }
 
 export interface PlayHistoryStatsFilters {

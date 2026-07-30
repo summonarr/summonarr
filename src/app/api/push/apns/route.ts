@@ -51,7 +51,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   const alreadyOwns = existing?.userId === session.user.id;
 
-  const sanitizedLabel = body.label
+  // typeof-guard BEFORE the string method: readJsonCapped<T>'s generic is a
+  // compile-time cast only, so `{"label":123}` reached .replace on a number and
+  // surfaced as a 500 instead of being ignored. Same rule the issues/messages
+  // route states explicitly.
+  const sanitizedLabel = typeof body.label === "string" && body.label
     ? (sanitizeText(body.label).slice(0, 100) || undefined)
     : undefined;
 

@@ -6,6 +6,7 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -48,6 +49,10 @@ export type CandidatesResponse = {
   ratingKey:           string;
   plexFilePath:        string | null;
   jellyfinFilePath:    string | null;
+  // Which configured Plex server the ratingKey + candidates came from. Echoed so
+  // the caller can POST the fix back against the SAME server (a ratingKey is
+  // server-local — see the fix-match POST route).
+  serverInstance:      string;
 };
 
 // 0-100 similarity of two titles via normalized Levenshtein edit distance.
@@ -193,13 +198,22 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     return NextResponse.json({ error: "Candidate listing only supported for Plex" }, { status: 400 });
   }
 
+  // Which configured server's library row (and therefore whose ratingKey and
+  // whose /matches endpoint) this listing is for. Absent ⇒ the default server,
+  // so every pre-multi-server caller keeps its exact behaviour.
+  const serverInstanceParam = searchParams.get("serverInstance");
+  if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
+  }
+  const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
+
   const [item, jellyfinItem] = await Promise.all([
-    prisma.plexLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId, mediaType } },
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId, mediaType, serverInstance },
       select: { plexRatingKey: true, filePath: true },
     }),
-    prisma.jellyfinLibraryItem.findUnique({
-      where: { tmdbId_mediaType: { tmdbId, mediaType } },
+    prisma.jellyfinLibraryItem.findFirst({
+      where: { tmdbId, mediaType, serverInstance },
       select: { filePath: true },
     }),
   ]);
@@ -210,7 +224,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   // Plex admin-token URL below (rating keys are always integers).
   const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
 
-  const plexConfig = await getPlexConfig();
+  const plexConfig = await getPlexConfig(serverInstance);
   if (!plexConfig.url || !plexConfig.token) {
     return NextResponse.json({ error: "Plex server not configured" }, { status: 500 });
   }
@@ -518,5 +532,6 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     ratingKey: item.plexRatingKey,
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,
+    serverInstance,
   } satisfies CandidatesResponse);
 });

@@ -16,6 +16,7 @@ import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 import { Chip, PageHeader } from "@/components/ui/design";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
@@ -59,7 +60,9 @@ export default async function IssuesPage({
   const issueType = VALID_ISSUE_TYPES.includes(typeParam as typeof VALID_ISSUE_TYPES[number])
     ? (typeParam as typeof VALID_ISSUE_TYPES[number])
     : null;
-  const q = (qParam ?? "").trim();
+  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
+  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.IssueWhereInput = {
     reportedBy: session.user.id,

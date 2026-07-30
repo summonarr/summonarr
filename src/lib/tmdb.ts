@@ -811,7 +811,10 @@ export async function getMovieCredits(id: number): Promise<CastMember[]> {
     id: c.id, name: c.name, character: c.character, profilePath: c.profile_path,
   }));
 
-  await setCache(key, result, TTL.DETAILS);
+  // Don't cache an empty result — `cast` missing from an otherwise-200 response
+  // would otherwise suppress the real cast for the full DETAILS TTL (mirrors
+  // searchMulti's guard).
+  if (result.length > 0) await setCache(key, result, TTL.DETAILS);
   return result;
 }
 
@@ -825,7 +828,8 @@ export async function getTVCredits(id: number): Promise<CastMember[]> {
     id: c.id, name: c.name, character: c.character, profilePath: c.profile_path,
   }));
 
-  await setCache(key, result, TTL.DETAILS);
+  // Don't cache an empty result — see getMovieCredits.
+  if (result.length > 0) await setCache(key, result, TTL.DETAILS);
   return result;
 }
 
@@ -849,7 +853,10 @@ export async function getTVSeasonEpisodes(
     voteAverage: e.vote_average ?? 0,
   }));
 
-  await setCache(key, episodes, TTL.DETAILS);
+  // Don't cache an empty result — `episodes` missing from an otherwise-200
+  // response would otherwise suppress the real season for the full DETAILS TTL
+  // (mirrors searchMulti's guard).
+  if (episodes.length > 0) await setCache(key, episodes, TTL.DETAILS);
   return episodes;
 }
 
@@ -1007,6 +1014,7 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
 
 export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
   const key = `movie:${id}:suggestions`;
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1025,12 +1033,17 @@ export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
     }
   }
   const trimmed = result.slice(0, 18);
-  await setCache(key, trimmed, TTL.DETAILS);
+  // Don't cache an empty result — if both /similar and /recommendations
+  // rejected (a transient double-failure), caching [] would suppress real
+  // suggestions for the full 7-day DETAILS TTL (mirrors searchMulti's guard).
+  if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
+  });
 }
 
 export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
   const key = `tv:${id}:suggestions`;
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1049,8 +1062,10 @@ export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
     }
   }
   const trimmed = result.slice(0, 18);
-  await setCache(key, trimmed, TTL.DETAILS);
+  // Don't cache an empty result — see getMovieSuggestions.
+  if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
+  });
 }
 
 export async function getMovieCollection(collectionId: number): Promise<TmdbMedia[]> {
@@ -1074,7 +1089,10 @@ export interface PagedResult {
 }
 
 export async function getPopularMoviesPage(page: number): Promise<PagedResult> {
-  const p = Math.max(1, page);
+  // Upper-bound to TMDB's own page depth (mirrors the totalPages clamp below) —
+  // otherwise an arbitrary page number mints an unbounded number of distinct
+  // TmdbCache rows and upstream calls for the same shared TMDB_READ_TOKEN.
+  const p = Math.min(Math.max(1, page), 500);
   const key = `movies:popular:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1084,13 +1102,16 @@ export async function getPopularMoviesPage(page: number): Promise<PagedResult> {
     items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
     totalPages: Math.min(r.total_pages, 500),
   };
-  await setCache(key, result, TTL.DISCOVER);
+  // Don't cache an empty page — a transiently-empty/erroring upstream response
+  // would otherwise suppress real results for the full DISCOVER TTL (mirrors
+  // searchMulti's negative-cache guard).
+  if (result.items.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result.items).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
 }
 
 export async function getPopularTVPage(page: number): Promise<PagedResult> {
-  const p = Math.max(1, page);
+  const p = Math.min(Math.max(1, page), 500);
   const key = `tv:popular:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1100,7 +1121,7 @@ export async function getPopularTVPage(page: number): Promise<PagedResult> {
     items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeTV),
     totalPages: Math.min(r.total_pages, 500),
   };
-  await setCache(key, result, TTL.DISCOVER);
+  if (result.items.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result.items).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
 }
@@ -1168,7 +1189,8 @@ function sanitizeDiscoverFilters(filters: DiscoverFilters): DiscoverFilters {
 }
 
 export async function discoverMoviesPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
-  const p = Math.max(1, page);
+  // Upper-bound to TMDB's own page depth — see getPopularMoviesPage.
+  const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
   const key = `${discoverKey("movie", filters)}:page:${p}`;
@@ -1195,13 +1217,15 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
     items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
     totalPages: Math.min(r.total_pages, 500),
   };
-  await setCache(key, result, TTL.DISCOVER);
+  // Don't cache an empty page — see getPopularMoviesPage.
+  if (result.items.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result.items).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
 }
 
 export async function discoverTVPage(filters: DiscoverFilters, page: number): Promise<PagedResult> {
-  const p = Math.max(1, page);
+  // Upper-bound to TMDB's own page depth — see getPopularMoviesPage.
+  const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
   const key = `${discoverKey("tv", filters)}:page:${p}`;
@@ -1228,7 +1252,8 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
     items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeTV),
     totalPages: Math.min(r.total_pages, 500),
   };
-  await setCache(key, result, TTL.DISCOVER);
+  // Don't cache an empty page — see getPopularMoviesPage.
+  if (result.items.length > 0) await setCache(key, result, TTL.DISCOVER);
   syncTmdbMediaCore(result.items).catch((err) => console.error("[tmdb] TmdbMediaCore sync failed:", err));
   return result;
 }

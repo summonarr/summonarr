@@ -110,7 +110,7 @@ test("validly-signed token with wrong payload types verifies to null", async () 
 test("a QC flow cookie does not verify as Plex flow state (cross-flow confusion)", async () => {
   // Both flow cookies are HS256 JWTs under the same NEXTAUTH_SECRET; the shape
   // check is what keeps a QuickConnect-flow token out of the Plex path.
-  const qcToken = await signQcFlowCookie({ secretHash: "a".repeat(64) });
+  const qcToken = await signQcFlowCookie({ secretHash: "a".repeat(64), instance: "" });
   assert.equal(await verifyPlexFlowCookie(qcToken), null);
 });
 

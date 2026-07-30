@@ -68,6 +68,7 @@ const {
   runTrashSync,
   listSpecs,
   getSpecDetail,
+  __resetGithubTokenCacheForTests,
 } = await import("../src/lib/trash.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -438,6 +439,7 @@ function findApp(trashSpecId: string, arrInstance: string): AppRow | undefined {
 }
 
 beforeEach(() => {
+  __resetGithubTokenCacheForTests(); // module-level TTL cache — see its own comment
   settings.clear();
   settingUpserts.length = 0;
   settingDeletes.length = 0;

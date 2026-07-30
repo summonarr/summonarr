@@ -142,13 +142,27 @@ export const PATCH = withIssueAdmin(async (
   }
 
   if (status === "RESOLVED" && issue.status !== "RESOLVED") {
-    notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution).catch(() => {});
-    notifyUserIssueResolvedPush({
-      userId: issue.reportedBy,
-      title: issue.title,
-      resolution: sanitizedResolution ?? issue.resolution,
-      issueId: id,
-    }).catch(() => {});
+    // One lookup decides whether the reporter-facing channels run, mirroring
+    // notifyRequestStatusChange and the messages route's `reporterActive`
+    // (guardrail 33 — gate at a chokepoint, never re-scatter it into the
+    // per-channel queries). Account removal disables rather than scrubs, so a
+    // removed reporter keeps a live email, Discord link and push subscriptions
+    // and would otherwise be notified forever.
+    const reporterActive = prisma.user
+      .findUnique({ where: { id: issue.reportedBy }, select: { deactivatedAt: true } })
+      .then((u) => !!u && u.deactivatedAt == null)
+      .catch(() => false);
+
+    void reporterActive.then((active) => {
+      if (!active) return;
+      notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution).catch(() => {});
+      notifyUserIssueResolvedPush({
+        userId: issue.reportedBy,
+        title: issue.title,
+        resolution: sanitizedResolution ?? issue.resolution,
+        issueId: id,
+      }).catch(() => {});
+    });
     const res = (sanitizedResolution ?? issue.resolution) ?? "";
     // An issue admin resolving their OWN reported issue shouldn't get a
     // self-notification inbox row ("Your reported issue was resolved"). Mirrors the

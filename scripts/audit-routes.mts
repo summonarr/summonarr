@@ -88,6 +88,8 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
 const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> = [
   { route: "/api/admin/users", reason: "user management delegated via withPermission(Permission.MANAGE_USERS)" },
   { route: "/api/admin/users/[id]", reason: "user management delegated via withPermission(Permission.MANAGE_USERS)" },
+  { route: "/api/admin/users/[id]/reactivate", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); re-enabling an ADMIN target additionally requires Permission.ADMIN in-handler" },
+  { route: "/api/admin/users/[id]/purge", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); purging an ADMIN target additionally requires Permission.ADMIN in-handler, and the target must already be disabled" },
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */
@@ -192,7 +194,13 @@ function routePath(file: string): string {
 }
 
 function isAllowlisted(rel: string): boolean {
-  return ALLOWLIST.some((a) => rel === a.prefix || rel.startsWith(a.prefix));
+  // A subtree match must stop at a path separator. `rel.startsWith("health")`
+  // also matched a sibling like `health-internal/…`, silently exempting a brand
+  // new route from the CI auth gate — the one thing this script exists to stop.
+  // Exact matches still pass (the bare `health` / `interactions` routes).
+  return ALLOWLIST.some(
+    (a) => rel === a.prefix || rel.startsWith(a.prefix.endsWith("/") ? a.prefix : `${a.prefix}/`),
+  );
 }
 
 function main(): void {

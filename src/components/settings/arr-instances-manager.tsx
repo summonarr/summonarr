@@ -92,6 +92,9 @@ const isNamed = (slug: string) => slug !== "" && slug !== "4k";
 function ServiceInstances({ service }: { service: ArrService }) {
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loaded, setLoaded] = useState(false);
+  // A failed initial GET leaves `drafts` empty, which is indistinguishable from
+  // "no instances configured" — and saving that wipes every named instance.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
@@ -138,8 +141,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
       const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
       setDrafts(named.map(toDraft));
       named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
+      setLoadFailed(false);
     } catch {
-      /* leave empty */
+      // Leaving `drafts` empty here used to be silent — and an empty draft list
+      // saves as "remove every named instance", which deletes their (encrypted,
+      // unrecoverable) API keys and webhook secrets. A failed load must never be
+      // mistaken for "the admin has no instances", so block saving and say so.
+      setLoadFailed(true);
     } finally {
       setLoaded(true);
     }
@@ -437,13 +445,19 @@ function ServiceInstances({ service }: { service: ArrService }) {
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-white h-8 px-3 text-xs">
           + Add {label} instance
         </Button>
-        <Button type="button" onClick={save} disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
+        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
         </Button>
         <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white"><RefreshCw className="w-3 h-3" />Refresh</button>
         {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
         {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
       </div>
+      {loadFailed && (
+        <p className="text-sm text-red-400 flex items-center gap-1.5">
+          <XCircle className="w-4 h-4 shrink-0" />
+          Couldn&apos;t load the current instances — saving is disabled so an empty list can&apos;t wipe them. Hit Refresh.
+        </p>
+      )}
       <p className="text-xs text-zinc-500">Extra {mediaWord} instances share the same webhook endpoints — each authenticates with its own webhook secret.</p>
     </div>
   );

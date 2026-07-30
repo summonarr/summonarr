@@ -691,9 +691,10 @@ test("notification-email rate-limits verification sends (4th within the window �
 
 // ═══ DELETE /api/profile (self-delete) ══════════════════════════════════════
 
-test("self-delete step-up is MANDATORY for a local account: a wrong or absent password is rejected with NO anonymization", async () => {
-  // The delete counterpart of the password step-up — irreversible, so it demands
-  // the current password too (the iOS regression touched this path).
+test("self-delete step-up is MANDATORY for a local account: a wrong or absent password is rejected with NO deactivation", async () => {
+  // The delete counterpart of the password step-up — it locks the user out of
+  // their own account, so it demands the current password too (the iOS
+  // regression touched this path).
   const wrong = await mintSession();
   const wrongRes = await deleteProfile(wrong.token, { password: "not-the-password" });
   assert.equal(wrongRes.status, 400);
@@ -704,43 +705,43 @@ test("self-delete step-up is MANDATORY for a local account: a wrong or absent pa
   assert.equal(absentRes.status, 400);
   assert.deepEqual(await absentRes.json(), { error: "Password is required to delete your account" });
 
-  assert.equal(txCalls, 0, "a failed step-up must never open the anonymization tx");
-  assert.equal(opsOf("user.update").length, 0, "the account must not be anonymized");
-  assert.equal(opsOf("account.deleteMany").length, 0, "no OAuth rows may be deleted on a failed step-up");
+  assert.equal(txCalls, 0, "a failed step-up must never open the deactivation tx");
+  assert.equal(opsOf("user.update").length, 0, "the account must not be disabled");
+  assert.equal(opsOf("authSession.deleteMany").length, 0, "no sessions may be revoked on a failed step-up");
 });
 
-test("self-delete with the CORRECT password anonymizes + disables the row and force-revalidates the user", async () => {
+test("self-delete with the CORRECT password DISABLES the row (no scrub) and force-revalidates the user", async () => {
   const { userId, token } = await mintSession();
   const before = Date.now();
   const res = await deleteProfile(token, { password: CURRENT_PW });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
 
-  assert.equal(txCalls, 1, "the anonymization runs inside one transaction");
-  // PII scrubbed, credential cleared, account disabled + all JWTs cut off.
+  assert.equal(txCalls, 1, "the deactivation runs inside one transaction");
+  // EXACTLY the two lifecycle stamps — self-delete blocks sign-in, it does not
+  // erase. deepEqual is the pin: re-adding a scrub field here would make the
+  // user-facing "close account" action silently destroy data an admin can no
+  // longer restore (the irreversible scrub is /api/admin/users/[id]/purge).
   const data = passwordUpdateData();
-  assert.equal(data.name, "Deleted user");
-  assert.equal(data.passwordHash, null);
-  assert.equal(data.notificationEmail, null);
-  assert.equal(data.plexUserId, null);
-  assert.equal(data.jellyfinUserId, null);
-  assert.equal(data.email, `deleted-${userId}@deleted.invalid`);
+  assert.deepEqual(Object.keys(data).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
   assert.ok((data.deactivatedAt as Date) instanceof Date, "the row is marked deactivated");
   assert.ok((data.sessionsRevokedAt as Date).getTime() >= before, "every existing JWT is cut off");
-  // OAuth rows + device sessions removed; play-history identity severed (not deleted).
-  assert.equal(opsOf("account.deleteMany").length, 1);
+  // Device sessions are dropped, but the identity survives intact…
   assert.equal(opsOf("authSession.deleteMany").length, 1);
-  assert.deepEqual((opsOf("mediaServerUser.updateMany")[0].args as { data: unknown }).data, { userId: null });
+  assert.equal(opsOf("account.deleteMany").length, 0, "OAuth rows survive — an admin can re-enable the account");
+  // …and above all the play-history link is untouched, so watches the user racks
+  // up after closing the account are still attributed to them.
+  assert.equal(opsOf("mediaServerUser.updateMany").length, 0, "the MediaServerUser link must NOT be severed");
   assert.equal(shouldForceDbCheck(userId, "any-session"), true, "invalidateUserSession must mark the user force-revalidate");
 });
 
-test("self-delete SKIPS the password step-up for an SSO account (session is the proof) and anonymizes directly", async () => {
-  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+test("self-delete SKIPS the password step-up for an SSO account (session is the proof) and disables directly", async () => {
+  const { token } = await mintSession({ provider: "jellyfin", passwordHash: null });
   const res = await deleteProfile(token); // no password supplied — and none required
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
-  assert.equal(txCalls, 1, "an SSO delete still runs the anonymization");
-  assert.equal(passwordUpdateData().email, `deleted-${userId}@deleted.invalid`);
+  assert.equal(txCalls, 1, "an SSO delete still runs the deactivation");
+  assert.deepEqual(Object.keys(passwordUpdateData()).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
 });
 
 // ═══ shared: every profile route requires an authenticated session ══════════

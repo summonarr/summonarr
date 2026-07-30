@@ -918,8 +918,11 @@ const spec = {
     "/push/vapid-key": {
       get: {
         tags: ["Push"],
+        // No `security: []` override — the handler is withAuth-wrapped and 401s
+        // anonymous callers, so it must inherit the document-level session/bearer
+        // requirement. Declaring it public made generated clients omit the
+        // credential and fail push registration with an unexplained 401.
         summary: "Get the public VAPID key for push subscription",
-        security: [],
         responses: { "200": { description: "VAPID public key", content: { "application/json": { schema: { type: "object", properties: { publicKey: { type: "string" } } } } } } },
       },
     },
@@ -1073,10 +1076,12 @@ const spec = {
     "/profile": {
       delete: {
         tags: ["Profile"],
-        summary: "Delete (deactivate + anonymize) the caller's own account",
+        summary: "Close (disable) the caller's own account",
+        description:
+          "Revokes every session and blocks sign-in from then on. Nothing is scrubbed and nothing is cascade-deleted — an admin can re-enable the account, and the irreversible personal-data scrub is a separate admin action (POST /admin/users/{id}/purge).",
         responses: {
-          "200": { description: "Account deactivated and anonymized (idempotent)" },
-          "400": { description: "Cannot delete the last admin" },
+          "200": { description: "Account disabled (idempotent)" },
+          "400": { description: "Cannot disable the last admin, or a missing/incorrect password on a local account" },
         },
       },
     },
@@ -1149,11 +1154,42 @@ const spec = {
       },
       delete: {
         tags: ["Admin – Users"],
-        summary: "Delete a user (ADMIN)",
+        summary: "Disable a user (MANAGE_USERS)",
+        description:
+          "Revokes every session and blocks sign-in. Reversible — nothing is scrubbed, the account's requests/issues/votes stay attached, and its Plex/Jellyfin link stays intact so play history keeps being attributed. Re-enable with POST /admin/users/{id}/reactivate; erase with POST /admin/users/{id}/purge.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
-          "200": { description: "User deleted" },
-          "400": { description: "Cannot delete last admin" },
+          "200": { description: "User disabled (idempotent)" },
+          "400": { description: "Cannot disable the last admin" },
+          "403": { description: "Forbidden" },
+        },
+      },
+    },
+    "/admin/users/{id}/reactivate": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "Re-enable a disabled user (MANAGE_USERS)",
+        description:
+          "Clears the disabled flag so the account can sign in again. Prior sessions stay revoked — the user signs in fresh. Refused for a purged account, which has no identity left to sign in with.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "User re-enabled (idempotent)" },
+          "400": { description: "Account was purged and cannot be re-enabled" },
+          "403": { description: "Forbidden" },
+          "409": { description: "Account state changed concurrently" },
+        },
+      },
+    },
+    "/admin/users/{id}/purge": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "IRREVERSIBLY scrub a disabled user's personal data (MANAGE_USERS)",
+        description:
+          "Anonymizes the account in place: name, email, password, image, Discord, notification email, provider-subject keys, OAuth rows, push subscriptions, watchlist/hidden/notifications, and the Plex/Jellyfin identity link. Requests, votes and issues survive on a de-identified row. Requires the account to be disabled first, and cannot be undone — this is the action that services a 'delete my data' request.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Personal data purged (idempotent)" },
+          "400": { description: "Account must be disabled before it can be purged" },
           "403": { description: "Forbidden" },
         },
       },
@@ -1193,6 +1229,51 @@ const spec = {
                         rootFolder: { type: "string" },
                         qualityProfileId: { type: "integer", nullable: true },
                         webhookSecret: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Saved; includes per-instance connection test results" },
+          "400": { description: "Invalid service or slug" },
+        },
+      },
+    },
+    "/admin/media-instances": {
+      get: {
+        tags: ["Admin – Settings"],
+        summary: "List all Plex/Jellyfin server instances with connection state (ADMIN)",
+        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+      },
+      post: {
+        tags: ["Admin – Settings"],
+        summary: "Save one service's instance registry + connection settings (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "instances"],
+                properties: {
+                  service: { type: "string", enum: ["plex", "jellyfin"] },
+                  instances: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      required: ["slug"],
+                      properties: {
+                        slug: { type: "string", description: "'' = default, or a named slug (lowercase alnum)" },
+                        name: { type: "string" },
+                        serverUrl: { type: "string", description: "Plex only" },
+                        adminToken: { type: "string", description: "Plex only; write-only, send the mask sentinel to keep unchanged" },
+                        adminEmail: { type: "string", description: "Plex only" },
+                        url: { type: "string", description: "Jellyfin only" },
+                        apiKey: { type: "string", description: "Jellyfin only; write-only, send the mask sentinel to keep unchanged" },
                       },
                     },
                   },
@@ -1408,6 +1489,26 @@ const spec = {
       },
     },
 
+    "/admin/debug/history-link": {
+      get: {
+        tags: ["Admin – Debug"],
+        summary: "Dump play-history attribution state for an account (ADMIN)",
+        description:
+          "Why a user's watch history is empty: the account's three identity columns, every candidate MediaServerUser row with per-row matchesFk / matchesSubject / visibleToUser verdicts, the resolved id list, and any orphaned server identities holding history the account cannot see. Pass exactly one of userId or email.",
+        parameters: [
+          { name: "userId", in: "query", schema: { type: "string" }, description: "Summonarr User id (mutually exclusive with email)" },
+          { name: "email", in: "query", schema: { type: "string" }, description: "Account email (mutually exclusive with userId)" },
+        ],
+        responses: {
+          "200": {
+            description: "Identity columns, candidate MediaServerUser rows with match verdicts, resolved ids, orphanedWithHistory",
+          },
+          "400": { description: "Neither userId nor email supplied" },
+          "404": { description: "No account matched" },
+        },
+      },
+    },
+
     "/admin/fix-match": {
       post: {
         tags: ["Admin – Fix Match"],
@@ -1418,51 +1519,97 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["source", "itemId", "tmdbId", "mediaType"],
+                required: ["server", "tmdbId", "mediaType", "correctTmdbId"],
                 properties: {
-                  source: { type: "string", enum: ["plex", "jellyfin"] },
-                  itemId: { type: "string" },
-                  tmdbId: { type: "integer" },
+                  server: { type: "string", enum: ["plex", "jellyfin"] },
+                  tmdbId: { type: "integer", description: "The wrong TMDB ID currently on the library row" },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
+                  correctTmdbId: { type: "integer" },
+                  canonicalGuid: { type: "string", description: "Plex only — a candidate GUID preselected from /admin/fix-match/candidates" },
+                  serverInstance: {
+                    type: "string",
+                    default: "",
+                    description:
+                      "Which configured media-server instance to remap (\"\" = the default server). MUST match the instance the library row came from — a Plex ratingKey / Jellyfin item id is server-local.",
+                  },
                 },
               },
             },
           },
         },
-        responses: { "200": { description: "Match updated" } },
+        responses: {
+          "200": { description: "Match updated (may carry a `warning` when Plex conflated both TMDB IDs)" },
+          "400": { description: "Bad body, or an invalid serverInstance slug" },
+          "404": { description: "No library row for that tmdbId on that instance — re-sync first" },
+          "429": { description: "Rate limited (10/min/admin)" },
+          "502": { description: "Remote remap or the follow-up cache write failed" },
+        },
       },
     },
     "/admin/fix-match/candidates": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Get TMDB candidates for a library item title (ADMIN / ISSUE_ADMIN)",
+        summary: "List Plex match candidates for a library item (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "query", in: "query", required: true, schema: { type: "string" } },
+          { name: "server", in: "query", required: true, schema: { type: "string", enum: ["plex"] } },
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "correctTmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "arrTmdbId", in: "query", schema: { type: "integer" }, description: "Radarr/Sonarr hint to boost a matching candidate" },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which configured Plex instance to read the row from and search (\"\" = the default server). Echoed back in the response.",
+          },
         ],
-        responses: { "200": { description: "TMDB search results" } },
+        responses: {
+          "200": { description: "Scored candidates plus target metadata, `ratingKey`, and the resolved `serverInstance`" },
+          "400": { description: "Missing params, a non-plex server, or an invalid serverInstance slug" },
+          "404": { description: "No Plex row for that tmdbId on that instance" },
+        },
       },
     },
     "/admin/fix-match/file-info": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Get file metadata for a library item (ADMIN / ISSUE_ADMIN)",
+        summary: "File paths + Radarr/Sonarr hint for a TMDB id across every configured server (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "source", in: "query", required: true, schema: { type: "string", enum: ["plex", "jellyfin"] } },
-          { name: "itemId", in: "query", required: true, schema: { type: "string" } },
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which instance `plexFilePath` / `jellyfinFilePath` are read from (\"\" = the default server).",
+          },
         ],
-        responses: { "200": { description: "File metadata from media server" } },
+        responses: {
+          "200": {
+            description:
+              "plexFilePath / jellyfinFilePath (for the requested instance) + arrTmdbId / arrTitle, " +
+              "plus plexServerInstance / jellyfinServerInstance (the instance each path came from, null when that server has no row) " +
+              "and plexInstances / jellyfinInstances — every instance holding the title, as `{ serverInstance, filePath }`.",
+          },
+          "400": { description: "Missing params, or an invalid serverInstance slug" },
+        },
       },
     },
     "/admin/fix-match/thumb": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Proxy thumbnail image for a library item (ADMIN / ISSUE_ADMIN)",
+        summary: "Proxy a Plex candidate thumbnail (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "source", in: "query", required: true, schema: { type: "string", enum: ["plex", "jellyfin"] } },
-          { name: "itemId", in: "query", required: true, schema: { type: "string" } },
+          {
+            name: "path", in: "query", required: true, schema: { type: "string" },
+            description: "A Plex-relative thumb path, or an absolute URL from an allowlisted metadata-agent CDN",
+          },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which configured Plex instance a RELATIVE path belongs to (\"\" = the default server). Ignored for absolute URLs.",
+          },
         ],
-        responses: { "200": { description: "Image binary (proxied)" } },
+        responses: {
+          "200": { description: "Image binary (proxied)" },
+          "400": { description: "Missing/invalid path, or an invalid serverInstance slug" },
+          "502": { description: "Upstream fetch failed or returned a non-image" },
+        },
       },
     },
 
@@ -1675,6 +1822,14 @@ const spec = {
       post: {
         tags: ["Cron"],
         summary: "Pre-warm OMDB ratings cache",
+        security: [{ cronSecret: [] }],
+        responses: { "200": { description: "Warm result" } },
+      },
+    },
+    "/cron/warm-recommendations": {
+      post: {
+        tags: ["Cron"],
+        summary: "Pre-warm personalized \"For You\" recommendation cache",
         security: [{ cronSecret: [] }],
         responses: { "200": { description: "Warm result" } },
       },

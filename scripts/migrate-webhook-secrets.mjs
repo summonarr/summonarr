@@ -16,9 +16,14 @@
 import { Client } from "pg";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
+// Radarr and Sonarr ONLY. The Plex and Jellyfin webhook handlers were removed
+// (guardrail 2 — Plex activity comes from the SSE stream, Jellyfin from the 5s
+// poller), so `plexWebhookSecret` / `jellyfinWebhookSecret` have no reader
+// anywhere in src/. Seeding them wrote AES ciphertext into keys that are also
+// absent from SETTINGS_SENSITIVE_KEYS, so the Prisma extension would never
+// decrypt them either — a permanently unreadable row for an endpoint that
+// doesn't exist.
 const TARGET_KEYS = [
-  "plexWebhookSecret",
-  "jellyfinWebhookSecret",
   "sonarrWebhookSecret",
   "radarrWebhookSecret",
 ];
@@ -103,8 +108,12 @@ async function main() {
       }
       const ciphertext = encrypt(plaintext, key);
       if (existing.rowCount === 0) {
+        // "updatedAt" is @updatedAt in the schema — Prisma fills it CLIENT-side, so
+        // the column is NOT NULL with no database default. A raw INSERT that omits
+        // it aborts with 23502, which made this whole migration a no-op. Every
+        // sibling raw Setting insert (see create-user.mjs) passes it explicitly.
         await client.query(
-          'INSERT INTO "Setting" (key, value) VALUES ($1, $2)',
+          'INSERT INTO "Setting" (key, value, "updatedAt") VALUES ($1, $2, now())',
           [tkey, ciphertext]
         );
       } else {

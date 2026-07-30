@@ -8,37 +8,45 @@ export type LibraryItem = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 
 // Cursor-based pagination avoids loading the entire library into memory; callers should not assume
 // a consistent snapshot — a concurrent full sync may repopulate rows mid-iteration.
+//
+// Multi-server support: the compound id widened to (tmdbId, mediaType, serverInstance),
+// so a page boundary can land between two rows that share a tmdbId (one per
+// server) — the cursor must carry serverInstance too, or the next page could
+// skip/repeat a same-tmdbId row from a different server. collectAllLibraryItems's
+// own tmdbId:mediaType dedup Set already collapses multi-server rows correctly,
+// so no change needed there.
 export async function* iterateLibrary(
   source: "plex" | "jellyfin",
   mediaType: "MOVIE" | "TV",
 ): AsyncGenerator<LibraryItem> {
-  let cursor: number | undefined;
+  let cursor: { tmdbId: number; serverInstance: string } | undefined;
   for (;;) {
     const page = source === "plex"
       ? await prisma.plexLibraryItem.findMany({
           where: { mediaType },
           take: LIBRARY_PAGE_SIZE,
           ...(cursor !== undefined
-            ? { skip: 1, cursor: { tmdbId_mediaType: { tmdbId: cursor, mediaType } } }
+            ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
             : {}),
-          orderBy: { tmdbId: "asc" },
-          select: { tmdbId: true, mediaType: true },
+          orderBy: [{ tmdbId: "asc" }, { serverInstance: "asc" }],
+          select: { tmdbId: true, mediaType: true, serverInstance: true },
         })
       : await prisma.jellyfinLibraryItem.findMany({
           where: { mediaType },
           take: LIBRARY_PAGE_SIZE,
           ...(cursor !== undefined
-            ? { skip: 1, cursor: { tmdbId_mediaType: { tmdbId: cursor, mediaType } } }
+            ? { skip: 1, cursor: { tmdbId_mediaType_serverInstance: { tmdbId: cursor.tmdbId, mediaType, serverInstance: cursor.serverInstance } } }
             : {}),
-          orderBy: { tmdbId: "asc" },
-          select: { tmdbId: true, mediaType: true },
+          orderBy: [{ tmdbId: "asc" }, { serverInstance: "asc" }],
+          select: { tmdbId: true, mediaType: true, serverInstance: true },
         });
     if (page.length === 0) break;
     for (const item of page) {
       yield { tmdbId: item.tmdbId, mediaType: item.mediaType as "MOVIE" | "TV" };
     }
     if (page.length < LIBRARY_PAGE_SIZE) break;
-    cursor = page[page.length - 1].tmdbId;
+    const last = page[page.length - 1];
+    cursor = { tmdbId: last.tmdbId, serverInstance: last.serverInstance };
   }
 }
 

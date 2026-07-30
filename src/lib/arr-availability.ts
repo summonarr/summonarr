@@ -8,7 +8,16 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 // configured instance. From those we derive:
 //   arrPending                    — wanted at the DEFAULT instance ("")            [back-compat]
 //   arr4kPending / arr4kAvailable — wanted/available at the "4k" instance          [back-compat, gated by include4k]
-//   arrInstances                  — the full per-slug { pending, available } map    [named-instance UI]
+//   arrInstances                  — the full per-slug { pending, available } map
+//
+// NOTE on arrInstances: it survives only when you call attachArrPending DIRECTLY.
+// attachAllAvailability — the chokepoint every discovery/list route funnels through
+// — re-projects this pass into {arrPending, arr4kPending, arr4kAvailable} and drops
+// the map (pinned by tests/attach-all.test.mts). Since the field is optional on
+// TmdbMedia, a list surface that read `media.arrInstances` would silently get
+// undefined forever rather than a type error. The detail pages that need per-instance
+// state query it directly for that reason. Propagating it through attach-all means
+// every list response starts emitting it — flip that pin deliberately, not by accident.
 export async function attachArrPending(
   items: TmdbMedia[],
   opts?: { include4k?: boolean },

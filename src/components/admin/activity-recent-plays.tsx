@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -19,6 +19,10 @@ import { withBasePath } from "@/lib/base-path";
 export interface RecentPlay {
   id: string;
   source: string;
+  // Media-server instance slug (media-instances.ts). "" = the default/only
+  // server, and also what every row written before multi-server support reads
+  // (`@default("")`) — so the badge below renders only when non-empty.
+  serverInstance: string;
   title: string;
   tmdbId: number | null;
   mediaType: string | null;
@@ -64,6 +68,10 @@ function formatBitrate(raw: number | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
+// Unpinned locale/timezone (via "en-US" + no timeZone) is only safe because
+// the sole caller (below, inside DetailRow) never renders during SSR/first
+// paint — DetailRow is gated behind `isExpanded`, false until a post-hydration
+// click (guardrail 16). Don't call this from an ungated render path.
 function formatTimestamp(dateStr: string | null): string {
   if (!dateStr) return "—";
   return new Date(dateStr).toLocaleString("en-US");
@@ -167,6 +175,19 @@ export function ActivityRecentPlays({
   const [page, setPage] = useState(1);
   const mounted = useHasMounted();
 
+  // ActivityLiveRefresher calls router.refresh() on every activity:history-updated
+  // SSE event so this table reflects a finished stream. But router.refresh()
+  // re-renders the SERVER tree without unmounting client components, and this
+  // component's key only changes on a filter change — so `plays` stayed frozen at
+  // whatever loaded on first mount while the cards and leaderboards around it
+  // updated. Re-seed from the incoming prop. Same pattern as browse-grid.tsx and
+  // audit-log-table.tsx.
+  useEffect(() => {
+    setPlays(initialPlays);
+    setPage(1);
+    setHasMore(initialPlays.length >= 20);
+  }, [initialPlays]);
+
   const loadMore = async () => {
     setLoading(true);
     try {
@@ -186,6 +207,7 @@ export function ActivityRecentPlays({
       const items: RecentPlay[] = data.items.map((p) => ({
         id: p.id,
         source: p.source,
+        serverInstance: p.serverInstance,
         title: p.title,
         tmdbId: p.tmdbId,
         mediaType: p.mediaType,
@@ -420,6 +442,28 @@ export function ActivityRecentPlays({
                                 background: sourceDotColor(p.source),
                               }}
                             />
+                            {/* Instance slug for a named server. Rendered only
+                                when non-empty — "" is both the default server
+                                and every pre-multi-server row, which must stay
+                                unlabelled. Colour keyed off `source` (same as
+                                the dot), never off the slug. */}
+                            {p.serverInstance && (
+                              <span
+                                className="ds-mono"
+                                title={`Played on the "${p.serverInstance}" ${p.source} server`}
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: "1px 5px",
+                                  borderRadius: 999,
+                                  background: "oklch(1 0 0 / 0.06)",
+                                  color: sourceDotColor(p.source),
+                                  letterSpacing: "0.04em",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {p.serverInstance}
+                              </span>
+                            )}
                           </Link>
                         </td>
                         <td style={{ ...TD, maxWidth: 320 }}>

@@ -1,9 +1,14 @@
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 
-// Resolve TMDB poster URLs for activity views. Returns a tmdbId→url map; url
-// is absent when the title is uncached/unmapped so callers fall back to the
-// letter placeholder.
+// Resolve TMDB posters for activity views — `resolvePosterMap` returns a
+// tmdbId→url map, `resolvePosterPathMap` the same lookup as raw TMDB paths.
+// An id is absent when the title is uncached/unmapped so callers fall back to
+// the letter placeholder.
+//
+// Both are live lookups on purpose: the `PlayHistory.posterPath` snapshot taken
+// at finalize time is null for every row whose `:details` cache row didn't
+// exist yet, so it is only ever a fallback (authoritative beats heuristic).
 //
 // TmdbMediaCore first: it carries `posterPath` as a plain column, so the
 // lookup avoids transferring and parsing the full `:details` JSON blob per id.
@@ -14,54 +19,132 @@ import { posterUrl } from "@/lib/tmdb-types";
 // Both MOVIE and TV rows (and both `movie:`/`tv:` fallback keys) are queried
 // for every id because `mediaType` can be null or mismatched on unmapped rows;
 // the first poster found per id wins.
-export async function resolvePosterMap(
-  items: { tmdbId: number | null }[],
-): Promise<Record<number, string>> {
-  const ids = [
-    ...new Set(
-      items
-        .map((i) => i.tmdbId)
-        .filter((id): id is number => id != null),
-    ),
-  ];
-  if (ids.length === 0) return {};
+export interface PosterLookupItem {
+  tmdbId: number | null;
+  mediaType?: string | null;
+}
 
+// The namespace key for one title. TMDB numbers movies and TV SEPARATELY, so id
+// 1399 is a different title in each — keying a poster map on the bare number
+// makes it first-writer-wins across the two, which already shipped as a live bug
+// once (see the identical `posterKeysFor` in play-history.ts:
+// "a session on TV id 1399 was served the poster cached for MOVIE id 1399").
+// An unknown mediaType still resolves through the movie key, and the lookup
+// below deliberately files such a row under BOTH keys so either spelling hits.
+export function posterPathKey(tmdbId: number, mediaType?: string | null): string {
+  return mediaType === "TV" ? `tv:${tmdbId}` : `movie:${tmdbId}`;
+}
+
+function namespacesFor(mediaType?: string | null): ("movie" | "tv")[] {
+  if (mediaType === "TV") return ["tv"];
+  if (mediaType === "MOVIE") return ["movie"];
+  return ["movie", "tv"]; // unknown/unmapped — consult both, first hit wins
+}
+
+export async function resolvePosterMap(
+  items: PosterLookupItem[],
+): Promise<Record<number, string>> {
+  const paths = await resolvePosterPathMap(items);
   const map: Record<number, string> = {};
+  for (const item of items) {
+    if (item.tmdbId == null || map[item.tmdbId]) continue;
+    const path = paths[posterPathKey(item.tmdbId, item.mediaType)];
+    if (!path) continue;
+    const url = posterUrl(path, "w342");
+    if (url) map[item.tmdbId] = url;
+  }
+  return map;
+}
+
+// Same lookup, returning the raw TMDB path instead of a w342 URL. Native
+// clients build their own image URLs (at their own size), so they want the
+// path; `resolvePosterMap` is this map with `posterUrl` applied.
+//
+// Keyed by `posterPathKey` ("movie:<id>" / "tv:<id>"), NOT the bare numeric id —
+// a caller ranking movies and TV side by side (getTopWatched partitions by
+// mediaType, so both can rank the same number) would otherwise get one row's art
+// on both.
+export async function resolvePosterPathMap(
+  items: PosterLookupItem[],
+): Promise<Record<string, string>> {
+  // Per numeric id, the set of namespaces any caller asked about. An id requested
+  // with an unknown mediaType contributes both.
+  const wanted = new Map<number, Set<"movie" | "tv">>();
+  for (const item of items) {
+    if (item.tmdbId == null) continue;
+    const set = wanted.get(item.tmdbId) ?? new Set<"movie" | "tv">();
+    for (const ns of namespacesFor(item.mediaType)) set.add(ns);
+    wanted.set(item.tmdbId, set);
+  }
+  if (wanted.size === 0) return {};
+
+  const ids = [...wanted.keys()];
+  const map: Record<string, string> = {};
 
   const coreRows = await prisma.tmdbMediaCore.findMany({
     where: { tmdbId: { in: ids } },
-    select: { tmdbId: true, posterPath: true },
+    select: { tmdbId: true, mediaType: true, posterPath: true },
   });
   for (const row of coreRows) {
-    if (map[row.tmdbId]) continue;
-    const url = row.posterPath ? posterUrl(row.posterPath, "w342") : null;
-    if (url) map[row.tmdbId] = url;
+    const ns = row.mediaType === "TV" ? "tv" : "movie";
+    if (!wanted.get(row.tmdbId)?.has(ns)) continue;
+    const key = `${ns}:${row.tmdbId}`;
+    if (map[key]) continue;
+    // Gate on posterUrl so a malformed stored path falls through to the
+    // TmdbCache row below rather than being handed out as a dead path.
+    if (row.posterPath && posterUrl(row.posterPath, "w342")) {
+      map[key] = row.posterPath;
+    }
   }
 
-  const missing = ids.filter((id) => !map[id]);
-  if (missing.length === 0) return map;
+  const missing: string[] = [];
+  for (const [id, namespaces] of wanted) {
+    // Unknown mediaType ⇒ both namespaces were requested, but either one
+    // answers the question (finalize mirrors it), so one hit ends the search.
+    if (namespaces.size > 1 && (map[`movie:${id}`] || map[`tv:${id}`])) continue;
+    for (const ns of namespaces) {
+      if (!map[`${ns}:${id}`]) missing.push(`${ns}:${id}`);
+    }
+  }
+  if (missing.length === 0) return finalize(map, wanted);
 
-  const keys = missing.flatMap((id) => [
-    `movie:${id}:details`,
-    `tv:${id}:details`,
-  ]);
   const rows = await prisma.tmdbCache.findMany({
-    where: { key: { in: keys } },
+    where: { key: { in: missing.map((k) => `${k}:details`) } },
     select: { key: true, data: true },
   });
 
   for (const row of rows) {
-    const id = parseInt(row.key.split(":")[1] ?? "", 10);
-    if (!Number.isFinite(id) || map[id]) continue;
+    const [ns, rawId] = row.key.split(":");
+    const id = parseInt(rawId ?? "", 10);
+    if (!Number.isFinite(id) || (ns !== "movie" && ns !== "tv")) continue;
+    const key = `${ns}:${id}`;
+    if (map[key]) continue;
     try {
       const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-      const url = parsed.posterPath
-        ? posterUrl(parsed.posterPath, "w342")
-        : null;
-      if (url) map[id] = url;
+      if (parsed.posterPath && posterUrl(parsed.posterPath, "w342")) {
+        map[key] = parsed.posterPath;
+      }
     } catch {
       // ignore unparseable cache rows
     }
+  }
+  return finalize(map, wanted);
+}
+
+// An id whose mediaType the caller did NOT know was looked up in both
+// namespaces; mirror whichever one hit onto the other so a `posterPathKey(id,
+// null)` lookup (which spells "movie:<id>") still resolves. Ids requested with a
+// known mediaType are untouched, so a real movie/TV collision stays separate.
+function finalize(
+  map: Record<string, string>,
+  wanted: Map<number, Set<"movie" | "tv">>,
+): Record<string, string> {
+  for (const [id, namespaces] of wanted) {
+    if (namespaces.size < 2) continue;
+    const movie = map[`movie:${id}`];
+    const tv = map[`tv:${id}`];
+    if (movie && !tv) map[`tv:${id}`] = movie;
+    else if (tv && !movie) map[`movie:${id}`] = tv;
   }
   return map;
 }

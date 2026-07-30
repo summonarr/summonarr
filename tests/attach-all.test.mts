@@ -23,7 +23,12 @@
 //     with the flags overlaid; skipRatings bypasses the ratings pass without
 //     touching the ratings cache;
 //   - PINS CURRENT BEHAVIOR: `arrInstances` (built by attachArrPending) is
-//     dropped by the merge — only arrPending/arr4k* survive.
+//     dropped by the merge — only arrPending/arr4k* survive;
+//   - per-user media-server visibility is resolved HERE (from the userId this
+//     chokepoint already carries) and pushed INTO the two library queries as a
+//     `serverInstance` allowlist: a server marked `restricted` contributes
+//     availability only to users granted `view` on it, and a deployment with no
+//     restricted server pays no extra identity read at all.
 //
 // No DB or network: every delegate the composition touches (plex/jellyfin
 // library items, the four ARR cache tables, mediaRequest, blacklistItem,
@@ -67,14 +72,35 @@ function fullMedia(id: number, mediaType: "movie" | "tv"): TmdbMedia {
 
 // ── in-memory delegates ─────────────────────────────────────────────────────
 
-type LibArgs = { where: { mediaType: "MOVIE" | "TV"; tmdbId: { in: number[] } } };
+type LibArgs = {
+  where: { mediaType: "MOVIE" | "TV"; tmdbId: { in: number[] }; serverInstance: { in: string[] } };
+};
+// `movie`/`tv` are rows on the default ("") server; `movieRemote`/`tvRemote` sit
+// on a second server whose slug is "remote" (restricted in the grants tests), so
+// the stub can honour the serverInstance allowlist the way Postgres would.
 function makeLibrary() {
-  const state = { movie: [] as number[], tv: [] as number[], calls: 0 };
+  const state = {
+    movie: [] as number[],
+    tv: [] as number[],
+    movieRemote: [] as number[],
+    tvRemote: [] as number[],
+    calls: 0,
+    args: [] as LibArgs[],
+  };
   const stub = {
     findMany: async (args: LibArgs): Promise<Array<{ tmdbId: number }>> => {
       state.calls += 1;
-      const lib = args.where.mediaType === "MOVIE" ? state.movie : state.tv;
-      return lib.filter((id) => args.where.tmdbId.in.includes(id)).map((tmdbId) => ({ tmdbId }));
+      state.args.push(args);
+      const isMovie = args.where.mediaType === "MOVIE";
+      const rows = [
+        ...(isMovie ? state.movie : state.tv).map((tmdbId) => ({ tmdbId, serverInstance: "" })),
+        ...(isMovie ? state.movieRemote : state.tvRemote).map((tmdbId) => ({ tmdbId, serverInstance: "remote" })),
+      ];
+      return rows
+        .filter(
+          (r) => args.where.tmdbId.in.includes(r.tmdbId) && args.where.serverInstance.in.includes(r.serverInstance),
+        )
+        .map((r) => ({ tmdbId: r.tmdbId }));
     },
   };
   return { state, stub };
@@ -113,6 +139,13 @@ const hidden = { rows: [] as EnumRow[], calls: [] as Array<{ where: { userId: st
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const ratingsCache = { rows: [] as CacheRow[], calls: [] as string[][] };
 
+// Per-user media-server visibility: the two registry Settings + the grants
+// column. `userReads` pins the cost contract — a deployment with no restricted
+// server must not pay an identity round-trip on every discovery grid.
+const registry = new Map<string, string>();
+const grantsByUser = new Map<string, unknown>();
+let userReads = 0;
+
 shadowPrismaModel(prisma, "plexLibraryItem", plexLib.stub);
 shadowPrismaModel(prisma, "jellyfinLibraryItem", jellyfinLib.stub);
 shadowPrismaModel(prisma, "radarrWantedItem", radarrWanted.stub);
@@ -143,6 +176,18 @@ shadowPrismaModel(prisma, "tmdbCache", {
     return ratingsCache.rows.filter((r) => args.where.key.in.includes(r.key));
   },
 });
+shadowPrismaModel(prisma, "setting", {
+  findUnique: async (args: { where: { key: string } }) => {
+    const v = registry.get(args.where.key);
+    return v !== undefined ? { key: args.where.key, value: v } : null;
+  },
+});
+shadowPrismaModel(prisma, "user", {
+  findUnique: async (args: { where: { id: string } }) => {
+    userReads += 1;
+    return { role: "USER", permissions: 0n, mediaServerGrants: grantsByUser.get(args.where.id) ?? null };
+  },
+});
 
 const FRESH = () => new Date(Date.now() + 60 * 60 * 1000);
 // A full MdblistRatings-shaped blob, as fetchMdblistBatch would have cached it.
@@ -163,12 +208,17 @@ const MDBLIST_603 = {
 };
 
 beforeEach(() => {
-  plexLib.state.movie = [];
-  plexLib.state.tv = [];
-  plexLib.state.calls = 0;
-  jellyfinLib.state.movie = [];
-  jellyfinLib.state.tv = [];
-  jellyfinLib.state.calls = 0;
+  for (const lib of [plexLib, jellyfinLib]) {
+    lib.state.movie = [];
+    lib.state.tv = [];
+    lib.state.movieRemote = [];
+    lib.state.tvRemote = [];
+    lib.state.calls = 0;
+    lib.state.args.length = 0;
+  }
+  registry.clear();
+  grantsByUser.clear();
+  userReads = 0;
   for (const t of [radarrWanted, sonarrWanted, radarrAvail, sonarrAvail]) {
     t.state.rows = [];
     t.state.calls = 0;
@@ -375,6 +425,57 @@ test("skipRatings bypasses the ratings pass — the ratings cache is never queri
   const out = await attachAllAvailability([media(603, "movie")], "u_1", SKIP);
   assert.equal(ratingsCache.calls.length, 0);
   assert.equal("imdbRating" in out[0], false); // base is the raw item, not a ratings merge
+});
+
+// ── per-user media-server visibility ────────────────────────────────────────
+
+test("no restricted server: both library queries scope to the default slug and the grants column is NEVER read", async () => {
+  // The cost contract for every deployment that hasn't opted in. `["" ]` is
+  // satisfied by every row in a single-server install, so results are unchanged,
+  // and the per-user read that would otherwise ride on every discovery grid is skipped.
+  plexLib.state.movie = [603];
+  jellyfinLib.state.movie = [603];
+  const out = await attachAllAvailability([media(603, "movie")], "u_1", SKIP);
+  assert.deepEqual([out[0].plexAvailable, out[0].jellyfinAvailable], [true, true]);
+  assert.deepEqual(plexLib.state.args[0].where.serverInstance, { in: [""] });
+  assert.deepEqual(jellyfinLib.state.args[0].where.serverInstance, { in: [""] });
+  assert.equal(userReads, 0, "nothing is restricted — the user row must not be read");
+});
+
+test("a restricted server contributes availability ONLY to a granted user", async () => {
+  // Same tmdbId, same library state, two users, opposite answers — the headline
+  // behavioural pin. 603 lives ONLY on the restricted "remote" server.
+  registry.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Friend's", restricted: true }]));
+  plexLib.state.movieRemote = [603];
+  grantsByUser.set("u_granted", { plex: { remote: { view: true } } });
+
+  const granted = await attachAllAvailability([media(603, "movie")], "u_granted", SKIP);
+  const ungranted = await attachAllAvailability([media(603, "movie")], "u_plain", SKIP);
+  assert.equal(granted[0].plexAvailable, true);
+  assert.equal(
+    ungranted[0].plexAvailable,
+    false,
+    "an ungranted viewer must not be told a restricted server's copy is available",
+  );
+  // The clause is what carries it — the granted viewer's query widens, the other doesn't.
+  assert.deepEqual(plexLib.state.args[0].where.serverInstance, { in: ["", "remote"] });
+  assert.deepEqual(plexLib.state.args[1].where.serverInstance, { in: [""] });
+  assert.equal(userReads, 2, "a restricted server exists — the grants read is load-bearing here");
+});
+
+test("an anonymous caller sees unrestricted servers only, with no user read", async () => {
+  registry.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Attic", restricted: true }]));
+  jellyfinLib.state.movie = [604]; // default server — visible to everyone
+  jellyfinLib.state.movieRemote = [603]; // restricted — nobody without a grant
+  const out = await attachAllAvailability([media(603, "movie"), media(604, "movie")], undefined, SKIP);
+  assert.deepEqual(
+    out.map((i) => [i.id, i.jellyfinAvailable]),
+    [
+      [603, false],
+      [604, true],
+    ],
+  );
+  assert.equal(userReads, 0, "no userId — there is no identity to read");
 });
 
 test("PINS CURRENT BEHAVIOR: arrInstances from the arr pass is dropped by the merge", async () => {

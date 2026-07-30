@@ -96,13 +96,21 @@ export function EnableMachineSessionToggle({
         </div>
       </div>
 
-      {enabled && (
+      {/*
+        Rendered unconditionally, NOT gated on `enabled`. The server refuses to
+        turn this on while the allowlist is empty, and `toggle()` reverts
+        `enabled` on that rejection — so gating the editor on `enabled` made a
+        fresh install un-enableable: the only place to set the allowlist appeared
+        for a moment and then vanished with the failed toggle. Set the IPs first,
+        then flip the switch.
+      */}
+      {(
         <div className="mt-3 pl-0.5">
           <label htmlFor="machine-session-ips" className="block text-xs font-medium text-zinc-300">
             Allowed IP addresses
           </label>
           <p className="text-xs text-zinc-500 mt-0.5 mb-1.5">
-            Restrict which client IPs may mint a session. One or more IPs or CIDR ranges, comma or newline separated (e.g. <code className="text-zinc-400">10.0.0.5, 192.168.1.0/24</code>). Leave blank to allow any IP. Requires <code className="text-zinc-400">TRUST_PROXY=true</code> and a reverse proxy that sets <code className="text-zinc-400">X-Forwarded-For</code> — otherwise every request is rejected.
+            Restrict which client IPs may mint a session. One or more IPs or CIDR ranges, comma or newline separated (e.g. <code className="text-zinc-400">10.0.0.5, 192.168.1.0/24</code>). <strong className="text-zinc-300">Required</strong> — the API cannot be enabled while this is empty, so set it before turning the switch on. Requires <code className="text-zinc-400">TRUST_PROXY=true</code> and a reverse proxy that sets <code className="text-zinc-400">X-Forwarded-For</code> — otherwise every request is rejected.
           </p>
           <textarea
             id="machine-session-ips"

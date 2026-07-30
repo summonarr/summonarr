@@ -21,8 +21,20 @@ type MediaType = "MOVIE" | "TV";
  * status), the same UPDATE additionally writes `status='AVAILABLE'` and
  * `availableAt=NOW()`. Without it, only `notifiedAvailable` flips (used by
  * the webhook path where status was already set upstream).
+ *
+ * Requesters whose account is DISABLED are dropped from the returned set. This
+ * is the single chokepoint for the batch "now available" fan-out — every sync
+ * route and the webhook poller derive their Discord/push/email/in-app payloads
+ * from these winners — so filtering here suppresses all four channels at once
+ * without touching a dozen per-channel queries. Account removal disables rather
+ * than scrubs (see account-lifecycle.ts), so a removed user keeps a live email
+ * address and push subscriptions and would otherwise go on receiving "now
+ * available" notifications for an account they can no longer sign into. The row
+ * still flips to AVAILABLE and still burns `notifiedAvailable` — only the
+ * delivery is skipped, so re-enabling the account later does not replay a
+ * backlog of stale notifications.
  */
-export async function claimAvailableNotificationWinners<T extends { id: string }>(
+export async function claimAvailableNotificationWinners<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
   opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
 ): Promise<T[]> {
@@ -62,7 +74,17 @@ export async function claimAvailableNotificationWinners<T extends { id: string }
       `);
   if (updated.length === 0) return [];
   const winnerIds = new Set(updated.map((r) => r.id));
-  return candidates.filter((r) => winnerIds.has(r.id));
+  const winners = candidates.filter((r) => winnerIds.has(r.id));
+
+  // Only runs when there is actually something to deliver, so the steady-state
+  // sync (zero winners) pays nothing for it.
+  const disabled = await prisma.user.findMany({
+    where: { id: { in: [...new Set(winners.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
+    select: { id: true },
+  });
+  if (disabled.length === 0) return winners;
+  const disabledIds = new Set(disabled.map((u) => u.id));
+  return winners.filter((r) => !disabledIds.has(r.requestedBy));
 }
 
 /**

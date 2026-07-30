@@ -83,15 +83,38 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
     const adminRoleId = userRole === "ADMIN" ? cfg.discordAdminRoleId : userRole === "ISSUE_ADMIN" ? cfg.discordIssueAdminRoleId : undefined;
 
     const roleIds = [cfg.discordLinkedRoleId, serverRoleId, adminRoleId].filter((id): id is string => isValidSnowflake(id));
-    if (roleIds.length === 0) return;
 
-    await Promise.allSettled(
-      roleIds.map((roleId) =>
+    // Sync is a DIFF, not an add-only pass. Without the removal half, a user
+    // demoted from ADMIN to USER kept their Discord admin role forever — the
+    // re-sync re-added the linked/server roles and simply never mentioned the
+    // admin one — and a Plex→Jellyfin switch accumulated both server roles.
+    //
+    // The removal set is deliberately scoped to roles SUMMONARR ITSELF manages
+    // (the five configured ids). Anything an operator granted by hand is not in
+    // that set and is never touched, so this can only ever revoke a role that
+    // Summonarr granted and that the user no longer qualifies for.
+    const desired = new Set(roleIds);
+    const managed = [
+      cfg.discordLinkedRoleId,
+      cfg.discordPlexRoleId,
+      cfg.discordJellyfinRoleId,
+      cfg.discordAdminRoleId,
+      cfg.discordIssueAdminRoleId,
+    ].filter((id): id is string => isValidSnowflake(id));
+    const stale = [...new Set(managed)].filter((id) => !desired.has(id));
 
-        safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
+    if (roleIds.length === 0 && stale.length === 0) return;
+
+    const memberRoleUrl = (roleId: string) =>
+      `${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`;
+    const auth = { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" };
+
+    await Promise.allSettled([
+      ...roleIds.map((roleId) =>
+        safeFetchTrusted(memberRoleUrl(roleId), {
           allowedHosts: DISCORD_HOSTS,
           method: "PUT",
-          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+          headers: auth,
           timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
         }).then(async (res) => {
           if (!res.ok) {
@@ -99,10 +122,74 @@ export async function assignDiscordRolesOnLink(discordUserId: string, userEmail:
             console.error(`[discord-notify] Failed to assign role ${roleId} (${res.status}): ${text}`);
           }
         })
+      ),
+      ...stale.map((roleId) =>
+        safeFetchTrusted(memberRoleUrl(roleId), {
+          allowedHosts: DISCORD_HOSTS,
+          method: "DELETE",
+          headers: auth,
+          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
+        }).then(async (res) => {
+          // 404 is the common, benign case: the member never had the role.
+          if (!res.ok && res.status !== 404) {
+            const text = await res.text();
+            console.error(`[discord-notify] Failed to revoke role ${roleId} (${res.status}): ${text}`);
+          }
+        })
+      ),
+    ]);
+  } catch (err) {
+    console.error("[discord-notify] assignDiscordRolesOnLink failed:", err);
+  }
+}
+
+// Revoke every Summonarr-managed role from a member who is no longer linked.
+//
+// assignDiscordRolesOnLink's diff only runs while an account IS linked, so
+// without this an unlinked user kept every role Summonarr ever granted them —
+// including the admin role — with no path back short of an operator editing the
+// guild by hand. Scoped to the five configured ids for the same reason the sync
+// diff is: a role the operator granted independently must never be touched.
+//
+// Best-effort and self-swallowing (mirrors assignDiscordRolesOnLink): losing the
+// Discord side must never fail the unlink itself, which has already committed.
+export async function revokeDiscordRolesOnUnlink(discordUserId: string): Promise<void> {
+  try {
+    if (!(await isFeatureEnabled("feature.integration.discord"))) return;
+    const rows = await prisma.setting.findMany({
+      where: { key: { in: ["discordBotToken", "discordGuildId", "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId"] } },
+    });
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (!cfg.discordBotToken || !cfg.discordGuildId) return;
+    if (!isValidSnowflake(cfg.discordGuildId) || !isValidSnowflake(discordUserId)) return;
+
+    const managed = [...new Set([
+      cfg.discordLinkedRoleId,
+      cfg.discordPlexRoleId,
+      cfg.discordJellyfinRoleId,
+      cfg.discordAdminRoleId,
+      cfg.discordIssueAdminRoleId,
+    ].filter((id): id is string => isValidSnowflake(id)))];
+    if (managed.length === 0) return;
+
+    await Promise.allSettled(
+      managed.map((roleId) =>
+        safeFetchTrusted(`${DISCORD_API}/guilds/${cfg.discordGuildId}/members/${discordUserId}/roles/${roleId}`, {
+          allowedHosts: DISCORD_HOSTS,
+          method: "DELETE",
+          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
+          timeoutMs: DISCORD_FETCH_TIMEOUT_MS,
+        }).then(async (res) => {
+          // 404 = the member never had the role (or already left the guild).
+          if (!res.ok && res.status !== 404) {
+            const text = await res.text();
+            console.error(`[discord-notify] Failed to revoke role ${roleId} on unlink (${res.status}): ${text}`);
+          }
+        })
       )
     );
   } catch (err) {
-    console.error("[discord-notify] assignDiscordRolesOnLink failed:", err);
+    console.error("[discord-notify] revokeDiscordRolesOnUnlink failed:", err);
   }
 }
 
@@ -418,6 +505,9 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
       where: {
         discordId: { not: null },
         notifyOnIssue: true,
+        // A disabled account keeps its Discord link (guardrail 33), so without
+        // this it keeps getting DM'd about every new issue.
+        deactivatedAt: null,
         ...idFilter,
       },
       select: { discordId: true, role: true, permissions: true },
@@ -470,7 +560,10 @@ export async function notifyUsersRequestsApproved(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true },
+      // deactivatedAt: null — account removal disables rather than scrubs
+      // (guardrail 33), so a removed user keeps a live Discord link and would
+      // otherwise still get pinged by a later batch approve/decline.
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true, deactivatedAt: null },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
@@ -549,7 +642,8 @@ export async function notifyUsersRequestsDeclined(
 
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
-      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true },
+      // deactivatedAt: null — see notifyUsersRequestsApproved.
+      where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true, deactivatedAt: null },
       select: { id: true, discordId: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));

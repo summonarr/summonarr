@@ -17,6 +17,10 @@ import {
   parsePermissions,
   serializePermissions,
   parseAndValidatePermissions,
+  parseMediaServerGrants,
+  serializeMediaServerGrants,
+  canViewMediaInstance,
+  type MediaServerGrants,
 } from "../src/lib/permissions.ts";
 
 test("ADMIN superbit grants every capability", () => {
@@ -187,4 +191,128 @@ test("parseAndValidatePermissions accepts the maximal legal mask (KNOWN_MASK)", 
   assert.equal(parseAndValidatePermissions(KNOWN_MASK.toString()), KNOWN_MASK);
   // One bit above the mask is still rejected (boundary just past legal space).
   assert.equal(parseAndValidatePermissions((KNOWN_MASK + 1n).toString()), null);
+});
+
+// ─── Per-server visibility grants (multi-server Plex/Jellyfin) ──────────────
+
+const OPEN = { slug: "open", restricted: false };
+const LOCKED = { slug: "remote", restricted: true };
+const DEFAULT_SERVER = { slug: "", restricted: false };
+
+test("canViewMediaInstance: the access matrix", () => {
+  const granted: MediaServerGrants = { plex: { remote: { view: true } } };
+
+  // ADMIN superbit sees every server, granted or not.
+  assert.equal(canViewMediaInstance(Permission.ADMIN, LOCKED, {}, "plex"), true);
+  // The default ("") server is visible to everyone — it is never restricted.
+  assert.equal(canViewMediaInstance(0n, DEFAULT_SERVER, {}, "plex"), true);
+  // An unrestricted named server needs no grant.
+  assert.equal(canViewMediaInstance(0n, OPEN, {}, "plex"), true);
+  // A restricted server needs the grant...
+  assert.equal(canViewMediaInstance(0n, LOCKED, granted, "plex"), true);
+  // ...and denies without it.
+  assert.equal(canViewMediaInstance(0n, LOCKED, {}, "plex"), false);
+  // A grant for a DIFFERENT slug doesn't carry over.
+  assert.equal(
+    canViewMediaInstance(0n, LOCKED, { plex: { other: { view: true } } }, "plex"),
+    false,
+  );
+  // view:false is not a grant.
+  assert.equal(canViewMediaInstance(0n, LOCKED, { plex: { remote: { view: false } } }, "plex"), false);
+  // A non-ADMIN permission bit grants nothing here — visibility is grant-driven,
+  // not bitmask-driven (only the superbit short-circuits).
+  assert.equal(canViewMediaInstance(Permission.MANAGE_REQUESTS, LOCKED, {}, "plex"), false);
+});
+
+test("canViewMediaInstance: grants are SERVICE-NAMESPACED (plex remote ≠ jellyfin remote)", () => {
+  // The headline pin for the nested shape. Plex "remote" and Jellyfin "remote"
+  // are different servers with different content; a flat slug map would make a
+  // grant on one silently unlock the other.
+  const plexOnly: MediaServerGrants = { plex: { remote: { view: true } } };
+  assert.equal(canViewMediaInstance(0n, LOCKED, plexOnly, "plex"), true);
+  assert.equal(canViewMediaInstance(0n, LOCKED, plexOnly, "jellyfin"), false);
+
+  const jellyfinOnly: MediaServerGrants = { jellyfin: { remote: { view: true } } };
+  assert.equal(canViewMediaInstance(0n, LOCKED, jellyfinOnly, "jellyfin"), true);
+  assert.equal(canViewMediaInstance(0n, LOCKED, jellyfinOnly, "plex"), false);
+});
+
+test("canViewMediaInstance: malformed / hostile grant maps fail CLOSED", () => {
+  // Whatever survives a bad parse must never widen visibility.
+  for (const raw of [null, undefined, "nope", 42, [], { plex: null }, { plex: "yes" }] as unknown[]) {
+    assert.equal(
+      canViewMediaInstance(0n, LOCKED, parseMediaServerGrants(raw), "plex"),
+      false,
+      `hostile grants ${JSON.stringify(raw)} must not grant view`,
+    );
+  }
+  // An inherited Object.prototype key must not read as a grant. "constructor"
+  // is a LEGAL instance slug (lowercase alnum), so this lookup really can land
+  // on Object.prototype.constructor — whose `.view` is undefined, not true.
+  assert.equal(canViewMediaInstance(0n, { slug: "constructor", restricted: true }, {}, "plex"), false);
+  assert.equal(canViewMediaInstance(0n, { slug: "toString", restricted: true }, { plex: {} }, "plex"), false);
+});
+
+test("parseMediaServerGrants / serializeMediaServerGrants round-trip", () => {
+  const raw = { plex: { remote: { view: true } }, jellyfin: { attic: { view: true } } };
+  const parsed = parseMediaServerGrants(raw);
+  assert.deepEqual(parsed, { plex: { remote: { view: true } }, jellyfin: { attic: { view: true } } });
+  assert.deepEqual(serializeMediaServerGrants(parsed), raw);
+
+  // Unknown service keys are dropped (allowlist, not a denylist).
+  assert.deepEqual(parseMediaServerGrants({ emby: { remote: { view: true } } }), {});
+  assert.deepEqual(serializeMediaServerGrants({ emby: { x: { view: true } } } as MediaServerGrants), {});
+
+  // Non-boolean view values coerce to false, never to a grant.
+  assert.deepEqual(parseMediaServerGrants({ plex: { remote: { view: "true" } } }), {
+    plex: { remote: { view: false } },
+  });
+
+  // Serialize drops view:false entries, then drops the now-empty service, so a
+  // grantless user stores {} rather than {"plex":{},"jellyfin":{}}.
+  assert.deepEqual(serializeMediaServerGrants({ plex: { remote: { view: false } }, jellyfin: {} }), {});
+
+  // Non-object roots / service maps are dropped, not thrown on.
+  assert.deepEqual(parseMediaServerGrants(null), {});
+  assert.deepEqual(parseMediaServerGrants("nope"), {});
+  assert.deepEqual(parseMediaServerGrants({ plex: 7 }), {});
+  assert.deepEqual(parseMediaServerGrants({ plex: { remote: "yes" } }), { plex: {} });
+});
+
+test("media-server grants: prototype-pollution attempts at BOTH nesting levels are rejected", () => {
+  // A nested map has TWO `__proto__`-own-property write surfaces (the service
+  // key and the slug key), not one. JSON.parse makes `__proto__` an OWN
+  // property, so an unguarded `out[key] = …` would hit Object.prototype's
+  // `__proto__` setter and re-point the map's prototype instead of adding a key.
+  const outer = JSON.parse('{"__proto__": {"polluted": {"view": true}}}');
+  const inner = JSON.parse('{"plex": {"__proto__": {"view": true}, "remote": {"view": true}}}');
+
+  const parsedOuter = parseMediaServerGrants(outer);
+  const parsedInner = parseMediaServerGrants(inner);
+  // Outer: an illegal service key is dropped entirely.
+  assert.deepEqual(parsedOuter, {});
+  // Inner: the legitimate sibling survives, the unsafe slug does not.
+  assert.deepEqual(parsedInner, { plex: { remote: { view: true } } });
+  // Neither map had its own prototype re-pointed.
+  assert.equal(Object.getPrototypeOf(parsedOuter), Object.prototype);
+  assert.equal(Object.getPrototypeOf(parsedInner.plex), Object.prototype);
+
+  // The write side rejects both surfaces too, so such a key can never reach the
+  // stored JSON in the first place.
+  const serOuter = serializeMediaServerGrants(JSON.parse('{"__proto__": {"x": {"view": true}}}'));
+  const serInner = serializeMediaServerGrants(
+    JSON.parse('{"plex": {"__proto__": {"view": true}, "remote": {"view": true}}}'),
+  );
+  assert.deepEqual(serOuter, {});
+  assert.deepEqual(serInner, { plex: { remote: { view: true } } });
+  assert.equal(Object.getPrototypeOf(serOuter), Object.prototype);
+
+  // …and Object.prototype itself is unpolluted after all four calls.
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "polluted"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "view"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(Object.prototype, "remote"), false);
+  assert.equal(({} as Record<string, unknown>).view, undefined);
+
+  // A polluted prototype must not be able to fabricate a grant either.
+  assert.equal(canViewMediaInstance(0n, { slug: "polluted", restricted: true }, parsedOuter, "plex"), false);
 });
