@@ -422,11 +422,11 @@ test("title and reason are sanitized: HTML-injection chars and control chars are
   await add(await mintSession(), {
     tmdbId: 603,
     mediaType: "MOVIE",
-    title: "<script>alert(1)</script>Matrix",
-    reason: "why not‮evil",
+    title: "<script>alert(1)</script>Matrix\u0007",
+    reason: "why\u0000not\u202Eevil",
   });
   const args = opsOf("blacklistItem.upsert")[0].args as { create: { title: string; reason: string } };
-  for (const ch of ["<", ">", " ", "", "‮"]) {
+  for (const ch of ["<", ">", "\u0000", "\u0007", "\u202E"]) {
     assert.ok(!args.create.title.includes(ch) && !args.create.reason.includes(ch), `${JSON.stringify(ch)} survived sanitization`);
   }
   assert.ok(args.create.title.includes("Matrix"), "the legible text must survive");
