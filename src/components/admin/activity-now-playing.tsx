@@ -29,19 +29,20 @@ import {
 
 // ActiveSession.id is "<source>:<sessionKey>" for the default instance, or
 // "<source>:<instance>:<sessionKey>" for a named one (see activeSessionId in
-// media-instances.ts). Plex sessions are always 2-segment in this phase (Plex
-// multi-server activation is Phase 2), but a Jellyfin session on a named
-// instance needs the real parse — a naive prefix-strip would send the
-// instance slug as part of the sessionKey and the server would 404 it.
-// Returns the endpoint + key (+ instance, Jellyfin only) for the sources that
-// support termination (Plex, Jellyfin), or null otherwise.
+// media-instances.ts). Both sources need the real parse — a naive prefix-strip
+// on a named instance's session would send the instance slug as part of the
+// sessionKey and the server would 404 it (and resolve against the wrong
+// server's snapshot). Returns the endpoint + key + instance for the sources
+// that support termination (Plex, Jellyfin), or null otherwise.
 function terminateTargetFor(
   session: ActiveSessionLive,
 ): { endpoint: string; sessionKey: string; serverInstance?: string } | null {
   if (session.id.startsWith("plex:")) {
+    const parsed = parseActiveSessionId(session.id);
     return {
       endpoint: "/api/admin/play-history/terminate-session",
-      sessionKey: session.id.slice(5),
+      sessionKey: parsed.sessionKey,
+      serverInstance: parsed.serverInstance,
     };
   }
   if (session.id.startsWith("jellyfin:")) {

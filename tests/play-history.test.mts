@@ -26,7 +26,9 @@
 //    completion 90, arc gap 14), and the 15s TTL + in-flight coalescing (one
 //    Setting.findMany serves every getter).
 //  - resolveShowTmdbId: source-native show key → tmdbId via the cached
-//    library tables, TV-scoped, null for empty/unmapped keys, and no
+//    library tables, TV-scoped AND serverInstance-scoped (Plex ratingKeys are
+//    small server-local integers, so two instances legitimately reuse the
+//    same key for different shows), null for empty/unmapped keys, and no
 //    cross-source table bleed.
 //  - resolveMediaServerUser: advisory-lock serialization (namespace 2020,
 //    31-bit-masked FNV-1a key — Postgres has no (int, bigint) overload),
@@ -36,7 +38,9 @@
 //    promote false→true but NEVER demote.
 //  - recordCompletedSession: the `${sessionKey}:${startedAt.toISOString()}`
 //    dedup key + createMany({ skipDuplicates: true }) — with the backfill
-//    crons gone this is the WHOLE dedup story (guardrail 19) — plus the
+//    crons gone this is the WHOLE dedup story (guardrail 19; uniqueness is
+//    [source, serverInstance, sourceSessionId], with serverInstance stamped
+//    through from the ActiveSession row) — plus the
 //    lastSeenAt CAS delete, the sub-90s drop, the wall-clock cap on the
 //    progressMs fallback (a seek-to-credits-and-quit can't mint watch time),
 //    the Tautulli-style 10s end-of-file clamp, credits-aware
@@ -612,32 +616,42 @@ test("settings getters: concurrent callers after a cache expiry coalesce onto on
 // ═══ resolveShowTmdbId ══════════════════════════════════════════════════════
 
 test("resolveShowTmdbId: empty show keys resolve to null without touching either library table", async () => {
-  assert.equal(await resolveShowTmdbId("plex", null), null);
-  assert.equal(await resolveShowTmdbId("plex", undefined), null);
-  assert.equal(await resolveShowTmdbId("jellyfin", ""), null);
+  assert.equal(await resolveShowTmdbId("plex", null, ""), null);
+  assert.equal(await resolveShowTmdbId("plex", undefined, ""), null);
+  assert.equal(await resolveShowTmdbId("jellyfin", "", ""), null);
   assert.equal(plexLibCalls.length, 0);
   assert.equal(jellyfinLibCalls.length, 0);
 });
 
-test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV-scoped, and never touch the Jellyfin table", async () => {
+test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstance-scoped, and never touch the Jellyfin table", async () => {
   plexLibRow = { tmdbId: 1399 };
-  assert.equal(await resolveShowTmdbId("plex", "rk-1399"), 1399);
+  assert.equal(await resolveShowTmdbId("plex", "rk-1399", ""), 1399);
   assert.equal(plexLibCalls.length, 1);
-  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV" });
+  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV", serverInstance: "" });
   assert.equal(jellyfinLibCalls.length, 0);
 
   // Unmapped: a row without a tmdbId and no row at all both read as null.
   plexLibRow = { tmdbId: null };
-  assert.equal(await resolveShowTmdbId("plex", "rk-unmapped"), null);
+  assert.equal(await resolveShowTmdbId("plex", "rk-unmapped", ""), null);
   plexLibRow = null;
-  assert.equal(await resolveShowTmdbId("plex", "rk-missing"), null);
+  assert.equal(await resolveShowTmdbId("plex", "rk-missing", ""), null);
 });
 
-test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem and never touch the Plex table", async () => {
+test("resolveShowTmdbId: a named instance's lookup carries ITS serverInstance in the where — ratingKeys are server-local integers, so an unscoped lookup can hit another server's show", async () => {
+  plexLibRow = { tmdbId: 4589 };
+  assert.equal(await resolveShowTmdbId("plex", "42", "remote"), 4589);
+  assert.deepEqual(
+    plexLibCalls[0].where,
+    { plexRatingKey: "42", mediaType: "TV", serverInstance: "remote" },
+    "dropping the serverInstance term would attribute the remote server's episode watches to whichever instance's show holds ratingKey 42 in the cache",
+  );
+});
+
+test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem, serverInstance-scoped for consistency, and never touch the Plex table", async () => {
   jellyfinLibRow = { tmdbId: 66732 };
-  assert.equal(await resolveShowTmdbId("jellyfin", "jf-item-1"), 66732);
+  assert.equal(await resolveShowTmdbId("jellyfin", "jf-item-1", ""), 66732);
   assert.equal(jellyfinLibCalls.length, 1);
-  assert.deepEqual(jellyfinLibCalls[0].where, { jellyfinItemId: "jf-item-1", mediaType: "TV" });
+  assert.deepEqual(jellyfinLibCalls[0].where, { jellyfinItemId: "jf-item-1", mediaType: "TV", serverInstance: "" });
   assert.equal(plexLibCalls.length, 0);
 });
 
@@ -880,6 +894,7 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
   assert.equal(historyCreates[0].data.length, 1);
   assert.deepEqual(historyCreates[0].data[0], {
     source: "plex",
+    serverInstance: "", // stamped from the ActiveSession row (multi-server attribution)
     startedAt: session.startedAt,
     stoppedAt: session.lastSeenAt, // lastSeenAt > startedAt → it is the stop anchor
     duration: 2400,
@@ -926,6 +941,24 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
   // The delete is a CAS on the lastSeenAt the caller read — never a blind id delete.
   assert.equal(activeSessionDeletes.length, 1);
   assert.deepEqual(activeSessionDeletes[0].where, { id: "plex:key-1", lastSeenAt: session.lastSeenAt });
+});
+
+test("recordCompletedSession: a named-instance session's watch lands with ITS serverInstance stamped — multi-server history attribution", async () => {
+  setSettings({});
+  // The ActiveSession row carries serverInstance from create (both pollers and
+  // the SSE writer stamp it); the finalize must copy it through, or every
+  // named-instance watch collapses onto serverInstance:"" — mis-attributed to
+  // the default server AND sharing its dedup namespace, where the unique key
+  // [source, serverInstance, sourceSessionId] would let an identical raw
+  // sessionKey:startedAt pair from another server silently swallow this row.
+  const session = makeSession({ id: "plex:remote:key-1", serverInstance: "remote" });
+  await recordCompletedSession(session, { skipSSE: true });
+  assert.equal(historyCreates.length, 1);
+  assert.equal(historyCreates[0].data[0].serverInstance, "remote", "the history row records which server the watch happened on");
+  // The dedup key itself stays the bare sessionKey:startedAt — the instance
+  // lives in its own column, not smuggled into the key.
+  assert.equal(historyCreates[0].data[0].sourceSessionId, "key-1:2026-07-01T20:00:00.000Z");
+  assert.deepEqual(activeSessionDeletes[0].where, { id: "plex:remote:key-1", lastSeenAt: session.lastSeenAt });
 });
 
 test("recordCompletedSession: sub-90s watches are dropped with no history row — but STILL CAS-delete the ActiveSession; 90s exactly is kept", async () => {

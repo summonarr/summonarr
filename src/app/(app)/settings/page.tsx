@@ -561,7 +561,10 @@ export default async function SettingsPage({
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Additional media servers</h2>
                 <p className="text-sm text-zinc-500 mt-1">Connect extra Plex/Jellyfin servers (e.g. a friend&apos;s separate server). Availability and activity are combined across every configured server of a type.</p>
               </div>
-              <MediaInstancesManager service="jellyfin" />
+              <div className="space-y-8">
+                <MediaInstancesManager service="plex" />
+                <MediaInstancesManager service="jellyfin" />
+              </div>
             </div>
 
             <div id="play-history" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>

@@ -6,10 +6,13 @@
 //
 // The /:/eventsource/notifications endpoint is the authoritative signal — Plex
 // emits a `playing` event with state="stopped" the moment a session ends.
-// This module owns a single long-lived SSE connection per Node process (per
-// CLAUDE.md guardrail 17) and finalizes ActiveSession rows the instant Plex
-// reports them stopped. The 5s poller in /api/sync/play-history is kept as a
-// metadata-enrichment + discovery layer and as a fallback if SSE drops.
+// This module owns one long-lived SSE connection per CONFIGURED PLEX INSTANCE
+// in this Node process (single-process deployment per CLAUDE.md guardrail 17):
+// a PlexEventStreamManager per registry slug, reconciled as a set by
+// reconcilePlexEventStream() at the bottom. Each manager finalizes its own
+// instance's ActiveSession rows the instant its server reports them stopped.
+// The 5s poller in /api/sync/play-history is kept as a metadata-enrichment +
+// discovery layer and as a fallback if SSE drops.
 //
 // The `recentlyFinalizedPlexSessions` ledger that the poller relies on for
 // re-create gating now lives here so both subsystems share one source of
@@ -20,6 +23,8 @@ import { safeFetchAdminConfigured } from "./safe-fetch";
 import { applyFinalTick, recordCompletedSession, isPlayHistoryEnabled, isSourceEnabled, emitActiveSessionsSnapshot, reanchorActiveSessionsOnBoot, SESSION_ABSENCE_GRACE_MS } from "./play-history";
 import { getPlexSessions } from "./plex";
 import { triggerFullSync } from "./internal-trigger";
+import { DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId, plexSettingKey, type MediaInstanceKey } from "./media-instances";
+import { getMediaInstances } from "./media-instance-registry";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
 // (mobile/TV clients that close without a clean Stop). When the playhead has
@@ -28,9 +33,15 @@ import { triggerFullSync } from "./internal-trigger";
 export const PLEX_STALL_THRESHOLD_MS = 60_000;
 
 // Ledger of Plex sessions finalized via SSE, the stall path, or the stale
-// loop. Keyed by ActiveSession.id ("plex:<sessionKey>"). Subsequent polls
-// skip re-creating the row while Plex's /status/sessions still includes the
-// ghost. In-memory: persists across polls inside the same Node process; a
+// loop. Keyed by ActiveSession.id — activeSessionId("plex", instance, key):
+// "plex:<sessionKey>" for the default instance, "plex:<instance>:<sessionKey>"
+// for named ones — so two servers reusing the same sessionKey can never
+// collide here. Subsequent polls skip re-creating the row while that server's
+// /status/sessions still includes the ghost. Deliberately module-scope rather
+// than per-manager state: the 5s poller writes this ledger too, so moving it
+// onto the class would force exported accessors routed by slug — strictly more
+// plumbing for the same no-bleed property the instance-qualified ids already
+// give. In-memory: persists across polls inside the same Node process; a
 // restart loses the ledger but Plex has usually dropped the session by then.
 const recentlyFinalizedPlexSessions = new Map<string, number>();
 const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
@@ -51,21 +62,26 @@ export function pruneRecentlyFinalized(nowMs: number): void {
   }
 }
 
-// Drop ledger entries for sessionKeys Plex no longer reports in /status/sessions.
-// The ledger exists to gate re-creation while Plex keeps a ghost session in its
-// snapshot after the user quit; once Plex actually drops the key, the ghost is
-// gone and the entry is just suppressing future plays that happen to reuse the
-// key. Pair with the 1h TTL backstop in case Plex never drops a ghost.
+// Drop ledger entries for sessionKeys ONE instance's Plex server no longer
+// reports in /status/sessions. `currentPlexSessionKeys` holds that server's
+// BARE sessionKeys; only entries whose parsed id belongs to `instance` are
+// candidates, so instance A's (possibly empty) snapshot can never release —
+// or keep suppressed — instance B's ledger state, and Jellyfin ids are never
+// touched. The ledger exists to gate re-creation while Plex keeps a ghost
+// session in its snapshot after the user quit; once Plex actually drops the
+// key, the ghost is gone and the entry is just suppressing future plays that
+// happen to reuse the key. Pair with the 1h TTL backstop in case Plex never
+// drops a ghost.
 //
 // Edge case (acknowledged, not addressed): if the Plex server itself restarts
 // (sessionKey counter resets to 1) within the 1h TTL of a finalize, the first
 // new play in the post-restart server can land on a key we've ledger-blocked.
 // Detection would require persisting machineIdentifier across Node restarts.
-export function clearFinalizedNotInCurrentSnapshot(currentPlexSessionKeys: ReadonlySet<string>): void {
+export function clearFinalizedNotInCurrentSnapshot(instance: MediaInstanceKey, currentPlexSessionKeys: ReadonlySet<string>): void {
   for (const id of recentlyFinalizedPlexSessions.keys()) {
-    if (!id.startsWith("plex:")) continue;
-    const sessionKey = id.slice(5);
-    if (!currentPlexSessionKeys.has(sessionKey)) {
+    const parsed = parseActiveSessionId(id);
+    if (parsed.source !== "plex" || parsed.serverInstance !== instance) continue;
+    if (!currentPlexSessionKeys.has(parsed.sessionKey)) {
       recentlyFinalizedPlexSessions.delete(id);
     }
   }
@@ -148,6 +164,11 @@ const MAX_NOTIFICATIONS_PER_FRAME = 256;
 const PERIODIC_RECYCLE_MS = 22 * 60 * 60 * 1000;
 
 class PlexEventStreamManager {
+  // Which Plex instance this manager serves ("" = the default server). One
+  // manager per registry slug — see the `managers` map at the bottom.
+  // Declared + assigned in the constructor body because Node strip-only TS
+  // rejects constructor parameter properties (erasable syntax only).
+  readonly instance: MediaInstanceKey;
   private currentUrl: string | null = null;
   private currentToken: string | null = null;
   private abortController: AbortController | null = null;
@@ -161,6 +182,16 @@ class PlexEventStreamManager {
   // in-flight call re-runs once after it finishes to pick up the latest state.
   private reconciling = false;
   private reconcilePending = false;
+
+  constructor(instance: MediaInstanceKey) {
+    this.instance = instance;
+  }
+
+  // Short per-instance tag for warn lines: "plex" for the default server
+  // (unchanged for single-server deployments), "plex:remote" for a named one.
+  private label(): string {
+    return mediaInstanceLabel("plex", this.instance);
+  }
 
   async reconcile(): Promise<void> {
     if (this.reconciling) {
@@ -179,18 +210,26 @@ class PlexEventStreamManager {
   }
 
   private async doReconcile(): Promise<void> {
+    // Connection keys for THIS instance — for the default instance these are
+    // byte-identical to the legacy plexServerUrl/plexAdminToken. Kept as one
+    // findMany over both keys (NOT getPlexConfig's findUnique-based read): the
+    // poller's test harness tells this module's DB reads apart from the
+    // route's own BY SHAPE — one connection-keys findMany per manager
+    // reconcile, plus the map reconcile's single registry findUnique below.
+    const urlKey = plexSettingKey(this.instance, "ServerUrl");
+    const tokenKey = plexSettingKey(this.instance, "AdminToken");
     const [phEnabled, plexSourceEnabled, settings] = await Promise.all([
       isPlayHistoryEnabled(),
       isSourceEnabled("plex"),
       prisma.setting.findMany({
-        where: { key: { in: ["plexServerUrl", "plexAdminToken"] } },
+        where: { key: { in: [urlKey, tokenKey] } },
         select: { key: true, value: true },
       }),
     ]);
 
     const settingMap = new Map(settings.map((r) => [r.key, r.value]));
-    const url = settingMap.get("plexServerUrl")?.replace(/\/$/, "") ?? null;
-    const token = settingMap.get("plexAdminToken") ?? null;
+    const url = settingMap.get(urlKey)?.replace(/\/$/, "") ?? null;
+    const token = settingMap.get(tokenKey) ?? null;
 
     const shouldRun = phEnabled && plexSourceEnabled && !!url && !!token;
 
@@ -209,7 +248,7 @@ class PlexEventStreamManager {
     this.running = true;
     this.backoffMs = INITIAL_BACKOFF_MS;
     this.loopPromise = this.runLoop().catch((err) => {
-      console.warn("[plex-events] loop crashed:", err);
+      console.warn(`[plex-events] ${this.label()} loop crashed:`, err);
       // Clear the state doReconcile checks so the next 5s reconcile restarts the
       // stream — otherwise `running` stays true and every future reconcile
       // early-returns, leaving SSE dead until process restart. Guard on the
@@ -221,7 +260,9 @@ class PlexEventStreamManager {
     });
   }
 
-  private stop(): void {
+  // Not private: also called by the map reconcile at the bottom when this
+  // manager's slug leaves the instance registry.
+  stop(): void {
     this.running = false;
     this.abortController?.abort();
     this.abortController = null;
@@ -249,7 +290,7 @@ class PlexEventStreamManager {
         // Silent first failure; warn on persistent outages so an admin sees something.
         if (this.backoffMs >= MAX_BACKOFF_MS) {
           const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[plex-events] connection failing repeatedly: ${msg}`);
+          console.warn(`[plex-events] ${this.label()} connection failing repeatedly: ${msg}`);
         }
       }
       if (!this.running) break;
@@ -377,13 +418,16 @@ class PlexEventStreamManager {
     try {
       [plexSessions, activeDbRows] = await Promise.all([
         getPlexSessions(url, token),
-        prisma.activeSession.findMany({ where: { source: "plex" } }),
+        // Scoped to THIS instance's rows. Without the serverInstance filter,
+        // instance A's absence sweep would read instance B's live sessions —
+        // whose keys are never in A's snapshot — and finalize them all.
+        prisma.activeSession.findMany({ where: { source: "plex", serverInstance: this.instance } }),
       ]);
     } catch (err) {
       // Don't block the SSE connect on a transient Plex or DB hiccup — the 5s
       // poller will reconcile within one tick.
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[plex-events] bootstrap reconcile failed: ${msg}`);
+      console.warn(`[plex-events] ${this.label()} bootstrap reconcile failed: ${msg}`);
       return;
     }
 
@@ -399,10 +443,11 @@ class PlexEventStreamManager {
       if (s.sessionKey) seenKeys.add(s.sessionKey);
     }
 
-    // Release ledger entries Plex is no longer reporting — the ghost they were
-    // suppressing is actually gone, and a future play reusing the key should
-    // not be invisible.
-    clearFinalizedNotInCurrentSnapshot(seenKeys);
+    // Release ledger entries THIS server is no longer reporting — the ghost
+    // they were suppressing is actually gone, and a future play reusing the
+    // key should not be invisible. Instance-scoped: another server's entries
+    // are never in this snapshot and must survive it.
+    clearFinalizedNotInCurrentSnapshot(this.instance, seenKeys);
 
     const now = new Date();
     const nowMs = now.getTime();
@@ -574,7 +619,7 @@ class PlexEventStreamManager {
     } catch (err) {
       // triggerFullSync already swallows and warns; this is defensive.
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[plex-events] timeline-triggered library sync failed: ${msg}`);
+      console.warn(`[plex-events] ${this.label()} timeline-triggered library sync failed: ${msg}`);
     }
   }
 
@@ -591,6 +636,12 @@ class PlexEventStreamManager {
   // that signal is intentionally ignored (irrelevant for a self-hosted server
   // reached over LAN/VPN). Exposed to the poller via setPlexReachable().
   async persistReachability(reachable: boolean): Promise<void> {
+    // Deliberate Phase 2 scoping: reachability is DEFAULT-instance-only. The
+    // plexServerReachable Setting key, the plex:reachability SSE event, and
+    // the admin badge they feed are single-server plumbing — a named manager
+    // writing them would clobber the default server's status. Per-instance
+    // reachability is deferred (Phase 3 polish).
+    if (this.instance !== DEFAULT_MEDIA_INSTANCE) return;
     // No-op when the value is unchanged since this process last persisted it.
     if (this.lastReachable === reachable) return;
     // Setting is the single source of truth used by the UI to render the
@@ -620,7 +671,9 @@ class PlexEventStreamManager {
     state: "playing" | "paused" | "buffering",
     viewOffset: number | undefined,
   ): Promise<void> {
-    const id = `plex:${sessionKey}`;
+    // Instance-qualified ActiveSession id: "plex:<key>" for the default
+    // instance (byte-identical to the single-server era), 3-segment for named.
+    const id = activeSessionId("plex", this.instance, sessionKey);
     // Skip if this session was just finalized — a late state event arriving
     // after a stop should not resurrect the row.
     if (isPlexSessionRecentlyFinalized(id)) return;
@@ -678,7 +731,7 @@ class PlexEventStreamManager {
   }
 
   private async finalizeStopped(sessionKey: string, viewOffset: number | undefined): Promise<void> {
-    const id = `plex:${sessionKey}`;
+    const id = activeSessionId("plex", this.instance, sessionKey);
     try {
       const existing = await prisma.activeSession.findUnique({ where: { id } });
       if (!existing) {
@@ -740,19 +793,85 @@ class PlexEventStreamManager {
   }
 }
 
-const manager = new PlexEventStreamManager();
+// One manager per configured Plex instance, keyed by slug ("" = default).
+// Created lazily by the map reconcile below; removed ONLY when the slug
+// leaves the registry — a manager whose slug remains but whose connection
+// Settings were cleared stops itself via its own doReconcile shouldRun check.
+const managers = new Map<MediaInstanceKey, PlexEventStreamManager>();
 
-// Idempotent: reads current Settings and starts/stops/restarts the SSE
-// connection as needed. Cheap to call repeatedly — the sync route invokes
-// this every 5s so settings edits via the admin UI propagate within one tick.
-export function reconcilePlexEventStream(): Promise<void> {
-  return manager.reconcile();
+// Module-level mirror of the per-manager reconcile coalescing (same do-while
+// shape): the boot hook (instrumentation.ts) and the 5s poller both call
+// reconcilePlexEventStream, and two overlapping whole-map passes could
+// otherwise race the create/stop decision for a slug. Per-manager reconciles
+// WITHIN one pass still run concurrently — this guard is only about map
+// passes.
+let mapReconciling = false;
+let mapReconcilePending = false;
+
+async function reconcileManagerMap(): Promise<void> {
+  // Registry read: exactly one setting.findUnique (key "plexInstances"); the
+  // default ("") instance is always present in the result. Deliberately
+  // getMediaInstances and NOT getSyncableMediaInstances — the per-instance
+  // connection check belongs to each manager's own doReconcile (which reads
+  // the two connection keys and decides shouldRun), and the poller's test
+  // harness tells this module's DB reads apart from the route's own BY SHAPE:
+  // one registry findUnique per map pass + one connection-keys findMany per
+  // manager reconcile, nothing else.
+  const instances = await getMediaInstances("plex");
+
+  const known = new Set(instances.map((i) => i.slug));
+  for (const [slug, mgr] of managers) {
+    if (!known.has(slug)) {
+      // Slug left the registry: stop the stream and drop the manager. Its
+      // connection Setting rows may well still exist — that's fine; registry
+      // removal is the only map-level removal trigger, and nothing re-creates
+      // the manager while the slug is unregistered.
+      mgr.stop();
+      managers.delete(slug);
+    }
+  }
+
+  await Promise.all(
+    instances.map((i) => {
+      let mgr = managers.get(i.slug);
+      if (!mgr) {
+        mgr = new PlexEventStreamManager(i.slug);
+        managers.set(i.slug, mgr);
+      }
+      return mgr.reconcile();
+    }),
+  );
 }
 
-// Report whether the local Plex server is reachable. Called by the 5s poller:
-// true after a successful getPlexSessions(), false when it throws. Deduped +
-// SSE-broadcast inside the manager so the UI's reachability badge tracks actual
-// local connectivity rather than plex.tv remote-access status.
+// Idempotent: reads the instance registry plus each instance's Settings and
+// starts/stops/restarts SSE connections as needed. Cheap to call repeatedly —
+// the sync route invokes this every 5s so settings edits via the admin UI
+// propagate within one tick.
+export async function reconcilePlexEventStream(): Promise<void> {
+  if (mapReconciling) {
+    mapReconcilePending = true;
+    return;
+  }
+  mapReconciling = true;
+  try {
+    do {
+      mapReconcilePending = false;
+      await reconcileManagerMap();
+    } while (mapReconcilePending);
+  } finally {
+    mapReconciling = false;
+  }
+}
+
+// Report whether the local DEFAULT Plex server is reachable. Called by the 5s
+// poller: true after a successful getPlexSessions(), false when it throws.
+// Deduped + SSE-broadcast inside the manager so the UI's reachability badge
+// tracks actual local connectivity rather than plex.tv remote-access status.
+// Reachability is default-instance-only in Phase 2 (see persistReachability).
+// Before the first reconcile creates the default manager this is a no-op —
+// the next 5s tick reports again, so nothing is lost.
 export function setPlexReachable(reachable: boolean): Promise<void> {
-  return manager.persistReachability(reachable);
+  const mgr = managers.get(DEFAULT_MEDIA_INSTANCE);
+  if (!mgr) return Promise.resolve();
+  return mgr.persistReachability(reachable);
 }

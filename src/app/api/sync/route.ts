@@ -11,11 +11,12 @@ import {
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { type MediaInstanceKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -82,10 +83,16 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
 // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge.
 // Prefer the previously stored mapping so ownership doesn't flip-flop on every sync.
 // Mirrors deduplicateByRatingKey in /api/sync/plex so the two writers agree on the row set.
+// Scoped per instance: ratingKeys are small server-local integers, so the SAME key on two
+// independently-administered servers is routine and legitimate — NOT conflation. Callers run
+// this per instance batch, and the prior-mapping lookup consults only THAT instance's stored
+// rows (an unscoped read could import another server's ratingKey→tmdbId mapping and wrongly
+// drop this server's row).
 type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
 async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   rows: T[],
   mediaType: "MOVIE" | "TV",
+  serverInstance: MediaInstanceKey,
 ): Promise<T[]> {
   const ratingKeyCount = new Map<string, number>();
   for (const r of rows) {
@@ -96,7 +103,7 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
 
   const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
   const existing = await prisma.plexLibraryItem.findMany({
-    where: { mediaType, tmdbId: { in: conflatedTmdbIds } },
+    where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
     select: { tmdbId: true, plexRatingKey: true },
   });
   const fixedIdByRatingKey = new Map<string, number>();
@@ -568,19 +575,20 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [plexConfig, jellyfinInstances, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
-    getPlexConfig(),
-    // Every configured, connection-ready Jellyfin server (multi-server support) — each
-    // instance's own url/apiKey is resolved via getJellyfinConfig(instance.slug) below.
+  const [plexInstances, jellyfinInstances, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+    // Every configured, connection-ready Plex/Jellyfin server (multi-server support) —
+    // each instance's own url/token is resolved via getPlexConfig(instance.slug) /
+    // getJellyfinConfig(instance.slug) inside its arm below.
+    getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
     prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
 
-  let plexMovieIds = new Map<number, PlexLibraryItemData>();
-  let plexTvIds    = new Map<number, PlexLibraryItemData>();
-  // Never reassigned (unlike plexMovieIds/plexTvIds above) — each configured Jellyfin
-  // instance's results are merged in via .set() rather than replacing the map wholesale.
+  // Never reassigned — each configured instance's results are merged in via .set()
+  // rather than replacing the map wholesale (union across servers of a type).
+  const plexMovieIds = new Map<number, PlexLibraryItemData>();
+  const plexTvIds    = new Map<number, PlexLibraryItemData>();
   const jfMovieIds = new Map<number, JellyfinLibraryItemData>();
   const jfTvIds    = new Map<number, JellyfinLibraryItemData>();
   let plexSyncSucceeded = false;
@@ -598,58 +606,145 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ),
     (async () => {
       if (!plexEnabled) return;
-      if (!plexConfig.url || !plexConfig.token) return;
-      try {
-        const serverUrl = plexConfig.url.replace(/\/$/, "");
-        const token = plexConfig.token;
-        // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
-        // this the scheduled full sync ingested EVERY section, marking media in an
-        // excluded library as owned → availability false positives on every cron tick.
-        const selectedPlexKeys = plexLibrariesRow?.value
-          ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-          : undefined;
-        const sections = await getPlexLibrarySections(serverUrl, token);
-        [plexMovieIds, plexTvIds] = await Promise.all([
-          getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
-          getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
-        ]);
-        const movieRows = Array.from(plexMovieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-        const tvRows    = Array.from(plexTvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-        const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE");
-        const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV");
-        // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the same write.
-        await prisma.$transaction(async (tx) => {
-          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-          await tx.plexLibraryItem.deleteMany();
-          if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
-          if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
-        }, { timeout: BATCH_TX_TIMEOUT });
-        plexSyncSucceeded = true;
-        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale source.
+      if (plexInstances.length === 0) return;
+
+      // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
+      // this the scheduled full sync ingested EVERY section, marking media in an
+      // excluded library as owned → availability false positives on every cron tick.
+      // One admin-facing setting, shared across every instance.
+      const selectedPlexKeys = plexLibrariesRow?.value
+        ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
+        : undefined;
+
+      // Fan out over every configured, connection-ready Plex server (multi-server
+      // support). Unlike arr, there's no per-request instance to attribute a fetch
+      // failure to — availability here is a union across all configured servers, not
+      // per-instance routing (see media-instances.ts) — so a failed instance simply
+      // contributes nothing to the write below, and plexSyncSucceeded (used only by
+      // the revert/stale-fallback checks further down, which need to know this run's
+      // union data is a COMPLETE picture) requires every configured instance's fetch AND
+      // the write to have both succeeded.
+      const fetched = await Promise.all(
+        plexInstances.map(async (instance) => {
+          try {
+            const cfg = await getPlexConfig(instance.slug);
+            if (!cfg.url || !cfg.token) return { slug: instance.slug, result: null }; // defensive; getSyncableMediaInstances already filters to configured ones
+            const serverUrl = cfg.url.replace(/\/$/, "");
+            const token = cfg.token;
+            const sections = await getPlexLibrarySections(serverUrl, token);
+            const [movieIds, tvIds] = await Promise.all([
+              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
+              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
+            ]);
+            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds } };
+          } catch (err) {
+            console.error(`[sync] Plex check failed for instance "${instance.slug}":`, err);
+            return { slug: instance.slug, result: null };
+          }
+        }),
+      );
+      const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, ...f.result }] : []));
+
+      // Union into the shared maps the ~300 lines of downstream availability logic
+      // already expect — they only ever ask "is this tmdbId in the map," so a plain
+      // per-key merge is correct regardless of which instance's value wins a collision.
+      for (const { movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) plexMovieIds.set(tmdbId, d);
+        for (const [tmdbId, d] of tvIds) plexTvIds.set(tmdbId, d);
+      }
+
+      let libraryWriteSucceeded = true;
+      if (writable.length > 0) {
+        try {
+          // Rows are built + deduped per instance BEFORE the transaction (the dedupe is
+          // a DB read; doing it in-tx would hold the advisory lock across it for nothing).
+          // Dedupe runs per instance batch (never across instances): two servers reusing
+          // the same small integer ratingKey is legitimate, not conflation.
+          const rowsByInstance = await Promise.all(
+            writable.map(async ({ slug, movieIds, tvIds }) => {
+              const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              return {
+                slug,
+                finalMovieRows: await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug),
+                finalTvRows:    await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug),
+              };
+            }),
+          );
+          // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the
+          // same write. Per-instance scoped delete (mirrors the Jellyfin arm below) so one
+          // instance's rewrite never touches another's rows; only instances whose fetch
+          // succeeded are touched at all (G13 — a failed instance's existing rows are left
+          // intact, never wiped).
+          await prisma.$transaction(async (tx) => {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
+            for (const { slug, finalMovieRows, finalTvRows } of rowsByInstance) {
+              await tx.plexLibraryItem.deleteMany({ where: { serverInstance: slug } });
+              if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
+              if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
+            }
+          }, { timeout: BATCH_TX_TIMEOUT });
+        } catch (err) {
+          console.error("[sync] Plex library write failed:", err);
+          libraryWriteSucceeded = false;
+        }
+      }
+
+      plexSyncSucceeded = libraryWriteSucceeded && fetched.every((f) => f.result !== null);
+      if (plexSyncSucceeded) {
+        // Stamp last-success timestamp so the notify-fallback (below) can detect a stale
+        // source. Means "every configured instance synced clean this run."
         await prisma.setting.upsert({
           where: { key: "lastPlexSyncSucceededAt" },
           update: { value: String(Date.now()) },
           create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
         }).catch((err) => console.error("[sync] failed to stamp lastPlexSyncSucceededAt:", err));
+      }
+
+      // TVEpisodeCache has no serverInstance column (episodes are TMDB-anchored, shared
+      // data — see media-instances.ts) — a per-instance episode-fetch failure can't be
+      // handled by leaving just THAT instance's rows stale the way the scoped
+      // PlexLibraryItem delete above does, so any single failure here skips the WHOLE
+      // write and leaves existing rows untouched — the same all-or-nothing contract the
+      // pre-multi-instance code already had (getPlexTVEpisodes throwing skipped the
+      // delete+insert entirely; reaching the write with an empty result means the
+      // libraries genuinely have no episodes, so the stale rows must be cleared rather
+      // than left as phantom ownership). Looping the delete+insert TOGETHER per instance
+      // would also have each instance's pass wipe the previous instance's just-written
+      // rows, so every instance's rows are accumulated and the delete+insert runs ONCE
+      // at the end. Each fetch runs against ITS OWN instance's sections list — Plex
+      // ratingKeys are server-local and never leave the per-instance fetch, so nothing
+      // can resolve episodes onto another server's show.
+      let allEpisodesFetched = true;
+      const allPlexEpisodeRows: Array<{ source: "plex" } & PlexTVEpisodeData> = [];
+      for (const { slug, serverUrl, token, sections } of writable) {
         try {
-          // Full replace: clear unconditionally then insert. getPlexTVEpisodes THROWS on
-          // a fetch failure (caught below → no clear), so reaching here with an empty
-          // result means the library genuinely has no episodes — clear the stale ones
-          // rather than leaving phantom ownership (the old `if (>0)` guard never cleared).
           const episodes = await getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections);
-          const episodeRows = episodes.map((e) => ({ source: "plex" as const, ...e }));
+          allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
+        } catch (err) {
+          console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);
+          allEpisodesFetched = false;
+        }
+      }
+      // The `writable.length === fetched.length` term is load-bearing: an instance
+      // whose LIBRARY fetch failed never enters `writable`, so its episodes were
+      // never fetched at all — without this term the whole-table rewrite below
+      // would proceed and wipe that server's episode rows for the length of its
+      // outage while every other safeguard in this arm correctly preserves its
+      // data. A library-WRITE failure deliberately does not veto (the fetched
+      // episode data is still a complete picture).
+      if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
+        try {
           await prisma.$transaction(async (tx) => {
             // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
             // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
             await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-            if (episodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, episodeRows);
+            if (allPlexEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allPlexEpisodeRows);
           }, { timeout: BATCH_TX_TIMEOUT });
         } catch (err) {
           console.error("[sync] Plex TV episode cache failed:", err);
         }
-      } catch (err) {
-        console.error("[sync] Plex check failed:", err);
       }
     })(),
     (async () => {
@@ -761,7 +856,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           allEpisodesFetched = false;
         }
       }
-      if (allEpisodesFetched && writable.length > 0) {
+      // `writable.length === fetched.length` — same load-bearing term as the Plex
+      // arm above: a library-fetch failure keeps the instance out of `writable`,
+      // so its episodes were never fetched; the whole-table rewrite must not run
+      // on that incomplete union or the down server's episode rows are wiped for
+      // the length of its outage.
+      if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
         try {
           await prisma.$transaction(async (tx) => {
             // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
@@ -793,7 +893,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // proof of absence — reading it as "not in library" would false-demote an item that's
   // actually present in the unreached library. Only trust a library map when its source
   // synced; skip the demote entirely while a configured source is down.
-  const plexConfiguredEnabled = plexEnabled && !!(plexConfig.url && plexConfig.token);
+  const plexConfiguredEnabled = plexEnabled && plexInstances.length > 0;
   const jellyfinConfiguredEnabled = jellyfinEnabled && jellyfinInstances.length > 0;
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed

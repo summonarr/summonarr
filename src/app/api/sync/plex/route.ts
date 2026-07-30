@@ -4,6 +4,7 @@ import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -19,6 +20,11 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("plex-sync", () => syncPlex(request));
 }
 
+// DEFAULT-INSTANCE-ONLY BY DESIGN (mirrors /api/sync/jellyfin — Phase 1 parity):
+// this route syncs only the default ("") Plex server; named additional instances
+// sync via the /api/sync orchestrator's per-instance fan-out only. Every library
+// read/delete here is therefore scoped to serverInstance = "" so the admin Resync
+// can never wipe or mask a named instance's rows.
 async function syncPlex(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
@@ -84,11 +90,16 @@ async function syncPlex(request: NextRequest) {
   const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
 
   // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge;
-  // deduplicate by preferring the previously stored mapping to avoid flip-flopping on every sync
+  // deduplicate by preferring the previously stored mapping to avoid flip-flopping on every
+  // sync. Keep in agreement with deduplicatePlexRowsByRatingKey in /api/sync/route so the
+  // two writers agree on the row set — including the per-instance scoping: ratingKeys are
+  // small server-local integers, so the prior-mapping lookup must consult only the instance
+  // being written (here always the default — this route is default-instance-only).
   type PlexRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string | null; plexRatingKey: string | null };
   const deduplicateByRatingKey = async (
     rows: PlexRow[],
     mediaType: "MOVIE" | "TV",
+    serverInstance: MediaInstanceKey,
   ): Promise<PlexRow[]> => {
     const ratingKeyCount = new Map<string, number>();
     for (const r of rows) {
@@ -99,7 +110,7 @@ async function syncPlex(request: NextRequest) {
 
     const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
     const existing = await prisma.plexLibraryItem.findMany({
-      where: { mediaType, tmdbId: { in: conflatedTmdbIds } },
+      where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
       select: { tmdbId: true, plexRatingKey: true },
     });
     const fixedIdByRatingKey = new Map<string, number>();
@@ -125,18 +136,20 @@ async function syncPlex(request: NextRequest) {
     });
   };
 
-  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE");
-  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV");
+  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", DEFAULT_MEDIA_INSTANCE);
+  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    DEFAULT_MEDIA_INSTANCE);
 
   if (recentOnly) {
-    // Insert-only: never delete rows on this path — an empty window would nuke the whole library
+    // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
+    // The already-present check is default-instance-scoped: a named instance's row for the same
+    // tmdbId must not mask inserting the default instance's own row.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "MOVIE", tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "TV", tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
     ]);
@@ -157,18 +170,22 @@ async function syncPlex(request: NextRequest) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
       if (incomingRatingKeys.length > 0) {
-        await tx.plexLibraryItem.deleteMany({ where: { plexRatingKey: { in: incomingRatingKeys } } });
+        // Default-instance-scoped: the same small integer ratingKey can legitimately
+        // exist on a named instance's server — only THIS server's stale mapping is stale.
+        await tx.plexLibraryItem.deleteMany({ where: { serverInstance: DEFAULT_MEDIA_INSTANCE, plexRatingKey: { in: incomingRatingKeys } } });
       }
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
 
-    // Advisory lock 2001,1 — see comment in the recentOnly branch above.
+    // Advisory lock 2001,1 — see comment in the recentOnly branch above. Full replace of
+    // the DEFAULT instance's rows only — a named instance's rows survive the admin Resync
+    // (they are owned by the orchestrator's per-instance fan-out).
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE" } });
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV" } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE } });
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });

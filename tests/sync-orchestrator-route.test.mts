@@ -189,6 +189,7 @@ const auditRows: Array<Record<string, unknown>> = [];
 const notificationCreateManyData: Array<Record<string, unknown>> = [];
 const tmdbCacheDeleteManyCalls: unknown[] = [];
 const mediaRequestFindManyWheres: Array<ReqWhere | undefined> = [];
+const plexLibraryItemFindManyWheres: Array<Record<string, unknown> | undefined> = []; // the dedupe prior-mapping lookup
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
 type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
 const casCalls: CasCall[] = [];
@@ -317,7 +318,15 @@ const fakePrisma = {
   radarrWantedItem: { findMany: async () => [] },
   sonarrAvailableItem: { findMany: async () => [] },
   sonarrWantedItem: { findMany: async () => [] },
-  plexLibraryItem: { findMany: async () => [] }, // dedupe path (no ratingKey conflation in these fixtures)
+  plexLibraryItem: {
+    // The dedupe prior-mapping lookup. Wheres are recorded so the instance-scoping
+    // pin can assert the read carries serverInstance; no fixture seeds prior
+    // mappings, so conflation resolves via the keep-first-occurrence branch.
+    findMany: async (args?: { where?: Record<string, unknown> }) => {
+      plexLibraryItemFindManyWheres.push(args?.where);
+      return [];
+    },
+  },
   tmdbCache: {
     deleteMany: async (args: unknown) => { tmdbCacheDeleteManyCalls.push(args); return { count: 0 }; },
   },
@@ -472,6 +481,7 @@ beforeEach(() => {
   tmdbCacheDeleteManyCalls.length = 0;
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
+  plexLibraryItemFindManyWheres.length = 0;
   casCalls.length = 0;
   pgLockCalls.length = 0;
   requests.clear();
@@ -572,20 +582,18 @@ test("guardrail 13: a { recentOnly } / { full:false } / empty body never downgra
     assert.equal(plexTx.length, 1, `body ${body}: exactly one Plex library transaction`);
     assert.equal(jfTx.length, 1, `body ${body}: exactly one Jellyfin library transaction`);
 
-    // The FULL-replace signature: an UNCONDITIONAL deleteMany (args === null, i.e.
-    // no where filter) inside the same tx as the repopulate. recentOnly would be
-    // insert-only. The body must not have changed this.
+    // The FULL-replace signature. Both sources' deletes are scoped per-instance
+    // (serverInstance: "" for the default/only configured server here) rather than
+    // table-wide — multi-server support (Phase 1 Jellyfin, Phase 2 Plex) — but each
+    // is still an UNCONDITIONAL delete of that instance's rows (no recency/date
+    // filter), so recentOnly still can't have downgraded it to insert-only.
     const plexDeletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
     const jfDeletes = jfTx[0].ops.filter((o) => o.model === "jellyfinLibraryItem" && o.method === "deleteMany");
     assert.deepEqual(
       plexDeletes.map((d) => d.args),
-      [null],
-      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional Plex library replace`,
+      [{ where: { serverInstance: "" } }],
+      `guardrail 13: body ${body} must NOT downgrade to insert-only — the orchestrator ignores the body and always issues the unconditional (per-instance-scoped) Plex library replace`,
     );
-    // Jellyfin's delete is scoped per-instance (serverInstance: "" for the default/only
-    // configured server here) rather than unconditional like Plex — multi-server support
-    // (Phase 1) — but it's still an UNCONDITIONAL delete of that instance's rows (no
-    // recency/date filter), so recentOnly still can't have downgraded it to insert-only.
     assert.deepEqual(
       jfDeletes.map((d) => d.args),
       [{ where: { serverInstance: "" } }],
@@ -785,6 +793,200 @@ test("multi-server: two configured Jellyfin instances each get their OWN serverI
   const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
   assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Multi-server Plex (Phase 2) — union-availability + per-instance scoping
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The Plex mirror of the Jellyfin block above: a second, independently-
+// configured Plex server (media-instance-registry.ts's JSON registry + its own
+// plexRemoteServerUrl/plexRemoteAdminToken Settings). Same contract — nothing
+// routes a REQUEST to a specific Plex server; availability is a union across
+// every configured server of a type, backed by a per-instance-scoped write.
+const PLEX_REMOTE_BASE = "http://10.77.0.4:32400";
+const PLEX_REMOTE_ORIGIN = new URL(PLEX_REMOTE_BASE).origin;
+
+function configurePlexMultiServer(): void {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-default");
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+}
+
+// Like plexResponder but takes raw /all Metadata items, for fixtures that need
+// full control of ratingKey/Guid shapes (the dedupe-scoping pin).
+function plexItemsResponder(items: unknown[]): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: "1", title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      return okJson({ MediaContainer: { totalSize: items.length, Metadata: items } });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}`);
+  };
+}
+
+test("multi-server: a request is marked AVAILABLE via the UNION of two independently-configured Plex instances' libraries", async () => {
+  configurePlexMultiServer();
+  // Disjoint libraries — no overlap — so a match can only come from the UNION,
+  // never from either instance's map alone.
+  const defaultResponder = plexResponder([300]);
+  const remoteResponder = plexResponder([400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "req-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(
+    b.plexMarked,
+    2,
+    "both requests matched the UNIONED plex availability map — the downstream marking logic never changed, only how the map is populated",
+  );
+  assert.equal(requests.get("req-default-only")?.status, "AVAILABLE");
+  assert.equal(
+    requests.get("req-remote-only")?.status,
+    "AVAILABLE",
+    "a title that exists ONLY on the second, named instance is still marked available — proves the union, not just the default instance's library, backs the decision",
+  );
+});
+
+test("multi-server: two configured Plex instances each get their OWN serverInstance-scoped deleteMany + createMany — never each other's rows", async () => {
+  configurePlexMultiServer();
+  const defaultResponder = plexResponder([300]);
+  const remoteResponder = plexResponder([400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1, "both instances' scoped writes land inside ONE shared transaction (one lock acquisition — mirrors the Jellyfin arm)");
+
+  const deletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
+  assert.equal(deletes.length, 2, "one scoped delete per configured instance — never a single unconditional wipe");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null).sort(),
+    ["", "remote"],
+    "each delete is scoped to its OWN instance slug",
+  );
+
+  const creates = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "createMany");
+  assert.equal(creates.length, 2, "one createMany batch per configured instance");
+  for (const c of creates) {
+    const rows = (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data;
+    assert.ok(rows.length > 0);
+    assert.equal(
+      new Set(rows.map((r) => r.serverInstance)).size,
+      1,
+      "every row within ONE instance's createMany batch carries that SAME instance's slug — never a mix",
+    );
+  }
+  const allCreatedRows = creates.flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number }> }).data);
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId), [300], "the default instance's row carries ITS OWN library's tmdbId");
+  assert.deepEqual(allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId), [400], "the named instance's row carries ITS OWN library's tmdbId, never the default's");
+});
+
+test("multi-server: the conflated-ratingKey dedupe is instance-scoped — the prior-mapping read carries serverInstance, and the SAME ratingKey on two servers is NOT conflation", async () => {
+  configurePlexMultiServer();
+  // Default instance: ONE item carrying TWO tmdb guids — genuine conflation
+  // within that instance's batch (two rows share ratingKey "rk-shared").
+  // Remote instance: a single item that happens to reuse the SAME ratingKey —
+  // Plex ratingKeys are small server-local integers, so cross-instance equality
+  // is routine and legitimate, never conflation.
+  const defaultResponder = plexItemsResponder([
+    { ratingKey: "rk-shared", type: "movie", title: "Conflated", Guid: [{ id: "tmdb://601" }, { id: "tmdb://602" }] },
+  ]);
+  const remoteResponder = plexItemsResponder([
+    { ratingKey: "rk-shared", type: "movie", title: "Remote Movie", Guid: [{ id: "tmdb://400" }] },
+  ]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // Exactly ONE prior-mapping lookup fired — for the default instance's conflated
+  // MOVIE batch — and it is scoped to THAT instance. An unscoped read could import
+  // the remote server's rk-shared→400 mapping and wrongly drop the default's rows.
+  assert.deepEqual(
+    plexLibraryItemFindManyWheres,
+    [{ mediaType: "MOVIE", serverInstance: "", tmdbId: { in: [601, 602] } }],
+    "the dedupe's conflated-ratingKey DB read must be scoped to the instance batch being deduped",
+  );
+
+  // Dedupe resolved WITHIN the default instance (no prior mapping ⇒ keep first
+  // occurrence), while the remote instance's same-ratingKey row survived untouched.
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1);
+  const allCreatedRows = plexTx[0].ops
+    .filter((o) => o.model === "plexLibraryItem" && o.method === "createMany")
+    .flatMap((c) => (c.args as { data: Array<{ serverInstance: string; tmdbId: number; plexRatingKey: string | null }> }).data);
+  assert.deepEqual(
+    allCreatedRows.filter((r) => r.serverInstance === "").map((r) => r.tmdbId),
+    [601],
+    "conflation within one instance's batch keeps the first occurrence and drops the second",
+  );
+  assert.deepEqual(
+    allCreatedRows.filter((r) => r.serverInstance === "remote").map((r) => r.tmdbId),
+    [400],
+    "a cross-instance ratingKey collision is legitimate — the remote row must NOT be deduped away",
+  );
+  assert.ok(allCreatedRows.every((r) => r.plexRatingKey === "rk-shared"));
+});
+
+test("multi-server PARTIAL failure: one instance's library fetch failing preserves its rows, suppresses the success stamp, and vetoes the whole-table episode rewrite", async () => {
+  configurePlexMultiServer();
+  // The named instance is down; the default is healthy. Every safeguard must
+  // treat this run's union as an INCOMPLETE picture.
+  const defaultResponder = plexResponder([300]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("boom", { status: 500 }) : defaultResponder(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  // (a) Only the healthy instance's scoped delete+rewrite ran — the failed
+  // instance never entered `writable`, so its existing library rows survive
+  // the run untouched (guardrail 13 per instance).
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1);
+  const deletes = plexTx[0].ops.filter((o) => o.model === "plexLibraryItem" && o.method === "deleteMany");
+  assert.deepEqual(
+    deletes.map((d) => (d.args as { where?: { serverInstance?: string } } | null)?.where?.serverInstance ?? null),
+    [""],
+    "only the healthy (default) instance is deleted+rewritten; the down instance's rows must survive its outage",
+  );
+
+  // (b) THE load-bearing pin: the whole-table TVEpisodeCache rewrite must NOT
+  // run on an incomplete union. TVEpisodeCache has no serverInstance column, so
+  // a rewrite here would deleteMany({source:"plex"}) — wiping the DOWN server's
+  // episode rows — and reinsert only the healthy server's. The gate's
+  // `writable.length === fetched.length` term is what this asserts: an instance
+  // whose LIBRARY fetch failed never got an episode fetch at all, which the
+  // episode loop's own allEpisodesFetched flag cannot see.
+  assert.equal(
+    txTouching("tVEpisodeCache").length,
+    0,
+    "a library-fetch failure on ANY instance must veto the all-or-nothing episode rewrite",
+  );
+
+  // (c) The run is not stamped clean and the source is reported degraded —
+  // plexSyncSucceeded requires EVERY configured instance's fetch to succeed.
+  assert.ok(
+    !settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"),
+    "a partial run must not stamp lastPlexSyncSucceededAt",
+  );
+  assert.deepEqual(b.failedSources, ["plex"]);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

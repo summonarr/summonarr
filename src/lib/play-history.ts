@@ -103,20 +103,26 @@ export async function getArcGapDays(): Promise<number> {
 
 // Map a source-native show key (Plex ratingKey / Jellyfin itemId) to its tmdbId
 // via the cached library tables. Returns null when unmapped or the key is empty.
+// serverInstance-scoped (multi-server support): Plex ratingKeys are small
+// server-local integers, so two instances legitimately reuse the same key for
+// different shows — an unscoped lookup could attribute one server's watch to
+// another server's title. Jellyfin item ids are UUIDs (near-zero collision
+// risk) but are scoped identically for consistency.
 export async function resolveShowTmdbId(
   source: "plex" | "jellyfin",
   showKey: string | null | undefined,
+  serverInstance: string,
 ): Promise<number | null> {
   if (!showKey) return null;
   if (source === "plex") {
     const item = await prisma.plexLibraryItem.findFirst({
-      where: { plexRatingKey: showKey, mediaType: "TV" },
+      where: { plexRatingKey: showKey, mediaType: "TV", serverInstance },
       select: { tmdbId: true },
     });
     return item?.tmdbId ?? null;
   }
   const item = await prisma.jellyfinLibraryItem.findFirst({
-    where: { jellyfinItemId: showKey, mediaType: "TV" },
+    where: { jellyfinItemId: showKey, mediaType: "TV", serverInstance },
     select: { tmdbId: true },
   });
   return item?.tmdbId ?? null;
@@ -506,6 +512,12 @@ export async function recordCompletedSession(
 
   const historyData = {
     source: session.source,
+    // Multi-server support: stamp which instance the watch happened on. The
+    // ActiveSession row carries it from create (both pollers and the SSE
+    // writer). PlayHistory's dedup unique key is [source, serverInstance,
+    // sourceSessionId], so the same raw sessionKey on two instances can never
+    // collide — and history attribution/debugging stays per-server.
+    serverInstance: session.serverInstance,
     startedAt: session.startedAt,
     stoppedAt,
     duration: durationS,
