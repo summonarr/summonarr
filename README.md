@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.17.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.18.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,6 +170,32 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### v0.18.0
+
+**Added**
+
+- **Multiple Plex and Jellyfin servers.** Summonarr is no longer limited to one Plex server and one Jellyfin server — you can register as many of each as you like under Admin → Settings → Media → "Additional media servers". Library sync, "now playing", watch history, request fulfilment and sign-in all work across every configured server. A title counts as available if it's on *any* of them, and the admin surfaces label which server each library item, session, watch and server-user came from.
+- **Sign in against any of your servers.** Jellyfin's login screen gains a server picker when you've configured more than one; Plex sign-in needs no picker (Plex accounts are global) and now admits anyone who is a friend on *any* of your servers. Each server has its own admin token, its own "restrict sign-in to synced members" setting, and its own membership list.
+- **Restricted servers with per-user access.** A named server can be marked **Restricted**, and its library then counts only for users you grant access to (Admin → Users → Permissions → "Media server access"). Ungranted users don't see its titles as available, aren't blocked from requesting them, and their requests are only marked Available — and only notified — once the title is on a server they can actually see. Admins always see everything, and a server left unrestricted behaves exactly as before.
+- **A personalized "For You" row** on the home page, built from your own watch history and watchlist. Off by default — enable `feature.page.forYou` in Admin → Settings → Features, and give the background job a cycle or two to warm up first.
+- Two admin diagnostics for when something looks wrong: one that explains why an account's watch history is empty, and one that dumps the whole ratings pipeline for a title.
+
+**Changed**
+
+- **Removing an account now disables it instead of erasing it.** Previously, removal scrubbed the account in place, which permanently detached that person's watch history — including anything they kept watching afterwards. Removal now switches the account off (all devices signed out, sign-in refused) while leaving history attributed. Permanent erasure — for a genuine "delete my data" request — is a separate, admin-only, two-step action under Admin → Users.
+- De-registering a media server now cleans up the library rows it left behind. Previously those rows lingered forever, so a removed server's entire catalogue kept reading as "in library" everywhere.
+
+**Fixed**
+
+- Fixing a bad Plex/Jellyfin match from the admin library page could rewrite the *wrong* server's library once more than one was configured. Bad-match detection also went silently empty in that situation, reporting "no problems found" when it had simply failed to compare anything.
+- Assorted account and notification correctness: accounts removed before this release could be re-enabled into an unusable state; removed and disabled accounts could still receive request and issue notifications; and a purge racing a reactivation could leave an account in an inconsistent state.
+- Watch history: rewatches chained incorrectly, a play's group-wide flags were computed over only part of the group, and poster lookups could pick the wrong artwork for a title that exists as both a film and a series.
+- Sign-in reliability: a rotated session token wasn't forwarded to the downstream verifier, and Plex sign-in could stall for over a minute per unreachable server.
+- Radarr/Sonarr: an empty root folder broke every add on that instance, candidate releases sorted by date as text rather than chronologically, and a failed lookup could be cached as though it had succeeded.
+- Docker: a malformed cron interval could silently stop the background jobs, and the health check was wrong when hosting under a subpath.
+- Search boxes across the app mishandled `%` and `_`, treating them as wildcards instead of literal characters.
+- Security hardening across search inputs, request bodies, URL handling, DNS caching, admin privilege checks and a dependency advisory.
+
 ### v0.17.3
 
 **Fixed**
@@ -314,7 +340,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.17.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.18.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
