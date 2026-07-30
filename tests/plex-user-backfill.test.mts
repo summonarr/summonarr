@@ -10,9 +10,16 @@
 //     complete no-op — no Setting reads, no plex.tv traffic, no writes. There
 //     is deliberately NO module-level once-guard and the ranAt marker is
 //     write-only (never read): once-per-boot lives in instrumentation.ts;
-//   - unconfigured Plex (missing or empty plexAdminToken) returns before any
-//     network; an empty account list (bad token) warns and skips WITHOUT
-//     stamping ranAt or touching users;
+//   - unconfigured Plex (NO instance with an admin token) returns before any
+//     network; an instance whose account fetch fails or returns empty warns
+//     (instance-labeled) and contributes nothing, and when NO instance
+//     contributes accounts the run skips WITHOUT stamping ranAt or touching
+//     users;
+//   - the account lists of EVERY configured Plex instance are merged into ONE
+//     union (plexUserId is the plex.tv CLOUD account id, stable across
+//     servers, so any instance's list resolves the same correct id), the
+//     ambiguous-email drop applies across the MERGED map, and one instance
+//     failing never costs another instance's binds;
 //   - matching is by normalizeEmail on BOTH sides (candidate row and plex.tv
 //     account), an ambiguous email (two distinct account ids) is never bound,
 //     and an account with no email can never match an empty candidate email;
@@ -26,6 +33,8 @@
 // (tests/_helpers.mts), globalThis.fetch is scripted for the two real plex.tv
 // hops getPlexAccounts makes (/api/v2/user owner JSON + /api/users friends
 // XML), and dns/promises.lookup is stubbed for the plex.tv SSRF resolve.
+// Every instance hits those SAME plex.tv origins, so multi-instance fixtures
+// dispatch on the X-Plex-Token header (plexResponderByToken), not the origin.
 // Dynamic imports keep the stubs ahead of the module graph (trakt.test pattern).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -51,14 +60,17 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // ── scripted fetch ──────────────────────────────────────────────────────────
 type FetchCall = { url: URL; headers: Headers };
 const fetchCalls: FetchCall[] = [];
-let respond: (url: URL) => Response = () => {
+// Responders receive the request headers too: every Plex instance hits the
+// SAME plex.tv origins, so multi-instance fixtures dispatch on X-Plex-Token.
+let respond: (url: URL, headers: Headers) => Response = () => {
   throw new Error("unexpected fetch — script a responder for this test");
 };
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
-  fetchCalls.push({ url, headers: new Headers(init?.headers) });
-  return respond(url);
+  const headers = new Headers(init?.headers);
+  fetchCalls.push({ url, headers });
+  return respond(url, headers);
 }) as typeof fetch;
 
 // Dynamic imports so the stubs above genuinely precede the module-graph load.
@@ -141,6 +153,32 @@ function plexResponder(opts: {
 function configurePlex(): void {
   settings.set("plexAdminToken", TOKEN);
   settings.set("plexServerUrl", "http://plex.local:32400");
+}
+
+const REMOTE_TOKEN = "plex-remote-admin-token";
+
+// Registers a second, named Plex instance ("remote") with its own admin token.
+// No plexRemoteServerUrl on purpose: getPlexAccounts ignores its serverUrl
+// param (both hops are account-level plex.tv calls, not machine-scoped) and
+// the source tolerates the key missing.
+function configureRemoteInstance(): void {
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteAdminToken", REMOTE_TOKEN);
+}
+
+// Multi-instance responder: every instance's getPlexAccounts hits the SAME
+// plex.tv origins (/api/v2/user + /api/users), so per-instance fixtures are
+// keyed on the X-Plex-Token header — the only wire-level difference between
+// instances. A function value lets a test make one instance die on the wire.
+function plexResponderByToken(
+  byToken: Record<string, Parameters<typeof plexResponder>[0] | ((url: URL) => Response) | undefined>,
+): (url: URL, headers: Headers) => Response {
+  return (url, headers) => {
+    const token = headers.get("X-Plex-Token") ?? "";
+    const script = byToken[token];
+    if (script === undefined) throw new Error(`unexpected X-Plex-Token "${token}" — script a fixture for this token`);
+    return typeof script === "function" ? script(url) : plexResponder(script)(url);
+  };
 }
 
 beforeEach(() => {
@@ -231,9 +269,11 @@ test("a purged user is excluded — the row shape purgeUserDataInTx leaves behin
 test("Plex unconfigured: missing or empty plexAdminToken returns before any network or write", async () => {
   candidateRows = [{ id: "u1", email: "user@example.com" }];
 
-  // No token row at all — plexServerUrl must not even be read.
+  // No token row at all — plexServerUrl must not even be read. The instance
+  // registry read (multi-server union) now precedes the connection keys; the
+  // default instance's token is still the FIRST connection key read.
   await runPlexUserBackfillIfNeeded();
-  assert.deepEqual(settingReadKeys, ["plexAdminToken"]);
+  assert.deepEqual(settingReadKeys, ["plexInstances", "plexAdminToken"]);
   assert.equal(fetchCalls.length, 0);
 
   // Cleared token ("") is also unconfigured.
@@ -279,7 +319,9 @@ test("happy path: owner + friend matched by normalized email; exact update shape
   assert.equal(settingUpserts[0].where.key, "plexUserIdBackfillRanAt");
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].create.value)));
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].update.value)));
-  assert.deepEqual(settingReadKeys, ["plexAdminToken", "plexServerUrl"]);
+  // Registry read first (multi-server union), then the default instance's
+  // token-before-ServerUrl pair — the exact legacy Setting keys.
+  assert.deepEqual(settingReadKeys, ["plexInstances", "plexAdminToken", "plexServerUrl"]);
 
   // One admin-facing summary warn, no unmatched noise, no errors.
   assert.deepEqual(warns, ["[plex-backfill] bound 2 existing Plex user(s) to their plex.tv account id."]);
@@ -343,6 +385,133 @@ test("an account with no email can never match — an empty candidate email land
   assert.ok(warns.some((w) => w.includes("could NOT be bound")));
 });
 
+// ── multi-instance union ────────────────────────────────────────────────────
+
+test("union: a candidate present only in a NAMED instance's account list is bound", async () => {
+  // plexUserId is the plex.tv CLOUD account id — stable across servers — so a
+  // person matched via ANY instance's admin list gets the same correct id;
+  // fetching only the default instance would strand this user unmatched.
+  candidateRows = [{ id: "u-roamer", email: "roamer@example.com" }];
+  configurePlex();
+  configureRemoteInstance();
+  respond = plexResponderByToken({
+    [TOKEN]: { owner: { id: 100, email: "owner@example.com" }, friends: [] },
+    [REMOTE_TOKEN]: {
+      owner: { id: 900, email: "remote-admin@example.com" },
+      friends: [{ id: "501", name: "Roamer", email: "roamer@example.com" }],
+    },
+  });
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.deepEqual(userUpdates, [{ where: { id: "u-roamer" }, data: { plexUserId: "501" } }]);
+  // Read order pins the union plumbing: registry first, then per instance the
+  // token BEFORE ServerUrl (a tokenless instance must skip without touching
+  // its ServerUrl key), default instance first.
+  assert.deepEqual(settingReadKeys, [
+    "plexInstances",
+    "plexAdminToken",
+    "plexServerUrl",
+    "plexRemoteAdminToken",
+    "plexRemoteServerUrl",
+  ]);
+  // Two plex.tv hops per instance, each pair carrying its OWN admin token.
+  assert.deepEqual(
+    fetchCalls.map((c) => c.headers.get("X-Plex-Token")),
+    [TOKEN, TOKEN, REMOTE_TOKEN, REMOTE_TOKEN],
+  );
+  assert.equal(settingUpserts.length, 1); // union contributed accounts → ranAt stamped
+  assert.deepEqual(warns, ["[plex-backfill] bound 1 existing Plex user(s) to their plex.tv account id."]);
+  assert.deepEqual(errors, []);
+});
+
+test("cross-instance ambiguity: the same email with DIFFERENT ids across instances binds neither; the same id across instances still binds", async () => {
+  // The ambiguous-email drop applies to the MERGED map: two instances' admins
+  // each reporting an email under a different plex.tv id means we cannot know
+  // which account owns the local record — bind neither. The same id re-listed
+  // by both instances is the normal shared-admin/shared-friend case
+  // (getPlexAccounts is account-level) and stays a plain no-op.
+  candidateRows = [
+    { id: "u-xdup", email: "xdup@example.com" },
+    { id: "u-shared", email: "shared@example.com" },
+  ];
+  configurePlex();
+  configureRemoteInstance();
+  respond = plexResponderByToken({
+    [TOKEN]: {
+      owner: { id: 100, email: "owner@example.com" },
+      friends: [
+        { id: "201", name: "A", email: "xdup@example.com" },
+        { id: "301", name: "S", email: "shared@example.com" },
+      ],
+    },
+    [REMOTE_TOKEN]: {
+      owner: { id: 900, email: "remote-admin@example.com" },
+      friends: [
+        { id: "202", name: "A2", email: "xdup@example.com" }, // different id for the same email ⇒ ambiguous across the union
+        { id: "301", name: "S", email: "shared@example.com" }, // same id from both instances ⇒ fine
+      ],
+    },
+  });
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.deepEqual(userUpdates, [{ where: { id: "u-shared" }, data: { plexUserId: "301" } }]);
+  const unmatchedWarn = warns.find((w) => w.includes("could NOT be bound"));
+  assert.ok(unmatchedWarn?.includes("xdup@example.com (u-xdup)"), String(unmatchedWarn));
+});
+
+test("per-instance failure isolation: the default instance dying on the wire does not cost the named instance's binds", async () => {
+  candidateRows = [{ id: "u-remote", email: "friend@example.com" }];
+  configurePlex();
+  configureRemoteInstance();
+  respond = plexResponderByToken({
+    [TOKEN]: () => {
+      throw new Error("ECONNREFUSED plex.tv"); // both default-instance hops die on the wire
+    },
+    [REMOTE_TOKEN]: {
+      owner: { id: 900, email: "remote-admin@example.com" },
+      friends: [{ id: "601", name: "Friend", email: "friend@example.com" }],
+    },
+  });
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.deepEqual(userUpdates, [{ where: { id: "u-remote" }, data: { plexUserId: "601" } }]);
+  assert.equal(settingUpserts.length, 1); // the union still contributed accounts → ranAt stamped
+  // The dead instance degrades to its own labeled warn (getPlexAccounts
+  // swallows the per-hop failures and returns []) without aborting the union.
+  assert.ok(
+    warns.some((w) => w.includes("[plex-backfill] plex returned no accounts; skipping this instance (token may be invalid).")),
+    warns.join("\n"),
+  );
+  assert.ok(warns.some((w) => w.includes("bound 1 existing Plex user(s)")), warns.join("\n"));
+  assert.deepEqual(errors, []);
+});
+
+test("all instances empty/unreachable: per-instance warns and NO ranAt stamp (retry next boot)", async () => {
+  candidateRows = [{ id: "u1", email: "user@example.com" }];
+  configurePlex();
+  configureRemoteInstance();
+  respond = plexResponderByToken({
+    [TOKEN]: {}, // both hops 401 → empty list
+    [REMOTE_TOKEN]: {}, // both hops 401 → empty list
+  });
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.equal(userUpdates.length, 0);
+  assert.equal(settingUpserts.length, 0); // nothing fetched anywhere → retryable next boot
+  assert.ok(
+    warns.some((w) => w.includes("[plex-backfill] plex returned no accounts; skipping this instance")),
+    warns.join("\n"),
+  );
+  assert.ok(
+    warns.some((w) => w.includes("[plex-backfill] plex:remote returned no accounts; skipping this instance")),
+    warns.join("\n"),
+  );
+});
+
 // ── degradation ─────────────────────────────────────────────────────────────
 
 test("plex.tv returns no accounts (bad token): warn + skip — no binds, and NO ranAt stamp", async () => {
@@ -355,8 +524,10 @@ test("plex.tv returns no accounts (bad token): warn + skip — no binds, and NO 
   assert.equal(userUpdates.length, 0);
   assert.equal(settingUpserts.length, 0); // a failed run must be retryable next boot
   assert.ok(warns.some((w) => w.includes("[plex] Failed to fetch server owner info:")));
+  // The skip warn is instance-labeled now (mediaInstanceLabel: "plex" = the
+  // default instance) and scoped to the instance, not the whole run.
   assert.ok(
-    warns.some((w) => w.includes("[plex-backfill] Plex returned no accounts; skipping (token may be invalid).")),
+    warns.some((w) => w.includes("[plex-backfill] plex returned no accounts; skipping this instance (token may be invalid).")),
   );
   assert.deepEqual(errors, []);
 });

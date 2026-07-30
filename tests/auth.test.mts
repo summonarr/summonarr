@@ -20,12 +20,17 @@
 //   correct credentials; the accept returns the full DeviceMeta payload and
 //   finds the user under the NFKC/lowercase/trim-normalized email.
 //
-//   authorizeWithPlex — fail-closed matrix on one scripted plex.tv wire:
-//   unconfigured plexServerUrl refuses outright (no fetch — the unscoped
-//   friend-list hole), a friend on THIS server's allowlist is provisioned
-//   (numeric plex id coerced to a string sub, token cache bound, notification
-//   email synced), and a stranger with a VALID plex token but no share on this
-//   machineIdentifier is refused with no row minted.
+//   authorizeWithPlex — fail-closed matrix on a scripted plex.tv wire:
+//   zero configured instances refuses outright (no fetch — the unscoped
+//   friend-list hole), a friend on a configured server's allowlist is
+//   provisioned (numeric plex id coerced to a string sub, token cache bound,
+//   notification email synced), and a stranger with a VALID plex token but no
+//   share on any configured machineIdentifier is refused with no row minted.
+//   The membership gate loops configured instances first-match-wins (default
+//   first): a friend only on a NAMED instance is admitted via that instance's
+//   own token/url/machine-id, one down server doesn't block a healthy one,
+//   each instance's AdminEmail admits per instance, and a blank-config
+//   instance is skipped rather than fatal.
 //
 //   findOrCreate{Plex,Jellyfin,Oidc}User — provider-subject binding is the
 //   only identity anchor: an existing sub match returns that row's identity
@@ -909,8 +914,9 @@ test("plex sign-in: unconfigured server fails closed; a friend on THIS server pr
   const ua = chromeUa("plex-wire");
   settings.set("plexAdminToken", "admin-plex-token");
 
-  // Phase 1 — no plexServerUrl: refuse BEFORE any plex.tv call (an unscoped
-  // friend list would widen sign-in to anyone the admin ever shared with).
+  // Phase 1 — token but no plexServerUrl ⇒ ZERO configured instances: refuse
+  // BEFORE any plex.tv call (an unscoped friend list would widen sign-in to
+  // anyone the admin ever shared with).
   assert.equal(
     await authorizeWithPlex({ plexToken: "plex-tok-unconfigured" }, makeReq(ua)),
     null,
@@ -918,7 +924,7 @@ test("plex sign-in: unconfigured server fails closed; a friend on THIS server pr
   assert.equal(fetchCalls.length, 0, "the fail-closed refusal must not touch the network");
   await flushAsync();
   assert.equal(auditDetails().reason, "plex_server_not_configured");
-  assert.ok(warns.some((w) => w.includes("plexServerUrl is not configured")));
+  assert.ok(warns.some((w) => w.includes("no Plex server is configured")));
 
   // Phase 2 — configured server, friend shared on OUR machineIdentifier.
   settings.set("plexServerUrl", "http://203.0.113.10:32400");
@@ -970,6 +976,181 @@ test("plex sign-in: unconfigured server fails closed; a friend on THIS server pr
   await flushAsync();
   assert.equal(auditDetails().reason, "invalid_credentials");
   assert.ok(!users.some((u) => u.email === "stranger@example.com"), "no row may be minted for a refused stranger");
+});
+
+// ── authorizeWithPlex — multi-instance membership loop ──────────────────────
+// Two configured servers: the default at 203.0.113.10 (machine-1, admin token
+// "admin-token-default") and the named "remote" at 203.0.113.20 (machine-2,
+// "admin-token-remote"). plex.tv's /api/users is ONE global endpoint, so the
+// responder discriminates on the X-Plex-Token request header — each instance's
+// admin token provably fetches its OWN friend list.
+
+function xmlResponse(body: string): Response {
+  return new Response(body, { status: 200, headers: { "content-type": "application/xml" } });
+}
+
+function friendsXml(entries: { email: string; machineId: string }[]): string {
+  return (
+    '<?xml version="1.0"?>' +
+    `<MediaContainer size="${entries.length}">` +
+    entries
+      .map((e, i) => `<User id="${i + 1}" email="${e.email}"><Server id="${i + 1}" machineIdentifier="${e.machineId}"/></User>`)
+      .join("") +
+    "</MediaContainer>"
+  );
+}
+
+function seedTwoPlexInstances(): void {
+  settings.set("plexServerUrl", "http://203.0.113.10:32400");
+  settings.set("plexAdminToken", "admin-token-default");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", "http://203.0.113.20:32400");
+  settings.set("plexRemoteAdminToken", "admin-token-remote");
+}
+
+// Scripted two-server wire: /api/v2/user serves `account`, each server's
+// /identity serves its machine id, and /api/users answers per admin token via
+// `byToken` (a missing token entry throws, surfacing an unexpected consult).
+function respondTwoPlexServers(
+  account: Record<string, unknown>,
+  byToken: Record<string, () => Response>,
+): void {
+  respond = (url, init) => {
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return jsonResponse(account);
+    if (url.hostname === "203.0.113.10" && url.pathname === "/identity") {
+      return jsonResponse({ MediaContainer: { machineIdentifier: "machine-1" } });
+    }
+    if (url.hostname === "203.0.113.20" && url.pathname === "/identity") {
+      return jsonResponse({ MediaContainer: { machineIdentifier: "machine-2" } });
+    }
+    if (url.hostname === "plex.tv" && url.pathname === "/api/users") {
+      const token = new Headers(init?.headers).get("x-plex-token") ?? "";
+      const make = byToken[token];
+      if (!make) throw new Error(`unexpected admin token on /api/users: ${token}`);
+      return make();
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+}
+
+test("plex multi-instance: a user shared ONLY on the second named instance is admitted via that instance's own token/url/machine-id", async () => {
+  const ua = chromeUa("plex-multi-admit");
+  seedTwoPlexInstances();
+  respondTwoPlexServers(
+    { id: 4242, email: "second@example.com", username: "Second", thumb: "" },
+    {
+      // The default admin's cross-server friend list does not contain this
+      // user at all; the remote admin's list shares them on machine-2.
+      "admin-token-default": () => xmlResponse(friendsXml([{ email: "someoneelse@example.com", machineId: "machine-1" }])),
+      "admin-token-remote": () => xmlResponse(friendsXml([{ email: "second@example.com", machineId: "machine-2" }])),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-second" }, makeReq(ua));
+  assert.ok(result, "a friend on the named instance must sign in");
+  assert.equal(result.email, "second@example.com");
+  const row = users.find((u) => u.email === "second@example.com");
+  assert.ok(row, "sign-in must have minted the user row");
+  assert.equal(row.plexUserId, "4242");
+  // First-match-wins ordering: the default instance was consulted (its own
+  // machine id resolved, its own token queried) and declined BEFORE the named
+  // instance admitted.
+  const identityHosts = fetchCalls.filter((c) => c.url.pathname === "/identity").map((c) => c.url.hostname);
+  assert.deepEqual(identityHosts, ["203.0.113.10", "203.0.113.20"]);
+});
+
+test("plex multi-instance: a down default instance is isolated — the healthy named instance still admits", async () => {
+  const ua = chromeUa("plex-multi-isolate");
+  seedTwoPlexInstances();
+  respondTwoPlexServers(
+    { id: 4343, email: "resilient@example.com", username: "Resilient", thumb: "" },
+    {
+      // plex.tv 500s the DEFAULT admin's friend query → getPlexFriendEmails
+      // throws for that instance only.
+      "admin-token-default": () => new Response("upstream exploded", { status: 500 }),
+      "admin-token-remote": () => xmlResponse(friendsXml([{ email: "resilient@example.com", machineId: "machine-2" }])),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-resilient" }, makeReq(ua));
+  assert.ok(result, "one down server must not block sign-in via a healthy one");
+  assert.equal(result.email, "resilient@example.com");
+  assert.ok(
+    warns.some((w) => w.includes("[plex auth] membership check failed for plex: ")),
+    "the failed instance must be warned about by name",
+  );
+  assert.ok(!warns.some((w) => w.includes("plex:remote")), "the healthy instance must not warn");
+});
+
+test("plex multi-instance: the named instance's AdminEmail admits its admin even with empty friend lists everywhere", async () => {
+  const ua = chromeUa("plex-multi-adminemail");
+  seedTwoPlexInstances();
+  // Stray padding + case in the Setting value: normalizeEmail parity with the
+  // plex.tv-verified address must make the two agree.
+  settings.set("plexRemoteAdminEmail", "  Remote-Admin@EXAMPLE.com  ");
+  const emptyXml = friendsXml([]);
+  respondTwoPlexServers(
+    { id: 4444, email: "remote-admin@example.com", username: "RemoteAdmin", thumb: "" },
+    {
+      "admin-token-default": () => xmlResponse(emptyXml),
+      "admin-token-remote": () => xmlResponse(emptyXml),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-remote-admin" }, makeReq(ua));
+  assert.ok(result, "an admin-only named server must still admit its admin");
+  assert.equal(result.email, "remote-admin@example.com");
+  // Both servers were actually consulted — the default declined (empty list,
+  // no plexAdminEmail seeded), the named one admitted via ITS AdminEmail.
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/api/users").length, 2);
+});
+
+test("plex multi-instance: a stranger on NO instance is refused invalid_credentials with no row minted", async () => {
+  const ua = chromeUa("plex-multi-stranger");
+  seedTwoPlexInstances();
+  settings.set("plexAdminEmail", "owner@example.com");
+  settings.set("plexRemoteAdminEmail", "remote-owner@example.com");
+  respondTwoPlexServers(
+    { id: 4545, email: "outsider@example.com", username: "Outsider", thumb: "" },
+    {
+      "admin-token-default": () => xmlResponse(friendsXml([{ email: "friend@example.com", machineId: "machine-1" }])),
+      "admin-token-remote": () => xmlResponse(friendsXml([{ email: "second@example.com", machineId: "machine-2" }])),
+    },
+  );
+
+  const stranger = await authorizeWithPlex({ plexToken: "plex-tok-outsider" }, makeReq(ua));
+  assert.equal(stranger, null, "membership on SOME configured instance is required");
+  await flushAsync();
+  assert.equal(auditDetails().reason, "invalid_credentials");
+  assert.ok(!users.some((u) => u.email === "outsider@example.com"), "no row may be minted for a refused stranger");
+  // Every instance was consulted before giving up.
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/api/users").length, 2);
+});
+
+test("plex multi-instance: a blank-config default (token without URL) is skipped, not fatal — the named instance still admits", async () => {
+  const ua = chromeUa("plex-multi-skip");
+  // The pre-generalization "tab shows but every attempt refuses" deployment
+  // shape, PLUS a fully configured named instance: the default must be
+  // filtered out (getSyncableMediaInstances semantics), never dialed, and
+  // never treated as fatal.
+  settings.set("plexAdminToken", "admin-token-default"); // no plexServerUrl
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  settings.set("plexRemoteServerUrl", "http://203.0.113.20:32400");
+  settings.set("plexRemoteAdminToken", "admin-token-remote");
+  respondTwoPlexServers(
+    { id: 4646, email: "second@example.com", username: "Second", thumb: "" },
+    {
+      "admin-token-remote": () => xmlResponse(friendsXml([{ email: "second@example.com", machineId: "machine-2" }])),
+    },
+  );
+
+  const result = await authorizeWithPlex({ plexToken: "plex-tok-skip" }, makeReq(ua));
+  assert.ok(result, "a skipped unconfigured instance must not block the configured one");
+  assert.equal(result.email, "second@example.com");
+  // Only the named instance's admin token ever hit /api/users, and the
+  // blank-config default was never dialed at all.
+  assert.equal(fetchCalls.filter((c) => c.url.pathname === "/api/users").length, 1);
+  assert.ok(!fetchCalls.some((c) => c.url.hostname === "203.0.113.10"), "the blank-config default must never be dialed");
 });
 
 test("provider-subject binding: an existing plex sub returns that identity (role preserved); an email match alone is REFUSED", async () => {

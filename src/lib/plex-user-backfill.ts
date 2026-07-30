@@ -1,6 +1,8 @@
 import { prisma } from "./prisma";
-import { getPlexAccounts } from "./plex";
+import { getPlexAccounts, type PlexAccountInfo } from "./plex";
 import { normalizeEmail } from "./email-normalize";
+import { getMediaInstances } from "./media-instance-registry";
+import { mediaInstanceLabel, plexSettingKey } from "./media-instances";
 
 // Boot-time self-heal for the Plex SSO identity-binding migration.
 //
@@ -12,9 +14,12 @@ import { normalizeEmail } from "./email-normalize";
 // the migration carry a real email but a null plexUserId, and would now be
 // REFUSED on their first post-migration sign-in (no plexUserId to match) until
 // the column is populated. This helper runs once per boot, queries plex.tv for
-// the admin's account list, and backfills plexUserId by matching email — a safe
-// one-time bridge using the admin's authoritative account list — so the next
-// sign-in succeeds via the new id-based binding.
+// EVERY configured Plex instance's admin account list (a union — plexUserId is
+// the plex.tv CLOUD account id, stable across servers, so a person matched via
+// any instance's list resolves to the same correct id), and backfills
+// plexUserId by matching email — a safe one-time bridge using the admins'
+// authoritative account lists — so the next sign-in succeeds via the new
+// id-based binding.
 //
 // Candidate filter: only "Plex-only" users — no passwordHash, no jellyfinUserId,
 // no OIDC Account row, AND no @jellyfin.local synthetic email (legacy Jellyfin
@@ -49,35 +54,71 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
     });
     if (candidates.length === 0) return;
 
-    const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
-    if (!tokenRow?.value) return; // Plex not configured — nothing to do
-
-    const serverRow = await prisma.setting.findUnique({ where: { key: "plexServerUrl" } });
-    const serverUrl = serverRow?.value ?? "";
-
-    const accounts = await getPlexAccounts(serverUrl, tokenRow.value);
-    if (accounts.length === 0) {
-      console.warn("[plex-backfill] Plex returned no accounts; skipping (token may be invalid).");
-      return;
-    }
+    // Account lists come from EVERY configured Plex instance (multi-server
+    // support). The instance list is getMediaInstances (a single registry
+    // findUnique on `plexInstances`, default entry always first) + direct
+    // per-instance findUnique reads below — NOT getSyncableMediaInstances,
+    // whose isMediaInstanceConfigured check issues a connection-keys findMany
+    // (the unit harness's setting stub is findUnique+upsert-only, the same
+    // constraint the play-history poller documents), and NOT getPlexConfig,
+    // which reads ServerUrl unconditionally: reading the token FIRST preserves
+    // "unconfigured ⇒ ServerUrl not even read, zero plex.tv traffic".
+    const instances = await getMediaInstances("plex");
 
     // A plex.tv email is user-changeable and not guaranteed unique across the
     // accounts an admin can see. If two distinct account ids normalize to the
-    // same email, binding by email could attach a local record to the wrong
-    // account, so such an email is marked ambiguous and skipped — those users
-    // fall into `unmatched` and an admin sets plexUserId explicitly instead.
+    // same email — within one instance's list OR across instances — binding by
+    // email could attach a local record to the wrong account, so such an email
+    // is marked ambiguous and skipped — those users fall into `unmatched` and
+    // an admin sets plexUserId explicitly instead. The same id re-listed (an
+    // admin/friend shared across instances — getPlexAccounts is account-level,
+    // so that is the normal multi-server case) is a no-op, not ambiguous.
     const idByEmail = new Map<string, string>();
     const ambiguousEmails = new Set<string>();
-    for (const a of accounts) {
-      if (!a.email || !a.id) continue;
-      const norm = normalizeEmail(a.email);
-      const existing = idByEmail.get(norm);
-      if (existing !== undefined && existing !== a.id) {
-        ambiguousEmails.add(norm);
+    let accountsFetched = 0;
+
+    for (const instance of instances) {
+      const tokenRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "AdminToken") } });
+      if (!tokenRow?.value) continue; // instance not configured — nothing to fetch from it
+
+      // getPlexAccounts ignores its serverUrl param (owner + friends both come
+      // account-level from plex.tv, not machine-scoped) — tolerate it missing.
+      const serverRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "ServerUrl") } });
+      const serverUrl = serverRow?.value ?? "";
+
+      const label = mediaInstanceLabel("plex", instance.slug);
+      let accounts: PlexAccountInfo[];
+      try {
+        accounts = await getPlexAccounts(serverUrl, tokenRow.value);
+      } catch (err) {
+        // Defensive — getPlexAccounts swallows its own hop failures today, but
+        // a throw from one instance must not cost the others' contributions.
+        console.warn(`[plex-backfill] Account fetch failed for ${label}; skipping this instance:`, err instanceof Error ? err.message : String(err));
         continue;
       }
-      idByEmail.set(norm, a.id);
+      if (accounts.length === 0) {
+        console.warn(`[plex-backfill] ${label} returned no accounts; skipping this instance (token may be invalid).`);
+        continue;
+      }
+      accountsFetched += accounts.length;
+
+      for (const a of accounts) {
+        if (!a.email || !a.id) continue;
+        const norm = normalizeEmail(a.email);
+        const existing = idByEmail.get(norm);
+        if (existing !== undefined && existing !== a.id) {
+          ambiguousEmails.add(norm);
+          continue;
+        }
+        idByEmail.set(norm, a.id);
+      }
     }
+
+    // Nothing fetched from ANY instance: either Plex is unconfigured (no
+    // instance has a token — silent, same as before) or every configured
+    // instance failed/returned empty (each already warned above). Return
+    // WITHOUT stamping ranAt so the next boot retries.
+    if (accountsFetched === 0) return;
 
     let bound = 0;
     const unmatched: { id: string; email: string }[] = [];

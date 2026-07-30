@@ -14,14 +14,20 @@ export default async function LoginPage() {
   // the admin account is created locally first; Jellyfin/OIDC are wired up from Settings afterwards.
   if (count === 0) redirect("/setup");
 
-  const [plexRow, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
-    prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
+  const [plexInstances, jellyfinInstances, siteTitleRow, siteUrlRow, disableLocalRow] = await Promise.all([
+    getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
     prisma.setting.findUnique({ where: { key: "siteTitle" } }),
     prisma.setting.findUnique({ where: { key: "siteUrl" } }),
     prisma.setting.findUnique({ where: { key: "disableLocalLogin" } }),
   ]);
-  const plexEnabled = !!plexRow?.value;
+  // Fully DB-configured, like Jellyfin below: the Plex tab appears once at least
+  // one instance has BOTH its ServerUrl and AdminToken stored. Deliberately
+  // tighter than the old plexAdminToken-only check — a token-without-URL
+  // deployment used to show the tab while every attempt refused
+  // (plex_server_not_configured); now the tab hides instead. No instance list
+  // reaches the client: Plex OAuth carries no server picker.
+  const plexEnabled = plexInstances.length > 0;
   // Mirror Plex: fully DB-configured. The Jellyfin tab appears only after an admin has
   // completed the Jellyfin wiring (server URL + API key stored) for at least one
   // instance — getSyncableMediaInstances already requires both per instance, so

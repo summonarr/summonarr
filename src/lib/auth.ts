@@ -16,7 +16,9 @@ import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
+import { getPlexConfig } from "@/lib/plex-config";
 
 // Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
 
@@ -736,22 +738,36 @@ export async function authorizeWithPlex(
     const cacheCutoff = new Date(Date.now() - CACHE_TTL_DAYS * 24 * 60 * 60 * 1000);
     const cached = await prisma.plexTokenCache.findUnique({ where: { tokenHash } });
 
-    // Refuse Plex sign-in entirely when plexServerUrl is not configured. The
+    // Refuse Plex sign-in entirely when no Plex server is configured. The
     // membership gate below allows a Plex account only if its email is in the set
-    // returned by getPlexFriendEmails(adminToken, plexServerUrl) — i.e. users with
-    // access to THIS specific server. If plexServerUrl is empty that scoping is
-    // lost and the friend-list filter degrades to "anyone the admin has shared ANY
-    // server (or library) with on their whole Plex account," which can be a far
-    // wider, attacker-influenceable population than the intended instance members.
-    // Fail closed rather than authenticate against an unscoped friend list.
-    const [adminTokenRow, adminEmailRow, serverUrlRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "plexAdminEmail" } }),
-      prisma.setting.findUnique({ where: { key: "plexServerUrl" } }),
-    ]);
-    const plexServerUrl = serverUrlRow?.value?.trim() || "";
-    if (!plexServerUrl) {
-      console.warn("[auth] Plex sign-in refused: plexServerUrl is not configured.");
+    // returned by getPlexFriendEmails(adminToken, serverUrl) for some configured
+    // instance — i.e. users with access to THAT specific server. Without a server
+    // URL that scoping is lost and the friend-list filter degrades to "anyone the
+    // admin has shared ANY server (or library) with on their whole Plex account,"
+    // which can be a far wider, attacker-influenceable population than the
+    // intended instance members. Fail closed rather than authenticate against an
+    // unscoped friend list.
+    //
+    // Per-instance configs are read up front, before identity resolution —
+    // exactly where the old single-server read sat. An instance with a blank
+    // (trimmed) URL or token is skipped: this reproduces getSyncableMediaInstances'
+    // filter with findUnique-only reads (getPlexConfig + one AdminEmail read per
+    // instance, which getPlexConfig doesn't carry), the same pattern as the
+    // Phase-2 play-history poller.
+    const registered = await getMediaInstances("plex");
+    const instances: { slug: MediaInstanceKey; url: string; token: string; adminEmail: string | null }[] = [];
+    for (const inst of registered) {
+      const [cfg, adminEmailRow] = await Promise.all([
+        getPlexConfig(inst.slug),
+        prisma.setting.findUnique({ where: { key: plexSettingKey(inst.slug, "AdminEmail") } }),
+      ]);
+      const url = cfg.url?.trim() ?? "";
+      const token = cfg.token?.trim() ?? "";
+      if (!url || !token) continue;
+      instances.push({ slug: inst.slug, url, token, adminEmail: adminEmailRow?.value ?? null });
+    }
+    if (instances.length === 0) {
+      console.warn("[auth] Plex sign-in refused: no Plex server is configured.");
       void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "plex_server_not_configured" } });
       // Fall through to the unified failure path below.
       await dummyVerify();
@@ -815,39 +831,58 @@ export async function authorizeWithPlex(
       });
     }
 
-    if (adminTokenRow?.value) {
-      const allowed = await getPlexFriendEmails(adminTokenRow.value, plexServerUrl);
+    // Membership gate — first match wins across every configured instance,
+    // default first. A Plex account is admitted when its verified email is on
+    // the friend list of ANY configured server (scoped to that server's
+    // machineIdentifier) or is that instance's admin email. Per-instance
+    // failures are isolated so one unreachable server can't block sign-in via
+    // a healthy one — but each instance still fails CLOSED on a plex.tv error
+    // (skip it; never fall back to an unscoped list).
+    for (const inst of instances) {
+      let allowed: Set<string>;
+      try {
+        allowed = await getPlexFriendEmails(inst.token, inst.url);
+      } catch (err) {
+        console.warn(`[plex auth] membership check failed for ${mediaInstanceLabel("plex", inst.slug)}:`, err instanceof Error ? err.message : String(err));
+        continue;
+      }
       // normalizeEmail (NFKC + lowercase + trim) — verifiedEmail is normalized the
       // same way, and plex-membership.ts normalizes identically, so a Setting value
-      // with stray whitespace/Unicode form can't make the two gates disagree.
-      if (adminEmailRow?.value) allowed.add(normalizeEmail(adminEmailRow.value));
+      // with stray whitespace/Unicode form can't make the two gates disagree. Added
+      // unconditionally after the fetch: an admin-only server with an empty friend
+      // list must still admit its admin.
+      if (inst.adminEmail) allowed.add(normalizeEmail(inst.adminEmail));
 
-      if (allowed.has(verifiedEmail)) {
-        const plexDbUser = await findOrCreatePlexUser({
-          plexUserId: plexUserSub,
-          email: verifiedEmail,
-          name: plexName,
-          image: plexThumb,
-        });
+      if (!allowed.has(verifiedEmail)) continue;
 
-        if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
-        } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
-          void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
-        } else {
-          // notificationEmail is kept in lock-step with the Plex-verified email on every
-          // sign-in so notifications always go to the user's current Plex address.
-          await prisma.user.update({
-            where: { id: plexDbUser.id },
-            data: {
-              notificationEmail: verifiedEmail,
-              ...(browserClientId ? { plexClientId: browserClientId } : {}),
-            },
-          }).catch(() => {});
-          const device = buildDeviceMeta(headers);
-          plexResult = { ...plexDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
-        }
+      const plexDbUser = await findOrCreatePlexUser({
+        plexUserId: plexUserSub,
+        email: verifiedEmail,
+        name: plexName,
+        image: plexThumb,
+      });
+
+      if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
+        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "email_collision_needs_rebind", emailHash: hashAuditEmail(verifiedEmail) } });
+      } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
+        void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
+      } else {
+        // notificationEmail is kept in lock-step with the Plex-verified email on every
+        // sign-in so notifications always go to the user's current Plex address.
+        await prisma.user.update({
+          where: { id: plexDbUser.id },
+          data: {
+            notificationEmail: verifiedEmail,
+            ...(browserClientId ? { plexClientId: browserClientId } : {}),
+          },
+        }).catch(() => {});
+        const device = buildDeviceMeta(headers);
+        plexResult = { ...plexDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
       }
+      // Identity (findOrCreatePlexUser) is instance-independent — a sentinel
+      // refusal here would repeat identically on every remaining instance, so
+      // the loop stops at the first membership match either way.
+      break;
     }
   } catch (err) {
     console.error("[plex auth] error:", err);
