@@ -7,8 +7,9 @@ import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogT
 import { posterUrl } from "@/lib/tmdb-types";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
-import type { FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
+import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
 import { withBasePath } from "@/lib/base-path";
+import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
 
@@ -35,6 +36,21 @@ interface Props {
   userProvider?: string;
 
   requestToken?: string;
+
+  // Preferred server for the fix. This dialog starts from a tmdbId with no
+  // library row in hand, so it's only a HINT: the real instance is resolved from
+  // the file-info response (which lists every server holding the title).
+  serverInstance?: string;
+}
+
+// Picks which configured server to act on: the caller's hint if that server
+// actually holds the title, else the default server, else the first one that
+// does. null when no server holds it (nothing to fix on that side).
+function resolveInstance(rows: FileInfoInstance[], hint: string): string | null {
+  if (rows.length === 0) return null;
+  if (rows.some((r) => r.serverInstance === hint)) return hint;
+  if (rows.some((r) => r.serverInstance === DEFAULT_MEDIA_INSTANCE)) return DEFAULT_MEDIA_INSTANCE;
+  return rows[0].serverInstance;
 }
 
 const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string; label: string }> = {
@@ -47,15 +63,21 @@ const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string; 
 };
 
 function PlexCandidateRow({
-  candidate, onSelect, disabled,
+  candidate, onSelect, disabled, serverInstance,
 }: {
-  candidate: PlexCandidate;
-  onSelect:  (guid: string) => void;
-  disabled:  boolean;
+  candidate:      PlexCandidate;
+  onSelect:       (guid: string) => void;
+  disabled:       boolean;
+  serverInstance: string;
 }) {
   const style   = LEVEL_STYLES[candidate.matchLevel] ?? LEVEL_STYLES.unknown;
+  // Relative Plex thumb paths are server-local — proxy them against the same
+  // instance the candidates came from. Omitted when default.
   const thumbSrc = candidate.thumb
-    ? withBasePath(`/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`)
+    ? withBasePath(`/api/admin/fix-match/thumb?${new URLSearchParams({
+        path: candidate.thumb,
+        ...(serverInstance ? { serverInstance } : {}),
+      })}`)
     : null;
 
   return (
@@ -95,8 +117,45 @@ function PlexCandidateRow({
   );
 }
 
+// Minimal inline server picker — rendered only when more than one configured
+// server holds the title, i.e. only when "fix the match" is genuinely ambiguous.
+// A single-server deployment never sees it.
+function InstancePicker({
+  service, rows, value, onChange, disabled,
+}: {
+  service:  "plex" | "jellyfin";
+  rows:     FileInfoInstance[];
+  value:    string | null;
+  onChange: (slug: string) => void;
+  disabled: boolean;
+}) {
+  if (rows.length < 2) return null;
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className="text-xs text-zinc-500 shrink-0">Server</span>
+      {rows.map((r) => (
+        <button
+          key={r.serverInstance}
+          onClick={() => onChange(r.serverInstance)}
+          disabled={disabled}
+          title={r.filePath ?? undefined}
+          className={`text-xs px-2 py-0.5 rounded border font-medium transition-colors disabled:opacity-50
+            ${r.serverInstance === value
+              ? "bg-indigo-500/20 border-indigo-500/50 text-indigo-300"
+              : "bg-zinc-900 border-zinc-700 text-zinc-400 hover:bg-zinc-800"}`}
+        >
+          {mediaInstanceLabel(service, r.serverInstance)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // Multi-phase dialog (search → confirm → Plex candidates) for re-matching a mismatched library item to the correct TMDB ID and resolving the issue.
-export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex, onJellyfin, isAdmin, userProvider, requestToken }: Props) {
+export function IssueFixMatchButton({
+  issueId, tmdbId, mediaType, title, onPlex, onJellyfin, isAdmin, userProvider, requestToken,
+  serverInstance = DEFAULT_MEDIA_INSTANCE,
+}: Props) {
   const showPlex     = onPlex     && (isAdmin || userProvider === "plex");
   const showJellyfin = onJellyfin && (isAdmin || userProvider === "jellyfin" || userProvider === "jellyfin-quickconnect");
   const router = useRouter();
@@ -114,6 +173,11 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   const [plexCandidates, setPlexCandidates] = useState<CandidatesResponse | null>(null);
   const [fileInfo, setFileInfo]           = useState<FileInfoResponse | null>(null);
   const [fileInfoError, setFileInfoError] = useState(false);
+  // Which configured server each side's fix targets. Resolved from the file-info
+  // response (the dialog has no library row to read it off), overridable by the
+  // admin when several servers hold the title. null ⇒ no server holds it.
+  const [plexInstance, setPlexInstance]         = useState<string | null>(null);
+  const [jellyfinInstance, setJellyfinInstance] = useState<string | null>(null);
   const [addWrongState, setAddWrongState] = useState<"idle" | "adding" | "done" | "conflict" | "error">("idle");
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -131,6 +195,8 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     setPlexCandidates(null);
     setAddWrongState("idle");
     setFileInfoError(false);
+    setPlexInstance(null);
+    setJellyfinInstance(null);
   }, [title]);
 
   const close = useCallback(() => {
@@ -142,20 +208,29 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
     if (!open) return;
     const controller = new AbortController();
     setFileInfoError(false);
-    fetch(withBasePath(`/api/admin/fix-match/file-info?tmdbId=${tmdbId}&mediaType=${mediaType}`), {
+    // The hint is omitted when it's the default instance so the request stays
+    // byte-identical to the pre-multi-server one. The response lists EVERY
+    // server holding the title regardless, so one fetch is enough to resolve
+    // (or offer a choice of) the instance — no refetch on picker change.
+    const params = new URLSearchParams({ tmdbId: String(tmdbId), mediaType });
+    if (serverInstance) params.set("serverInstance", serverInstance);
+    fetch(withBasePath(`/api/admin/fix-match/file-info?${params}`), {
       signal: controller.signal,
     })
       .then((r) => r.ok ? r.json() as Promise<FileInfoResponse> : null)
       .then((data) => {
-        if (data) setFileInfo(data);
-        else setFileInfoError(true);
+        if (data) {
+          setFileInfo(data);
+          setPlexInstance(resolveInstance(data.plexInstances, serverInstance));
+          setJellyfinInstance(resolveInstance(data.jellyfinInstances, serverInstance));
+        } else setFileInfoError(true);
       })
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         setFileInfoError(true);
       });
     return () => controller.abort();
-  }, [open, tmdbId, mediaType]);
+  }, [open, tmdbId, mediaType, serverInstance]);
 
   useEffect(() => {
     if (open && phase === "search") {
@@ -211,6 +286,9 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
         mediaType,
         correctTmdbId: String(selected.id),
       });
+      // Same server the candidates (and their ratingKey) must come from as the
+      // POST that applies them. Omitted when default — see the file-info fetch.
+      if (plexInstance) params.set("serverInstance", plexInstance);
       const res  = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
       const json = await res.json() as CandidatesResponse & { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -238,7 +316,10 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
       const res  = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid }),
+        body:    JSON.stringify({
+          server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
+          ...(plexInstance ? { serverInstance: plexInstance } : {}),
+        }),
       });
       const json = await res.json() as { ok?: boolean; error?: string };
       if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -257,7 +338,10 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
       const res  = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id }),
+        body:    JSON.stringify({
+          server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
+          ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
+        }),
       });
       const json = await res.json() as { ok?: boolean; error?: string };
       if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -299,6 +383,19 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
   }
 
   const busy = plexState.status === "fetching" || plexState.status === "applying" || jellyfinState.status === "applying";
+
+  // Path shown for whichever server each side is currently pointed at; falls back
+  // to the path the route resolved for the requested instance.
+  const plexPath     = (fileInfo?.plexInstances.find((r) => r.serverInstance === plexInstance)?.filePath)
+    ?? fileInfo?.plexFilePath ?? null;
+  const jellyfinPath = (fileInfo?.jellyfinInstances.find((r) => r.serverInstance === jellyfinInstance)?.filePath)
+    ?? fileInfo?.jellyfinFilePath ?? null;
+  // Empty for the default server, so a single-server deployment renders exactly
+  // as before.
+  const plexInstanceLabel = plexInstance && plexInstance !== DEFAULT_MEDIA_INSTANCE
+    ? mediaInstanceLabel("plex", plexInstance) : "";
+  const jellyfinInstanceLabel = jellyfinInstance && jellyfinInstance !== DEFAULT_MEDIA_INSTANCE
+    ? mediaInstanceLabel("jellyfin", jellyfinInstance) : "";
 
   return (
     <>
@@ -354,19 +451,23 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                   Couldn&apos;t load file details. Match info may be incomplete.
                 </p>
               )}
-              {fileInfo?.plexFilePath && (
+              {plexPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">Plex</span>
-                  <p className="text-xs font-mono text-zinc-500 truncate" title={fileInfo.plexFilePath}>
-                    {fileInfo.plexFilePath.replace(/\\/g, "/").split("/").pop()}
+                  <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">
+                    {plexInstanceLabel || "Plex"}
+                  </span>
+                  <p className="text-xs font-mono text-zinc-500 truncate" title={plexPath}>
+                    {plexPath.replace(/\\/g, "/").split("/").pop()}
                   </p>
                 </div>
               )}
-              {fileInfo?.jellyfinFilePath && (
+              {jellyfinPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-purple-500/70 w-16 shrink-0">Jellyfin</span>
-                  <p className="text-xs font-mono text-zinc-500 truncate" title={fileInfo.jellyfinFilePath}>
-                    {fileInfo.jellyfinFilePath.replace(/\\/g, "/").split("/").pop()}
+                  <span className="text-xs font-semibold text-purple-500/70 w-16 shrink-0">
+                    {jellyfinInstanceLabel || "Jellyfin"}
+                  </span>
+                  <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinPath}>
+                    {jellyfinPath.replace(/\\/g, "/").split("/").pop()}
                   </p>
                 </div>
               )}
@@ -511,7 +612,9 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                   {showPlex && (
                     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-yellow-400">Plex</span>
+                        <span className="text-sm font-semibold text-yellow-400">
+                          Plex{plexInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{plexInstanceLabel}</span>}
+                        </span>
                         {plexState.status === "done" && (
                           <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> Fixed</span>
                         )}
@@ -519,6 +622,13 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                           <span className="text-xs text-red-400">{plexState.error}</span>
                         )}
                       </div>
+                      <InstancePicker
+                        service="plex"
+                        rows={fileInfo?.plexInstances ?? []}
+                        value={plexInstance}
+                        onChange={setPlexInstance}
+                        disabled={busy || plexState.status === "done"}
+                      />
                       {plexState.status === "idle" || plexState.status === "error" ? (
                         <button
                           onClick={fetchPlexCandidates}
@@ -539,7 +649,9 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                   {showJellyfin && (
                     <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-4 space-y-2.5">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm font-semibold text-purple-400">Jellyfin</span>
+                        <span className="text-sm font-semibold text-purple-400">
+                          Jellyfin{jellyfinInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{jellyfinInstanceLabel}</span>}
+                        </span>
                         {jellyfinState.status === "done" && (
                           <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> Fixed</span>
                         )}
@@ -547,6 +659,13 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                           <span className="text-xs text-red-400">{jellyfinState.error}</span>
                         )}
                       </div>
+                      <InstancePicker
+                        service="jellyfin"
+                        rows={fileInfo?.jellyfinInstances ?? []}
+                        value={jellyfinInstance}
+                        onChange={setJellyfinInstance}
+                        disabled={busy || jellyfinState.status === "done"}
+                      />
                       {jellyfinState.status === "idle" || jellyfinState.status === "error" ? (
                         <button
                           onClick={applyJellyfin}
@@ -610,6 +729,9 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                 <div className="px-6 pt-4 pb-3 border-b border-zinc-700 flex-shrink-0">
                   <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1.5">
                     Plex candidates for TMDB #{selected.id} · {plexCandidates.candidates.length} found
+                    {plexInstanceLabel && (
+                      <span className="ml-1.5 normal-case text-orange-400">on {plexInstanceLabel}</span>
+                    )}
                   </p>
                   {plexCandidates.arrConfirmedTmdbId !== null && (
                     <p className={`text-sm ${plexCandidates.arrConfirmedTmdbId === selected.id ? "text-emerald-400" : "text-yellow-400"}`}>
@@ -630,6 +752,7 @@ export function IssueFixMatchButton({ issueId, tmdbId, mediaType, title, onPlex,
                         candidate={c}
                         onSelect={applyPlex}
                         disabled={plexState.status === "applying"}
+                        serverInstance={plexCandidates.serverInstance}
                       />
                     ))
                   )}

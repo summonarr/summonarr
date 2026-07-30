@@ -104,6 +104,13 @@ function plexServerHeaders(token: string): Record<string, string> {
 }
 
 const FETCH_TIMEOUT_MS = 60_000;
+// Timeout for a small single-shot server probe (/identity). The 60s default is
+// calibrated for the paged library walk, not a ~1 KB identity read: multi-server
+// callers iterate instances SEQUENTIALLY (the sign-in membership loop in auth.ts,
+// the settings connection test), so one dead-but-configured server would
+// otherwise add a full minute of dead wait per instance before the next one is
+// even tried.
+export const PLEX_IDENTITY_TIMEOUT_MS = 10_000;
 const PLEX_PAGE_SIZE   = 1_000;
 // Response cap per fetch. The safe-fetch default is 10 MB decompressed; a
 // 1000-item page has ~10× headroom today, but match jellyfin.ts/arr.ts's 50 MB
@@ -141,10 +148,10 @@ async function plexFetchAllPages<T>(
   }
 }
 
-function plexFetch(url: string, token: string): Promise<Response> {
+function plexFetch(url: string, token: string, timeoutMs: number = FETCH_TIMEOUT_MS): Promise<Response> {
   return safeFetchAdminConfigured(url, {
     headers: plexServerHeaders(token),
-    timeoutMs: FETCH_TIMEOUT_MS,
+    timeoutMs,
     maxResponseBytes: LIBRARY_FETCH_MAX_BYTES,
   });
 }
@@ -761,9 +768,17 @@ export async function getPlexAccounts(
   return accounts;
 }
 
-export async function getPlexMachineId(serverUrl: string, adminToken: string): Promise<string | null> {
+// Reads the server's machineIdentifier. Swallows every error and returns null —
+// callers treat null as "could not reach / could not identify this server".
+// timeoutMs defaults to the library-walk timeout for back-compat; pass
+// PLEX_IDENTITY_TIMEOUT_MS from any path that iterates instances sequentially.
+export async function getPlexMachineId(
+  serverUrl: string,
+  adminToken: string,
+  timeoutMs: number = FETCH_TIMEOUT_MS,
+): Promise<string | null> {
   try {
-    const res = await plexFetch(`${serverUrl}/identity`, adminToken);
+    const res = await plexFetch(`${serverUrl}/identity`, adminToken, timeoutMs);
     if (!res.ok) return null;
     const data = (await res.json()) as { MediaContainer?: { machineIdentifier?: string } };
     return data.MediaContainer?.machineIdentifier ?? null;
@@ -785,7 +800,10 @@ export async function getPlexFriendEmails(adminToken: string, serverUrl?: string
     console.warn("[plex] getPlexFriendEmails called without serverUrl; refusing to enumerate friends.");
     return new Set<string>();
   }
-  const machineId = await getPlexMachineId(serverUrl, adminToken);
+  // Short timeout: this runs once per configured instance inside a SEQUENTIAL
+  // loop on the Plex sign-in path, and is followed by a 15s plex.tv fetch — at
+  // the 60s default a single dead server stalls sign-in for ~75s.
+  const machineId = await getPlexMachineId(serverUrl, adminToken, PLEX_IDENTITY_TIMEOUT_MS);
   if (!machineId) {
     console.warn("[plex] getPlexFriendEmails: unable to resolve machineId for server; refusing.");
     return new Set<string>();

@@ -34,6 +34,11 @@ interface InstanceView {
   hasAdminToken?: boolean; // plex
   url?: string; // jellyfin
   hasApiKey?: boolean; // jellyfin
+  // jellyfin — the per-instance `jellyfin<Slug>RestrictSignIn` policy read by
+  // isJellyfinSignInAllowed. The API resolves an absent Setting row to `true`,
+  // matching auth.ts's fail-closed default, so this is never undefined in a GET
+  // response; the `?` only keeps the shared Plex/Jellyfin view type honest.
+  restrictSignIn?: boolean;
 }
 
 interface Draft {
@@ -42,6 +47,7 @@ interface Draft {
   url: string; // serverUrl (plex) or url (jellyfin) — one field, label varies
   token: string; // adminToken (plex) or apiKey (jellyfin)
   adminEmail: string; // plex only
+  restrictSignIn: boolean; // jellyfin only
   hasToken: boolean;
   isNew: boolean;
 }
@@ -53,6 +59,11 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
     url: (service === "plex" ? v.serverUrl : v.url) ?? "",
     token: "",
     adminEmail: v.adminEmail ?? "",
+    // Fail closed on anything we can't read as an explicit `false` — same
+    // default as isJellyfinSignInAllowed, so the checkbox can never render
+    // unchecked (= "anyone may sign in") for a server that is actually
+    // restricted.
+    restrictSignIn: v.restrictSignIn ?? true,
     hasToken: (service === "plex" ? v.hasAdminToken : v.hasApiKey) ?? false,
     isNew: false,
   };
@@ -70,6 +81,10 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { ok?: boolean; error?: string }>>({});
+  // Index of the draft whose Remove button is awaiting confirmation. Indexes
+  // shift whenever the list changes, so every path that adds/removes/replaces
+  // drafts clears this.
+  const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -78,6 +93,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       const data = (await res.json()) as Record<MediaServerService, InstanceView[]>;
       const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
       setDrafts(named.map((v) => toDraft(v, service)));
+      setConfirmRemove(null);
       setLoadFailed(false);
     } catch {
       // Leaving `drafts` empty here used to be silent — and an empty draft list
@@ -102,13 +118,17 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
   const addInstance = () => {
     setDrafts((prev) => [
       ...prev,
-      { slug: "", name: "", url: "", token: "", adminEmail: "", hasToken: false, isNew: true },
+      // restrictSignIn defaults to true — a brand-new server starts fail-closed,
+      // matching isJellyfinSignInAllowed's default for an absent Setting row.
+      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, hasToken: false, isNew: true },
     ]);
+    setConfirmRemove(null);
     setStatus("idle");
   };
 
   const removeInstance = (idx: number) => {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
+    setConfirmRemove(null);
     setStatus("idle");
   };
 
@@ -145,6 +165,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
         : {
             url: d.url.trim(),
             apiKey: d.token ? d.token : d.hasToken ? MASKED_VALUE : undefined,
+            restrictSignIn: d.restrictSignIn,
           }),
     }));
 
@@ -163,6 +184,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       if (res.ok && data.ok) {
         const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
         setDrafts(named.map((v) => toDraft(v, service)));
+        setConfirmRemove(null);
         setTests(data.testResults ?? {});
         setStatus("ok");
         setMessage("Saved");
@@ -264,14 +286,84 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
               </div>
             )}
 
+            {/* Jellyfin-only sign-in policy. Mirrors the default instance's
+                JellyfinRestrictSignInToggle, which writes `jellyfinRestrictSignIn`
+                via /api/settings; a named instance's key is only reachable here.
+                Until this shipped a named instance was permanently fail-closed —
+                isJellyfinSignInAllowed reads the Setting and defaults to
+                restricted, and nothing could ever write it. */}
+            {service === "jellyfin" && (
+              <div className="pt-1">
+                <label className="flex items-start gap-2 text-sm text-zinc-300">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={d.restrictSignIn}
+                    onChange={(e) => update(idx, { restrictSignIn: e.target.checked })}
+                  />
+                  <span>
+                    Restrict sign-in to synced members
+                    <span className="block text-xs text-zinc-500">
+                      Only accounts this server has already synced into Summonarr — or anyone who has signed in
+                      before — may sign in. Unchecking lets ANY valid account on this Jellyfin server sign in and
+                      create a Summonarr account (not recommended).
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
+
             <div className="flex items-center justify-between pt-1">
               {test?.ok && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />Connected</span>}
               {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
               {!test && <span />}
-              <button type="button" onClick={() => removeInstance(idx)} className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400">
-                <Trash2 className="w-3.5 h-3.5" />Remove
-              </button>
+              {confirmRemove !== idx && (
+                <button
+                  type="button"
+                  // An `isNew` draft has never been saved, so nothing exists
+                  // server-side to destroy — discard it straight away and only
+                  // ask for confirmation on a persisted instance.
+                  onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
+                  className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />Remove
+                </button>
+              )}
             </div>
+
+            {/* Removal is genuinely destructive, and it lands on Save — not on
+                the click — because the server reconciles the whole list. Name
+                what goes and what stays before the admin commits: the stored
+                URL + credentials are encrypted and cannot be recovered, and the
+                cached library/session rows are rebuilt only by re-adding the
+                server. Play history deliberately survives (guardrail 28 — its
+                MediaServerUser rows are soft-deleted, never hard-deleted). */}
+            {confirmRemove === idx && (
+              <div className="rounded-md border border-red-900/60 bg-red-950/30 p-3 space-y-2">
+                <p className="text-xs text-red-200">
+                  Remove <strong>{d.name.trim() || d.slug || "this server"}</strong>? On <strong>Save</strong> this deletes
+                  its cached library items, its active sessions, and its stored URL + {tokenLabel} (encrypted —
+                  not recoverable), and marks its media-server users departed. <strong>Play history is preserved.</strong>
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => removeInstance(idx)}
+                    autoFocus
+                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />Remove server
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRemove(null)}
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         );
       })}

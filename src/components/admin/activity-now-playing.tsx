@@ -364,6 +364,12 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
     ? `/admin/activity/media/${s.tmdbId}${s.mediaType ? `?type=${(s.mediaType ?? "").toUpperCase()}` : ""}`
     : null;
   const accent = accentFor(s.title || s.id);
+  // Which media server this stream is on. ActiveSessionLive carries no
+  // `serverInstance` field (neither does the SSE snapshot select), but the id
+  // encodes the slug by construction — see activeSessionId in
+  // media-instances.ts — so the badge needs no wire change. "" for the default
+  // instance, and SourceTag renders nothing extra in that case.
+  const serverInstance = parseActiveSessionId(s.id).serverInstance;
   const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
   const bitrateMbps = toBitrateKbps(s.bitrate) / 1000;
   const paused = s.state === "paused";
@@ -453,7 +459,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <SourceTag source={s.source} />
+            <SourceTag source={s.source} instance={serverInstance} />
             <span
               className="ds-mono"
               style={{ fontSize: 9.5, color: "var(--ds-fg-disabled)" }}

@@ -3,6 +3,7 @@ import { requireAuth } from "@/lib/api-auth";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 // Hosts Plex's metadata agents return for candidate thumbnails. The external-URL
 // branch routes through safeFetchTrusted with this allowlist so the admin-controlled
@@ -37,8 +38,19 @@ export async function GET(request: NextRequest) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  const thumbPath = new URL(request.url).searchParams.get("path");
+  const { searchParams } = new URL(request.url);
+  const thumbPath = searchParams.get("path");
   if (!thumbPath) return new NextResponse("Missing path", { status: 400 });
+
+  // Which configured Plex server a RELATIVE thumb path belongs to (a Plex thumb
+  // path is server-local, like the ratingKey it hangs off). Validated here rather
+  // than inside the relative branch so an invalid slug is rejected uniformly.
+  // Absent ⇒ the default server, matching every pre-multi-server caller.
+  const serverInstanceParam = searchParams.get("serverInstance");
+  if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
+    return new NextResponse("Invalid serverInstance", { status: 400 });
+  }
+  const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
 
   if (/[@\\]/.test(thumbPath) && !/^https?:\/\//i.test(thumbPath)) {
     return new NextResponse("Invalid path", { status: 400 });
@@ -84,7 +96,7 @@ export async function GET(request: NextRequest) {
     if (!thumbPath.startsWith("/") || thumbPath.startsWith("//")) {
       return new NextResponse("Invalid path", { status: 400 });
     }
-    const plexConfig = await getPlexConfig();
+    const plexConfig = await getPlexConfig(serverInstance);
     if (!plexConfig.url || !plexConfig.token) return new NextResponse("Plex not configured", { status: 500 });
 
     const serverUrl = plexConfig.url.replace(/\/$/, "");

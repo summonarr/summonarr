@@ -3,12 +3,32 @@ import { withIssueAdmin } from "@/lib/api-auth";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+
+// One configured server that holds this title, with the path it holds it at.
+export type FileInfoInstance = {
+  serverInstance: string;
+  filePath:       string | null;
+};
 
 export type FileInfoResponse = {
   plexFilePath:      string | null;
   jellyfinFilePath:  string | null;
   arrTmdbId:         number | null;
   arrTitle:          string | null;
+
+  // The four fields below are purely ADDITIVE — the four above keep their exact
+  // pre-multi-server values, so an older consumer needs no change.
+  //
+  // Which instance the two filePaths above came from — the requested slug when
+  // that server actually holds the title, else null.
+  plexServerInstance:     string | null;
+  jellyfinServerInstance: string | null;
+  // EVERY configured server holding this title, so an issue-driven picker (which
+  // starts from a tmdbId with no library row in hand) can thread the right slug
+  // without a second round trip — one entry ⇒ pick it, several ⇒ ask the admin.
+  plexInstances:     FileInfoInstance[];
+  jellyfinInstances: FileInfoInstance[];
 };
 
 export const GET = withIssueAdmin(async (request, _ctx, _session) => {
@@ -21,19 +41,44 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     return NextResponse.json({ error: "Missing params" }, { status: 400 });
   }
 
-  const [plexItem, jellyfinItem] = await Promise.all([
+  // Absent ⇒ the default server, so a pre-multi-server caller sees exactly its
+  // old plexFilePath/jellyfinFilePath/arrTmdbId values.
+  const serverInstanceParam = searchParams.get("serverInstance");
+  if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
+  }
+  const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
+
+  const [plexItem, jellyfinItem, plexInstances, jellyfinInstances] = await Promise.all([
     prisma.plexLibraryItem.findFirst({
-      where: { tmdbId, mediaType },
+      where: { tmdbId, mediaType, serverInstance },
       select: { filePath: true },
     }),
     prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId, mediaType },
+      where: { tmdbId, mediaType, serverInstance },
       select: { filePath: true },
+    }),
+    prisma.plexLibraryItem.findMany({
+      where: { tmdbId, mediaType },
+      select: { serverInstance: true, filePath: true },
+      orderBy: { serverInstance: "asc" },
+    }),
+    prisma.jellyfinLibraryItem.findMany({
+      where: { tmdbId, mediaType },
+      select: { serverInstance: true, filePath: true },
+      orderBy: { serverInstance: "asc" },
     }),
   ]);
 
   let arrTmdbId: number | null = null;
-  const filePath = plexItem?.filePath ?? jellyfinItem?.filePath ?? null;
+  // Prefer the requested instance's path; fall back to any instance holding the
+  // title so the Radarr/Sonarr hint still resolves when the caller hasn't picked
+  // an instance yet and the title lives only on a named server.
+  const filePath = plexItem?.filePath
+    ?? jellyfinItem?.filePath
+    ?? plexInstances.find((r) => r.filePath)?.filePath
+    ?? jellyfinInstances.find((r) => r.filePath)?.filePath
+    ?? null;
 
   if (filePath) {
     const arrUrlKey = mediaType === "MOVIE" ? "radarrUrl"    : "sonarrUrl";
@@ -84,5 +129,9 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     jellyfinFilePath: jellyfinItem?.filePath ?? null,
     arrTmdbId,
     arrTitle,
+    plexServerInstance:     plexItem     ? serverInstance : null,
+    jellyfinServerInstance: jellyfinItem ? serverInstance : null,
+    plexInstances,
+    jellyfinInstances,
   } satisfies FileInfoResponse);
 });

@@ -1,5 +1,12 @@
 import { prisma } from "@/lib/prisma";
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
+import {
+  DEFAULT_MEDIA_INSTANCE,
+  isValidMediaInstanceSlug,
+  jellyfinSettingKey,
+  plexSettingKey,
+  type MediaInstanceKey,
+} from "@/lib/media-instances";
 
 // Bad-match computation for native admin clients.
 //
@@ -16,6 +23,11 @@ export interface BadMatchSide {
   title: string | null;
   posterPath: string | null;
   releaseYear: string | null;
+  // Which server holds this row ("" = the default/only one). A client fixing
+  // the match MUST send it back as `serverInstance` — the ratingKey/itemId
+  // beside it is server-local, so applying the fix against the default server
+  // would remap whatever unrelated item happens to carry that id there.
+  serverInstance: string;
 }
 
 export interface BadMatchItem {
@@ -30,6 +42,7 @@ export interface BadMatchItem {
 
 // Longest shared directory prefix across a set of file paths — the inferred
 // mount point that stripMountPoint peels off so paths compare across servers.
+// Only ever hand it ONE server instance's paths (see buildPathMap).
 function commonPathPrefix(paths: (string | null)[]): string {
   const valid = paths.filter((p): p is string => p !== null && p.length > 0);
   if (valid.length === 0) return "";
@@ -164,18 +177,103 @@ type PathEntry = {
   mediaType: "MOVIE" | "TV";
   filePath: string;
   key: string | null; // ratingKey (plex) or itemId (jellyfin)
+  serverInstance: string;
   title: string | null;
   year: string | null;
 };
 
+// One service's rows, flattened to the shape buildPathMap consumes (the two
+// tables differ only in the name of their server-native id column).
+type LibraryRow = {
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  filePath: string | null;
+  serverInstance: string;
+  key: string | null;
+  title: string | null;
+  year: string | null;
+};
+
+type StripPrefixField = "MoviePathStripPrefix" | "TvPathStripPrefix";
+type StripSettingKey = (instance: MediaInstanceKey, field: StripPrefixField) => string;
+
+// The Movie/Tv strip-prefix Setting keys for every NAMED instance present in a
+// row set. The default instance's two keys are always read separately, so this
+// returns [] — and costs no query — for a single-server deployment.
+function namedStripKeys(rows: { serverInstance: string }[], settingKey: StripSettingKey): string[] {
+  const slugs = new Set<string>();
+  for (const r of rows) {
+    // isValidMediaInstanceSlug guards key derivation against a corrupt/hand-
+    // edited serverInstance; such a row just inherits the default's prefix.
+    if (r.serverInstance !== DEFAULT_MEDIA_INSTANCE && isValidMediaInstanceSlug(r.serverInstance)) {
+      slugs.add(r.serverInstance);
+    }
+  }
+  return [...slugs].flatMap((s) => [settingKey(s, "MoviePathStripPrefix"), settingKey(s, "TvPathStripPrefix")]);
+}
+
+// Per-instance strip prefix, falling back to the shared default-instance key
+// when the instance has no row of its own. That fallback is what keeps every
+// existing deployment byte-identical: only plexMoviePathStripPrefix & co. exist
+// there, and a named server the admin hasn't configured separately inherits them.
+function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey) {
+  return (instance: string, mediaType: "MOVIE" | "TV"): string => {
+    const field: StripPrefixField = mediaType === "MOVIE" ? "MoviePathStripPrefix" : "TvPathStripPrefix";
+    return cfg[settingKey(instance, field)] ?? cfg[settingKey(DEFAULT_MEDIA_INSTANCE, field)] ?? "";
+  };
+}
+
+// Relative-path keyspace for one service, normalised PER SERVER INSTANCE.
+//
+// Grouping first is the whole correctness story: commonPathPrefix infers a
+// bind-mount root from the longest shared prefix of the paths it is handed, so
+// two Plex servers mounted at /plexmedia/… and /mnt/nas/video/… share no leading
+// segment, the inferred mount collapses to "", nothing is stripped, every key
+// stays an absolute path the other service can never match — and the report
+// silently empties out, reading as "no problems found".
+//
+// The groups then merge into ONE keyspace, because the Plex↔Jellyfin join is
+// relative-path based and cannot be instance-scoped (the same file is normally
+// on a Plex server AND a Jellyfin server, under unrelated slugs). Two instances
+// holding the same relative path is a mirrored library, so last-writer-wins
+// collapses two entries for one physical file rather than corrupting anything;
+// the default instance is merged last so it wins that collapse.
+function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType: "MOVIE" | "TV") => string): Map<string, PathEntry> {
+  const byInstance = new Map<string, LibraryRow[]>();
+  for (const row of rows) {
+    if (!row.filePath) continue;
+    const group = byInstance.get(row.serverInstance);
+    if (group) group.push(row);
+    else byInstance.set(row.serverInstance, [row]);
+  }
+
+  const out = new Map<string, PathEntry>();
+  const ordered = [...byInstance.keys()].sort((a, b) =>
+    a === DEFAULT_MEDIA_INSTANCE ? 1 : b === DEFAULT_MEDIA_INSTANCE ? -1 : a.localeCompare(b),
+  );
+  for (const instance of ordered) {
+    const group = byInstance.get(instance)!;
+    const mount = commonPathPrefix(group.map((r) => r.filePath));
+    for (const item of group) {
+      const rel = stripMountPoint(item.filePath, mount);
+      if (!rel) continue;
+      out.set(toMatchKey(normaliseRelPath(rel, stripFor(instance, item.mediaType)), item.mediaType), {
+        tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath!,
+        key: item.key, serverInstance: item.serverInstance, title: item.title, year: item.year,
+      });
+    }
+  }
+  return out;
+}
+
 export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMatchItem[]> {
   const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({
-      select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true },
+      select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true },
       take: LIBRARY_ITEM_CAP,
     }),
     prisma.jellyfinLibraryItem.findMany({
-      select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true },
+      select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true },
       take: LIBRARY_ITEM_CAP,
     }),
     prisma.setting.findMany({
@@ -183,38 +281,36 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
     }),
   ]);
 
-  const prefixCfg = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
-  const plexMovieStrip = prefixCfg.plexMoviePathStripPrefix ?? "";
-  const plexTvStrip = prefixCfg.plexTvPathStripPrefix ?? "";
-  const jfMovieStrip = prefixCfg.jellyfinMoviePathStripPrefix ?? "";
-  const jfTvStrip = prefixCfg.jellyfinTvPathStripPrefix ?? "";
+  const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
 
-  const plexMount = commonPathPrefix(plexItems.map((i) => i.filePath));
-  const jfMount = commonPathPrefix(jellyfinItems.map((i) => i.filePath));
-
-  const plexPathMap = new Map<string, PathEntry>();
-  for (const item of plexItems) {
-    if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, plexMount);
-    if (!rel) continue;
-    const strip = item.mediaType === "MOVIE" ? plexMovieStrip : plexTvStrip;
-    plexPathMap.set(toMatchKey(normaliseRelPath(rel, strip), item.mediaType), {
-      tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath,
-      key: item.plexRatingKey, title: item.title, year: item.year,
-    });
+  // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
+  // slug list is taken from the library rows rather than the instance registry:
+  // those are exactly the instances with paths to normalise, and a row left
+  // behind by a de-registered instance still gets its own prefix.
+  const namedKeys = [
+    ...namedStripKeys(plexItems, plexSettingKey),
+    ...namedStripKeys(jellyfinItems, jellyfinSettingKey),
+  ];
+  if (namedKeys.length > 0) {
+    const namedRows = await prisma.setting.findMany({ where: { key: { in: namedKeys } } });
+    for (const r of namedRows) prefixCfg[r.key] = r.value;
   }
 
-  const jfPathMap = new Map<string, PathEntry>();
-  for (const item of jellyfinItems) {
-    if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, jfMount);
-    if (!rel) continue;
-    const strip = item.mediaType === "MOVIE" ? jfMovieStrip : jfTvStrip;
-    jfPathMap.set(toMatchKey(normaliseRelPath(rel, strip), item.mediaType), {
-      tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath,
-      key: item.jellyfinItemId, title: item.title, year: item.year,
-    });
-  }
+  const plexPathMap = buildPathMap(
+    plexItems.map((i) => ({
+      tmdbId: i.tmdbId, mediaType: i.mediaType, filePath: i.filePath,
+      serverInstance: i.serverInstance, key: i.plexRatingKey, title: i.title, year: i.year,
+    })),
+    stripResolver(prefixCfg, plexSettingKey),
+  );
+
+  const jfPathMap = buildPathMap(
+    jellyfinItems.map((i) => ({
+      tmdbId: i.tmdbId, mediaType: i.mediaType, filePath: i.filePath,
+      serverInstance: i.serverInstance, key: i.jellyfinItemId, title: i.title, year: i.year,
+    })),
+    stripResolver(prefixCfg, jellyfinSettingKey),
+  );
 
   const raw: { relativePath: string; plex: PathEntry; jellyfin: PathEntry }[] = [];
   for (const [relPath, plexItem] of plexPathMap) {
@@ -241,6 +337,7 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
     title: e.title,
     posterPath: posters.get(`${e.tmdbId}:${e.mediaType}`) ?? null,
     releaseYear: e.year,
+    serverInstance: e.serverInstance,
   });
 
   return filtered.map((m) => {

@@ -177,6 +177,18 @@ export async function getCachedPlexAllowlist(): Promise<Set<string> | null> {
     consulted.push({ slug, state });
   }
 
+  // Evict state for slugs that left the registry — the same idiom
+  // reconcileManagerMap uses for its per-slug manager map (plex-events.ts).
+  // Without it a remove-then-re-add of the SAME slug pointing at a DIFFERENT
+  // server keeps serving the old server's cached member set (and its
+  // machineId-scoped emails) until the 30-min TTL expires, enforcing the wrong
+  // allowlist for the new server. A pruned slug's in-flight fetch self-catches,
+  // so dropping the state can't leak an unhandled rejection.
+  const registered = new Set(instances.map((i) => i.slug));
+  for (const slug of slugStates.keys()) {
+    if (!registered.has(slug)) slugStates.delete(slug);
+  }
+
   const parts: Array<{ slug: MediaInstanceKey; emails: Set<string>; fetchedAt: number }> = [];
   for (const { slug, state } of consulted) {
     // Block only on a COLD instance, so enforcement begins on the first Plex

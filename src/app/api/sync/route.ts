@@ -15,7 +15,7 @@ import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLib
 import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
+import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { type MediaInstanceKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
@@ -879,6 +879,40 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     if (result.status === "rejected") {
       console.error("[sync] Unexpected top-level sync rejection:", result.reason);
     }
+  }
+
+  // Sweep library rows belonging to servers that are no longer REGISTERED.
+  //
+  // Availability readers are an unscoped union across every row, and no sync
+  // path ever targets a de-registered slug again — so an orphaned row makes
+  // that server's whole catalogue read "in library" forever (guardrail 35).
+  // /api/admin/media-instances deletes on removal, but two cases slip past it:
+  // a removal that lands DURING this run (the arms above captured the instance
+  // list before their multi-minute library walk, so the write can re-insert
+  // rows for a slug removed in the meantime), and rows orphaned by a release
+  // that predates that cleanup. Re-reading the registry here — after the
+  // writes, in the same run — closes both.
+  //
+  // Scoped to REGISTERED (getMediaInstances), never merely syncable: an
+  // instance that is registered but temporarily unconfigured (an admin
+  // mid-edit, a blanked token) must keep its rows, exactly as the arms above
+  // leave a failed instance's rows intact.
+  try {
+    const [registeredPlex, registeredJellyfin] = await Promise.all([
+      getMediaInstances("plex"),
+      getMediaInstances("jellyfin"),
+    ]);
+    const [orphanedPlex, orphanedJellyfin] = await Promise.all([
+      prisma.plexLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredPlex.map((i) => i.slug) } } }),
+      prisma.jellyfinLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredJellyfin.map((i) => i.slug) } } }),
+    ]);
+    if (orphanedPlex.count > 0 || orphanedJellyfin.count > 0) {
+      console.warn(
+        `[sync] Swept library rows for de-registered servers — plex: ${orphanedPlex.count}, jellyfin: ${orphanedJellyfin.count}`,
+      );
+    }
+  } catch (err) {
+    console.error("[sync] De-registered-instance sweep failed:", err);
   }
 
   // Demote AVAILABLE requests that have dropped out of *both* the *arr caches and the

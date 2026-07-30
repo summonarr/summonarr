@@ -190,6 +190,9 @@ const notificationCreateManyData: Array<Record<string, unknown>> = [];
 const tmdbCacheDeleteManyCalls: unknown[] = [];
 const mediaRequestFindManyWheres: Array<ReqWhere | undefined> = [];
 const plexLibraryItemFindManyWheres: Array<Record<string, unknown> | undefined> = []; // the dedupe prior-mapping lookup
+// The de-registered-instance sweep runs OUTSIDE any transaction (top-level
+// prisma), so its deletes land here rather than in the TxRecord journal.
+const orphanSweepDeletes: Array<{ model: string; where: Record<string, unknown> | undefined }> = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
 type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
 const casCalls: CasCall[] = [];
@@ -325,6 +328,17 @@ const fakePrisma = {
     findMany: async (args?: { where?: Record<string, unknown> }) => {
       plexLibraryItemFindManyWheres.push(args?.where);
       return [];
+    },
+    // The end-of-run sweep for de-registered instances (top-level, not in a tx).
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "plexLibraryItem", where: args?.where });
+      return { count: 0 };
+    },
+  },
+  jellyfinLibraryItem: {
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "jellyfinLibraryItem", where: args?.where });
+      return { count: 0 };
     },
   },
   tmdbCache: {
@@ -482,6 +496,7 @@ beforeEach(() => {
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
   plexLibraryItemFindManyWheres.length = 0;
+  orphanSweepDeletes.length = 0;
   casCalls.length = 0;
   pgLockCalls.length = 0;
   requests.clear();
@@ -987,6 +1002,60 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
     "a partial run must not stamp lastPlexSyncSucceededAt",
   );
   assert.deepEqual(b.failedSources, ["plex"]);
+});
+
+test("de-registered instances are swept: the sweep targets exactly the slugs NOT in the registry, scoped per service", async () => {
+  // The orchestrator captures its instance list before a multi-minute library
+  // walk, so a removal landing mid-run can be re-inserted by the write that
+  // follows — and once the slug is de-registered nothing ever targets it
+  // again, so the rows would read "in library" forever. Re-reading the
+  // registry after the writes closes that window in the same run, and also
+  // repairs rows orphaned by a release predating the removal cleanup.
+  configurePlexMultiServer();
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? plexResponder([400])(url) : plexResponder([300])(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexSweep = orphanSweepDeletes.filter((d) => d.model === "plexLibraryItem");
+  assert.equal(plexSweep.length, 1, "exactly one sweep per service, after the library writes");
+  assert.deepEqual(
+    plexSweep[0].where,
+    { serverInstance: { notIn: ["", "remote"] } },
+    "the sweep spares every REGISTERED slug and targets the rest — a notIn over the registry, never a blanket delete",
+  );
+  const jfSweep = orphanSweepDeletes.filter((d) => d.model === "jellyfinLibraryItem");
+  assert.equal(jfSweep.length, 1);
+  assert.deepEqual(
+    jfSweep[0].where,
+    { serverInstance: { notIn: [""] } },
+    "each service sweeps against its OWN registry — a Plex slug must not spare a Jellyfin row or vice versa",
+  );
+});
+
+test("the sweep spares a REGISTERED but unconfigured instance — an admin mid-edit must not lose their library", async () => {
+  // getSyncableMediaInstances (what the sync arms fan out over) requires BOTH
+  // connection fields; getMediaInstances (what the sweep reads) requires only
+  // registration. That difference is the whole safety margin: an instance
+  // whose token is momentarily blank still appears in the registry, so its
+  // rows survive exactly as a failed instance's rows do.
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-default");
+  settings.set("plexInstances", JSON.stringify([{ slug: "halfway", name: "Halfway" }]));
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE); // a DIFFERENT slug's keys — "halfway" has none
+  respond = plexResponder([300]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  const plexSweep = orphanSweepDeletes.filter((d) => d.model === "plexLibraryItem");
+  assert.deepEqual(
+    plexSweep[0].where,
+    { serverInstance: { notIn: ["", "halfway"] } },
+    "an unconfigured-but-registered slug is spared; only de-registration sweeps rows",
+  );
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

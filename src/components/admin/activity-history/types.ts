@@ -4,6 +4,12 @@
 export interface HistoryRow {
   id: string;
   source: string;
+  // Media-server instance slug (media-instances.ts). "" = the default/only
+  // server, which is also what every row written before multi-server support
+  // reads (`@default("")`), so the UI renders a badge for it only when
+  // non-empty. Already on the wire: the ungrouped API path `include`s the whole
+  // PlayHistory row and the grouped path selects `h.*`.
+  serverInstance: string;
   title: string;
   tmdbId: number | null;
   mediaType: string | null;

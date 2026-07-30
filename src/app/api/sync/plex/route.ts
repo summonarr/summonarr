@@ -24,7 +24,9 @@ export async function POST(request: NextRequest) {
 // this route syncs only the default ("") Plex server; named additional instances
 // sync via the /api/sync orchestrator's per-instance fan-out only. Every library
 // read/delete here is therefore scoped to serverInstance = "" so the admin Resync
-// can never wipe or mask a named instance's rows.
+// can never wipe or mask a named instance's rows. (The episode-cache maintenance
+// is NOT scoped — TVEpisodeCache is TMDB-anchored shared data with no
+// serverInstance.)
 async function syncPlex(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;

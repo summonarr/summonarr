@@ -1519,51 +1519,97 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["source", "itemId", "tmdbId", "mediaType"],
+                required: ["server", "tmdbId", "mediaType", "correctTmdbId"],
                 properties: {
-                  source: { type: "string", enum: ["plex", "jellyfin"] },
-                  itemId: { type: "string" },
-                  tmdbId: { type: "integer" },
+                  server: { type: "string", enum: ["plex", "jellyfin"] },
+                  tmdbId: { type: "integer", description: "The wrong TMDB ID currently on the library row" },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
+                  correctTmdbId: { type: "integer" },
+                  canonicalGuid: { type: "string", description: "Plex only — a candidate GUID preselected from /admin/fix-match/candidates" },
+                  serverInstance: {
+                    type: "string",
+                    default: "",
+                    description:
+                      "Which configured media-server instance to remap (\"\" = the default server). MUST match the instance the library row came from — a Plex ratingKey / Jellyfin item id is server-local.",
+                  },
                 },
               },
             },
           },
         },
-        responses: { "200": { description: "Match updated" } },
+        responses: {
+          "200": { description: "Match updated (may carry a `warning` when Plex conflated both TMDB IDs)" },
+          "400": { description: "Bad body, or an invalid serverInstance slug" },
+          "404": { description: "No library row for that tmdbId on that instance — re-sync first" },
+          "429": { description: "Rate limited (10/min/admin)" },
+          "502": { description: "Remote remap or the follow-up cache write failed" },
+        },
       },
     },
     "/admin/fix-match/candidates": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Get TMDB candidates for a library item title (ADMIN / ISSUE_ADMIN)",
+        summary: "List Plex match candidates for a library item (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "query", in: "query", required: true, schema: { type: "string" } },
+          { name: "server", in: "query", required: true, schema: { type: "string", enum: ["plex"] } },
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
           { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          { name: "correctTmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "arrTmdbId", in: "query", schema: { type: "integer" }, description: "Radarr/Sonarr hint to boost a matching candidate" },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which configured Plex instance to read the row from and search (\"\" = the default server). Echoed back in the response.",
+          },
         ],
-        responses: { "200": { description: "TMDB search results" } },
+        responses: {
+          "200": { description: "Scored candidates plus target metadata, `ratingKey`, and the resolved `serverInstance`" },
+          "400": { description: "Missing params, a non-plex server, or an invalid serverInstance slug" },
+          "404": { description: "No Plex row for that tmdbId on that instance" },
+        },
       },
     },
     "/admin/fix-match/file-info": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Get file metadata for a library item (ADMIN / ISSUE_ADMIN)",
+        summary: "File paths + Radarr/Sonarr hint for a TMDB id across every configured server (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "source", in: "query", required: true, schema: { type: "string", enum: ["plex", "jellyfin"] } },
-          { name: "itemId", in: "query", required: true, schema: { type: "string" } },
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which instance `plexFilePath` / `jellyfinFilePath` are read from (\"\" = the default server).",
+          },
         ],
-        responses: { "200": { description: "File metadata from media server" } },
+        responses: {
+          "200": {
+            description:
+              "plexFilePath / jellyfinFilePath (for the requested instance) + arrTmdbId / arrTitle, " +
+              "plus plexServerInstance / jellyfinServerInstance (the instance each path came from, null when that server has no row) " +
+              "and plexInstances / jellyfinInstances — every instance holding the title, as `{ serverInstance, filePath }`.",
+          },
+          "400": { description: "Missing params, or an invalid serverInstance slug" },
+        },
       },
     },
     "/admin/fix-match/thumb": {
       get: {
         tags: ["Admin – Fix Match"],
-        summary: "Proxy thumbnail image for a library item (ADMIN / ISSUE_ADMIN)",
+        summary: "Proxy a Plex candidate thumbnail (ADMIN / ISSUE_ADMIN)",
         parameters: [
-          { name: "source", in: "query", required: true, schema: { type: "string", enum: ["plex", "jellyfin"] } },
-          { name: "itemId", in: "query", required: true, schema: { type: "string" } },
+          {
+            name: "path", in: "query", required: true, schema: { type: "string" },
+            description: "A Plex-relative thumb path, or an absolute URL from an allowlisted metadata-agent CDN",
+          },
+          {
+            name: "serverInstance", in: "query", schema: { type: "string", default: "" },
+            description: "Which configured Plex instance a RELATIVE path belongs to (\"\" = the default server). Ignored for absolute URLs.",
+          },
         ],
-        responses: { "200": { description: "Image binary (proxied)" } },
+        responses: {
+          "200": { description: "Image binary (proxied)" },
+          "400": { description: "Missing/invalid path, or an invalid serverInstance slug" },
+          "502": { description: "Upstream fetch failed or returned a non-image" },
+        },
       },
     },
 

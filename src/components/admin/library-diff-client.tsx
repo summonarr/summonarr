@@ -6,6 +6,7 @@ import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { mediaInstanceLabel } from "@/lib/media-instances";
 
 interface RequestSummary {
   total: number;
@@ -15,6 +16,10 @@ interface RequestSummary {
 export interface DiffItem {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
+  // Which configured server this row came from — "" = the default/only server,
+  // a slug = a named additional one. The same title can now appear once per
+  // server, so this is part of the row's identity (React key, DOM id).
+  serverInstance: string;
   title: string | null;
   posterPath: string | null;
   releaseYear: string | null;
@@ -36,6 +41,7 @@ export interface DiffItem {
 export interface BadMatchSideData {
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
+  serverInstance: string;
   title: string | null;
   posterPath: string | null;
   releaseYear: string | null;
@@ -81,9 +87,17 @@ function MediaCard({
   const typeLabel    = item.mediaType === "MOVIE" ? "MOVIE" : "TV";
   const arrName      = item.mediaType === "MOVIE" ? "Radarr" : "Sonarr";
 
+  // The default instance keeps the exact legacy id so any existing
+  // #item-<tmdbId>-<TYPE> deep link still resolves; a named server appends its
+  // slug, because one title present on two servers otherwise emits the same
+  // DOM id twice (breaking the anchor and the ?tmdbId= highlight scroll).
+  const domId = item.serverInstance
+    ? `item-${item.serverInstance}-${item.tmdbId}-${item.mediaType}`
+    : `item-${item.tmdbId}-${item.mediaType}`;
+
   return (
     <div
-      id={`item-${item.tmdbId}-${item.mediaType}`}
+      id={domId}
       className="flex gap-3"
       style={{
         padding: 12,
@@ -154,6 +168,24 @@ function MediaCard({
           >
             {typeLabel}
           </span>
+          {/* Server badge — rendered ONLY for a named instance (e.g.
+              "plex:remote"), so a single-server deployment keeps exactly the
+              chip row it always had. Colour is keyed off the service; the slug
+              lives in the text (same split as ServerUserTable's source badge). */}
+          {server && item.serverInstance !== "" && (
+            <span
+              className="ds-chip"
+              style={{
+                background: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 14%, transparent)`,
+                borderColor: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 35%, var(--ds-border))`,
+                color: server === "plex" ? PLEX_TINT : JELLYFIN_TINT,
+                fontSize: 9.5,
+                padding: "1px 6px",
+              }}
+            >
+              {mediaInstanceLabel(server, item.serverInstance)}
+            </span>
+          )}
           {item.voteAverage != null && item.voteAverage > 0 && (
             <span
               className="ds-mono"
@@ -214,6 +246,7 @@ function MediaCard({
             {server && (
               <FixMatchButton
                 server={server}
+                serverInstance={item.serverInstance}
                 tmdbId={item.tmdbId}
                 mediaType={item.mediaType}
                 correctTmdbId={item.arrTmdbId}
@@ -356,6 +389,13 @@ function BadMatchSide({
   );
 }
 
+// "PLEX" for the default server, "PLEX:REMOTE" for a named one. This chip is
+// the only place a bad-match card names its server, and with two Plex servers
+// configured a bare "PLEX" no longer says which one holds the wrong match.
+function sideLabel(service: "plex" | "jellyfin", serverInstance: string): string {
+  return mediaInstanceLabel(service, serverInstance).toUpperCase();
+}
+
 function BadMatchCard({ match }: { match: ClientBadMatch }) {
   const { arrVerdict, arrTmdbId } = match;
   const plexCorrectId     = arrTmdbId ?? match.jellyfin.tmdbId;
@@ -427,11 +467,12 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
             opacity: arrVerdict === "jellyfin" ? 0.4 : 1,
           }}
         >
-          <BadMatchSide item={match.plex} label="PLEX" tint={PLEX_TINT} filePath={match.relativePath} />
+          <BadMatchSide item={match.plex} label={sideLabel("plex", match.plex.serverInstance)} tint={PLEX_TINT} filePath={match.relativePath} />
           {arrVerdict === "plex" || arrVerdict === null ? (
             match.plexRatingKey ? (
               <FixMatchButton
                 server="plex"
+                serverInstance={match.plex.serverInstance}
                 tmdbId={match.plex.tmdbId}
                 mediaType={match.plex.mediaType}
                 correctTmdbId={plexCorrectId}
@@ -459,11 +500,12 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
             opacity: arrVerdict === "plex" ? 0.4 : 1,
           }}
         >
-          <BadMatchSide item={match.jellyfin} label="JELLYFIN" tint={JELLYFIN_TINT} filePath={match.relativePath} />
+          <BadMatchSide item={match.jellyfin} label={sideLabel("jellyfin", match.jellyfin.serverInstance)} tint={JELLYFIN_TINT} filePath={match.relativePath} />
           {arrVerdict === "jellyfin" || arrVerdict === null ? (
             match.jellyfinItemId ? (
               <FixMatchButton
                 server="jellyfin"
+                serverInstance={match.jellyfin.serverInstance}
                 tmdbId={match.jellyfin.tmdbId}
                 mediaType={match.jellyfin.mediaType}
                 correctTmdbId={jellyfinCorrectId}
@@ -514,6 +556,12 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
             tmdbId:        wrongItem.tmdbId,
             mediaType:     wrongItem.mediaType,
             correctTmdbId: arrTmdbId,
+            // Same instance pinning the per-row FixMatchButton does. Omitted
+            // when empty so a default-instance body stays byte-identical.
+            // Without it the route falls back to the default server and
+            // rewrites ITS library using a ratingKey that belongs to the
+            // named one — the wrong-server remap this phase fixed.
+            ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
           }),
         });
         const json = await res.json() as { ok?: boolean };
@@ -652,9 +700,15 @@ function DiffColumn({
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {items.map((item) => (
             <MediaCard
-              key={`${item.tmdbId}:${item.mediaType}`}
+              // serverInstance is part of the key: the same title present on two
+              // configured servers is two rows here, and without it React sees a
+              // duplicate key and renders only one of them.
+              key={`${item.serverInstance}:${item.tmdbId}:${item.mediaType}`}
               item={item}
               server={server}
+              // Deliberately matched on tmdbId:mediaType only — a ?tmdbId= deep
+              // link names a title, not a server instance, so it rings that
+              // title on every server holding it rather than needing a new param.
               highlight={
                 highlightServer === server &&
                 highlightKey === `${item.tmdbId}:${item.mediaType}`

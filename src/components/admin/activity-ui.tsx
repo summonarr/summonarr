@@ -29,7 +29,14 @@ export function sourceDotColor(source: string): string {
   return source === "plex" ? "var(--ds-plex)" : "var(--ds-jellyfin)";
 }
 
-export function SourceTag({ source }: { source: string }) {
+// `instance` is a media-server instance slug (media-instances.ts). It is
+// appended to the label as ":<slug>" — the same shape mediaInstanceLabel
+// produces ("plex:remote") — and ONLY when non-empty: `serverInstance` is a
+// `@default("")` column, so every pre-multi-server row reads "" and is
+// indistinguishable from "the default server". Omitting it there keeps
+// single-server deployments byte-identical and never mislabels legacy rows.
+// Colour stays keyed off `source`; the slug lives in the text.
+export function SourceTag({ source, instance }: { source: string; instance?: string }) {
   const isPlex = source === "plex";
   return (
     <span
@@ -46,6 +53,7 @@ export function SourceTag({ source }: { source: string }) {
       }}
     >
       {isPlex ? "Plex" : "Jellyfin"}
+      {instance ? `:${instance}` : ""}
     </span>
   );
 }

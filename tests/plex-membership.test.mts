@@ -21,6 +21,9 @@
 //     nothing without poisoning, and a configured-but-COLD instance whose
 //     fetch fails or comes back empty poisons the WHOLE call to null (a
 //     partial union would mass-revoke the down server's users);
+//   - a slug that leaves the registry has its cached state EVICTED, so
+//     re-adding the slug against a different server can't serve the old
+//     server's members out of a still-fresh cache;
 //   - membership emails arrive lowercased (plex.ts) and each instance's
 //     configured admin email is appended lowercased+trimmed to ITS OWN set.
 //
@@ -92,6 +95,14 @@ const BRINE_TOKEN = "brine-plex-token";
 const TARDY_URL = "http://203.0.113.50:32400";
 const TARDY_MACHINE = "machine-tardy";
 const TARDY_TOKEN = "tardy-plex-token";
+// Two DIFFERENT servers reachable under the SAME slug, for the deregistration
+// eviction test at the end of the timeline.
+const SWAP_A_URL = "http://203.0.113.60:32400";
+const SWAP_A_MACHINE = "machine-swap-a";
+const SWAP_A_TOKEN = "swap-a-plex-token";
+const SWAP_B_URL = "http://203.0.113.70:32400";
+const SWAP_B_MACHINE = "machine-swap-b";
+const SWAP_B_TOKEN = "swap-b-plex-token";
 
 type FetchCall = { url: string; headers: Headers };
 type Responder = () => Response | Promise<Response>;
@@ -109,6 +120,8 @@ let arcticIdentityResponder: Responder = () => {
 };
 const brineIdentityResponder: Responder = () => identityJson(BRINE_MACHINE);
 const tardyIdentityResponder: Responder = () => identityJson(TARDY_MACHINE);
+const swapAIdentityResponder: Responder = () => identityJson(SWAP_A_MACHINE);
+const swapBIdentityResponder: Responder = () => identityJson(SWAP_B_MACHINE);
 // usersResponder receives the recorded call so multi-instance tests can key
 // the response off headers.get("x-plex-token"); single-server tests ignore it.
 let usersResponder: (call: FetchCall) => Response | Promise<Response> = () => {
@@ -137,6 +150,14 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (url.startsWith(`${TARDY_URL}/identity`)) {
     identityCalls.push(call);
     return tardyIdentityResponder();
+  }
+  if (url.startsWith(`${SWAP_A_URL}/identity`)) {
+    identityCalls.push(call);
+    return swapAIdentityResponder();
+  }
+  if (url.startsWith(`${SWAP_B_URL}/identity`)) {
+    identityCalls.push(call);
+    return swapBIdentityResponder();
   }
   if (url.startsWith("https://plex.tv/api/users")) {
     usersCalls.push(call);
@@ -483,9 +504,9 @@ test("POISON: a configured-but-COLD instance whose fetch can't produce a set nul
 
 test("an UNCONFIGURED registry entry contributes nothing and does NOT poison", async () => {
   fakeNow += 1 * MIN;
-  // The admin removed arctic from the registry (its lingering slug state is
-  // inert once deregistered) and registered "ghost" without ever entering a
-  // server url/token for it.
+  // The admin removed arctic from the registry (this call also EVICTS its slug
+  // state — see the deregistration test at the end of the file) and registered
+  // "ghost" without ever entering a server url/token for it.
   settings.plexInstances = registryJson("remote", "ghost");
   settingReadKeys.length = 0;
   const identityBefore = identityCalls.length;
@@ -579,4 +600,50 @@ test("unconfigured→configured transition: an 'unconfigured' verdict never arms
     "the new instance's members must join the union on the FIRST call after configuration — a stale 'unconfigured' skip here is the enforcing-partial-union mass-revoke bug",
   );
   assert.equal(usersCalls.length - usersBefore, 1, "the transition call performed a real fetch for the new instance");
+});
+
+test("deregistering a slug EVICTS its cached state — re-adding the same slug against a DIFFERENT server serves the new server's members, not the old cache", async () => {
+  // The per-slug cache is keyed on the slug alone, not on the server it was
+  // fetched from, and its TTL is 30 minutes. Without eviction on deregistration,
+  // remove-then-re-add ("I pointed 'backup' at a new box") kept enforcing the
+  // OLD server's machineId-scoped allowlist for up to half an hour: members of
+  // the new server get locked out, members of a server that is no longer
+  // attached stay admitted. plex-events.ts prunes its per-slug manager map the
+  // same way.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "swap");
+  settings.plexSwapServerUrl = SWAP_A_URL;
+  settings.plexSwapAdminToken = SWAP_A_TOKEN;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === SWAP_A_TOKEN) return xmlResponse(usersXml([{ email: "olduser@example.com", machine: SWAP_A_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  const withSwapA = await getCachedPlexAllowlist();
+  assert.ok(withSwapA?.has("olduser@example.com"), "the first server's members join the union");
+
+  // Removed from the registry — this call is where the eviction happens.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote");
+  const withoutSwap = await getCachedPlexAllowlist();
+  assert.ok(withoutSwap && !withoutSwap.has("olduser@example.com"), "a deregistered instance stops contributing");
+
+  // Re-added under the SAME slug, pointing at a DIFFERENT server. Its cache
+  // would still be TTL-fresh (~2 min old) if it had survived deregistration.
+  fakeNow += 1 * MIN;
+  settings.plexInstances = registryJson("remote", "swap");
+  settings.plexSwapServerUrl = SWAP_B_URL;
+  settings.plexSwapAdminToken = SWAP_B_TOKEN;
+  usersResponder = (call) => {
+    const token = call.headers.get("x-plex-token");
+    if (token === SWAP_B_TOKEN) return xmlResponse(usersXml([{ email: "newuser2@example.com", machine: SWAP_B_MACHINE }]));
+    throw new Error(`unexpected plex.tv refetch for token ${token}`);
+  };
+  const withSwapB = await getCachedPlexAllowlist();
+  assert.ok(withSwapB, "the re-added instance must fetch cold, not poison");
+  assert.ok(withSwapB.has("newuser2@example.com"), "the NEW server's members must be enforced immediately");
+  assert.ok(
+    !withSwapB.has("olduser@example.com"),
+    "stale state from the previous registration of this slug must not survive deregistration — that is a lockout of the new server's users",
+  );
 });

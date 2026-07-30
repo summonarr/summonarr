@@ -17,6 +17,9 @@ import { shadowPrismaModel } from "./_helpers.mts";
 
 const registryValues = new Map<string, string>();
 let configuredKeys = new Set<string>();
+// Per-key override for the connection-field VALUE the stub reports (default
+// "set") — used by the whitespace test below.
+let configuredValues = new Map<string, string>();
 
 const settingStub = {
   findUnique: async (args: { where: { key: string } }) => {
@@ -26,7 +29,7 @@ const settingStub = {
   findMany: async (args: { where: { key: { in: string[] } } }) => {
     return args.where.key.in
       .filter((k) => configuredKeys.has(k))
-      .map((k) => ({ key: k, value: "set" }));
+      .map((k) => ({ key: k, value: configuredValues.get(k) ?? "set" }));
   },
 };
 
@@ -35,6 +38,7 @@ shadowPrismaModel(prisma, "setting", settingStub);
 function reset() {
   registryValues.clear();
   configuredKeys = new Set<string>();
+  configuredValues = new Map<string, string>();
 }
 
 test("no registry + no additional config → the default instance only", async () => {
@@ -92,6 +96,25 @@ test("getSyncableMediaInstances (jellyfin): only instances with Url + ApiKey con
   configuredKeys = new Set(["jellyfinUrl", "jellyfinApiKey", "jellyfinRemoteUrl"]);
   const syncable = await getSyncableMediaInstances("jellyfin");
   assert.deepEqual(syncable.map((i) => i.slug), [""]);
+});
+
+test("isMediaInstanceConfigured trims: a whitespace-only URL or token is NOT configured", async () => {
+  reset();
+  registryValues.set("plexInstances", JSON.stringify([{ slug: "blank" }, { slug: "tabtoken" }]));
+  configuredKeys = new Set([
+    "plexServerUrl", "plexAdminToken",
+    "plexBlankServerUrl", "plexBlankAdminToken",
+    "plexTabtokenServerUrl", "plexTabtokenAdminToken",
+  ]);
+  // A row that exists but holds only whitespace. Untrimmed, `!!"   "` is true,
+  // so the instance advertised itself as configured — the login tab rendered and
+  // the sync fan-out included it — while every consumer trims before use
+  // (authorizeWithPlex, plex-membership, the poller) and therefore refused it.
+  configuredValues.set("plexBlankServerUrl", "   ");
+  configuredValues.set("plexTabtokenAdminToken", "\t\n ");
+
+  const syncable = await getSyncableMediaInstances("plex");
+  assert.deepEqual(syncable.map((i) => i.slug), [""], "only the genuinely-configured default survives");
 });
 
 test("plex and jellyfin registries are read from their own keys (services don't cross-contaminate)", async () => {

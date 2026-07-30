@@ -81,8 +81,13 @@ export async function isMediaInstanceConfigured(service: MediaServerService, slu
       ? [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken")]
       : [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey")];
   const rows = await prisma.setting.findMany({ where: { key: { in: [urlKey, authKey] } } });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  return !!map[urlKey] && !!map[authKey];
+  // Trimmed presence, not raw truthiness: every consumer trims before use
+  // (authorizeWithPlex, plex-membership, the play-history poller), so a
+  // whitespace-only value is not a usable config. Reading it as configured
+  // showed the instance's sign-in tab and put it in the sync fan-out while
+  // every actual connection refused.
+  const map = new Map(rows.map((r) => [r.key, r.value.trim()]));
+  return !!map.get(urlKey) && !!map.get(authKey);
 }
 
 // All registered instances for a service, default first, then registry
@@ -100,11 +105,17 @@ export async function getSyncableMediaInstances(service: MediaServerService): Pr
   return all.filter((_, idx) => results[idx]);
 }
 
-// Persist the named-instance registry (admin settings). Validates and
-// de-dupes; the default ("") is never stored (it's synthesized). Callers must
-// separately write each instance's connection Setting rows via
-// plexSettingKey/jellyfinSettingKey.
-export async function saveMediaInstances(service: MediaServerService, entries: MediaInstanceConfig[]): Promise<void> {
+// The Setting row a registry save writes: validated, de-duped, serialized. The
+// default ("") is never stored (it's synthesized in getMediaInstances).
+//
+// PURE, and exported, so a caller that must write the registry INSIDE its own
+// transaction (the admin media-instances route, whose registry save and library
+// cleanup have to commit together) can hand the row to its own tx client
+// without re-implementing — or drifting from — this normalization.
+export function buildMediaInstanceRegistryWrite(
+  service: MediaServerService,
+  entries: MediaInstanceConfig[],
+): { key: string; value: string } {
   const seen = new Set<string>([DEFAULT_MEDIA_INSTANCE]);
   const clean: MediaInstanceConfig[] = [];
   for (const e of entries) {
@@ -116,9 +127,18 @@ export async function saveMediaInstances(service: MediaServerService, entries: M
       seen.add(norm.slug);
     }
   }
+  return { key: REGISTRY_KEY[service], value: JSON.stringify(clean) };
+}
+
+// Persist the named-instance registry (admin settings). Callers must separately
+// write each instance's connection Setting rows via
+// plexSettingKey/jellyfinSettingKey — and, when removing an instance, clean up
+// its library/session rows too (see the admin media-instances route).
+export async function saveMediaInstances(service: MediaServerService, entries: MediaInstanceConfig[]): Promise<void> {
+  const { key, value } = buildMediaInstanceRegistryWrite(service, entries);
   await prisma.setting.upsert({
-    where: { key: REGISTRY_KEY[service] },
-    create: { key: REGISTRY_KEY[service], value: JSON.stringify(clean) },
-    update: { value: JSON.stringify(clean) },
+    where: { key },
+    create: { key, value },
+    update: { value },
   });
 }

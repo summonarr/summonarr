@@ -154,8 +154,9 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       const affected = unmatched.map((u) => `${u.email} (${u.id})`).join(", ");
       console.warn(
         `[plex-backfill] ${unmatched.length} Plex-only user(s) could NOT be bound — their User.email does not ` +
-          "match any email returned by plex.tv for this admin token. They will be REFUSED on next Plex sign-in " +
-          `until an admin updates their email (or sets plexUserId manually). Affected: ${affected}`,
+          "match any email returned by plex.tv for ANY configured Plex instance's admin token. They will be " +
+          "REFUSED on next Plex sign-in until an admin updates their email (or sets plexUserId manually). " +
+          `Affected: ${affected}`,
       );
     }
   } catch (err) {

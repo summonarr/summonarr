@@ -19,6 +19,10 @@ import { withBasePath } from "@/lib/base-path";
 export interface RecentPlay {
   id: string;
   source: string;
+  // Media-server instance slug (media-instances.ts). "" = the default/only
+  // server, and also what every row written before multi-server support reads
+  // (`@default("")`) — so the badge below renders only when non-empty.
+  serverInstance: string;
   title: string;
   tmdbId: number | null;
   mediaType: string | null;
@@ -203,6 +207,7 @@ export function ActivityRecentPlays({
       const items: RecentPlay[] = data.items.map((p) => ({
         id: p.id,
         source: p.source,
+        serverInstance: p.serverInstance,
         title: p.title,
         tmdbId: p.tmdbId,
         mediaType: p.mediaType,
@@ -437,6 +442,28 @@ export function ActivityRecentPlays({
                                 background: sourceDotColor(p.source),
                               }}
                             />
+                            {/* Instance slug for a named server. Rendered only
+                                when non-empty — "" is both the default server
+                                and every pre-multi-server row, which must stay
+                                unlabelled. Colour keyed off `source` (same as
+                                the dot), never off the slug. */}
+                            {p.serverInstance && (
+                              <span
+                                className="ds-mono"
+                                title={`Played on the "${p.serverInstance}" ${p.source} server`}
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: "1px 5px",
+                                  borderRadius: 999,
+                                  background: "oklch(1 0 0 / 0.06)",
+                                  color: sourceDotColor(p.source),
+                                  letterSpacing: "0.04em",
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {p.serverInstance}
+                              </span>
+                            )}
                           </Link>
                         </td>
                         <td style={{ ...TD, maxWidth: 320 }}>

@@ -6,6 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import { withBasePath } from "@/lib/base-path";
+import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
 
@@ -17,6 +18,12 @@ interface Props {
   label:         string;
 
   arrTmdbId?:    number | null;
+
+  // Which configured server's library row this button rewrites. "" (the default)
+  // keeps the exact pre-multi-server request shape; a named slug is threaded into
+  // both the candidates query and the POST body so the remote rewrite lands on
+  // the same server the row (and its ratingKey) came from.
+  serverInstance?: string;
 }
 
 const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: string; label: string }> = {
@@ -32,12 +39,15 @@ interface ModalProps {
   data:          CandidatesResponse;
   correctTmdbId: number;
   arrTmdbId:     number | null;
+  // "plex:<slug>" for a named server, empty for the default one — surfaced so the
+  // admin can see WHICH server this picker is about to rewrite.
+  instanceLabel: string;
   onSelect:      (guid: string) => void;
   onCancel:      () => void;
   applying:      boolean;
 }
 
-function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCancel, applying }: ModalProps) {
+function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onCancel, applying }: ModalProps) {
   const {
     candidates, targetTitle, targetYear, targetImdbId, targetPosterPath,
     targetOverview, targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
@@ -69,6 +79,9 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-1">
               Target — TMDB #{correctTmdbId}
+              {instanceLabel && (
+                <span className="ml-2 text-orange-400 normal-case">· on {instanceLabel}</span>
+              )}
               {resolvedArrTmdbId === correctTmdbId && (
                 <span className="ml-2 text-emerald-400">· Radarr/Sonarr confirmed ✓</span>
               )}
@@ -147,6 +160,9 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
         <div className="px-6 py-3 flex-shrink-0 flex items-center justify-between">
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
             Plex candidates — select the correct match
+            {instanceLabel && (
+              <span className="ml-1.5 text-orange-400 normal-case">on {instanceLabel}</span>
+            )}
           </p>
           <p className="text-xs text-zinc-500">{candidates.length} found</p>
         </div>
@@ -158,7 +174,7 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
             candidates.map((c) => (
               <CandidateRow key={c.guid} candidate={c} onSelect={onSelect} disabled={applying}
                 targetImdbId={targetImdbId} targetRuntime={targetRuntime} targetGenres={targetGenres}
-                arrTmdbId={resolvedArrTmdbId} />
+                arrTmdbId={resolvedArrTmdbId} serverInstance={data.serverInstance} />
             ))
           )}
         </div>
@@ -179,19 +195,25 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, onSelect, onCance
 }
 
 function CandidateRow({
-  candidate, onSelect, disabled, targetImdbId, targetRuntime, targetGenres, arrTmdbId,
+  candidate, onSelect, disabled, targetImdbId, targetRuntime, targetGenres, arrTmdbId, serverInstance,
 }: {
-  candidate:     PlexCandidate;
-  onSelect:      (guid: string) => void;
-  disabled:      boolean;
-  targetImdbId:  string;
-  targetRuntime: number | null;
-  targetGenres:  string[];
-  arrTmdbId:     number | null;
+  candidate:      PlexCandidate;
+  onSelect:       (guid: string) => void;
+  disabled:       boolean;
+  targetImdbId:   string;
+  targetRuntime:  number | null;
+  targetGenres:   string[];
+  arrTmdbId:      number | null;
+  serverInstance: string;
 }) {
   const hash     = candidate.guid.split("/").pop() ?? candidate.guid;
+  // A relative Plex thumb path is server-local like the ratingKey, so the proxy
+  // needs the same instance the candidates came from. Omitted when default.
   const thumbSrc = candidate.thumb
-    ? withBasePath(`/api/admin/fix-match/thumb?path=${encodeURIComponent(candidate.thumb)}`)
+    ? withBasePath(`/api/admin/fix-match/thumb?${new URLSearchParams({
+        path: candidate.thumb,
+        ...(serverInstance ? { serverInstance } : {}),
+      })}`)
     : posterUrl(candidate.tmdbPosterPath, "w342");
   const arrMatch = arrTmdbId !== null && candidate.tmdbId === String(arrTmdbId);
 
@@ -295,11 +317,21 @@ function CandidateRow({
 
 // Admin control to correct a wrong library→TMDB match. Plex opens a candidate
 // picker (fetch → select → apply); Jellyfin applies directly with no picker.
-export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label, arrTmdbId = null }: Props) {
+export function FixMatchButton({
+  server, tmdbId, mediaType, correctTmdbId, label, arrTmdbId = null,
+  serverInstance = DEFAULT_MEDIA_INSTANCE,
+}: Props) {
   const router = useRouter();
   const [phase, setPhase]       = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null);
+
+  // Two library rows can share a tmdbId once a second server is configured, so a
+  // bare "Fix match" is ambiguous — name the server on both the button and the
+  // picker. Empty for the default instance (single-server deployments unchanged).
+  const instanceLabel = serverInstance === DEFAULT_MEDIA_INSTANCE
+    ? ""
+    : mediaInstanceLabel(server, serverInstance);
 
   const reset = useCallback(() => {
     setPhase("idle");
@@ -315,6 +347,9 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
     try {
       const params = new URLSearchParams({ server, tmdbId: String(tmdbId), mediaType, correctTmdbId: String(correctTmdbId) });
       if (arrTmdbId) params.set("arrTmdbId", String(arrTmdbId));
+      // Omitted for the default instance so the request is byte-identical to the
+      // pre-multi-server one (the route defaults an absent param to "").
+      if (serverInstance) params.set("serverInstance", serverInstance);
       const res = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
       const json = await res.json() as CandidatesResponse & { error?: string };
       if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
@@ -333,7 +368,12 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
       const res = await fetch(withBasePath("/api/admin/fix-match"), {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ server, tmdbId, mediaType, correctTmdbId, canonicalGuid }),
+        // serverInstance omitted when default — same byte-identical rationale as
+        // the candidates query above.
+        body:    JSON.stringify({
+          server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
+          ...(serverInstance ? { serverInstance } : {}),
+        }),
       });
       let json: { ok?: boolean; error?: string; warning?: string } = {};
       try { json = await res.json() as { ok?: boolean; error?: string; warning?: string }; } catch { }
@@ -372,6 +412,7 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
           data={candidates}
           correctTmdbId={correctTmdbId}
           arrTmdbId={arrTmdbId}
+          instanceLabel={instanceLabel}
           onSelect={(guid) => applyFix(guid)}
           onCancel={reset}
           applying={phase === "applying"}
@@ -387,7 +428,11 @@ export function FixMatchButton({ server, tmdbId, mediaType, correctTmdbId, label
             hover:bg-orange-500/20 hover:border-orange-500/50
             disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {phase === "fetching" ? "Loading…" : phase === "applying" ? "Applying…" : label}
+          {phase === "fetching"
+            ? "Loading…"
+            : phase === "applying"
+              ? "Applying…"
+              : instanceLabel ? `${label} · ${instanceLabel}` : label}
         </button>
         {phase === "error" && (
           <>
