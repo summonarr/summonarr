@@ -23,9 +23,9 @@ import { withBasePath } from "@/lib/base-path";
 import { NotificationsModal } from "./user-modals/notifications-modal";
 import { PermissionsModal } from "./user-modals/permissions-modal";
 import { SessionsModal } from "./user-modals/sessions-modal";
-import { roleLabel, type NamedInstance, type User } from "./user-modals/shared";
+import { roleLabel, type NamedInstance, type RestrictedMediaInstance, type User } from "./user-modals/shared";
 
-export type { NamedInstance } from "./user-modals/shared";
+export type { NamedInstance, RestrictedMediaInstance } from "./user-modals/shared";
 
 interface UserTableProps {
   users: User[];
@@ -36,6 +36,9 @@ interface UserTableProps {
   // Named instances (from the registry) the permission editor can grant
   // per-user access to. Empty/absent hides the Instance access section.
   namedInstances?: NamedInstance[];
+  // RESTRICTED Plex/Jellyfin servers the permission editor can grant per-user
+  // visibility on. Empty/absent hides the Media server access section.
+  mediaInstances?: RestrictedMediaInstance[];
 }
 
 const sourceStyles: Record<User["source"], string> = {
@@ -64,9 +67,10 @@ interface ActionsMenuProps {
   onPurge: () => void;
   has4k?: boolean;
   namedInstances?: NamedInstance[];
+  mediaInstances?: RestrictedMediaInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, namedInstances }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -228,12 +232,12 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
 
       {notifOpen    && <NotificationsModal u={u} onClose={closeNotif} />}
       {sessionsOpen && <SessionsModal      u={u} onClose={closeSessions} />}
-      {permOpen     && <PermissionsModal   u={u} onClose={closePerm} show4k={has4k} namedInstances={namedInstances} />}
+      {permOpen     && <PermissionsModal   u={u} onClose={closePerm} show4k={has4k} namedInstances={namedInstances} mediaInstances={mediaInstances} />}
     </div>
   );
 }
 
-export function UserTable({ users, currentUserId, has4k, namedInstances }: UserTableProps) {
+export function UserTable({ users, currentUserId, has4k, namedInstances, mediaInstances }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -490,6 +494,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances }: UserT
                 onPurge={() => setConfirming({ id: u.id, kind: "purge" })}
                 has4k={has4k}
                 namedInstances={namedInstances}
+                mediaInstances={mediaInstances}
               />
             )}
           </div>

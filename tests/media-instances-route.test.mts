@@ -704,6 +704,104 @@ test("removing a Jellyfin instance also deletes its RestrictSignIn row (the wide
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// `restricted` — the per-server VISIBILITY flag (per-user media-server grants)
+// Wire contract the instances manager depends on, for BOTH services:
+//   GET  → <service>[].restricted: boolean (registry metadata, not a Setting)
+//   POST → { restricted?: boolean } persists into the registry JSON
+// The manager round-trips the GET view straight back through POST, so an
+// unechoed or undefaulted field silently CLEARS the flag on the next save —
+// which un-gates a private server's whole library for every user at once.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("restricted round-trip: POST persists it into the registry, GET echoes it for both services, and re-POSTing the GET view unchanged does NOT clear it", async () => {
+  const admin = await mintSession("ADMIN");
+
+  for (const service of ["plex", "jellyfin"] as const) {
+    const on = await POST(
+      postReq({ service, instances: [{ slug: "remote", name: "Remote", restricted: true }, { slug: "open", name: "Open" }] }, admin.header),
+      undefined,
+    );
+    assert.equal(on.status, 200);
+    assert.deepEqual(
+      ((await on.json()) as { instances: Array<{ slug: string; restricted: boolean }> }).instances.map((i) => [i.slug, i.restricted]),
+      [["", false], ["remote", true], ["open", false]],
+      `${service}: the POST response view must carry restricted, and an omitted field must default to open`,
+    );
+
+    // The flag lives in the registry JSON, NOT in a Setting row of its own —
+    // nothing would ever clean up a stray per-instance key on removal.
+    assert.deepEqual(
+      JSON.parse(settings.get(service === "plex" ? "plexInstances" : "jellyfinInstances")!),
+      [{ slug: "remote", name: "Remote", restricted: true }, { slug: "open", name: "Open", restricted: false }],
+    );
+
+    const view = (await (await GET(getReq(admin.header), undefined)).json()) as Record<string, Array<{ slug: string; name: string; restricted: boolean }>>;
+    assert.deepEqual(
+      view[service].map((i) => [i.slug, i.restricted]),
+      [["", false], ["remote", true], ["open", false]],
+      `${service}: GET must echo restricted — the manager reads this straight into its draft`,
+    );
+
+    // THE REGRESSION: feed the GET view back verbatim, exactly as the manager's
+    // save() does for an admin who only edited the display name. Before the
+    // route round-tripped the field, this save dropped it and the server went
+    // public.
+    const resave = await POST(
+      postReq({ service, instances: view[service].filter((i) => i.slug !== "").map((i) => ({ slug: i.slug, name: i.name, restricted: i.restricted })) }, admin.header),
+      undefined,
+    );
+    assert.equal(resave.status, 200);
+    assert.deepEqual(
+      ((await resave.json()) as { instances: Array<{ slug: string; restricted: boolean }> }).instances.map((i) => [i.slug, i.restricted]),
+      [["", false], ["remote", true], ["open", false]],
+      `${service}: an unedited round-trip must not un-restrict the server`,
+    );
+
+    // And explicitly off again.
+    await POST(postReq({ service, instances: [{ slug: "remote", name: "Remote", restricted: false }] }, admin.header), undefined);
+    assert.deepEqual(JSON.parse(settings.get(service === "plex" ? "plexInstances" : "jellyfinInstances")!), [
+      { slug: "remote", name: "Remote", restricted: false },
+    ]);
+    settings.clear();
+  }
+});
+
+test("the DEFAULT (\"\") instance can never be restricted, even if a client asks — it is synthesized, and a restricted default would blank the library on a single-server install", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await POST(
+    postReq({ service: "plex", instances: [{ slug: "", name: "Default", restricted: true }, { slug: "remote", restricted: true }] }, admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(
+    JSON.parse(settings.get("plexInstances")!),
+    [{ slug: "remote", name: "remote", restricted: true }],
+    "the \"\" entry must never reach the registry — it would shadow defaultInstanceConfig()",
+  );
+  assert.deepEqual(
+    ((await res.json()) as { instances: Array<{ slug: string; restricted: boolean }> }).instances.map((i) => [i.slug, i.restricted]),
+    [["", false], ["remote", true]],
+  );
+});
+
+test("restricted is coerced strictly (=== true) — a hand-edited \"true\"/1 in the payload reads as OPEN, never as restricted", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await POST(
+    postReq(
+      { service: "jellyfin", instances: [{ slug: "a", restricted: "true" }, { slug: "b", restricted: 1 }, { slug: "c", restricted: true }] },
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(
+    ((await res.json()) as { instances: Array<{ slug: string; restricted: boolean }> }).instances.map((i) => [i.slug, i.restricted]),
+    [["", false], ["a", false], ["b", false], ["c", true]],
+    "truthiness would let a malformed value silently gate a server nobody has been granted",
+  );
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // TASK 3 — the Plex connection test must probe the entered ServerUrl
 // ════════════════════════════════════════════════════════════════════════════
 

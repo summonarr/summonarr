@@ -218,6 +218,17 @@ async function syncPlex(request: NextRequest) {
       // orchestrator's markLibraryRequests. A Plex-pinned user must NOT get a "ready to
       // watch" ping from a Jellyfin resync (and vice versa); users with no preference
       // are notified by whichever source sees the item first.
+      //
+      // The orchestrator's per-user media-server VISIBILITY gate (multi-server
+      // grants) deliberately has no counterpart here, and adding one would be dead
+      // code: this route is default-instance-only (see the header comment), so
+      // `movieIds`/`tvIds` above describe the "" server exclusively — and the
+      // default instance is visible to EVERY user by construction
+      // (defaultInstanceConfig hard-codes restricted:false, a "" registry entry is
+      // rejected, and canViewMediaInstance short-circuits true on slug ""). A
+      // restricted named instance can therefore never contribute a row to this
+      // route's decision. If this route is ever generalized to named instances,
+      // port the orchestrator's presentForRequester gate with it.
       const userRows = await prisma.user.findMany({
         where: { id: { in: unnotified.map((r) => r.requestedBy) } },
         select: { id: true, mediaServer: true },

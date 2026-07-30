@@ -58,6 +58,25 @@ function writeInAppNotification(
   });
 }
 
+// `inPlex`/`inJellyfin` are COLLAPSED booleans — the instance that proved
+// presence is not carried here — and that stays sound under multi-server
+// per-user visibility grants for one structural reason: every caller of this
+// function probes the DEFAULT ("") server only. pollAndNotifyAvailable's
+// checkPlex/checkJellyfin closures are built in the Radarr/Sonarr webhook
+// handlers from getPlexConfig()/getJellyfinConfig() with no slug argument, which
+// resolve DEFAULT_MEDIA_INSTANCE; the default instance is visible to every user
+// by construction (defaultInstanceConfig hard-codes restricted:false and
+// canViewMediaInstance short-circuits true on slug ""). So `true` here already
+// means "present on a server this requester can see", for every requester.
+//
+// A restricted named instance can only enter the picture through the sync
+// orchestrator, which does carry per-instance presence and applies the
+// per-requester gate itself (presentForRequester in /api/sync/route.ts).
+//
+// If a caller ever probes a NAMED instance, this contract breaks and the two
+// booleans must become per-instance (an optional slug-set parameter, so the two
+// webhook call sites keep compiling) plus the same pre-CAS grants filter the
+// orchestrator applies. Do not widen the probe without doing that.
 export async function notifyAvailablePerServer(
   pending: PendingAvailableRequest[],
   inPlex: boolean,

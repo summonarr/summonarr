@@ -12,7 +12,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";
-import { getMediaInstances, getSyncableMediaInstances } from "../src/lib/media-instance-registry.ts";
+import {
+  getMediaInstances,
+  getSyncableMediaInstances,
+  buildMediaInstanceRegistryWrite,
+} from "../src/lib/media-instance-registry.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 
 const registryValues = new Map<string, string>();
@@ -122,4 +126,73 @@ test("plex and jellyfin registries are read from their own keys (services don't 
   registryValues.set("plexInstances", JSON.stringify([{ slug: "remote" }]));
   const jellyfin = await getMediaInstances("jellyfin");
   assert.deepEqual(jellyfin.map((i) => i.slug), [""]); // no jellyfinInstances set
+});
+
+// ─── restricted (per-user server-visibility grants) ─────────────────────────
+
+test("restricted round-trips through the registry JSON", async () => {
+  reset();
+  registryValues.set(
+    "plexInstances",
+    JSON.stringify([
+      { slug: "remote", name: "Friend's Server", restricted: true },
+      { slug: "open", name: "Shared", restricted: false },
+    ]),
+  );
+  const list = await getMediaInstances("plex");
+  assert.equal(list.find((i) => i.slug === "remote")?.restricted, true);
+  assert.equal(list.find((i) => i.slug === "open")?.restricted, false);
+});
+
+test("restricted coerces to false for non-boolean / absent values", async () => {
+  reset();
+  // Truthy-but-not-true values must NOT read as restricted: a hand-edited
+  // "false" string is famously truthy, and reading it as restricted would blank
+  // that server's library for every non-granted user.
+  registryValues.set(
+    "plexInstances",
+    JSON.stringify([
+      { slug: "strtrue", restricted: "true" },
+      { slug: "strfalse", restricted: "false" },
+      { slug: "one", restricted: 1 },
+      { slug: "nullish", restricted: null },
+      { slug: "absent" },
+    ]),
+  );
+  const list = await getMediaInstances("plex");
+  for (const slug of ["strtrue", "strfalse", "one", "nullish", "absent"]) {
+    assert.equal(list.find((i) => i.slug === slug)?.restricted, false, `${slug} must coerce to restricted:false`);
+  }
+});
+
+test("the synthesized default instance is ALWAYS restricted:false", async () => {
+  reset();
+  // Guardrail 35: a single-server deployment must never be able to observe the
+  // multi-server generalization. The default ("") is synthesized, never
+  // registry-backed, so a hostile/hand-edited "" entry claiming restricted:true
+  // is dropped rather than shadowing it — otherwise one bad blob would hide the
+  // entire library from every non-admin.
+  registryValues.set("plexInstances", JSON.stringify([{ slug: "", name: "Evil", restricted: true }]));
+  const list = await getMediaInstances("plex");
+  assert.deepEqual(list.map((i) => i.slug), [""]);
+  assert.equal(list[0].restricted, false);
+  assert.equal(list[0].name, "Default");
+
+  // Same for jellyfin, and with no registry row at all.
+  reset();
+  const jf = await getMediaInstances("jellyfin");
+  assert.equal(jf[0].restricted, false);
+});
+
+test("buildMediaInstanceRegistryWrite persists restricted and never stores the default", () => {
+  const { key, value } = buildMediaInstanceRegistryWrite("jellyfin", [
+    { slug: "", name: "Default", restricted: false },
+    { slug: "attic", name: "Attic", restricted: true },
+    { slug: "open", name: "Open", restricted: false },
+  ]);
+  assert.equal(key, "jellyfinInstances");
+  assert.deepEqual(JSON.parse(value), [
+    { slug: "attic", name: "Attic", restricted: true },
+    { slug: "open", name: "Open", restricted: false },
+  ]);
 });

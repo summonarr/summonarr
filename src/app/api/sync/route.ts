@@ -29,6 +29,8 @@ import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } f
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
+import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
+import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -58,6 +60,18 @@ async function runConcurrent<T>(
 // instance stays independent. Library marking stays instance-agnostic (keyed by
 // tmdbId) — a Plex/Jellyfin hit marks every instance's request for that title AVAILABLE.
 const vkey = (tmdbId: number, arrInstance: string) => `${tmdbId}:${arrInstance}`;
+
+// Per-instance presence accumulator: tmdbId → the set of server slugs that hold it.
+// The union maps below answer "is this title anywhere", which is no longer a
+// sufficient answer once a restricted instance's library counts as availability
+// ONLY for the users granted `view` on it — a per-requester decision has to know
+// WHICH server holds the title. Populated from the same per-instance fetch
+// results as the union, so it can never disagree with it and costs no extra query.
+const addPresence = (m: Map<number, Set<string>>, tmdbId: number, slug: string): void => {
+  const existing = m.get(tmdbId);
+  if (existing) existing.add(slug);
+  else m.set(tmdbId, new Set([slug]));
+};
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -591,6 +605,16 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   const plexTvIds    = new Map<number, PlexLibraryItemData>();
   const jfMovieIds = new Map<number, JellyfinLibraryItemData>();
   const jfTvIds    = new Map<number, JellyfinLibraryItemData>();
+  // Per-instance presence, kept ALONGSIDE the union maps above (never replacing
+  // them — ~300 lines of downstream availability logic ask the union "is this
+  // tmdbId present" and must keep behaving identically). These answer the
+  // narrower question the per-user visibility gate needs: WHICH servers hold it.
+  // Same key set as the union by construction — both are filled from the same
+  // per-instance loop below.
+  const plexMovieSlugs = new Map<number, Set<string>>();
+  const plexTvSlugs    = new Map<number, Set<string>>();
+  const jfMovieSlugs   = new Map<number, Set<string>>();
+  const jfTvSlugs      = new Map<number, Set<string>>();
   let plexSyncSucceeded = false;
   let jellyfinSyncSucceeded = false;
 
@@ -648,9 +672,20 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // Union into the shared maps the ~300 lines of downstream availability logic
       // already expect — they only ever ask "is this tmdbId in the map," so a plain
       // per-key merge is correct regardless of which instance's value wins a collision.
-      for (const { movieIds, tvIds } of writable) {
-        for (const [tmdbId, d] of movieIds) plexMovieIds.set(tmdbId, d);
-        for (const [tmdbId, d] of tvIds) plexTvIds.set(tmdbId, d);
+      // The parallel `*Slugs` maps record WHICH instance contributed each key: the
+      // union's collision-winner is arbitrary, so it cannot answer "does the
+      // requester see a server that actually holds this title" once an instance is
+      // restricted. Filled here, inside the same loop, while the per-instance
+      // results are still separate.
+      for (const { slug, movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) {
+          plexMovieIds.set(tmdbId, d);
+          addPresence(plexMovieSlugs, tmdbId, slug);
+        }
+        for (const [tmdbId, d] of tvIds) {
+          plexTvIds.set(tmdbId, d);
+          addPresence(plexTvSlugs, tmdbId, slug);
+        }
       }
 
       let libraryWriteSucceeded = true;
@@ -789,9 +824,18 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // Union into the shared maps the ~300 lines of downstream availability logic
       // already expect — they only ever ask "is this tmdbId in the map," so a plain
       // per-key merge is correct regardless of which instance's value wins a collision.
-      for (const { movieIds, tvIds } of writable) {
-        for (const [tmdbId, d] of movieIds) jfMovieIds.set(tmdbId, d);
-        for (const [tmdbId, d] of tvIds) jfTvIds.set(tmdbId, d);
+      // The parallel `*Slugs` maps record WHICH instance contributed each key — see
+      // the identical comment in the Plex arm above for why the union alone can no
+      // longer answer the per-requester visibility question.
+      for (const { slug, movieIds, tvIds } of writable) {
+        for (const [tmdbId, d] of movieIds) {
+          jfMovieIds.set(tmdbId, d);
+          addPresence(jfMovieSlugs, tmdbId, slug);
+        }
+        for (const [tmdbId, d] of tvIds) {
+          jfTvIds.set(tmdbId, d);
+          addPresence(jfTvSlugs, tmdbId, slug);
+        }
       }
 
       let libraryWriteSucceeded = true;
@@ -985,14 +1029,156 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ? stillPendingAll
     : stillPendingAll.filter((r) => !revertedIds.has(r.id));
 
+  // ── Per-user media-server visibility (multi-server grants) ─────────────────
+  //
+  // A `restricted` Plex/Jellyfin instance contributes availability ONLY to users
+  // granted `view` on it, so "is this request's title available" stopped being
+  // one global answer: the SAME title on the SAME server is available to a
+  // granted requester and not-yet-available to an ungranted one. The AVAILABLE
+  // flip and the notification both follow that per-requester answer — an
+  // ungranted requester's row stays PENDING/APPROVED and un-notified until a
+  // copy lands on a server they can see, or until the grant is issued.
+  //
+  // Cost: no extra round-trip. plexInstances/jellyfinInstances were read once at
+  // the top of this run (getSyncableMediaInstances → MediaInstanceConfig carries
+  // `restricted`), and the two grant columns ride the user.findMany the
+  // marking/notify passes already issue — never a per-requester query
+  // (guardrail 31). visibleInstancesFor is the PURE resolver built for exactly
+  // this many-requesters-one-registry-read shape.
+  //
+  // NOT applied to the two ARR marking passes above, deliberately: Radarr/Sonarr
+  // availability is server-agnostic (the *arr knows a file exists in a root
+  // folder, not which media server indexes it), so there is no per-instance
+  // presence to gate on. In every real topology the *arr feeds the DEFAULT
+  // server, which is visible to everyone by construction.
+  //
+  // visibilityEnforced is the byte-identical escape hatch (guardrail 35): with
+  // no restricted instance configured — every single-server deployment, and
+  // every multi-server one that hasn't opted in — every configured slug is
+  // visible to everyone, the per-user answer collapses to the union, and every
+  // decision below short-circuits to the pre-grants code path.
+  const visibilityEnforced =
+    plexInstances.some((i) => i.restricted) || jellyfinInstances.some((i) => i.restricted);
+
+  type RequesterRow = { id: string; mediaServer: string | null; role: string; permissions: bigint; mediaServerGrants: unknown };
+  // One batched read of the requester columns every per-user decision below
+  // needs. `mediaServer` is the pre-existing preference filter; `role` +
+  // `permissions` + `mediaServerGrants` are the grants gate's inputs — extra
+  // COLUMNS on a query that already ran, not a new query. `role` is NOT
+  // optional: the raw `permissions` column is `@default(0)` and is only seeded
+  // by a MANUAL one-shot script, so an upgraded deployment can hold a
+  // role="ADMIN" row with permissions=0. Passing that raw would deny an admin
+  // the ADMIN short-circuit HERE while every read path grants it (they all go
+  // through effectivePermissions), stranding the operator's own requests as
+  // PENDING while the UI insists the title is available.
+  const loadRequesters = async (userIds: string[]): Promise<Map<string, RequesterRow>> => {
+    const rows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(userIds)] } },
+      select: { id: true, mediaServer: true, role: true, permissions: true, mediaServerGrants: true },
+    });
+    const byId = new Map<string, RequesterRow>();
+    for (const u of rows) byId.set(u.id, u);
+    return byId;
+  };
+
+  // A requester's visible slugs, memoised for the whole run: a title present in
+  // several libraries asks the same question about the same user repeatedly.
+  const visibilityCache = new Map<string, VisibleServerInstances>();
+  const visibilityOf = (requesters: Map<string, RequesterRow>, userId: string): VisibleServerInstances => {
+    const hit = visibilityCache.get(userId);
+    if (hit) return hit;
+    // A requester whose row is missing (deleted between the snapshot and now)
+    // resolves as 0n permissions + no grants — the least-privileged answer, so an
+    // absent row can never WIDEN visibility. Mirrors getVisibleServerInstances'
+    // null-session branch. Safe to memoise: within a run a row can only go away,
+    // never appear, so a cached least-privileged answer can never be the stale
+    // one that matters.
+    const u = requesters.get(userId);
+    const vis = visibleInstancesFor(
+      // effectivePermissions, never the raw column — see loadRequesters. This
+      // is what makes the sync gate agree with every read path for a legacy
+      // ADMIN row whose permissions were never seeded.
+      u ? effectivePermissions(u.role, u.permissions) : 0n,
+      parseMediaServerGrants(u?.mediaServerGrants),
+      plexInstances,
+      jellyfinInstances,
+    );
+    visibilityCache.set(userId, vis);
+    return vis;
+  };
+
+  // "Is this title on a <service> server THIS requester can see?" — the
+  // per-viewer replacement for the union map's `.has()`. The union check runs
+  // FIRST and unchanged: a title absent from every configured server is absent
+  // for everyone and no grant can conjure it, so the overwhelmingly common
+  // "not present" answer costs exactly what it did before.
+  const presentForRequester = (
+    req: { tmdbId: number; mediaType: string; requestedBy: string },
+    service: "plex" | "jellyfin",
+    requesters: Map<string, RequesterRow>,
+  ): boolean => {
+    const isMovie = req.mediaType === "MOVIE";
+    const union = service === "plex"
+      ? (isMovie ? plexMovieIds : plexTvIds)
+      : (isMovie ? jfMovieIds : jfTvIds);
+    if (!union.has(req.tmdbId)) return false;
+    if (!visibilityEnforced) return true; // nothing restricted ⇒ the union IS the per-user answer
+    const holders = (service === "plex"
+      ? (isMovie ? plexMovieSlugs : plexTvSlugs)
+      : (isMovie ? jfMovieSlugs : jfTvSlugs)
+    ).get(req.tmdbId);
+    // Unreachable — the union and presence maps are filled in the same loop — but
+    // fail CLOSED rather than fall back to the union if they ever diverge.
+    if (!holders) return false;
+    const vis = visibilityOf(requesters, req.requestedBy);
+    return (service === "plex" ? vis.plex : vis.jellyfin).some((slug) => holders.has(slug));
+  };
+
   const markLibraryRequests = async (
     movieIds: Map<number, unknown>,
     tvIds: Map<number, unknown>,
     source: "plex" | "jellyfin",
   ): Promise<number> => {
-    const toMark = stillPending.filter((req) =>
+    const candidates = stillPending.filter((req) =>
       req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
     );
+    if (candidates.length === 0) return 0;
+
+    // GRANTS GATE — PRE-CAS BY CONSTRUCTION.
+    //
+    // This is a plain JS filter over the already-materialised candidate array,
+    // and its position is the whole correctness argument:
+    //   • guardrail 14 holds untouched. claimAvailableNotificationWinners is
+    //     still the ONLY writer of notifiedAvailable; it simply never receives a
+    //     gated id, so the exactly-once claim across the Plex and Jellyfin
+    //     passes is unchanged.
+    //   • the claim is NOT burned for a gated requester. (Contrast
+    //     notify-available.ts's deactivatedAt filter, which sits AFTER the
+    //     UPDATE … RETURNING and deliberately burns the claim so a re-enabled
+    //     account can't replay a stale backlog. For grants that would be exactly
+    //     wrong — an ungranted requester would permanently lose the
+    //     notification even after being granted.) A gated row stays
+    //     PENDING/APPROVED with notifiedAvailable=false, so the next run
+    //     re-evaluates it and flips + notifies as soon as the grant lands or a
+    //     copy appears on a server they can see.
+    //   • guardrail 15 holds untouched. `stillPending` is still READ exactly once
+    //     per run and both passes still share that one snapshot; the invariant
+    //     constrains the read, not what a pass filters out of it afterwards.
+    //
+    // Gating `candidates` (rather than the later toNotify/toMarkOnly splits)
+    // covers all three downstream branches at once — notify, flip-without-notify,
+    // and the already-notified flip — so an invisible title can never move a
+    // requester's row to AVAILABLE by any route.
+    let requesters = new Map<string, RequesterRow>();
+    let toMark = candidates;
+    if (visibilityEnforced) {
+      // Loaded at the CANDIDATE scope (wider than the `unnotified` scope the
+      // pre-grants code used) because the gate must run before toMark is settled;
+      // the same rows are then reused for the mediaServer split below, so this is
+      // still ONE user query per pass.
+      requesters = await loadRequesters(candidates.map((r) => r.requestedBy));
+      toMark = candidates.filter((req) => presentForRequester(req, source, requesters));
+    }
     if (toMark.length === 0) return 0;
 
     // Re-fetch notifiedAvailable to catch any updates the concurrent Plex pass may have committed
@@ -1005,22 +1191,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const unnotified = toMark.filter((r) => !alreadyNotifiedIds.has(r.id));
     if (unnotified.length > 0) {
 
-      const userRows = await prisma.user.findMany({
-        where: { id: { in: unnotified.map((r) => r.requestedBy) } },
-        select: { id: true, mediaServer: true },
-      });
-      const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+      // Already loaded at the candidate scope when the grants gate ran above;
+      // otherwise issue exactly the query the pre-grants code issued.
+      if (!visibilityEnforced) {
+        requesters = await loadRequesters(unnotified.map((r) => r.requestedBy));
+      }
 
       // Users with a mediaServer preference only get notified by their preferred source;
       // users with no preference get notified by whichever source sees the item first
       const toNotify = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        const ms = requesters.get(r.requestedBy)?.mediaServer ?? null;
         return !ms || ms === source;
       });
 
       // Mark available without notifying users whose preferred server is a different source
       const toMarkOnly = unnotified.filter((r) => {
-        const ms = userMediaServer.get(r.requestedBy) ?? null;
+        const ms = requesters.get(r.requestedBy)?.mediaServer ?? null;
         return !!ms && ms !== source;
       });
 
@@ -1109,19 +1295,21 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const jellyfinStale = jellyfinConfigured && !jellyfinSyncSucceeded &&
       lastJellyfinSuccessAt != null && (nowMs - lastJellyfinSuccessAt) > STALE_SYNC_FALLBACK_MS;
 
-    const userRows = await prisma.user.findMany({
-      where: { id: { in: pendingAvailableNotify.map((r) => r.requestedBy) } },
-      select: { id: true, mediaServer: true },
-    });
-    const userMediaServer = new Map(userRows.map((u) => [u.id, u.mediaServer]));
+    const requesters = await loadRequesters(pendingAvailableNotify.map((r) => r.requestedBy));
 
     // Collect candidate ids, then do a single CAS updateMany + a single notify per channel
     // rather than one-DB-roundtrip-per-request and one-notify-call-per-request.
     const toNotify: typeof pendingAvailableNotify = [];
     for (const req of pendingAvailableNotify) {
-      const ms = userMediaServer.get(req.requestedBy) ?? null;
-      const inPlex = req.mediaType === "MOVIE" ? plexMovieIds.has(req.tmdbId) : plexTvIds.has(req.tmdbId);
-      const inJellyfin = req.mediaType === "MOVIE" ? jfMovieIds.has(req.tmdbId) : jfTvIds.has(req.tmdbId);
+      const ms = requesters.get(req.requestedBy)?.mediaServer ?? null;
+      // Per-viewer presence (grants): "in Plex" means "on a Plex server THIS
+      // requester can see", so the notification follows the same gate as the
+      // AVAILABLE flip in markLibraryRequests. Also pre-CAS — the filter builds
+      // toNotify, and only that array reaches claimAvailableNotificationWinners,
+      // so a gated row's claim is never burned and the next run re-offers it.
+      // With nothing restricted this is exactly the union `.has()` it replaced.
+      const inPlex = presentForRequester(req, "plex", requesters);
+      const inJellyfin = presentForRequester(req, "jellyfin", requesters);
       // "Unusable" = this source cannot prove presence either way: not configured/enabled
       // at all, OR its sync has been failing past the 24h stale window. A source that
       // synced fine this run is NOT unusable, so its empty result still blocks a false
@@ -1130,8 +1318,19 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // never contribute and a permanently-broken Plex starved every plex-pinned user's
       // "now available" notification forever, which is exactly what the fallback above
       // was written to prevent.
-      const plexUnusable = !plexConfigured || plexStale;
-      const jellyfinUnusable = !jellyfinConfigured || jellyfinStale;
+      // Grants extend "unusable" per requester: someone who can see NO configured
+      // server of a type is in exactly the position of a deployment with that type
+      // unconfigured — it can never prove presence for them either way, so it must
+      // not block the OTHER source's notify. Reachable when the DEFAULT instance of
+      // a type is unconfigured and only a restricted named one exists (the default
+      // is visible to everyone by construction, so a configured default always
+      // makes this false). Folding grants into the existing unusable term — not
+      // just into inPlex/inJellyfin — is what preserves the fallback's
+      // anti-starvation contract for a per-user answer.
+      const noVisiblePlex = visibilityEnforced && visibilityOf(requesters, req.requestedBy).plex.length === 0;
+      const noVisibleJellyfin = visibilityEnforced && visibilityOf(requesters, req.requestedBy).jellyfin.length === 0;
+      const plexUnusable = !plexConfigured || plexStale || noVisiblePlex;
+      const jellyfinUnusable = !jellyfinConfigured || jellyfinStale || noVisibleJellyfin;
       const shouldNotify = !ms
         ? inPlex || inJellyfin || (plexUnusable && jellyfinUnusable)
         : ms === "plex"

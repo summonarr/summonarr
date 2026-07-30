@@ -10,12 +10,20 @@
 // the admin settings UI, which writes the registry JSON through
 // saveMediaInstances().
 //
-// Registry entries are deliberately thin ({ slug, name } only) compared to
-// arr-instance-registry.ts's ArrInstanceConfig: nothing routes a request to a
-// specific Plex/Jellyfin server (availability is a union across all configured
-// servers of a type), so there's no restricted/serverAll/autoRoute metadata to
-// carry here. Per-user server-visibility grants are a later, additive addition
-// to this same JSON shape, not a schema change.
+// Registry entries stay thin compared to arr-instance-registry.ts's
+// ArrInstanceConfig: nothing routes a request to a specific Plex/Jellyfin server
+// (availability is a union across the configured servers of a type), so there's
+// no serverAll/autoRoute/skipLibraryCheck routing metadata to carry here.
+//
+// `restricted` is the one access field, added by the per-user server-visibility
+// grants feature (anticipated by this comment's earlier revision — it landed as
+// exactly the additive JSON-shape change predicted, no schema migration). A
+// restricted server's library contributes availability ONLY for users granted
+// `view` on it (User.mediaServerGrants → canViewMediaInstance in
+// permissions.ts); the union is then per-viewer rather than global. The
+// synthesized default ("") entry is ALWAYS restricted:false — guardrail 35's
+// byte-identical-default rule means a single-server deployment must never be
+// able to observe this generalization.
 //
 // Impure (reads Setting) — the pure key derivation lives in media-instances.ts
 // and is re-used here.
@@ -26,6 +34,9 @@ import { type MediaInstanceKey, type MediaServerService, DEFAULT_MEDIA_INSTANCE,
 export interface MediaInstanceConfig {
   slug: MediaInstanceKey;
   name: string;
+  // Gate this server's library behind a per-user `view` grant. false (the
+  // default, and always the case for the "" instance) ⇒ visible to everyone.
+  restricted: boolean;
 }
 
 const REGISTRY_KEY: Record<MediaServerService, string> = {
@@ -33,8 +44,13 @@ const REGISTRY_KEY: Record<MediaServerService, string> = {
   jellyfin: "jellyfinInstances",
 };
 
+// The synthesized default instance — always present, always visible to every
+// user. `restricted` is hard-coded false rather than configurable: guardrail 35
+// requires the default server behave byte-identically to the pre-multi-server
+// deployment, and a restrictable default would let a misconfiguration blank the
+// whole library for every non-granted user on a single-server install.
 function defaultInstanceConfig(): MediaInstanceConfig {
-  return { slug: DEFAULT_MEDIA_INSTANCE, name: "Default" };
+  return { slug: DEFAULT_MEDIA_INSTANCE, name: "Default", restricted: false };
 }
 
 // Coerce one untrusted registry entry into a well-formed MediaInstanceConfig,
@@ -49,6 +65,11 @@ function normalizeEntry(raw: unknown): MediaInstanceConfig | null {
   return {
     slug,
     name: typeof o.name === "string" && o.name.trim() ? o.name : slug,
+    // Strict === true (the arr-instance-registry.ts idiom), not truthiness: a
+    // hand-edited "false"/"0"/1 must not be read as restricted, and an absent
+    // field on a pre-restricted-field registry blob reads as open, which is the
+    // behavior those deployments already have.
+    restricted: o.restricted === true,
   };
 }
 

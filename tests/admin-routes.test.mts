@@ -1124,6 +1124,9 @@ test("a MANAGE_USERS delegate cannot grant ITSELF instance access, quota, or a c
 
   for (const body of [
     { instanceGrants: { anime: { request: true, autoApprove: true } } },
+    // Visibility on a RESTRICTED media server is privilege-bearing for the same
+    // reason: it decides whether that server's library is available to them.
+    { mediaServerGrants: { plex: { remote: { view: true } } } },
     { movieQuotaLimit: 100000 },
     { maxContentRating: null },
   ]) {
@@ -1149,4 +1152,106 @@ test("a MANAGE_USERS delegate cannot grant ITSELF instance access, quota, or a c
     ctxFor(targetId),
   );
   assert.equal(other.status, 200);
+});
+
+// ── mediaServerGrants: per-user VISIBILITY on a RESTRICTED media server ──────
+// A restricted Plex/Jellyfin server's library contributes availability only for
+// users granted `view` on it (canViewMediaInstance). The map is SERVICE-
+// NAMESPACED — { plex: { "<slug>": { view } }, jellyfin: {…} } — deliberately
+// unlike instanceGrants' flat slug map, because plex "remote" and jellyfin
+// "remote" are different servers holding different content.
+
+const grantsBody = (grants: unknown) => JSON.stringify({ mediaServerGrants: grants });
+const patchGrants = (id: string, header: Record<string, string>, body: string) =>
+  userPatch(
+    req(`http://localhost:3000/api/admin/users/${id}`, {
+      method: "PATCH",
+      headers: { ...header, "content-type": "application/json" },
+      body,
+    }),
+    ctxFor(id),
+  );
+
+test("mediaServerGrants: the map is normalized, written, echoed and audited — and a plex slug never leaks into the identically-named jellyfin one", async () => {
+  const admin = await mintSession("ADMIN", 1n);
+  const targetId = seedUser("USER");
+  const res = await patchGrants(
+    targetId,
+    admin.header,
+    grantsBody({
+      plex: { remote: { view: true }, attic: { view: false } },
+      jellyfin: { remote: { view: false } },
+      emby: { remote: { view: true } }, // not a known service → dropped whole
+    }),
+  );
+  assert.equal(res.status, 200);
+
+  // serializeMediaServerGrants drops view:false entries, then drops any service
+  // left empty — so this stores {plex:{remote:…}}, not {plex:…,jellyfin:{}}.
+  const expected = { plex: { remote: { view: true } } };
+  assert.deepEqual(await res.json(), { id: targetId, mediaServerGrants: expected });
+
+  const writes = txOps.filter((o) => o.op === "user.update(top)");
+  assert.equal(writes.length, 1, "exactly one row write");
+  assert.deepEqual(
+    (writes[0].args as { where: { id: string }; data: unknown }).data,
+    { mediaServerGrants: expected },
+    "only the grants column may be touched",
+  );
+  // THE namespacing pin: granting plex "remote" must leave jellyfin untouched.
+  // A flat slug map (instanceGrants' shape) would have made these one key, so
+  // the grant would silently expose a completely different server's library.
+  assert.equal(Object.hasOwn(expected, "jellyfin"), false);
+
+  await flush();
+  assert.equal(auditRows.length, 1, "a grants change is audited like a permission change");
+  assert.equal(auditRows[0].action, "USER_PERMISSIONS_CHANGE");
+  assert.equal(auditRows[0].target, `user:${targetId}`);
+  // logAudit serializes `details` to a JSON string before the insert.
+  assert.deepEqual(JSON.parse(auditRows[0].details as string), {
+    field: "mediaServerGrants",
+    targetUser: usersById.get(targetId)!.name,
+    after: expected,
+  });
+});
+
+test("mediaServerGrants: an ARRAY is rejected 400 with ZERO writes — typeof [] is \"object\", so it would otherwise serialize to {} and silently clear every grant", async () => {
+  const admin = await mintSession("ADMIN", 1n);
+  const targetId = seedUser("USER");
+  const res = await patchGrants(targetId, admin.header, grantsBody([{ plex: { remote: { view: true } } }]));
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "mediaServerGrants must be an object map or null" });
+  assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 0);
+
+  // `null` IS accepted — it is how the editor clears every grant — and lands as
+  // an empty map rather than a JSON null.
+  const cleared = await patchGrants(targetId, admin.header, grantsBody(null));
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(await cleared.json(), { id: targetId, mediaServerGrants: {} });
+});
+
+test("mediaServerGrants: prototype-pollution keys are dropped at BOTH nesting levels, and Object.prototype is left untouched", async () => {
+  const admin = await mintSession("ADMIN", 1n);
+  const targetId = seedUser("USER");
+  // Hand-built JSON, not JSON.stringify: an object literal's `__proto__:` sets
+  // the prototype instead of creating an own key, so only a parsed body can
+  // reproduce what an attacker actually sends. JSON.parse makes it OWN.
+  const raw =
+    '{"mediaServerGrants":{' +
+    '"__proto__":{"remote":{"view":true}},' +
+    '"constructor":{"remote":{"view":true}},' +
+    '"plex":{"__proto__":{"view":true},"constructor":{"view":true},"prototype":{"view":true},"remote":{"view":true}}' +
+    "}}";
+  const res = await patchGrants(targetId, admin.header, raw);
+  assert.equal(res.status, 200);
+  assert.deepEqual(
+    await res.json(),
+    { id: targetId, mediaServerGrants: { plex: { remote: { view: true } } } },
+    "every unsafe key must be dropped at the service level AND inside the slug map",
+  );
+
+  const proto = Object.prototype as unknown as Record<string, unknown>;
+  assert.equal(proto.remote, undefined, "Object.prototype must not have gained a slug key");
+  assert.equal(proto.view, undefined);
+  assert.equal(({} as Record<string, unknown>).remote, undefined);
 });

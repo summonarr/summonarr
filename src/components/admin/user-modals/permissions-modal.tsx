@@ -9,13 +9,16 @@ import {
 } from "@/components/icons";
 import { Permission, PRESETS, parsePermissions } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
+import { mediaInstanceLabel } from "@/lib/media-instances";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   AdminToggleRow,
   roleLabel,
   type InstanceGrantMap,
+  type MediaServerGrants,
   type NamedInstance,
+  type RestrictedMediaInstance,
   type User,
 } from "./shared";
 
@@ -120,10 +123,26 @@ function QuotaRow({
   );
 }
 
-export function PermissionsModal({ u, onClose, show4k = false, namedInstances = [] }: { u: User; onClose: () => void; show4k?: boolean; namedInstances?: NamedInstance[] }) {
+export function PermissionsModal({
+  u,
+  onClose,
+  show4k = false,
+  namedInstances = [],
+  mediaInstances = [],
+}: {
+  u: User;
+  onClose: () => void;
+  show4k?: boolean;
+  namedInstances?: NamedInstance[];
+  // RESTRICTED Plex/Jellyfin servers only. Empty on every deployment that has
+  // never restricted one — which is the overwhelming majority — and the section
+  // then renders nothing at all rather than an empty heading.
+  mediaInstances?: RestrictedMediaInstance[];
+}) {
   const router = useRouter();
   const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
   const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
+  const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(u.mediaServerGrants);
   const [saving, setSaving] = useState(false);
   const [quota, setQuota] = useState({
     movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
@@ -186,6 +205,32 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
       });
       if (!res.ok) {
         setGrants(prev);
+        return;
+      }
+      router.refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Visibility grant on a RESTRICTED Plex/Jellyfin server. Service-namespaced —
+  // the two service maps are written independently so granting plex:remote can
+  // never touch a jellyfin instance that happens to share the slug.
+  async function toggleMediaGrant(service: "plex" | "jellyfin", slug: string) {
+    const prev = mediaGrants;
+    const serviceMap = { ...(prev[service] ?? {}) };
+    serviceMap[slug] = { view: serviceMap[slug]?.view !== true };
+    const next: MediaServerGrants = { ...prev, [service]: serviceMap };
+    setMediaGrants(next);
+    setSaving(true);
+    try {
+      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mediaServerGrants: next }),
+      });
+      if (!res.ok) {
+        setMediaGrants(prev);
         return;
       }
       router.refresh();
@@ -330,6 +375,32 @@ export function PermissionsModal({ u, onClose, show4k = false, namedInstances = 
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* Restricted Plex/Jellyfin servers. Rendered ONLY when at least one
+                exists — a deployment that has never restricted a server sees no
+                trace of this feature. Sits inside the non-admin branch, so an
+                admin never gets a grants list implying they need one:
+                canViewMediaInstance short-circuits on the ADMIN bit. */}
+            {mediaInstances.length > 0 && (
+              <div className="mb-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Media server access</p>
+                <p className="text-[10px] text-zinc-500 mb-2">
+                  Restricted servers only. Without a grant this user never sees that server&apos;s library as available.
+                  Every other server is visible to everyone; admins see all of them.
+                </p>
+                {mediaInstances.map((inst) => (
+                  <AdminToggleRow
+                    // Slug alone collides across services — plex:remote and
+                    // jellyfin:remote are different servers (see MediaServerGrants).
+                    key={mediaInstanceLabel(inst.service, inst.slug)}
+                    label={`${inst.name} (${mediaInstanceLabel(inst.service, inst.slug)})`}
+                    checked={mediaGrants[inst.service]?.[inst.slug]?.view === true}
+                    onChange={() => toggleMediaGrant(inst.service, inst.slug)}
+                    disabled={saving}
+                  />
+                ))}
               </div>
             )}
 

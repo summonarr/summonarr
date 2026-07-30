@@ -39,6 +39,12 @@ interface InstanceView {
   // matching auth.ts's fail-closed default, so this is never undefined in a GET
   // response; the `?` only keeps the shared Plex/Jellyfin view type honest.
   restrictSignIn?: boolean;
+  // BOTH services — gate this server's library behind a per-user `view` grant
+  // (User.mediaServerGrants → canViewMediaInstance). Registry metadata, not a
+  // Setting row, and REQUIRED on the wire: this view is round-tripped straight
+  // back through POST, so an absent field here would read as `false` and every
+  // save would silently un-restrict the server.
+  restricted: boolean;
 }
 
 interface Draft {
@@ -48,6 +54,7 @@ interface Draft {
   token: string; // adminToken (plex) or apiKey (jellyfin)
   adminEmail: string; // plex only
   restrictSignIn: boolean; // jellyfin only
+  restricted: boolean; // both services — per-user view grant required
   hasToken: boolean;
   isNew: boolean;
 }
@@ -64,6 +71,12 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
     // unchecked (= "anyone may sign in") for a server that is actually
     // restricted.
     restrictSignIn: v.restrictSignIn ?? true,
+    // Strict === true, matching the registry normalizer this value came from
+    // (media-instance-registry.ts). Unlike restrictSignIn the safe default is
+    // OPEN: a restricted server nobody has been granted is invisible to every
+    // non-admin, so guessing "restricted" from a malformed response would blank
+    // the library instead of merely widening access.
+    restricted: v.restricted === true,
     hasToken: (service === "plex" ? v.hasAdminToken : v.hasApiKey) ?? false,
     isNew: false,
   };
@@ -120,7 +133,10 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       ...prev,
       // restrictSignIn defaults to true — a brand-new server starts fail-closed,
       // matching isJellyfinSignInAllowed's default for an absent Setting row.
-      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, hasToken: false, isNew: true },
+      // `restricted` defaults to FALSE for the opposite reason: an unrestricted
+      // server is the status quo, and a restricted one with no grants yet issued
+      // would be invisible to every non-admin the moment it finished syncing.
+      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true },
     ]);
     setConfirmRemove(null);
     setStatus("idle");
@@ -156,6 +172,9 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
     const instances = drafts.map((d) => ({
       slug: d.slug,
       name: d.name.trim() || d.slug,
+      // Outside the per-service spread on purpose: visibility is the one access
+      // field BOTH services share (restrictSignIn below is Jellyfin-only).
+      restricted: d.restricted,
       ...(service === "plex"
         ? {
             serverUrl: d.url.trim(),
@@ -312,6 +331,31 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 </label>
               </div>
             )}
+
+            {/* Service-AGNOSTIC, unlike restrictSignIn above: a restricted
+                server's library contributes availability only for users granted
+                `view` on it (User.mediaServerGrants → canViewMediaInstance),
+                and that question is identical for Plex and Jellyfin. Grants are
+                issued per user in Admin → Users → Permissions & Quota. The
+                default server never appears in this list and can never be
+                restricted — it is synthesized, not registry-backed. */}
+            <div className="pt-1">
+              <label className="flex items-start gap-2 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={d.restricted}
+                  onChange={(e) => update(idx, { restricted: e.target.checked })}
+                />
+                <span>
+                  Restricted (needs a grant)
+                  <span className="block text-xs text-zinc-500">
+                    Only users granted access to this server see its library as available. Leave off to
+                    combine it into everyone&apos;s availability, like the main server. Admins always see it.
+                  </span>
+                </span>
+              </label>
+            </div>
 
             <div className="flex items-center justify-between pt-1">
               {test?.ok && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />Connected</span>}

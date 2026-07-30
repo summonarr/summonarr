@@ -1,14 +1,15 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
-import { hasPermission, Permission, parseInstanceGrants } from "@/lib/permissions";
-import { UserTable, type NamedInstance } from "@/components/admin/user-table";
+import { hasPermission, Permission, parseInstanceGrants, parseMediaServerGrants } from "@/lib/permissions";
+import { UserTable, type NamedInstance, type RestrictedMediaInstance } from "@/components/admin/user-table";
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { CreateUserButton } from "@/components/admin/create-user-button";
 import { PageHeader } from "@/components/ui/design";
 import { isArrConfigured } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { isPurgedRow } from "@/lib/account-lifecycle";
 
@@ -47,6 +48,7 @@ export default async function UsersPage() {
         pushOnDeclined: true,
         notifyOnIssue: true,
         instanceGrants: true,
+        mediaServerGrants: true,
         _count: { select: { requests: true } },
       },
       orderBy: [{ name: "asc" }, { email: "asc" }],
@@ -112,6 +114,21 @@ export default async function UsersPage() {
   }
   const namedInstances = [...namedInstanceMap.values()];
 
+  // RESTRICTED Plex/Jellyfin servers for the per-user visibility editor. NOT
+  // unioned by slug like the arr list above: grants are service-namespaced, so
+  // plex "remote" and jellyfin "remote" are two different servers holding
+  // different content and each needs its own row. Unrestricted servers are
+  // omitted — they are visible to everyone, so there is nothing to grant, and an
+  // empty list makes the whole section disappear (the case on any deployment
+  // that has never restricted a server). The default ("") is never restricted.
+  const mediaInstances: RestrictedMediaInstance[] = [];
+  for (const service of ["plex", "jellyfin"] as const) {
+    for (const inst of await getMediaInstances(service)) {
+      if (!inst.restricted) continue;
+      mediaInstances.push({ service, slug: inst.slug, name: inst.name });
+    }
+  }
+
   return (
     <div className="ds-page-enter">
       <PageHeader
@@ -153,6 +170,7 @@ export default async function UsersPage() {
             pushOnDeclined: u.pushOnDeclined,
             notifyOnIssue: u.notifyOnIssue,
             instanceGrants: parseInstanceGrants(u.instanceGrants),
+            mediaServerGrants: parseMediaServerGrants(u.mediaServerGrants),
             mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
             maxContentRating: u.maxContentRating,
             source: localAuthIds.has(u.id)
@@ -164,6 +182,7 @@ export default async function UsersPage() {
           currentUserId={session.user.id}
           has4k={has4k}
           namedInstances={namedInstances}
+          mediaInstances={mediaInstances}
         />
       </div>
 

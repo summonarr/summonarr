@@ -63,6 +63,16 @@ model User {
   // back-compat (see canRequestInstance in src/lib/permissions.ts). null/absent ⇒
   // no named-instance grants. ADMIN bypasses. Parsed via parseInstanceGrants().
   instanceGrants Json?
+  // Per-user VISIBILITY grants for RESTRICTED Plex/Jellyfin server instances
+  // (multi-server support). Unlike instanceGrants above this map is SERVICE-
+  // NAMESPACED — plex "remote" and jellyfin "remote" are different servers
+  // holding different content, so a flat slug map would conflate them:
+  // { "plex": { "remote": { "view": true } }, "jellyfin": { … } }. Only servers
+  // flagged `restricted` in the plexInstances/jellyfinInstances registry are
+  // gated; the default ("") server is never restricted and is visible to all.
+  // null/absent ⇒ no grants. ADMIN bypasses. Parsed via parseMediaServerGrants()
+  // (see canViewMediaInstance in src/lib/permissions.ts).
+  mediaServerGrants Json?
   // Per-user, per-media-type request-quota overrides. null ⇒ use the global
   // quotaLimit/quotaPeriod Settings. QUOTA_UNLIMITED (or ADMIN) bypasses both.
   movieQuotaLimit Int?

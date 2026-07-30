@@ -93,6 +93,7 @@ interface InstancePayload {
   url?: string; // Jellyfin
   apiKey?: string; // Jellyfin, secret
   restrictSignIn?: boolean; // Jellyfin — omit to leave the stored value untouched
+  restricted?: boolean; // gate this server's library behind a per-user view grant
 }
 
 interface SavePayload {
@@ -107,7 +108,10 @@ function readRestrictSignIn(value: string | undefined): boolean {
   return (value ?? "true").trim().toLowerCase() !== "false";
 }
 
-async function readInstanceView(service: MediaServerService, slug: string, name: string) {
+// `restricted` is echoed straight from the registry entry (not a Setting row):
+// the manager UI round-trips this view back through POST, so omitting it here
+// would make every save silently clear the flag.
+async function readInstanceView(service: MediaServerService, slug: string, name: string, restricted: boolean) {
   if (service === "plex") {
     const keys = [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken"), plexSettingKey(slug, "AdminEmail")];
     const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
@@ -115,6 +119,7 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
     return {
       slug,
       name,
+      restricted,
       serverUrl: map[plexSettingKey(slug, "ServerUrl")] ?? "",
       adminEmail: map[plexSettingKey(slug, "AdminEmail")] ?? "",
       hasAdminToken: !!map[plexSettingKey(slug, "AdminToken")],
@@ -126,6 +131,7 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
   return {
     slug,
     name,
+    restricted,
     url: map[jellyfinSettingKey(slug, "Url")] ?? "",
     hasApiKey: !!map[jellyfinSettingKey(slug, "ApiKey")],
     restrictSignIn: readRestrictSignIn(map[jellyfinSettingKey(slug, "RestrictSignIn")]),
@@ -134,8 +140,12 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [plex, jellyfin] = await Promise.all([
-    getMediaInstances("plex").then((list) => Promise.all(list.map((i) => readInstanceView("plex", i.slug, i.name)))),
-    getMediaInstances("jellyfin").then((list) => Promise.all(list.map((i) => readInstanceView("jellyfin", i.slug, i.name)))),
+    getMediaInstances("plex").then((list) =>
+      Promise.all(list.map((i) => readInstanceView("plex", i.slug, i.name, i.restricted))),
+    ),
+    getMediaInstances("jellyfin").then((list) =>
+      Promise.all(list.map((i) => readInstanceView("jellyfin", i.slug, i.name, i.restricted))),
+    ),
   ]);
   return NextResponse.json({ plex, jellyfin });
 });
@@ -185,7 +195,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     service,
     instances
       .filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE)
-      .map((i) => ({ slug: i.slug, name: typeof i.name === "string" && i.name.trim() ? i.name : i.slug })),
+      .map((i) => ({
+        slug: i.slug,
+        name: typeof i.name === "string" && i.name.trim() ? i.name : i.slug,
+        // Strict === true, matching the registry normalizer. The default ("")
+        // is filtered out above and is never restrictable (guardrail 35).
+        restricted: i.restricted === true,
+      })),
   );
 
   // ONE transaction for the registry write, the connection-Setting writes AND
@@ -323,6 +339,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     ...auditContext(req, session),
   });
 
-  const view = await Promise.all(configured.map((i) => readInstanceView(service, i.slug, i.name)));
+  const view = await Promise.all(configured.map((i) => readInstanceView(service, i.slug, i.name, i.restricted)));
   return NextResponse.json({ ok: true, instances: view, testResults });
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import type { MediaServerGrants } from "@/lib/permissions";
+
 // A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
 // grants. Mirrors the registry's ArrInstanceConfig access fields.
 export interface NamedInstance {
@@ -10,6 +12,24 @@ export interface NamedInstance {
 }
 
 export type InstanceGrantMap = Record<string, { request?: boolean; autoApprove?: boolean }>;
+
+// A RESTRICTED Plex/Jellyfin server the visibility editor can grant `view` on.
+// Only restricted instances reach the client — an unrestricted server is visible
+// to everyone and has nothing to grant, so the page filters rather than shipping
+// the whole registry and re-deriving the filter in two places.
+//
+// `service` is part of the identity, not decoration: grants are service-
+// namespaced (permissions.ts), so plex "remote" and jellyfin "remote" are two
+// different servers and must never collapse into one row.
+export interface RestrictedMediaInstance {
+  service: "plex" | "jellyfin";
+  slug: string;
+  name: string;
+}
+
+// The stored per-user shape, straight from the permissions leaf so the editor
+// and canViewMediaInstance can never disagree about it.
+export type { MediaServerGrants };
 
 export interface User {
   id: string;
@@ -28,6 +48,7 @@ export interface User {
   discordId: string | null;
   permissions: string;
   instanceGrants: InstanceGrantMap;
+  mediaServerGrants: MediaServerGrants;
   movieQuotaLimit: number | null;
   movieQuotaDays: number | null;
   tvQuotaLimit: number | null;

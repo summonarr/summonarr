@@ -17,10 +17,12 @@ import {
   canRequestInstance,
   canAutoApproveInstance,
   parseInstanceGrants,
+  parseMediaServerGrants,
   hasPermission,
   effectivePermissions,
   Permission,
 } from "@/lib/permissions";
+import { getMediaInstanceAccessLists, visibleInstancesFor } from "@/lib/media-visibility";
 import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
 import { mapLimit } from "@/lib/concurrency";
@@ -62,14 +64,23 @@ const keyOf = (tmdbId: number, mediaType: string) => `${tmdbId}:${mediaType}`;
 
 // Thrown inside the quota transaction to roll it back and surface a 429 carrying
 // the offending media type's numbers.
+//
+// Fields are declared and assigned explicitly rather than via constructor
+// parameter properties: the unit suite runs source through Node's strip-only TS
+// mode, which rejects that sugar outright (same desugaring as backup-crypto.ts /
+// arr.ts / play-history.ts).
 class QuotaExceeded extends Error {
-  constructor(
-    readonly mt: MediaType,
-    readonly limit: number,
-    readonly windowLabel: string,
-    readonly used: number,
-  ) {
+  readonly mt: MediaType;
+  readonly limit: number;
+  readonly windowLabel: string;
+  readonly used: number;
+
+  constructor(mt: MediaType, limit: number, windowLabel: string, used: number) {
     super("QUOTA_EXCEEDED");
+    this.mt = mt;
+    this.limit = limit;
+    this.windowLabel = windowLabel;
+    this.used = used;
   }
 }
 
@@ -143,6 +154,7 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       tvQuotaDays: true,
       maxContentRating: true,
       instanceGrants: true,
+      mediaServerGrants: true,
     },
   });
   if (!target) return NextResponse.json({ error: "Target user not found" }, { status: 404 });
@@ -197,9 +209,13 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // input). Mirrors the single POST /api/requests: only pay the TMDB details
   // fetch when at least one CONFIGURED non-default instance carries an autoRoute
   // rule; otherwise every item targets the default instance exactly as before.
-  const [radarrConfigured, sonarrConfigured] = await Promise.all([
+  // The media-server registry rides along here (it's needed by the availability lookup
+  // below, and this block already pays a round-trip) so resolving the target's
+  // server visibility costs nothing extra.
+  const [radarrConfigured, sonarrConfigured, mediaAccess] = await Promise.all([
     getSyncableArrInstances("radarr"),
     getSyncableArrInstances("sonarr"),
+    getMediaInstanceAccessLists(),
   ]);
   const configuredByType = { MOVIE: radarrConfigured, TV: sonarrConfigured } as const;
   const routingActive =
@@ -258,6 +274,19 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     }
   }
 
+  // Media-server visibility of the TARGET, never the caller: every classification below
+  // decides what lands in the target's request list, so a restricted server the CALLER can
+  // see must not make an item read "already available" for a target who holds no grant on it
+  // (and vice versa — an admin bulk-requesting on behalf of a plain user must not have their
+  // own broader visibility silently swallow the items). Same targetPerms/target-grants rule
+  // the instance and quota gates above already follow.
+  const visible = visibleInstancesFor(
+    targetPerms,
+    parseMediaServerGrants(target.mediaServerGrants),
+    mediaAccess.plex,
+    mediaAccess.jellyfin,
+  );
+
   // Authoritative existing-state lookup — never trust client-supplied availability.
   // Every mediaRequest / arr-availability query is scoped to each item's ROUTED
   // instance, so a target who holds only a request for the same title on a
@@ -271,8 +300,14 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       where: { requestedBy: targetUserId, OR: instPairs },
       select: { id: true, tmdbId: true, mediaType: true, status: true, permanentlyDeclined: true },
     }),
-    prisma.plexLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
-    prisma.jellyfinLibraryItem.findMany({ where: { OR: orPairs }, select: { tmdbId: true, mediaType: true } }),
+    prisma.plexLibraryItem.findMany({
+      where: { OR: orPairs, serverInstance: { in: visible.plex } },
+      select: { tmdbId: true, mediaType: true },
+    }),
+    prisma.jellyfinLibraryItem.findMany({
+      where: { OR: orPairs, serverInstance: { in: visible.jellyfin } },
+      select: { tmdbId: true, mediaType: true },
+    }),
     movieItems.length
       ? prisma.radarrAvailableItem.findMany({
           where: { OR: movieItems.map((i) => ({ tmdbId: i.tmdbId, arrInstance: slugOf(i) })) },

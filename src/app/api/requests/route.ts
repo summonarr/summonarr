@@ -15,6 +15,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog, sanitizeContainsSearch } from "@/lib/sanitize";
 import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
 import { getArrInstances, getSyncableArrInstances, isInstanceConfigured } from "@/lib/arr-instance-registry";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
@@ -393,14 +394,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // cache counts as already-here. An instance with skipLibraryCheck (4K/opt-in) ignores
   // the shared library — a copy at another quality must not block requesting this one —
   // and only that instance's available cache counts.
+  //
+  // The library half is scoped to the servers THIS requester can see: a copy sitting on a
+  // restricted server they hold no grant for must not reject their request. Telling someone
+  // a title is "already available" when they cannot watch it leaves them no path forward,
+  // which is the whole reason visibility is per-user rather than global. Same shape as
+  // skipLibraryCheck above — an instance the requester can't reach doesn't block them.
   const skipLibraryCheck = instance.skipLibraryCheck;
+  const visible = await getVisibleServerInstances(session);
   const [plexItem, jellyfinItem, arrAvailable] = await Promise.all([
     skipLibraryCheck
       ? Promise.resolve(null)
-      : prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
+      : prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.plex } } }),
     skipLibraryCheck
       ? Promise.resolve(null)
-      : prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType } }),
+      : prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.jellyfin } } }),
     isAutoApprove
       ? mediaType === "MOVIE"
         ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)

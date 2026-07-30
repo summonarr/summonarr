@@ -6,7 +6,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants } from "@/lib/permissions";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 
@@ -42,6 +42,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     mediaServer?: string | null;
     maxContentRating?: string | null;
     instanceGrants?: unknown;
+    mediaServerGrants?: unknown;
   } & Partial<Record<NotifKey, boolean>>;
   const parsedBody = await readJsonCapped<UpdateBody>(req, 32768);
   if (parsedBody instanceof NextResponse) return parsedBody;
@@ -69,21 +70,23 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   }
 
   // MANAGE_USERS delegates management of OTHER accounts. The `role` and
-  // `permissions` branches each carry their own isSelf gate; these three fields
-  // are privilege-bearing too and had none, so a delegate could PATCH their OWN
+  // `permissions` branches each carry their own isSelf gate; these fields are
+  // privilege-bearing too and had none, so a delegate could PATCH their OWN
   // row to grant themselves request + auto-approve on a RESTRICTED named instance,
-  // lift their own quota to an effectively unlimited value, or raise their own
-  // content-rating cap. Each branch ends in invalidateUserSession(id), which
-  // re-signs the JWT from the DB column, so the self-grant lands on their very
-  // next request. Gate all three in one place, mirroring those branches.
+  // visibility into a RESTRICTED Plex/Jellyfin server's library, lift their own
+  // quota to an effectively unlimited value, or raise their own content-rating
+  // cap. Each branch ends in invalidateUserSession(id), which re-signs the JWT
+  // from the DB column, so the self-grant lands on their very next request. Gate
+  // them all in one place, mirroring those branches.
   if (!callerIsAdmin && isSelf) {
     const selfPrivilegeEdit =
       "maxContentRating" in body ||
       body.instanceGrants !== undefined ||
+      body.mediaServerGrants !== undefined ||
       QUOTA_FIELDS.some((k) => k in body);
     if (selfPrivilegeEdit) {
       return NextResponse.json(
-        { error: "Cannot change your own instance access, quota, or content rating cap" },
+        { error: "Cannot change your own instance access, server visibility, quota, or content rating cap" },
         { status: 403 },
       );
     }
@@ -220,6 +223,39 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "instanceGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
     invalidateUserSession(id);
     return NextResponse.json({ id, instanceGrants: grants });
+  }
+
+  // Per-server VISIBILITY grants for RESTRICTED Plex/Jellyfin instances. A
+  // SERVICE-NAMESPACED JSON map { plex: { "<slug>": { view? } }, jellyfin: {…} }
+  // — plex "remote" and jellyfin "remote" are different servers, so this
+  // deliberately does NOT reuse instanceGrants' flat shape. Only `restricted`
+  // instances are gated (the default "" server is never restricted); stored on
+  // User.mediaServerGrants and consulted by canViewMediaInstance.
+  //
+  // parseMediaServerGrants is the whole validator: it drops unknown service
+  // keys, non-object entries and the prototype-pollution keys at BOTH nesting
+  // levels, so nothing a client sends can reach the column unfiltered. The
+  // array check is separate because Array.isArray(x) && typeof x === "object"
+  // is true — a bare `[]` would otherwise serialize to `{}` and silently clear
+  // every grant instead of being rejected as malformed.
+  if (body.mediaServerGrants !== undefined) {
+    if (body.mediaServerGrants !== null && (typeof body.mediaServerGrants !== "object" || Array.isArray(body.mediaServerGrants))) {
+      return NextResponse.json({ error: "mediaServerGrants must be an object map or null" }, { status: 400 });
+    }
+    const grants = serializeMediaServerGrants(parseMediaServerGrants(body.mediaServerGrants));
+    const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
+    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    try {
+      await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
+        return NextResponse.json({ error: "Not found" }, { status: 404 });
+      }
+      throw err;
+    }
+    void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_PERMISSIONS_CHANGE", target: `user:${id}`, details: { field: "mediaServerGrants", targetUser: prev.name ?? prev.email, after: grants }, ...auditContext(req, session) });
+    invalidateUserSession(id);
+    return NextResponse.json({ id, mediaServerGrants: grants });
   }
 
   const quotaField = QUOTA_FIELDS.find((k) => k in body);

@@ -17,6 +17,7 @@ import { TrailerButton } from "@/components/media/trailer-button";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
+import { getVisibleServerInstances, visibleEpisodeSourcesFrom } from "@/lib/media-visibility";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
@@ -51,12 +52,18 @@ export default async function TVDetailPage({
   const session = await sessionPromise;
 
   const provider = session?.user.provider;
-  const episodeSources =
+  const providerSources =
     provider === "plex"
       ? ["plex"]
       : provider === "jellyfin" || provider === "jellyfin-quickconnect"
       ? ["jellyfin"]
       : ["plex", "jellyfin"];
+
+  // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
+  // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
+  // in-library gates on the "report issue" / "vote to delete" actions — so scoping the
+  // QUERIES (not their results) is what keeps a restricted server invisible end to end.
+  const visible = await getVisibleServerInstances(session);
 
   const [
     plexItem,
@@ -84,10 +91,10 @@ export default async function TVDetailPage({
     onHidden,
   ] = await Promise.all([
     prisma.plexLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV" },
+      where: { tmdbId: media.id, mediaType: "TV", serverInstance: { in: visible.plex } },
     }),
     prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId: media.id, mediaType: "TV" },
+      where: { tmdbId: media.id, mediaType: "TV", serverInstance: { in: visible.jellyfin } },
     }),
     prisma.mediaRequest.findFirst({
       where: { tmdbId: media.id, mediaType: "TV", tvdbId: { not: null } },
@@ -106,9 +113,14 @@ export default async function TVDetailPage({
     prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
     getTVCredits(media.id).catch(() => []),
     getTVSuggestions(media.id).catch(() => []),
+    // Fetched for every source the viewer's PROVIDER allows, then filtered
+    // below against the scoped library rows resolved in this same Promise.all.
+    // TVEpisodeCache has no serverInstance column (guardrail 35), so `source`
+    // alone would surface a RESTRICTED server's per-episode holdings; `source`
+    // is selected here purely so that filter can run without a second query.
     prisma.tVEpisodeCache.findMany({
-      where: { tmdbId: media.id, source: { in: episodeSources } },
-      select: { seasonNumber: true, episodeNumber: true },
+      where: { tmdbId: media.id, source: { in: providerSources } },
+      select: { seasonNumber: true, episodeNumber: true, source: true },
     }),
     getTVGenres().catch(() => []),
     isBlacklisted(media.id, "TV"),
@@ -140,9 +152,16 @@ export default async function TVDetailPage({
   ]);
   const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
+  // Report a source's episodes only when this viewer can see some server of
+  // that type actually holding the show — the TVEpisodeCache gate described in
+  // media-visibility.ts. Filtering here rather than in the query above keeps it
+  // to zero extra round-trips, since plexItem/jellyfinItem land in the same
+  // Promise.all.
+  const episodeSources = visibleEpisodeSourcesFrom(!!plexItem, !!jellyfinItem, providerSources);
   const ownedBySeason: Record<number, number[]> = {};
   const seen = new Set<string>();
   for (const row of ownedEpisodes) {
+    if (!episodeSources.includes(row.source as "plex" | "jellyfin")) continue;
     const key = `${row.seasonNumber}:${row.episodeNumber}`;
     if (seen.has(key)) continue;
     seen.add(key);
