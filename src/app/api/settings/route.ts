@@ -145,6 +145,7 @@ const SETTINGS_SCHEMA = [
   ["feature.page.issues",             false],
   ["feature.page.votes",              false],
   ["feature.page.donate",             false],
+  ["feature.page.forYou",             false],
   ["feature.behavior.activeSessions", false],
   ["feature.behavior.activityCalendar", false],
   ["feature.integration.plex",        false],
@@ -158,6 +159,7 @@ const SETTINGS_SCHEMA = [
   ["feature.admin.activity",          false],
   ["feature.admin.auditLog",          false],
   ["feature.admin.backup",            false],
+  ["feature.admin.apiDocs",           false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];

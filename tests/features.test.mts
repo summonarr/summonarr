@@ -18,6 +18,9 @@
 // the DB-backed path fails fast instead of hanging on a nonexistent database.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { prisma } from "../src/lib/prisma.ts";
 import {
   FEATURE_DEFINITIONS,
@@ -150,6 +153,28 @@ test("each group contains exactly the definitions of its category, in registry o
     for (const def of groups[category]) {
       assert.equal(def.category, category, `${def.key} landed in the wrong group`);
     }
+  }
+});
+
+test("every registered flag is writable through /api/settings — an unlisted key is an INERT toggle", () => {
+  // The failure this exists for, found in a live browser check rather than by
+  // any test: /api/settings validates against its own static SETTINGS_SCHEMA
+  // allowlist and silently `continue`s past an unrecognized key while still
+  // answering {ok:true}. A flag registered here but missing there therefore
+  // renders a switch in the Features tab that reports success, never persists,
+  // and reverts on reload — with no error anywhere to explain why.
+  const routeSrc = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), "../src/app/api/settings/route.ts"),
+    "utf8",
+  );
+  const schema = routeSrc.slice(
+    routeSrc.indexOf("const SETTINGS_SCHEMA"),
+    routeSrc.indexOf("] as const", routeSrc.indexOf("const SETTINGS_SCHEMA")),
+  );
+  const allowed = new Set([...schema.matchAll(/\["([^"]+)",/g)].map((m) => m[1]));
+  assert.ok(allowed.size >= 50, `only parsed ${allowed.size} allowlisted setting keys — the pin would be vacuous`);
+  for (const key of FEATURE_KEYS) {
+    assert.ok(allowed.has(key), `${key} is registered but not writable via /api/settings — its toggle does nothing`);
   }
 });
 
