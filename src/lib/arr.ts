@@ -690,7 +690,14 @@ export async function isSeriesDownloadedInSonarr(
       const lookup = await arrFetch<{ tvdbId: number }[]>(
         cfg, `/api/v3/series/lookup?term=tmdb:${claimedTmdbId}`,
       );
-      const resolved = lookup.length ? lookup[0].tvdbId : null;
+      // Sonarr's lookup response is typed but never schema-checked, so hold it to the
+      // same positive-integer contract as the payload ids above. Unguarded, a
+      // malformed upstream value could become `tvdbId` below, where the `===` against
+      // the library rows would silently never match — reporting "not downloaded" for a
+      // series Sonarr actually has, rather than the honest `null` for unverifiable.
+      const rawResolved = lookup.length ? lookup[0].tvdbId : null;
+      const resolved =
+        Number.isInteger(rawResolved) && (rawResolved as number) > 0 ? (rawResolved as number) : null;
       if (tvdbId === null) {
         tvdbId = resolved;
       } else if (resolved !== null && resolved !== tvdbId) {
@@ -701,9 +708,15 @@ export async function isSeriesDownloadedInSonarr(
         // on the tmdbId, so an unrelated APPROVED request would be marked AVAILABLE,
         // its wanted row evicted, and its requester told it's ready. Verifying only
         // the tvdbId left that path unchecked. Disagreeing ids are never legitimate.
+        // All three are positive integers by the guards above, so the explicit
+        // Number() is a no-op at runtime — it is there to make that evident AT the
+        // call site, both to a reader and to the log-injection scanner, which cannot
+        // see validation that happened several lines earlier. The webhook payload is
+        // attacker-shaped (secret-only auth, no schema), so a string id carrying a
+        // newline would otherwise be able to forge a second "[arr] …" log entry.
         console.warn(
           "[arr] Sonarr download check: payload ids disagree (tvdbId=%s resolves tmdbId=%s to tvdbId=%s); treating as not downloaded.",
-          tvdbId, claimedTmdbId, resolved,
+          Number(tvdbId), Number(claimedTmdbId), Number(resolved),
         );
         return false;
       }
