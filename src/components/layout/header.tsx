@@ -14,6 +14,7 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
+import { getVisibleAdminItems } from "@/lib/nav-items";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { NotificationBell } from "@/components/layout/notification-bell";
 
@@ -412,6 +413,12 @@ export function Header() {
   const permsStr = session?.user?.permissions;
   const eff = permsStr ? parsePermissions(permsStr) : 0n;
   const isAdminLike = role === "ADMIN" || hasPermission(eff, Permission.ADMIN) || role === "ISSUE_ADMIN" || hasPermission(eff, Permission.MANAGE_ISSUES);
+  // The avatar menu's Settings entry used to render for EVERY signed-in user, but
+  // /settings is ADMIN-only and redirects everyone else to "/" — so most users had
+  // a dead item in their own menu. Resolved through the shared nav resolver rather
+  // than a local ADMIN check so it follows the page's gate if that ever changes.
+  const canOpenSettings = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role)
+    .some((i) => i.href === "/settings");
   const showPlex =
     isAdminLike || provider === "plex";
   const showJellyfin =
@@ -542,9 +549,11 @@ export function Header() {
             <DropdownMenuItem onClick={() => router.push("/profile")}>
               Profile
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => router.push("/settings")}>
-              Settings
-            </DropdownMenuItem>
+            {canOpenSettings && (
+              <DropdownMenuItem onClick={() => router.push("/settings")}>
+                Settings
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <AppearanceMenu />
             <DropdownMenuSeparator />
