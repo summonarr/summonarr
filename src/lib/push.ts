@@ -397,11 +397,20 @@ function mediaDeepLink(mediaType: string, tmdbId: number | null | undefined): st
   return `/media/${mediaType === "MOVIE" ? "movie" : "tv"}/${tmdbId}`;
 }
 
+// Builds the request deep link (/requests/<id>) for admin-facing notifications.
+// An admin tapping "New request" needs the REQUEST — the approve/decline screen —
+// not the title's detail page, which carries no queue action. Undefined when no
+// request id is available, leaving that notification tab-level.
+function requestDeepLink(requestId: string | null | undefined): string | undefined {
+  if (!requestId) return undefined;
+  return `/requests/${requestId}`;
+}
+
 export async function notifyAdminsNewRequestPush(data: {
   title: string;
   mediaType: string;
   requestedBy: string;
-  tmdbId?: number;
+  requestId?: string;
   excludeUserId?: string;
 }) {
   try {
@@ -417,7 +426,7 @@ export async function notifyAdminsNewRequestPush(data: {
       body: `${data.title} — requested by ${data.requestedBy}`,
       url: "/admin",
       category: "new_request",
-      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
+      deepLink: requestDeepLink(data.requestId),
     };
 
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));

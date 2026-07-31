@@ -998,7 +998,7 @@ async function handleComponent(interaction: any): Promise<void> {
             });
             if (!earlierPending) {
               void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null, excludeUserId: dbUser.id });
-              void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, tmdbId: selected.id, excludeUserId: dbUser.id });
+              void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, requestId: pendingRequest.id, excludeUserId: dbUser.id });
               void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
             }
             note = "An admin will review your request.";

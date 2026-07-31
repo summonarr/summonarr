@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.18.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.19.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,22 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.19.0
+
+**Added**
+
+- **API Docs in the admin nav.** The OpenAPI reference at `/admin/api-docs` already existed but nothing linked to it, so it was reachable only by typing the URL. It now appears under Admin, and can be hidden with the new "API Docs page" toggle in Admin → Settings → Features.
+- **Jellyfin server picker for the iOS app.** A user whose Jellyfin account lives on a named (non-default) server could not sign in from the app at all — the web login page built its picker in a way native clients had no access to. The app can now list the configured servers and pick one.
+
+**Fixed**
+
+- **Delegated admins were shown pages they cannot open.** Anyone granted Manage Users or Manage Requests received the *whole* admin menu, but 8 of its 11 destinations require full admin and simply bounced them back to the home page. Each entry is now shown only to someone who can actually open it, across the sidebar, the mobile tab bar and the mobile drawer.
+- **The Settings link appeared for everyone.** The avatar menu offered Settings to every signed-in user, and it redirected all non-admins home. It is now shown only to admins.
+- **The "For You" carousel could never be switched on.** Its toggle was missing from the settings write allowlist, so flipping it reported success, saved nothing and reverted on reload — and since the feature defaults to off, there was no way to enable it at all.
+- **An admin could lose the entire admin menu.** An admin account whose permissions had been edited by hand to any other value resolved without the admin capability and saw no admin nav.
+- **Admin "new request" push notifications** now open the request itself, where it can be approved or declined, instead of the title's detail page.
+- **Fix Match could return the wrong server's result** on a multi-server setup, and Jellyfin sign-in did not validate the server name it was given — a differently-capitalised name resolved one server's connection while checking another's membership, refusing a legitimate first-time user.
 
 ### v0.18.0
 
@@ -340,7 +356,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.18.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.19.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

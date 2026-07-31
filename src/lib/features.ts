@@ -190,6 +190,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     defaultEnabled: true,
   },
   {
+    key: "feature.admin.apiDocs",
+    label: "API Docs page",
+    description: "Show the /admin/api-docs OpenAPI reference and nav link.",
+    category: "admin",
+    defaultEnabled: true,
+  },
+  {
     key: "trashGuidesEnabled",
     label: "TRaSH Guides",
     description: "Enable the TRaSH Guides admin page and nightly sync.",

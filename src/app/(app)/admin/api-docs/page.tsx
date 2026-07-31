@@ -1,12 +1,16 @@
 import { authActive, isTokenExpired } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import { OpenApiViewer } from "@/components/admin/openapi-viewer";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
 export default async function ApiDocsPage() {
+  // Enforce the flag on the PAGE, not just the nav — hiding the link alone would
+  // leave the URL live, so the toggle would not actually disable anything.
+  await requireFeature("feature.admin.apiDocs");
   const session = await authActive();
   if (!session || isTokenExpired(session) || !hasPermission(session.user.permissions, Permission.ADMIN)) {
     redirect("/");

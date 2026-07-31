@@ -25,8 +25,9 @@ import {
   Ban,
   Bookmark,
   EyeOff,
+  FileText,
 } from "@/components/icons";
-import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
 
 export interface NavItem {
   href: string;
@@ -55,6 +56,7 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/activity":     "feature.admin.activity",
   "/admin/audit-log":    "feature.admin.auditLog",
   "/admin/backup":       "feature.admin.backup",
+  "/admin/api-docs":     "feature.admin.apiDocs",
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 
@@ -107,25 +109,49 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },
   { href: "/admin/backup", label: "Backup", icon: HardDrive, section: "admin" },
   { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin" },
+  { href: "/admin/api-docs", label: "API Docs", icon: FileText, section: "admin" },
   { href: "/settings", label: "Settings", icon: Settings, section: "admin" },
 ];
 
-// Resolves the admin nav items visible for a role or permission set: full nav for
-// ADMIN (or granular users+requests), issues-only for MANAGE_ISSUES, else none.
+// The permission each admin destination ACTUALLY requires, mirroring the gate on
+// its own page (the page/layout redirect is the enforcement; this map only
+// decides whether to draw the link). Kept as an href-keyed map for the same
+// reason as NAV_ITEM_FEATURE_KEY — NavItem stays a plain data shape shared by
+// server and client components.
+//
+// Only three destinations are delegable. Everything else is ADMIN-only, which is
+// why a MANAGE_USERS holder must NOT be shown Backup, Settings or the Audit Log:
+// their page guards redirect to "/", so those links were dead ends that read as
+// broken permissions. tests/nav-items.test.mts parses the real page sources and
+// fails if this map and a page's gate ever disagree.
+export const ADMIN_ITEM_PERMISSION: Record<string, PermissionValue> = {
+  "/admin":        Permission.MANAGE_REQUESTS,
+  "/admin/issues": Permission.MANAGE_ISSUES,
+  "/admin/users":  Permission.MANAGE_USERS,
+};
+
+// Resolves the admin nav items visible for a role or permission set. Each item is
+// filtered on the permission its own page enforces; hasPermission short-circuits
+// on the ADMIN superbit, so a full admin still gets everything.
 export function getVisibleAdminItems(roleOrPerms?: string | { role?: string; permissions?: bigint | string }): NavItem[] {
-  let role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
-  let perms: bigint | undefined;
-  if (roleOrPerms && typeof roleOrPerms === "object" && roleOrPerms.permissions != null) {
-    const p = roleOrPerms.permissions;
-    perms = typeof p === "string" ? parsePermissions(p) : p;
-    role = roleOrPerms.role;
-  }
-  if (!perms && role) {
-    perms = effectivePermissions(role, 0n);
-  }
-  if (!perms) perms = 0n;
-  if (hasPermission(perms, Permission.ADMIN)) return adminNavItems;
-  if (hasPermission(perms, Permission.MANAGE_ISSUES)) return adminNavItems.filter((i) => i.href === "/admin/issues");
-  if (hasPermission(perms, [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS])) return adminNavItems; // granular full-admin nav for now
-  return [];
+  const role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
+  const raw = typeof roleOrPerms === "object" && roleOrPerms !== null ? roleOrPerms.permissions : undefined;
+  const stored = raw == null ? 0n : typeof raw === "string" ? parsePermissions(raw) : raw;
+  // Resolve through effectivePermissions rather than re-deriving its convention
+  // here. It owns both halves: a stored mask of 0n means "never seeded" and falls
+  // back to the role preset, and role ADMIN always contributes the superbit. The
+  // previous inline version consulted the role ONLY when the mask was zero, so an
+  // ADMIN row carrying any other non-zero bits — reachable via the permissions
+  // editor in /api/admin/users/[id], which can write an arbitrary mask over an
+  // existing ADMIN — resolved without the ADMIN bit and got NO admin nav at all.
+  // Not live today (claimsToSession normalizes before every current call site),
+  // but the {role, permissions} signature invites passing a raw User row.
+  const perms = role ? effectivePermissions(role, stored) : stored;
+  return adminNavItems.filter((item) =>
+    // An unmapped destination is ADMIN-only — fail CLOSED. This is deliberately
+    // the opposite default to filterNavByFeatures: an unrecognized feature flag
+    // should still show a page, but a new admin page nobody has classified must
+    // not be advertised to a delegated user.
+    hasPermission(perms, ADMIN_ITEM_PERMISSION[item.href] ?? Permission.ADMIN),
+  );
 }

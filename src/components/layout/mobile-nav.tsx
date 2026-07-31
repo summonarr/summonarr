@@ -19,13 +19,12 @@ import {
 } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
-import { filterNavByFeatures, userNavItems } from "@/lib/nav-items";
+import { filterNavByFeatures, getVisibleAdminItems, userNavItems } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
 import { SearchBar } from "@/components/layout/header";
-import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
 
 type Tab = {
   href: string;
@@ -376,15 +375,17 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
       p === "/requests" || p === "/issues" || p === "/votes" || p === "/watchlist" || p === "/hidden",
   };
 
+  // Derive the 4th slot from the same resolver the sidebar uses, so the tab lands
+  // on a page this user can actually open. It used to hardcode "/admin", which
+  // requires MANAGE_REQUESTS — so a MANAGE_USERS-only delegate tapped Admin and
+  // was redirected straight back to Discover.
   const permsStr = sessionPerms;
-  const eff = permsStr ? parsePermissions(permsStr) : 0n;
-  const hasAdmin = hasPermission(eff, Permission.ADMIN);
-  const hasManageUsers = hasPermission(eff, Permission.MANAGE_USERS);
-  const hasManageReqs = hasPermission(eff, Permission.MANAGE_REQUESTS);
-  const hasManageIssues = hasPermission(eff, Permission.MANAGE_ISSUES);
-  if (role === "ADMIN" || hasAdmin || hasManageUsers || hasManageReqs) {
+  const adminItems = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role);
+  const issuesOnly = adminItems.length === 1 && adminItems[0].href === "/admin/issues";
+
+  if (adminItems.length > 0 && !issuesOnly) {
     const admin: Tab = {
-      href: "/admin",
+      href: adminItems[0].href,
       label: "Admin",
       icon: ShieldCheck,
       match: (p) => p.startsWith("/admin") || p === "/settings",
@@ -392,7 +393,7 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
     return [discover, browse, requests, admin];
   }
 
-  if (role === "ISSUE_ADMIN" || hasManageIssues) {
+  if (issuesOnly) {
     const issues: Tab = {
       href: "/admin/issues",
       label: "Issues",

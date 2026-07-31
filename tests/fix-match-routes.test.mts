@@ -545,8 +545,56 @@ test("candidates?serverInstance=remote: scopes the library reads and searches th
 
   const plexRead = opsOf("plexLibraryItem.findFirst")[0].args as { where: Record<string, unknown> };
   assert.equal(plexRead.where.serverInstance, "remote");
-  const jfRead = opsOf("jellyfinLibraryItem.findFirst")[0].args as { where: Record<string, unknown> };
-  assert.equal(jfRead.where.serverInstance, "remote", "the sibling Jellyfin path lookup must be scoped too");
+  // The sibling Jellyfin lookup is deliberately NOT scoped by this slug: it
+  // names the PLEX server, and the two sides of a bad match are independent
+  // instances (bad-matches.ts pairs rows by relative path across every
+  // configured server, each side carrying its own serverInstance). See the
+  // cross-instance pin below.
+  const jfRead = opsOf("jellyfinLibraryItem.findMany")[0].args as { where: Record<string, unknown> };
+  assert.equal(jfRead.where.serverInstance, undefined, "the Jellyfin path hint must not be scoped by the PLEX slug");
+});
+
+test("candidates: the Jellyfin path hint crosses instances — a bad match straddling two servers still names both files", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
+  // Jellyfin holds the same tmdbId on the DEFAULT server only — exactly the
+  // shape bad-matches.ts emits when one server's row is wrong and the other's
+  // isn't. Scoping this read with the Plex slug ("remote") reported null here,
+  // blanking the comparison the admin opened the picker to make.
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/jf-def.mkv", jellyfinItemId: "aaaaaaaa" });
+  respond = (url) => {
+    if (url.origin !== new URL(PLEX_REMOTE).origin) throw new Error(`WRONG SERVER: ${url.origin}`);
+    return okJson({ MediaContainer: { SearchResult: [] } });
+  };
+
+  const res = await candidates(req(candidatesUrl({
+    server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  // The PLEX side stays strictly scoped — it carries the ratingKey the POST
+  // rewrites, so a cross-server read there would remap the wrong library.
+  assert.equal(body.plexFilePath, "/d/rem.mkv");
+  assert.equal(body.jellyfinFilePath, "/d/jf-def.mkv");
+});
+
+test("candidates: when several Jellyfin servers hold the title, the REQUESTED instance still wins", async () => {
+  // Preference, not a free-for-all: every answer the old scoped read produced
+  // must survive unchanged, so widening can only ever turn a null into a path.
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/jf-def.mkv", jellyfinItemId: "aaaaaaaa" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/jf-rem.mkv", jellyfinItemId: "bbbbbbbb" });
+  respond = () => okJson({ MediaContainer: { SearchResult: [] } });
+
+  const res = await candidates(req(candidatesUrl({
+    server: "plex", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal((await res.json()).jellyfinFilePath, "/d/jf-rem.mkv");
 });
 
 test("candidates with NO serverInstance uses the DEFAULT instance's row + server", async () => {
@@ -556,6 +604,7 @@ test("candidates with NO serverInstance uses the DEFAULT instance's row + server
   // here, so this also pins that the route no longer lets an arbitrary row win.
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
   plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", plexRatingKey: "1001" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/jf.mkv", jellyfinItemId: "aaaaaaaa" });
   respond = (url) => {
     if (url.origin !== new URL(PLEX_DEFAULT).origin) throw new Error(`WRONG SERVER: ${url.origin}`);
     return okJson({ MediaContainer: { SearchResult: [] } });
@@ -570,6 +619,9 @@ test("candidates with NO serverInstance uses the DEFAULT instance's row + server
   assert.equal(body.ratingKey, "1001");
   assert.equal(body.serverInstance, "");
   assert.equal(body.plexFilePath, "/d/def.mkv");
+  // Single-server shape (every row on ""): byte-identical to the pre-multi-server
+  // response, including the Jellyfin hint (guardrail 35).
+  assert.equal(body.jellyfinFilePath, "/d/jf.mkv");
   assert.deepEqual(origins(), [new URL(PLEX_DEFAULT).origin]);
 });
 

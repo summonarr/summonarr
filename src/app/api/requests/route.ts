@@ -562,7 +562,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
       after(async () => {
         await Promise.allSettled([
           notifyAdminsNewRequest({ title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath, tmdbId, releaseYear: meta.releaseYear, excludeUserId: session.user.id }),
-          notifyAdminsNewRequestPush({ title: meta.title, mediaType, requestedBy, tmdbId, excludeUserId: session.user.id }),
+          notifyAdminsNewRequestPush({ title: meta.title, mediaType, requestedBy, requestId: request.id, excludeUserId: session.user.id }),
           notifyAdminsNewRequestDiscord({ requestId: request.id, title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath }),
         ]);
       });

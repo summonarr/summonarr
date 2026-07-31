@@ -516,6 +516,39 @@ test("E2E device: mutable-content + encrypted blob carrying the rich text and th
   assert.deepEqual(errors, []);
 });
 
+test("the admin new-request deep link points at the REQUEST, not the title; no u without a requestId", async () => {
+  const device = makeDevice();
+  subRows = [iosSub("u-admin", "apns-token-admin", { e2e: device, user: ADMIN })];
+
+  await notifyAdminsNewRequestPush({
+    title: "Dune",
+    mediaType: "MOVIE",
+    requestedBy: "alice",
+    requestId: "req_abc123",
+  });
+
+  assert.equal(relayCalls.length, 1);
+  // Cleartext is unchanged (generic alert + the tab-level /admin fallback for a
+  // device with no E2E key); the request id rides only inside the ciphertext.
+  assert.equal(relayCalls[0].body.payload.url, "/admin");
+  assert.deepEqual(decryptE2e(device, relayCalls[0].body.payload.e2e!), {
+    t: "New Movie Request",
+    b: "Dune — requested by alice",
+    u: "/requests/req_abc123",
+  });
+
+  // No requestId → no u at all, so the tap falls back to the Requests tab
+  // rather than deep-linking to the title the admin can't action from.
+  relayCalls.length = 0;
+  await notifyAdminsNewRequestPush({ title: "Andor", mediaType: "TV", requestedBy: "bob" });
+  assert.equal(relayCalls.length, 1);
+  assert.deepEqual(decryptE2e(device, relayCalls[0].body.payload.e2e!), {
+    t: "New TV Show Request",
+    b: "Andor — requested by bob",
+  });
+  assert.deepEqual(errors, []);
+});
+
 test("an E2E encrypt failure falls back to the generic payload — the send still goes out, scoped log emitted", async () => {
   userRows = [{ id: "u-bad", pushOnApproved: true }];
   const bad = iosSub("u-bad", "apns-token-badkey");
