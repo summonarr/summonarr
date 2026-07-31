@@ -56,6 +56,7 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/activity":     "feature.admin.activity",
   "/admin/audit-log":    "feature.admin.auditLog",
   "/admin/backup":       "feature.admin.backup",
+  "/admin/api-docs":     "feature.admin.apiDocs",
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 

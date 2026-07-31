@@ -40,7 +40,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -205,6 +205,65 @@ test("every feature.page.* flag is wired into the nav, except the documented non
   for (const key of registeredKeys) {
     if (!key.startsWith("feature.page.") || NOT_A_NAV_DESTINATION.has(key)) continue;
     assert.ok(wired.has(key), `${key} gates a page but no nav item is wired to it`);
+  }
+});
+
+test("every feature.admin.* flag is wired into the nav too", () => {
+  // Same drift as the page-flag pin above, on the admin side: a registered flag
+  // nothing consults is a toggle that appears in the Features tab and silently
+  // does nothing to the nav. Declare an exception here if one is ever added that
+  // gates something other than a nav destination.
+  const NOT_A_NAV_DESTINATION = new Set<string>([]);
+  const wired = new Set(Object.values(NAV_ITEM_FEATURE_KEY));
+  for (const key of registeredKeys) {
+    if (!key.startsWith("feature.admin.") || NOT_A_NAV_DESTINATION.has(key)) continue;
+    assert.ok(wired.has(key), `${key} gates an admin page but no nav item is wired to it`);
+  }
+});
+
+// trashGuidesEnabled is deliberately NOT a page guard. Its own on/off toggle
+// lives at /admin/trash-guides/settings, so requireFeature on that subtree would
+// 404 the page an admin needs in order to turn the feature back on — the flag
+// would be locked off forever from the UI. It is enforced where it actually
+// matters instead: the mutating API routes refuse, and the nightly sync no-ops.
+const PAGE_GUARD_EXEMPT: Record<string, string> = {
+  trashGuidesEnabled: "its own re-enable toggle lives inside the gated subtree",
+};
+
+test("a nav item gated by a feature flag ALSO enforces it on the page — a hidden link is not a disabled page", () => {
+  // Hiding the link without a page guard leaves the URL live, so the toggle
+  // would not actually disable anything.
+  const appDir = resolve(HERE, "../src/app/(app)");
+  for (const [href, key] of Object.entries(NAV_ITEM_FEATURE_KEY)) {
+    if (PAGE_GUARD_EXEMPT[key]) continue;
+    const dir = href === "/" ? appDir : resolve(appDir, `.${href}`);
+    const sources = ["page.tsx", "_shared.ts", "layout.tsx"]
+      .map((f) => resolve(dir, f))
+      .filter((f) => existsSync(f))
+      .map((f) => readFileSync(f, "utf8"))
+      .join("\n");
+    assert.ok(
+      sources.includes(`requireFeature("${key}")`),
+      `${href} is hidden by ${key} in the nav but never enforces it — the page stays reachable by URL`,
+    );
+  }
+});
+
+test("a page-guard-exempt flag is still enforced SOMEWHERE — the exemption is not a hiding place", () => {
+  // Without this, adding a key to PAGE_GUARD_EXEMPT would silently downgrade a
+  // real toggle to a cosmetic one that only hides a link.
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = resolve(dir, e.name);
+      return e.isDirectory() ? walk(full) : e.name.endsWith(".ts") ? [full] : [];
+    });
+  const apiSources = walk(resolve(HERE, "../src/app/api")).map((f) => readFileSync(f, "utf8"));
+  assert.ok(apiSources.length > 100, "the API walk found almost nothing — this test would pass vacuously");
+  for (const key of Object.keys(PAGE_GUARD_EXEMPT)) {
+    assert.ok(
+      apiSources.some((s) => s.includes(`isFeatureEnabled("${key}")`)),
+      `${key} is exempt from the page guard but no API route enforces it either`,
+    );
   }
 });
 

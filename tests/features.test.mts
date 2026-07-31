@@ -158,7 +158,7 @@ test("group sizes are exact (pins accidental category reassignment)", () => {
   assert.equal(groups.pages.length, 7);
   assert.equal(groups.behaviors.length, 4);
   assert.equal(groups.integrations.length, 7);
-  assert.equal(groups.admin.length, 5);
+  assert.equal(groups.admin.length, 6);
 });
 
 // ── getFeatureFlags(cfg) — the pure computeFlags path ────────────────────
