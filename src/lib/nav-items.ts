@@ -113,17 +113,19 @@ export const adminNavItems: NavItem[] = [
 // Resolves the admin nav items visible for a role or permission set: full nav for
 // ADMIN (or granular users+requests), issues-only for MANAGE_ISSUES, else none.
 export function getVisibleAdminItems(roleOrPerms?: string | { role?: string; permissions?: bigint | string }): NavItem[] {
-  let role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
-  let perms: bigint | undefined;
-  if (roleOrPerms && typeof roleOrPerms === "object" && roleOrPerms.permissions != null) {
-    const p = roleOrPerms.permissions;
-    perms = typeof p === "string" ? parsePermissions(p) : p;
-    role = roleOrPerms.role;
-  }
-  if (!perms && role) {
-    perms = effectivePermissions(role, 0n);
-  }
-  if (!perms) perms = 0n;
+  const role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
+  const raw = typeof roleOrPerms === "object" && roleOrPerms !== null ? roleOrPerms.permissions : undefined;
+  const stored = raw == null ? 0n : typeof raw === "string" ? parsePermissions(raw) : raw;
+  // Resolve through effectivePermissions rather than re-deriving its convention
+  // here. It owns both halves: a stored mask of 0n means "never seeded" and falls
+  // back to the role preset, and role ADMIN always contributes the superbit. The
+  // previous inline version consulted the role ONLY when the mask was zero, so an
+  // ADMIN row carrying any other non-zero bits — reachable via the permissions
+  // editor in /api/admin/users/[id], which can write an arbitrary mask over an
+  // existing ADMIN — resolved without the ADMIN bit and got NO admin nav at all.
+  // Not live today (claimsToSession normalizes before every current call site),
+  // but the {role, permissions} signature invites passing a raw User row.
+  const perms = role ? effectivePermissions(role, stored) : stored;
   if (hasPermission(perms, Permission.ADMIN)) return adminNavItems;
   if (hasPermission(perms, Permission.MANAGE_ISSUES)) return adminNavItems.filter((i) => i.href === "/admin/issues");
   if (hasPermission(perms, [Permission.MANAGE_USERS, Permission.MANAGE_REQUESTS])) return adminNavItems; // granular full-admin nav for now

@@ -272,13 +272,32 @@ test("permissions outrank the role: a USER row carrying the ADMIN bit gets the a
   );
 });
 
-test("an explicit permissions: 0n falls back to the ROLE — 0n is falsy, so the zero is not honoured", () => {
-  // A genuine quirk of the implementation (`if (!perms && role)` — `!0n` is
-  // true), pinned rather than assumed: an ADMIN whose permissions column is
-  // literally zero still gets the admin nav via effectivePermissions(role).
-  // Harmless for nav, since the real gates re-derive permissions server-side,
-  // but anyone reusing this helper as an authorization input should know.
+test("an explicit permissions: 0n falls back to the ROLE preset — 0n means 'never seeded', not 'no capabilities'", () => {
+  // The codebase-wide convention, owned by effectivePermissions: a row whose mask
+  // is literally zero predates the permissions migration (or a create site forgot
+  // to seed it), so it resolves to the role preset rather than locking the user
+  // out. A deliberately-restricted user has at least one bit set.
   assert.deepEqual(hrefs(getVisibleAdminItems({ role: "ADMIN", permissions: 0n })), hrefs(adminNavItems));
+  assert.deepEqual(getVisibleAdminItems({ role: "USER", permissions: 0n }), []);
+});
+
+test("an ADMIN carrying non-zero, non-ADMIN bits still gets the admin nav — the role superbit is not dropped", () => {
+  // The regression this function shipped with: resolution consulted the role only
+  // when the mask was zero, so an ADMIN whose permissions had been hand-edited to
+  // any other non-zero value resolved without Permission.ADMIN and got NOTHING.
+  // effectivePermissions ORs the superbit in for role ADMIN at any mask.
+  const out = getVisibleAdminItems({ role: "ADMIN", permissions: Permission.REQUEST });
+  assert.deepEqual(hrefs(out), hrefs(adminNavItems), "a hand-edited ADMIN lost the entire admin nav");
+});
+
+test("a non-ADMIN role with a non-zero mask is still governed by the mask, not the preset", () => {
+  // The other half of the convention, unchanged: a non-zero mask is authoritative
+  // for every role except ADMIN, so restricting a user actually restricts them.
+  assert.deepEqual(getVisibleAdminItems({ role: "USER", permissions: Permission.REQUEST }), []);
+  assert.deepEqual(
+    hrefs(getVisibleAdminItems({ role: "USER", permissions: Permission.MANAGE_ISSUES })),
+    ["/admin/issues"],
+  );
 });
 
 test('permissions "0" with no role yields nothing', () => {
