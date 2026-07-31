@@ -25,6 +25,7 @@ import {
   Ban,
   Bookmark,
   EyeOff,
+  FileText,
 } from "@/components/icons";
 import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
 
@@ -107,6 +108,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },
   { href: "/admin/backup", label: "Backup", icon: HardDrive, section: "admin" },
   { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin" },
+  { href: "/admin/api-docs", label: "API Docs", icon: FileText, section: "admin" },
   { href: "/settings", label: "Settings", icon: Settings, section: "admin" },
 ];
 
