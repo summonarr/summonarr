@@ -42,6 +42,25 @@
 #    that is only round-tripped through encryptToken/decryptToken,
 #    "k9Xzm6H1c3RhbXBsZQ" (tests/push-routes.test.mts). Each specific
 #    fixture string is allowlisted below — not the files or the rules.
+#
+# 5. tests/discord-routes.test.mts needs THREE mutually distinct Discord
+#    snowflakes at once — a guild, a linked role, and another user's
+#    account — so it cannot reuse the single placeholder from item 4
+#    without collapsing the very distinctions the tests exist to check
+#    (e.g. that an unlink revokes the role on the right guild, and that
+#    one user's unlink leaves another user's discordId intact). All three
+#    are invented descending/counting digit patterns, not values from any
+#    real Discord app, and they trip the 18-digit discord-client-id shape
+#    rule for the same reason item 4's placeholder does.
+#
+#    The same pass added one NEXTAUTH_SECRET fixture,
+#    "tv-availability-route-secret-0123456789ab", that stops one character
+#    short of the item-3 counting sequence and so clears generic-api-key's
+#    entropy floor on its own. Its siblings in the other new test files all
+#    end in the full 0123456789abcdef run and are covered by item 3. Note
+#    this one is allowlisted rather than edited: gitleaks scans history, so
+#    changing the working tree would leave the string in the commit that
+#    introduced it and the scan would still flag it.
 
 [extend]
 useDefault = true
@@ -59,4 +78,8 @@ regexes = [
   '''123456789012345678''',
   '''internal-trigger-test-cron-secret-0123456789''',
   '''k9Xzm6H1c3RhbXBsZQ''',
+  '''555444333222111000''',
+  '''111222333444555666''',
+  '''987654321098765432''',
+  '''tv-availability-route-secret-0123456789ab''',
 ]
