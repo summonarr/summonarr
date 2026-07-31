@@ -67,7 +67,7 @@ const fetchCalls: URL[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
-  if (!url.hostname.endsWith("themoviedb.org")) {
+  if (!(url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     throw new Error(`unexpected non-TMDB fetch: ${url}`);
   }
   if (!tmdbOk) return new Response("{}", { status: 404, headers: { "content-type": "application/json" } });

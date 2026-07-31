@@ -74,7 +74,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   fetchCalls.push(url);
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
 
-  if (url.hostname.endsWith("themoviedb.org")) {
+  if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     if (!tmdbOk) return json({ status_message: "TMDB DOWN" }, 500);
     return json({ page: 1, total_pages: 1, results: [] });
   }

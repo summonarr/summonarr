@@ -238,7 +238,7 @@ test("no cookie redirects to /login", async () => {
 });
 
 test("the redirect is a THROW, never a returned null — a returning guard would render the page signed-out", async () => {
-  let returned: unknown = Symbol("nothing was returned");
+  let returned: unknown;
   try {
     returned = await call(undefined);
   } catch {

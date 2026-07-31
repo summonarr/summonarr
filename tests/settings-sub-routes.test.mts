@@ -429,16 +429,18 @@ test("both verbs audit the change", async () => {
   const t = await mintSession();
   await postPlex(t, { authToken: "a-good-token" });
   await drainAfter();
-  let data = (opsOf("auditLog.create")[0].args as { data: { action: string; target: string; details: string } }).data;
-  assert.equal(data.action, "SETTINGS_CHANGE");
-  assert.equal(data.target, "settings:plex");
-  assert.equal(JSON.parse(data.details).operation, "rotate");
+  const auditData = () =>
+    (opsOf("auditLog.create")[0].args as { data: { action: string; target: string; details: string } }).data;
+
+  const posted = auditData();
+  assert.equal(posted.action, "SETTINGS_CHANGE");
+  assert.equal(posted.target, "settings:plex");
+  assert.equal(JSON.parse(posted.details).operation, "rotate");
 
   ops = [];
   await deletePlex(t);
   await drainAfter();
-  data = (opsOf("auditLog.create")[0].args as { data: { details: string } }).data as never;
-  assert.equal(JSON.parse((opsOf("auditLog.create")[0].args as { data: { details: string } }).data.details).operation, "delete");
+  assert.equal(JSON.parse(auditData().details).operation, "delete");
 });
 
 test("the audit record never contains the token itself", async () => {

@@ -95,7 +95,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     if (!arrOk || failing) return json({ message: "ARR ADD FAILED" }, 500);
     return json({ id: 1, tvdbId: 4242 });
   }
-  if (url.hostname.endsWith("themoviedb.org")) return json({ id: 603, title: "The Matrix", results: [] });
+  if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) return json({ id: 603, title: "The Matrix", results: [] });
   return json({});
 }) as unknown as typeof fetch;
 

@@ -132,7 +132,6 @@ const COOKIE = getSessionCookieName();
 // ── business-model stubs ─────────────────────────────────────────────────────
 type BlItem = { id: string; tmdbId: number; mediaType: string; title: string | null; reason: string | null; addedBy: string; createdAt: Date };
 let items: BlItem[] = [];
-let upsertImpl: ((args: Record<string, unknown>) => Promise<BlItem>) | null = null;
 
 shadowPrismaModel(prisma, "blacklistItem", {
   findMany: async (args: { orderBy?: unknown; take?: number }) => {
@@ -142,7 +141,6 @@ shadowPrismaModel(prisma, "blacklistItem", {
   },
   upsert: async (args: Record<string, unknown>) => {
     rec("blacklistItem.upsert", args);
-    if (upsertImpl) return upsertImpl(args);
     const where = (args.where as { tmdbId_mediaType: { tmdbId: number; mediaType: string } }).tmdbId_mediaType;
     const existing = items.find((i) => i.tmdbId === where.tmdbId && i.mediaType === where.mediaType);
     if (existing) {
@@ -232,7 +230,6 @@ beforeEach(() => {
   items = [];
   afterTasks.length = 0;
   auditFails = false;
-  upsertImpl = null;
 });
 
 // ── role gating (guardrail 6a) ───────────────────────────────────────────────

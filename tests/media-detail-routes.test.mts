@@ -77,7 +77,7 @@ const PERSON_CREDITS = [
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
-  if (!url.hostname.endsWith("themoviedb.org")) {
+  if (!(url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     throw new Error(`unexpected non-TMDB fetch: ${url}`);
   }
   const isSeason = /\/tv\/\d+\/season\/\d+/.test(url.pathname);

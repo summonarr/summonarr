@@ -71,7 +71,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
-  if (!url.hostname.endsWith("themoviedb.org")) return json({});
+  if (!(url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) return json({});
   if (!tmdbOk) return json({ status_message: "TMDB SECRET DETAIL" }, 500);
 
   if (/\/search\/multi/.test(url.pathname)) {
