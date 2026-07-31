@@ -76,6 +76,7 @@ registerHooks({
 const {
   filterNavByFeatures,
   NAV_ITEM_FEATURE_KEY,
+  ADMIN_ITEM_PERMISSION,
   userNavItems,
   adminNavItems,
   getVisibleAdminItems,
@@ -257,12 +258,26 @@ test("MANAGE_ISSUES alone sees only the issues entry", () => {
   assert.deepEqual(out, ["/admin/issues"]);
 });
 
-test("MANAGE_USERS alone gets the full admin nav — the documented 'granular full-admin nav for now'", () => {
-  assert.deepEqual(hrefs(getVisibleAdminItems({ permissions: Permission.MANAGE_USERS })), hrefs(adminNavItems));
+test("MANAGE_USERS alone sees ONLY Users — not Backup, Settings or the Audit Log", () => {
+  // Those pages redirect a non-ADMIN to "/", so advertising them to a delegated
+  // user produced dead links that read as broken permissions.
+  assert.deepEqual(hrefs(getVisibleAdminItems({ permissions: Permission.MANAGE_USERS })), ["/admin/users"]);
 });
 
-test("MANAGE_REQUESTS alone gets the full admin nav", () => {
-  assert.deepEqual(hrefs(getVisibleAdminItems({ permissions: Permission.MANAGE_REQUESTS })), hrefs(adminNavItems));
+test("MANAGE_REQUESTS alone sees ONLY the request queue", () => {
+  assert.deepEqual(hrefs(getVisibleAdminItems({ permissions: Permission.MANAGE_REQUESTS })), ["/admin"]);
+});
+
+test("two delegated bits compose, in nav order, and still admit nothing ADMIN-only", () => {
+  const out = hrefs(getVisibleAdminItems({ permissions: Permission.MANAGE_USERS | Permission.MANAGE_REQUESTS }));
+  assert.deepEqual(out, ["/admin", "/admin/users"]);
+});
+
+test("every delegated bit together still falls short of the ADMIN-only pages", () => {
+  const delegated = Object.values(ADMIN_ITEM_PERMISSION).reduce((a, b) => a | b, 0n);
+  const out = hrefs(getVisibleAdminItems({ permissions: delegated }));
+  assert.deepEqual(out, Object.keys(ADMIN_ITEM_PERMISSION).sort(), "a delegated user reached an ADMIN-only page");
+  assert.ok(!out.includes("/settings") && !out.includes("/admin/backup"));
 });
 
 test("permissions outrank the role: a USER row carrying the ADMIN bit gets the admin nav", () => {
@@ -355,6 +370,66 @@ test("every admin nav href is under /admin, or is the settings page", () => {
       item.href.startsWith("/admin") || item.href === "/settings",
       `${item.href} is in the admin nav but outside the admin surface`,
     );
+  }
+});
+
+// ── the nav's permission map vs what the PAGES actually enforce ──────────────
+
+// Read the permission a destination really requires out of its own source. The
+// gate is a one-liner on the page, except where the page delegates to a shared
+// loader or a layout (trash-guides), so the first file that carries it wins.
+function enforcedPermission(href: string): string | null {
+  const appDir = resolve(HERE, "../src/app/(app)");
+  const dir = href === "/" ? appDir : resolve(appDir, `.${href}`);
+  for (const candidate of ["page.tsx", "_shared.ts", "layout.tsx"]) {
+    const file = resolve(dir, candidate);
+    if (!existsSync(file)) continue;
+    const m = /hasPermission\(\s*session\.user\.permissions,\s*Permission\.([A-Z_]+)\s*\)/.exec(
+      readFileSync(file, "utf8"),
+    );
+    if (m) return m[1];
+  }
+  return null;
+}
+
+test("every admin nav destination enforces a permission in its own source — an ungated admin page would be a real hole", () => {
+  for (const item of adminNavItems) {
+    assert.ok(
+      enforcedPermission(item.href),
+      `${item.href} has no parseable permission gate — either it is ungated, or the gate was rewritten and the next test can no longer see it`,
+    );
+  }
+});
+
+test("the nav's permission map MATCHES what each page enforces — a link nobody can open is a broken-permissions bug report", () => {
+  // The failure this prevents: a page's gate is tightened (or a new admin page
+  // ships) and the nav keeps advertising it, so a delegated user clicks through
+  // to a redirect. The map is only the drawing decision — the page is the truth.
+  for (const item of adminNavItems) {
+    const enforced = enforcedPermission(item.href);
+    const declared = ADMIN_ITEM_PERMISSION[item.href] ?? Permission.ADMIN;
+    assert.equal(
+      declared,
+      Permission[enforced as keyof typeof Permission],
+      `${item.href} enforces Permission.${enforced} but the nav shows it for a different bit`,
+    );
+  }
+});
+
+test("every ADMIN_ITEM_PERMISSION key is a real admin nav item", () => {
+  const known = new Set(hrefs(adminNavItems));
+  for (const href of Object.keys(ADMIN_ITEM_PERMISSION)) {
+    assert.ok(known.has(href), `ADMIN_ITEM_PERMISSION classifies "${href}", which is not an admin nav item`);
+  }
+});
+
+test("an unclassified admin page fails CLOSED — the opposite default to the feature map", () => {
+  const unmapped = adminNavItems.filter((i) => !ADMIN_ITEM_PERMISSION[i.href]);
+  assert.ok(unmapped.length > 0, "expected some ADMIN-only entries");
+  const everyDelegatedBit = Object.values(ADMIN_ITEM_PERMISSION).reduce((a, b) => a | b, 0n);
+  const visible = hrefs(getVisibleAdminItems({ permissions: everyDelegatedBit }));
+  for (const item of unmapped) {
+    assert.ok(!visible.includes(item.href), `${item.href} is unclassified but was shown to a delegated user`);
   }
 });
 
