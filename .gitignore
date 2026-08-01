@@ -67,3 +67,6 @@ scripts/burn-*.ts
 # Raw multi-agent audit output — large, unverified, and regenerated per scan.
 # Findings worth keeping become commits or CLAUDE.md guardrails, not a tracked file.
 .audit-findings.json
+
+# Scratch probe tests written by audit/agent runs — never part of the committed suite.
+tests/zz*.test.mts

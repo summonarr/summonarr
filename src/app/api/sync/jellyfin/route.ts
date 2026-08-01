@@ -9,6 +9,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
+import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
@@ -143,8 +144,12 @@ async function syncJellyfin(request: NextRequest) {
     return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
   };
 
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+  // `serverInstance` is NOT optional here — see the Plex twin. The deletes below are
+  // scoped to `instance`, so omitting it made a named-instance resync delete that
+  // server's rows and re-insert the whole library under the schema default "",
+  // moving it onto the DEFAULT server and un-restricting a `restricted` one.
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
@@ -199,9 +204,40 @@ async function syncJellyfin(request: NextRequest) {
     select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
 
-  const toMark = requests.filter((req) =>
+  let toMark = requests.filter((req) =>
     req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
   );
+
+  // Per-user visibility gate for a RESTRICTED named server (guardrail 35) — the Jellyfin
+  // twin of the Plex gate; see that route for the full reasoning. This run describes
+  // exactly ONE server, so the question is the same for every id: may this requester see
+  // `instance`? Only a restricted instance can answer no, so the default ("") server
+  // does no extra work and behaves byte-identically.
+  //
+  // PRE-CAS by construction: filtering `toMark` keeps gated rows out of BOTH the
+  // claimAvailableNotificationWinners call and the updateMany flips, so a gated request
+  // keeps notifiedAvailable = false, stays PENDING/APPROVED, and is re-evaluated later
+  // rather than having its once-only claim burned.
+  const instanceConfig = jellyfinInstances.find((i) => i.slug === instance);
+  if (instanceConfig?.restricted === true && toMark.length > 0) {
+    const requesterRows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(toMark.map((r) => r.requestedBy))] } },
+      // `role` is NOT optional. The raw `permissions` column is @default(0) and is
+      // seeded only by a manual one-shot script, so an upgraded deployment can hold a
+      // role="ADMIN" row with permissions=0. Passing that raw would deny the ADMIN
+      // short-circuit HERE while every read path grants it (they all go through
+      // effectivePermissions) — stranding the operator's own requests as PENDING while
+      // the UI insists the title is available. Same reasoning as the orchestrator's
+      // loadRequesters.
+      select: { id: true, role: true, permissions: true, mediaServerGrants: true },
+    });
+    const byId = new Map(requesterRows.map((u) => [u.id, u]));
+    toMark = toMark.filter((r) => {
+      const u = byId.get(r.requestedBy);
+      if (!u) return false; // requester vanished mid-run — fail closed
+      return canViewMediaInstance(effectivePermissions(u.role, u.permissions), instanceConfig, parseMediaServerGrants(u.mediaServerGrants), "jellyfin");
+    });
+  }
 
   if (toMark.length > 0) {
     const unnotified = toMark.filter((r) => !r.notifiedAvailable);
@@ -211,16 +247,10 @@ async function syncJellyfin(request: NextRequest) {
       // to watch" ping from a Plex resync (and vice versa); users with no preference are
       // notified by whichever source sees the item first.
       //
-      // The orchestrator's per-user media-server VISIBILITY gate (multi-server
-      // grants) deliberately has no counterpart here, and adding one would be dead
-      // code: this route is default-instance-only (see the header comment), so
-      // `movieIds`/`tvIds` above describe the "" server exclusively — and the
-      // default instance is visible to EVERY user by construction
-      // (defaultInstanceConfig hard-codes restricted:false, a "" registry entry is
-      // rejected, and canViewMediaInstance short-circuits true on slug ""). A
-      // restricted named instance can therefore never contribute a row to this
-      // route's decision. If this route is ever generalized to named instances,
-      // port the orchestrator's presentForRequester gate with it.
+      // The per-user media-server VISIBILITY gate now runs where `toMark` is built
+      // above — it has to, because this route IS generalized to named instances. The
+      // split below is the separate, older concern: which SOURCE the user prefers,
+      // not which server they may see.
       const userRows = await prisma.user.findMany({
         where: { id: { in: unnotified.map((r) => r.requestedBy) } },
         select: { id: true, mediaServer: true },

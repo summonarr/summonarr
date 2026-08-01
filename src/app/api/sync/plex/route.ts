@@ -9,6 +9,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
+import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
@@ -123,21 +124,31 @@ async function syncPlex(request: NextRequest) {
     return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
   };
 
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  // `serverInstance` is NOT optional here. Every delete on this path is scoped to
+  // `instance`, so omitting it on the insert made a named-instance resync delete that
+  // server's rows and re-insert them under the schema default "" — moving the whole
+  // library onto the DEFAULT server. That silently un-restricts a `restricted` server
+  // (slug "" is visible to everyone) and drops its server-local ratingKeys into the
+  // default's namespace, where a later fix-match would address the wrong server.
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
 
   // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge;
   // deduplicate by preferring the previously stored mapping to avoid flip-flopping on every
   // sync. Keep in agreement with deduplicatePlexRowsByRatingKey in /api/sync/route so the
   // two writers agree on the row set — including the per-instance scoping: ratingKeys are
   // small server-local integers, so the prior-mapping lookup must consult only the instance
-  // being written (here always the default — this route is default-instance-only).
+  // being written (`instance`, which the body may name — NOT always the default).
   type PlexRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string | null; plexRatingKey: string | null };
-  const deduplicateByRatingKey = async (
-    rows: PlexRow[],
+  // Generic in the row type so the caller's extra columns — `serverInstance` above in
+  // particular — survive in the TYPE and not just at runtime. A concrete PlexRow[]
+  // return would erase them, hiding the very field whose omission moved a named
+  // server's library onto the default.
+  const deduplicateByRatingKey = async <T extends PlexRow>(
+    rows: T[],
     mediaType: "MOVIE" | "TV",
     serverInstance: MediaInstanceKey,
-  ): Promise<PlexRow[]> => {
+  ): Promise<T[]> => {
     const ratingKeyCount = new Map<string, number>();
     for (const r of rows) {
       if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
@@ -178,8 +189,8 @@ async function syncPlex(request: NextRequest) {
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
-    // The already-present check is default-instance-scoped: a named instance's row for the same
-    // tmdbId must not mask inserting the default instance's own row.
+    // The already-present check is scoped to the instance being written: another server's
+    // row for the same tmdbId must not mask inserting this server's own row.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.plexLibraryItem.findMany({
         where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
@@ -207,8 +218,8 @@ async function syncPlex(request: NextRequest) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
       if (incomingRatingKeys.length > 0) {
-        // Default-instance-scoped: the same small integer ratingKey can legitimately
-        // exist on a named instance's server — only THIS server's stale mapping is stale.
+        // Scoped to the instance being written: the same small integer ratingKey can
+        // legitimately exist on another server — only THIS server's mapping is stale.
         await tx.plexLibraryItem.deleteMany({ where: { serverInstance: instance, plexRatingKey: { in: incomingRatingKeys } } });
       }
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
@@ -217,8 +228,7 @@ async function syncPlex(request: NextRequest) {
   } else {
 
     // Advisory lock 2001,1 — see comment in the recentOnly branch above. Full replace of
-    // the DEFAULT instance's rows only — a named instance's rows survive the admin Resync
-    // (they are owned by the orchestrator's per-instance fan-out).
+    // the rows belonging to `instance` ONLY; every other server's rows survive untouched.
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
       await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: instance } });
@@ -242,9 +252,42 @@ async function syncPlex(request: NextRequest) {
     select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
 
-  const toMark = requests.filter((req) =>
+  let toMark = requests.filter((req) =>
     req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
   );
+
+  // Per-user visibility gate for a RESTRICTED named server (guardrail 35). This run
+  // describes exactly ONE server, so unlike the orchestrator — which unions every
+  // server and needs per-tmdbId holder sets — the question is the same for every id:
+  // may this requester see `instance`? Only a restricted instance can answer no, so
+  // the default ("") server does no extra work and behaves byte-identically.
+  //
+  // PRE-CAS by construction: filtering `toMark` here keeps gated rows out of BOTH the
+  // claimAvailableNotificationWinners call and the two updateMany flips below, so a
+  // gated request keeps notifiedAvailable = false and stays PENDING/APPROVED. It is
+  // re-evaluated on every later run, and the once-only claim is never burned — so the
+  // legitimate notification still fires if the title lands on a server they can see,
+  // or if they are granted access later.
+  const instanceConfig = plexInstances.find((i) => i.slug === instance);
+  if (instanceConfig?.restricted === true && toMark.length > 0) {
+    const requesterRows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(toMark.map((r) => r.requestedBy))] } },
+      // `role` is NOT optional. The raw `permissions` column is @default(0) and is
+      // seeded only by a manual one-shot script, so an upgraded deployment can hold a
+      // role="ADMIN" row with permissions=0. Passing that raw would deny the ADMIN
+      // short-circuit HERE while every read path grants it (they all go through
+      // effectivePermissions) — stranding the operator's own requests as PENDING while
+      // the UI insists the title is available. Same reasoning as the orchestrator's
+      // loadRequesters.
+      select: { id: true, role: true, permissions: true, mediaServerGrants: true },
+    });
+    const byId = new Map(requesterRows.map((u) => [u.id, u]));
+    toMark = toMark.filter((r) => {
+      const u = byId.get(r.requestedBy);
+      if (!u) return false; // requester vanished mid-run — fail closed
+      return canViewMediaInstance(effectivePermissions(u.role, u.permissions), instanceConfig, parseMediaServerGrants(u.mediaServerGrants), "plex");
+    });
+  }
 
   if (toMark.length > 0) {
     const unnotified = toMark.filter((r) => !r.notifiedAvailable);
@@ -254,16 +297,11 @@ async function syncPlex(request: NextRequest) {
       // watch" ping from a Jellyfin resync (and vice versa); users with no preference
       // are notified by whichever source sees the item first.
       //
-      // The orchestrator's per-user media-server VISIBILITY gate (multi-server
-      // grants) deliberately has no counterpart here, and adding one would be dead
-      // code: this route is default-instance-only (see the header comment), so
-      // `movieIds`/`tvIds` above describe the "" server exclusively — and the
-      // default instance is visible to EVERY user by construction
-      // (defaultInstanceConfig hard-codes restricted:false, a "" registry entry is
-      // rejected, and canViewMediaInstance short-circuits true on slug ""). A
-      // restricted named instance can therefore never contribute a row to this
-      // route's decision. If this route is ever generalized to named instances,
-      // port the orchestrator's presentForRequester gate with it.
+      // The per-user media-server VISIBILITY gate now runs where `toMark` is built
+      // above — it has to, because this route IS generalized to named instances and a
+      // restricted one must not flip a request AVAILABLE (or notify) for a requester
+      // who cannot see that server. The split below is the separate, older concern:
+      // which SOURCE the user prefers, not which server they may see.
       const userRows = await prisma.user.findMany({
         where: { id: { in: unnotified.map((r) => r.requestedBy) } },
         select: { id: true, mediaServer: true },
