@@ -3,7 +3,7 @@ import { requireAuth } from "@/lib/api-auth";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import type { Prisma } from "@/generated/prisma";
 
@@ -36,7 +36,12 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  if (!checkRateLimit(`ph-export:${session.user.id}:${getClientIp(request.headers)}`, 5, 3_600_000)) {
+  // Keyed on the session user ALONE. getClientIp falls back to a hash of the
+  // User-Agent whenever TRUST_PROXY is not "true" — the default docker deployment —
+  // so folding it in let one admin session mint a fresh bucket per UA string and
+  // multiply its own allowance on a bulk PII export. A caller-controlled component can
+  // only ever widen a limit, never tighten it.
+  if (!checkRateLimit(`ph-export:${session.user.id}`, 5, 3_600_000)) {
     return NextResponse.json({ error: "Too many export requests — try again later" }, { status: 429 });
   }
 

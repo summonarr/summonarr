@@ -834,18 +834,23 @@ async function recordApply(
   // produced on first apply.
   if (outcome.ok) {
     const appliedAt = new Date();
-    const updateData = {
+    // `enabled` is deliberately NOT in the shared payload. It belongs on CREATE — a
+    // brand-new application starts enabled — but writing it on UPDATE silently reverts
+    // an admin's explicit disable: the cron only applies `enabled: true` rows, but a
+    // manual apply (/api/admin/trash-guides/apply names specIds directly) and the
+    // dependency cascade both reach a disabled row, and a successful outcome then
+    // turned the toggle back on with nothing in the UI to explain it.
+    const successUpdate = {
       appliedAt,
       lastError: null,
       lastErrorAt: null,
       errorCount: 0,
-      enabled: true,
       ...(outcome.remoteId != null ? { remoteId: outcome.remoteId } : {}),
     };
     await prisma.trashApplication.upsert({
       where: { trashSpecId_arrInstance: { trashSpecId: spec.id, arrInstance } },
-      update: updateData,
-      create: { trashSpecId: spec.id, arrInstance, ...updateData },
+      update: successUpdate,
+      create: { trashSpecId: spec.id, arrInstance, enabled: true, ...successUpdate },
     });
   } else {
     const lastErrorAt = new Date();

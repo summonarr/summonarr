@@ -5,7 +5,7 @@ import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl, getJellyfinConfig } from "@/lib/jellyfin-config";
-import { checkRateLimit, peekRateLimit, recordFailure, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, refundHit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
@@ -673,7 +673,13 @@ export async function authorizeWithCredentials(
   const ipKey = `login-ip:${ip}`;
   const ipLimit = 20;
   const ipAllowed = checkRateLimit(ipKey, ipLimit, 5 * 60 * 1000);
-  const accountAllowed = peekRateLimit(accountKey, accountLimit, accountWindowMs);
+  // RESERVE atomically rather than peek. peekRateLimit is synchronous but the verify
+  // below is awaited, so concurrent attempts all passed a peek before any of them
+  // recorded — an attacker firing N requests at once got N password verifications
+  // regardless of the limit. checkRateLimit checks and pushes in one step; the hit is
+  // refunded on a successful login so the original intent still holds (the account
+  // bucket counts real failed verifications, not successful sign-ins).
+  const accountAllowed = checkRateLimit(accountKey, accountLimit, accountWindowMs);
 
   if (!ipAllowed || !accountAllowed) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
@@ -690,14 +696,15 @@ export async function authorizeWithCredentials(
   }
 
   if (!valid || !user) {
-    // Record a hit on the account bucket ONLY now — i.e. on a genuine wrong
-    // password (or unknown account, which also reached the dummyVerify branch).
-    // Gating with peek above + recording here means the bucket counts real
-    // failed verifications, not mere email guesses.
-    recordFailure(accountKey, accountWindowMs);
+    // The hit was already reserved at the gate above — a genuine wrong password (or an
+    // unknown account, which also reached the dummyVerify branch) simply keeps it.
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "invalid_credentials", emailHash } });
     return null;
   }
+
+  // Successful sign-in: give the reserved slot back so the account bucket still counts
+  // only failures, exactly as the peek/record split intended.
+  refundHit(accountKey);
 
   const device = buildDeviceMeta(headers);
   return { id: user.id, email: user.email, name: user.name, role: user.role, rememberMe: credentials.rememberMe as string | undefined, ...device };
