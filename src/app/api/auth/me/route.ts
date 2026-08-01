@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { machineIpAllowed } from "@/lib/api-auth";
 import {
   parseSessionCookie,
   serializeSessionCookie,
@@ -74,6 +75,19 @@ export async function GET(req: NextRequest) {
   // Bearer (native) sessions skip it: the JWT lives in app-secure storage, not an
   // ambiently-replayed cookie.
   if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
+    return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
+  }
+  // A machine session carries a mint-time IP allowlist snapshotted into its
+  // claims, and every OTHER authenticated surface re-checks it per request —
+  // authActive (auth.ts) and the withAuth/withAdmin wrappers both do. This route
+  // enforced the fingerprint but not the allowlist, so a leaked machine token
+  // replayed from a disallowed address was refused everywhere except here, where
+  // it still returned the impersonated identity: id, role and permission bitmask.
+  // Applies to bearer sessions too — unlike the fingerprint check above, which
+  // bearer clients deliberately skip, the allowlist is exactly what binds a
+  // machine token to its permitted addresses.
+  // Absent/empty allowlist ⇒ true, so ordinary user sessions are unaffected.
+  if (!machineIpAllowed(result.claims, req.headers)) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
   const res = applyPrivacyHeaders(NextResponse.json({ session: serialize(result.claims) }));

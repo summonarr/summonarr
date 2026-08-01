@@ -116,7 +116,7 @@ type Req = InstanceType<typeof NextRequest>;
 const COOKIE = getSessionCookieName(); // "summonarr-session" under the http AUTH_URL
 
 let seq = 0;
-async function mintSession(opts: { role?: string; uaFingerprint?: string } = {}): Promise<{
+async function mintSession(opts: { role?: string; uaFingerprint?: string; machineAllowedIps?: string[] } = {}): Promise<{
   userId: string;
   sessionId: string;
   token: string;
@@ -137,6 +137,7 @@ async function mintSession(opts: { role?: string; uaFingerprint?: string } = {})
       id: userId, role: opts.role ?? "USER", permissions: "0", provider: "credentials",
       sessionId, expiresAt,
       ...(opts.uaFingerprint ? { uaFingerprint: opts.uaFingerprint } : {}),
+      ...(opts.machineAllowedIps ? { machineAllowedIps: opts.machineAllowedIps } : {}),
     },
     { expiresInSeconds: 7_200 },
   );
@@ -325,4 +326,34 @@ test("me: the refreshed session JWT is threaded back as Set-Cookie ONLY on the c
   const viaBearer = await getMe(meReq(asBearer(token)));
   assert.equal(viaBearer.status, 200);
   assert.equal(viaBearer.headers.get("set-cookie"), null);
+});
+
+// ── machine-session IP allowlist ────────────────────────────────────────────
+
+test("a machine token replayed from a DISALLOWED ip is refused, not handed the identity", async () => {
+  // The allowlist is snapshotted into the claims at mint time and re-checked per
+  // request by authActive and the withAuth wrappers. This route enforced the UA
+  // fingerprint but not the allowlist, so a leaked machine token was refused
+  // everywhere EXCEPT here — where it still returned id, role and permissions.
+  const { token } = await mintSession({ role: "ADMIN", machineAllowedIps: ["10.0.0.0/8"] });
+  const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "203.0.113.9" }));
+  assert.equal(res.status, 401);
+  const body = await res.json();
+  assert.equal(body.session, null, "no identity may leak on a refused address");
+});
+
+test("the same machine token from an ALLOWED ip still works", async () => {
+  const { token, userId } = await mintSession({ role: "ADMIN", machineAllowedIps: ["10.0.0.0/8"] });
+  const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "10.1.2.3" }));
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.session.user.id, userId);
+});
+
+test("an ordinary session carries no allowlist and is unaffected by the check", async () => {
+  // Absent/empty allowlist ⇒ allowed, so this must not become a general IP gate.
+  const { token, userId } = await mintSession();
+  const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "203.0.113.9" }));
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).session.user.id, userId);
 });
