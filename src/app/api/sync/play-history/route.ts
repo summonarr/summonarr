@@ -19,7 +19,7 @@ import { getPlexSessions, extractTmdbIdFromGuids, getPlexUser, getPlexMarkers } 
 import { getJellyfinSessions } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getPlexConfig } from "@/lib/plex-config";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId } from "@/lib/media-instances";
+import { type MediaInstanceKey, activeSessionId, mediaInstanceLabel, parseActiveSessionId } from "@/lib/media-instances";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { emitSSE } from "@/lib/sse-emitter";
@@ -102,19 +102,18 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // every poll. Report the result so the UI's reachability badge reflects
   // whether Summonarr can actually reach the Plex server (not plex.tv remote
   // access). Fire-and-forget; the persist is deduped + only writes on change.
-  // DEFAULT-instance-only in Phase 2 (matches persistReachability's own gate in
-  // plex-events.ts): setPlexReachable always addresses the DEFAULT manager's
-  // plexServerReachable Setting/badge, so a named instance's probe result must
-  // never flip the default server's status. Per-instance reachability is
-  // deferred (Phase 3 polish).
+  // Reported PER INSTANCE: setPlexReachable addresses that instance's manager,
+  // which writes its own plexSettingKey(instance, "ServerReachable"). Previously
+  // this was gated to the default because the Setting/badge were single-server,
+  // which meant a named server's outage never surfaced anywhere.
   let sessions;
   try {
     sessions = await getPlexSessions(serverUrl, token);
   } catch (err) {
-    if (instance === DEFAULT_MEDIA_INSTANCE) void setPlexReachable(false);
+    void setPlexReachable(false, instance);
     throw err;
   }
-  if (instance === DEFAULT_MEDIA_INSTANCE) void setPlexReachable(true);
+  void setPlexReachable(true, instance);
   const now = new Date();
   const nowMs = now.getTime();
   pruneRecentlyFinalized(nowMs);

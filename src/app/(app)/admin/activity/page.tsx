@@ -1,4 +1,6 @@
 import { authActive } from "@/lib/auth";
+import { plexSettingKey } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -114,6 +116,18 @@ export default async function ActivityPage({
   const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
   const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
 
+  // Which Plex servers exist has to be known BEFORE the batch below, because it
+  // determines which Setting keys the reachability read asks for. One extra
+  // round-trip (the registry is a single Setting row) rather than widening the
+  // query to `startsWith: "plex"`, which would drag every instance's admin token
+  // through the decryption extension just to render a status chip.
+  const plexInstances = await getMediaInstances("plex");
+  const plexStatusKeys = plexInstances.flatMap((i) => [
+    plexSettingKey(i.slug, "ServerReachable"),
+    plexSettingKey(i.slug, "ServerUrl"),
+    plexSettingKey(i.slug, "AdminToken"),
+  ]);
+
   const [
     stats,
     activeSessions,
@@ -151,7 +165,7 @@ export default async function ActivityPage({
     getActivityCalendar(source, mediaType),
     getTranscodeOffenders({ days, source, mediaType }),
     prisma.setting.findMany({
-      where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
+      where: { key: { in: plexStatusKeys } },
       select: { key: true, value: true },
     }),
     isPlayHistoryEnabled(),
@@ -200,17 +214,36 @@ export default async function ActivityPage({
   // probe. The poller only runs when play-history + Plex source are enabled and
   // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
   // value is stale, so gate the badge on the same conditions as its data source.
+  // Resolved PER SERVER. Each instance is gated on its OWN url+token, so an
+  // unconfigured named server contributes no chip rather than inheriting the
+  // default's verdict — and a configured one that goes down is finally visible,
+  // which is the whole point of making this per-instance.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
-  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
-  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
-  let initialPlexReachable: boolean | null = null;
-  const reachableValue = plexSettings.get("plexServerReachable");
-  if (plexSseActive && reachableValue) {
-    try {
-      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
-      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
-    } catch { /* leave null */ }
-  }
+  const plexReachability = plexInstances.map((inst) => {
+    const configured =
+      !!plexSettings.get(plexSettingKey(inst.slug, "ServerUrl")) &&
+      !!plexSettings.get(plexSettingKey(inst.slug, "AdminToken"));
+    // Only trust the flag when the poller that maintains it is running: it is
+    // written by the 5s poller (true on getPlexSessions success, false on throw)
+    // plus the SSE connect-time probe, which run only when play-history + the
+    // Plex source are enabled and url+token are set. Otherwise the value is
+    // stale, so gate the chip on the same conditions as its data source.
+    const live = configured && phEnabled && plexSourceEnabled;
+    let reachable: boolean | null = null;
+    const raw = plexSettings.get(plexSettingKey(inst.slug, "ServerReachable"));
+    if (live && raw) {
+      try {
+        const parsed = JSON.parse(raw) as { reachable?: unknown };
+        if (typeof parsed.reachable === "boolean") reachable = parsed.reachable;
+      } catch { /* leave null = unknown */ }
+    }
+    // The registry names the default instance "Default", which would render
+    // "Default unreachable" on a single-server deployment where it has always
+    // said "Plex" — exactly the kind of observable difference guardrail 35
+    // forbids. Label the default bare and qualify only named servers.
+    const name = inst.slug === "" ? "Plex" : `Plex (${inst.name})`;
+    return { instance: inst.slug, name, reachable };
+  });
 
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
@@ -582,7 +615,7 @@ export default async function ActivityPage({
           initialSessions={serializedSessions}
           source={source}
           mediaType={mediaType}
-          initialPlexReachable={initialPlexReachable}
+          plexReachability={plexReachability}
         />
       )}
 

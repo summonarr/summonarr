@@ -14,7 +14,7 @@ export type LiveEvent =
   | { type: "issuemessage:created"; issueId: string }
   | { type: "activity:sessions"; sessions: ActiveSessionLive[] }
   | { type: "activity:history-updated" }
-  | { type: "plex:reachability"; reachable: boolean };
+  | { type: "plex:reachability"; reachable: boolean; instance: string };
 
 export interface ActiveSessionLive {
   id: string;

@@ -47,6 +47,10 @@ const PLEX_INSTANCE_FIELDS: Record<PlexSettingField, true> = {
   ServerUrl: true,
   AdminToken: true,
   AdminEmail: true,
+  // App-written, not admin-editable — but still this instance's key, so removing
+  // the instance must take it too or the row is orphaned forever (nothing else
+  // ever writes a de-registered slug's keys).
+  ServerReachable: true,
   Libraries: true,
   PathStripPrefix: true,
   MoviePathStripPrefix: true,

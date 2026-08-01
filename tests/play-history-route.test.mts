@@ -76,6 +76,7 @@
 // setImmediate drains suffice for the fire-and-forget markers/logAudit tails.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
@@ -1152,10 +1153,11 @@ test("multi-server: a NAMED-instance outage never flips the default server's rea
     assert.ok((body["plex:remote"] as { error?: string }).error, "the failing instance records its error under its own label");
     await settle();
 
-    // Reachability is DEFAULT-instance-only in Phase 2: setPlexReachable
-    // always addresses the DEFAULT manager's plexServerReachable Setting, so
-    // the named instance's failure must not write through it. The default's
-    // own healthy probe re-reports true, which dedups to no write.
+    // Reachability is now reported PER INSTANCE — each manager writes its own
+    // plexSettingKey(instance, "ServerReachable"). This assertion is unchanged
+    // in intent: whatever the named instance does, it must never write through
+    // the DEFAULT server's key. The default's own healthy probe re-reports
+    // true, which dedups to no write.
     const reachabilityWrites = settingUpserts.filter((u) => u.key === "plexServerReachable");
     assert.ok(
       !reachabilityWrites.some((u) => u.value.includes('"reachable":false')),
@@ -1189,6 +1191,24 @@ test("a Plex outage sets results.plex.error, stamps X-Cron-Degraded, and stays 2
   );
   // setPlexReachable(false) persists the reachability flip.
   assert.ok(settingUpserts.some((u) => u.key === "plexServerReachable"), "a failed getPlexSessions marks the server unreachable");
+});
+
+test("the poller threads the probed INSTANCE into both reachability reports", () => {
+  // Source-pinned rather than behavioural, and deliberately so. The runtime
+  // effect of setPlexReachable is invisible here: it addresses that instance's
+  // manager, and this harness starves plex-events' reconcile (guardrail 35) so
+  // a named instance has no manager to receive it — the call is a silent no-op.
+  // The test above covers the named-instance FAILURE path; a mutation that
+  // dropped the argument from the SUCCESS call survived the entire suite,
+  // because no test exercises a named instance polling successfully. That
+  // regression would silently report every server's health onto the DEFAULT
+  // server's badge — the exact clobbering the per-instance keys exist to stop.
+  const source = readFileSync(new URL("../src/app/api/sync/play-history/route.ts", import.meta.url), "utf8");
+  const calls = source.match(/setPlexReachable\([^)]*\)/g) ?? [];
+  assert.equal(calls.length, 2, "expected exactly the success and failure reports");
+  for (const call of calls) {
+    assert.match(call, /,\s*instance\)/, `${call} must report against the instance it probed, not the default`);
+  }
 });
 
 // ═══ guardrail-7 silence ════════════════════════════════════════════════════

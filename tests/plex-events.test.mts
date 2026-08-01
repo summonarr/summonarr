@@ -1041,7 +1041,10 @@ test("cross-instance bootstrap isolation: the default manager's absence sweep re
 let reachabilityUpsertsBaseline = -1;
 let reachabilityEventsBaseline = -1;
 const reachabilityUpserts = () => settingUpserts.filter((u) => u.key === "plexServerReachable");
-const reachabilityEvents = () => sseEvents.filter((e) => e.type === "plex:reachability");
+const reachabilityEvents = () => sseEvents.filter((e) => e.type === "plex:reachability") as { type: string; reachable: boolean; instance: string }[];
+// The named instance writes plexRemoteServerReachable — a DIFFERENT key, which
+// is the whole point: neither server can overwrite the other.
+const namedReachabilityUpserts = () => settingUpserts.filter((u) => u.key === "plexRemoteServerReachable");
 
 test("named-instance activation: a second manager connects to ITS origin/token and addresses rows by 3-segment ids while the default stays 2-segment", async () => {
   reachabilityUpsertsBaseline = reachabilityUpserts().length;
@@ -1085,27 +1088,49 @@ test("named-instance activation: a second manager connects to ITS origin/token a
   await waitFor(() => deletesFor("plex:remote:r-live").length === 2, "CAS delete + force-clean, both addressing the 3-segment id");
 });
 
-test("named-instance reachability silence: a named manager never writes plexServerReachable nor emits plex:reachability (default-only Phase 2 scoping)", async () => {
-  // The named manager has bootstrapped successfully at least once by now
-  // (previous test). Without the default-only gate, its FIRST bootstrap would
-  // have upserted the Setting (fresh manager ⇒ lastReachable=null ⇒ no dedupe)
-  // and broadcast the event — the baselines were captured before activation.
+test("named-instance reachability is reported under ITS OWN key and never clobbers the default server's status", async () => {
+  // Reachability used to be default-only, so a named server going down was
+  // invisible — nothing anywhere recorded it. Each manager now writes its own
+  // instance-qualified key instead. The original concern is unchanged and still
+  // pinned here: whatever a named manager does, the DEFAULT server's key and the
+  // admin badge it feeds must be untouched by it.
+  //
+  // The named manager has bootstrapped successfully by now (previous test), and
+  // a fresh manager has lastReachable=null so its first bootstrap always writes.
   assert.equal(
     reachabilityUpserts().length,
     reachabilityUpsertsBaseline,
-    "no plexServerReachable upsert since the named instance activated — that Setting is the DEFAULT server's status, and a named manager writing it would clobber the admin badge",
+    "the DEFAULT server's plexServerReachable row must not be touched by a named manager — it feeds the default's admin badge",
   );
-  assert.equal(reachabilityEvents().length, reachabilityEventsBaseline, "no plex:reachability broadcast from the named manager");
+  assert.ok(
+    namedReachabilityUpserts().length > 0,
+    "the named instance recorded no reachability at all — its outages would be invisible, which is the gap this replaced",
+  );
+  const namedEvents = reachabilityEvents().filter((e) => e.instance === "remote");
+  assert.ok(namedEvents.length > 0, "the named manager broadcast no plex:reachability event");
+  assert.ok(
+    namedEvents.every((e) => e.reachable === true),
+    "a reachable server must report true",
+  );
+  assert.equal(
+    reachabilityEvents().filter((e) => e.instance === "").length,
+    reachabilityEventsBaseline,
+    "no event may be emitted under the DEFAULT instance by a named manager",
+  );
 
   // Belt and braces: force ANOTHER remote bootstrap (stream end → real-timer
-  // backoff → reconnect) and re-assert — the gate must hold on every
-  // bootstrap, not just the first.
+  // backoff → reconnect) and re-assert the default is still untouched — the
+  // scoping must hold on every bootstrap, not just the first.
   const remoteSseBefore = sseFetchesFor(PLEX2_URL).length;
   currentStreamFor(PLEX2_URL).end();
   await waitForMs(() => sseFetchesFor(PLEX2_URL).length === remoteSseBefore + 1, "the remote reconnect");
   await drain(30);
-  assert.equal(reachabilityUpserts().length, reachabilityUpsertsBaseline, "still no upsert after a fresh named-instance bootstrap");
-  assert.equal(reachabilityEvents().length, reachabilityEventsBaseline, "still no broadcast after a fresh named-instance bootstrap");
+  assert.equal(reachabilityUpserts().length, reachabilityUpsertsBaseline, "still no DEFAULT upsert after a fresh named-instance bootstrap");
+  assert.equal(
+    reachabilityEvents().filter((e) => e.instance === "").length,
+    reachabilityEventsBaseline,
+    "still no DEFAULT-instance broadcast after a fresh named-instance bootstrap",
+  );
 });
 
 test("registry removal: dropping the slug stops (aborts) its manager on the next reconcile, nothing reconnects, and the default stream stays live", async () => {

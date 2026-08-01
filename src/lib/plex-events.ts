@@ -636,22 +636,24 @@ class PlexEventStreamManager {
   // that signal is intentionally ignored (irrelevant for a self-hosted server
   // reached over LAN/VPN). Exposed to the poller via setPlexReachable().
   async persistReachability(reachable: boolean): Promise<void> {
-    // Deliberate Phase 2 scoping: reachability is DEFAULT-instance-only. The
-    // plexServerReachable Setting key, the plex:reachability SSE event, and
-    // the admin badge they feed are single-server plumbing — a named manager
-    // writing them would clobber the default server's status. Per-instance
-    // reachability is deferred (Phase 3 polish).
-    if (this.instance !== DEFAULT_MEDIA_INSTANCE) return;
+    // Each manager owns its OWN server's status. The Phase-2 scoping that made
+    // this default-only existed because the Setting key and SSE event were
+    // single-server plumbing, so a named manager writing them would clobber the
+    // default's status — the cost being that a named server going down was
+    // invisible. Both are now instance-qualified, so every manager writes its
+    // own key and nobody can clobber anybody. The default's key is still exactly
+    // "plexServerReachable", so a single-server deployment is unchanged.
     // No-op when the value is unchanged since this process last persisted it.
     if (this.lastReachable === reachable) return;
     // Setting is the single source of truth used by the UI to render the
     // server-reachability indicator. Store a JSON blob so we can add fields
     // (lastChangedAt etc) without a schema change.
     try {
+      const key = plexSettingKey(this.instance, "ServerReachable");
       const value = JSON.stringify({ reachable, observedAt: new Date().toISOString() });
       await prisma.setting.upsert({
-        where: { key: "plexServerReachable" },
-        create: { key: "plexServerReachable", value },
+        where: { key },
+        create: { key, value },
         update: { value },
       });
       // Only record the value as persisted after the write succeeds, so a
@@ -659,7 +661,7 @@ class PlexEventStreamManager {
       this.lastReachable = reachable;
       // Broadcast so the UI updates without polling.
       const { emitSSE } = await import("./sse-emitter");
-      emitSSE({ type: "plex:reachability", reachable });
+      emitSSE({ type: "plex:reachability", reachable, instance: this.instance });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[plex-events] persist reachability failed: ${msg}`);
@@ -870,8 +872,14 @@ export async function reconcilePlexEventStream(): Promise<void> {
 // Reachability is default-instance-only in Phase 2 (see persistReachability).
 // Before the first reconcile creates the default manager this is a no-op —
 // the next 5s tick reports again, so nothing is lost.
-export function setPlexReachable(reachable: boolean): Promise<void> {
-  const mgr = managers.get(DEFAULT_MEDIA_INSTANCE);
+export function setPlexReachable(
+  reachable: boolean,
+  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
+): Promise<void> {
+  // Addresses THAT instance's manager, so the 5s poller's per-instance probe
+  // result lands on the server it actually probed. Defaults to the default
+  // instance so an older single-server call site keeps its exact behaviour.
+  const mgr = managers.get(instance);
   if (!mgr) return Promise.resolve();
   return mgr.persistReachability(reachable);
 }

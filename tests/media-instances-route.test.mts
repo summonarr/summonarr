@@ -476,6 +476,9 @@ test("Setting cleanup covers the WHOLE per-instance field union, not just the co
       "plexRemoteLibraries",
       "plexRemoteMoviePathStripPrefix",
       "plexRemotePathStripPrefix",
+      // App-written status key — this instance still owns it, so removal must
+      // take it or the row outlives the instance with nothing left to clean it.
+      "plexRemoteServerReachable",
       "plexRemoteServerUrl",
       "plexRemoteTvPathStripPrefix",
     ],
