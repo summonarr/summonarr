@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { readJsonCapped } from "@/lib/body-size";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
@@ -569,6 +570,13 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
           .then(async (episodes) => {
             if (episodes.length === 0) return;
+            // TVEpisodeCache has NO serverInstance column: every plex server shares
+            // one `source` namespace for a given show. Repopulating from the one
+            // server we just re-matched therefore DELETES any other plex
+            // server rows for this show. Only safe to own when this is the sole
+            // registered plex server; otherwise leave the show to the sync
+            // orchestrator, which rebuilds from the union of all of them.
+            if ((await getMediaInstances("plex")).length > 1) return;
             await prisma.$transaction(async (tx) => {
               await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId: correctTmdbId } });
@@ -617,6 +625,13 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)
           .then(async (episodes) => {
             if (episodes.length === 0) return;
+            // TVEpisodeCache has NO serverInstance column: every jellyfin server shares
+            // one `source` namespace for a given show. Repopulating from the one
+            // server we just re-matched therefore DELETES any other jellyfin
+            // server rows for this show. Only safe to own when this is the sole
+            // registered jellyfin server; otherwise leave the show to the sync
+            // orchestrator, which rebuilds from the union of all of them.
+            if ((await getMediaInstances("jellyfin")).length > 1) return;
             await prisma.$transaction(async (tx) => {
               await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
               await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: correctTmdbId } });

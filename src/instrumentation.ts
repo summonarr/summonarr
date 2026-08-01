@@ -243,8 +243,26 @@ export async function register() {
       .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
       .catch((err) => console.error("[account-lifecycle] startup error:", err));
 
+    // RUN ONCE EVER, not once per boot. The backfill binds User.plexUserId on an
+    // EMAIL match — precisely the link authorizeWithPlex deliberately refuses,
+    // calling it "the account-takeover surface" and demanding an explicit admin
+    // link, because a plex.tv email is user-changeable. As a one-shot bridge for
+    // rows predating plexUserId that trade is defensible; re-running it on every
+    // boot forever is not, because unmatched candidates stay candidates and the
+    // window never closes.
+    //
+    // The guard lives HERE, in the caller, not in the helper: the helper is
+    // documented and tested as re-runnable, and its own test states the
+    // once-guarantee belongs in instrumentation.ts. It already stamps
+    // plexUserIdBackfillRanAt when it completes — that marker was written and
+    // then never read by anything, which is what left the window open.
     import("@/lib/plex-user-backfill")
-      .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
+      .then(async ({ runPlexUserBackfillIfNeeded }) => {
+        const { prisma } = await import("@/lib/prisma");
+        const ranAt = await prisma.setting.findUnique({ where: { key: "plexUserIdBackfillRanAt" } });
+        if (ranAt?.value) return;
+        await runPlexUserBackfillIfNeeded();
+      })
       .catch((err) => console.error("[plex-backfill] startup error:", err));
 
     // Open the Plex SSE notifications stream so we get real-time "session

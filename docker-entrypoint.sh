@@ -37,13 +37,34 @@ try {
   await client.connect();
   const exists = await client.query(`SELECT to_regclass('"PlayHistory"') AS t`);
   if (exists.rows[0].t !== null) {
+    // The partition MUST match PlayHistory's real unique key,
+    // [source, serverInstance, sourceSessionId]. It used to be the 2-column
+    // [source, sourceSessionId] — NARROWER than the constraint — so on a
+    // multi-server install this deleted rows Postgres considers legitimately
+    // distinct. recordCompletedSession depends on exactly that distinction
+    // ("the same raw sessionKey on two instances can never collide", see
+    // play-history.ts), so this ran on EVERY container boot and destroyed real
+    // watch history, which the live poller is the sole writer of and cannot
+    // rebuild.
+    //
+    // This runs BEFORE `prisma db push`, so a deployment upgrading from a
+    // pre-multi-server schema has no such column yet. Detect rather than
+    // assume: absent column ⇒ single-server data ⇒ the 2-column key is the
+    // correct one for that database.
+    const col = await client.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_name = 'PlayHistory' AND column_name = 'serverInstance'
+    `);
+    const partition = col.rowCount > 0
+      ? `source, "serverInstance", "sourceSessionId"`
+      : `source, "sourceSessionId"`;
     const res = await client.query(`
       DELETE FROM "PlayHistory"
       WHERE id IN (
         SELECT id FROM (
           SELECT id,
                  ROW_NUMBER() OVER (
-                   PARTITION BY source, "sourceSessionId"
+                   PARTITION BY ${partition}
                    ORDER BY id DESC
                  ) AS rn
           FROM "PlayHistory"
