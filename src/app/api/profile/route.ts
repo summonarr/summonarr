@@ -59,9 +59,21 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
 
   const now = new Date();
 
+  // The role read at the top of this handler is up to ~250 ms stale: verifyPassword
+  // runs scrypt tuned to bcrypt cost 12. A promotion landing in that window would pass
+  // the STALE "USER" here, and deactivateUserInTx only runs the last-admin CAS for an
+  // admin — so the freshly-promoted last admin could delete themselves and leave the
+  // instance with none. Re-read inside the transaction, where the CAS can see it.
+  let disabledRole: string | null = null;
   try {
     await prisma.$transaction(async (tx) => {
-      await deactivateUserInTx(tx, id, target.role, now);
+      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true, deactivatedAt: true } });
+      // Guardrail 33: re-running the deactivate on an already-disabled ADMIN excludes
+      // its own row from the active-admin count and throws LastAdminError spuriously,
+      // so callers must short-circuit. A concurrent admin-side removal lands here.
+      if (!fresh || fresh.deactivatedAt) return;
+      await deactivateUserInTx(tx, id, fresh.role, now);
+      disabledRole = fresh.role;
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
@@ -82,7 +94,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     userName: target.name ?? target.email ?? "unknown",
     action: "USER_DEACTIVATE",
     target: `user:${id}`,
-    details: { kind: "self-delete", before: { role: target.role } },
+    details: { kind: "self-delete", before: { role: disabledRole ?? target.role } },
     ...auditContext(req, session),
   });
 

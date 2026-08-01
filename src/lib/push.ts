@@ -46,10 +46,24 @@ async function getVapidKeysRaw(): Promise<VapidKeys | null> {
   // concatenating that raw into `mailto:` produces an unparseable URI: push services
   // that validate it reject the signed JWT, so every web push fails with nothing in
   // the log pointing at the From address. Take the bracketed address when present.
-  const rawContact = (cfg.smtpFrom || cfg.smtpUser || "").trim();
-  const contactAddr = rawContact.match(/<([^>]+)>/)?.[1]?.trim() || rawContact;
-  const contact = `mailto:${contactAddr || "admin@localhost"}`;
+  const contact = buildVapidContact(cfg.smtpFrom, cfg.smtpUser);
   return { publicKey: cfg.vapidPublicKey, privateKey: cfg.vapidPrivateKey, contact };
+}
+
+// RFC 8292 requires VAPID `sub` to be a URI. smtpFrom legitimately holds an RFC 5322
+// header value (`Summonarr <noreply@host>` — email.ts consumes it as one), and
+// concatenating that raw into `mailto:` produces an unparseable URI: push services that
+// validate it reject the signed JWT, so every web push fails with nothing in the log
+// pointing at the From address. Take the bracketed address when present.
+//
+// Exported because there is a SECOND caller — /api/push/test — which built the contact
+// inline from the raw smtpFrom and so reproduced exactly this bug, making the admin
+// "send test notification" button fail on any deployment with a display-name From
+// while real notifications worked. One implementation, both call sites.
+export function buildVapidContact(smtpFrom?: string | null, smtpUser?: string | null): string {
+  const raw = (smtpFrom || smtpUser || "").trim();
+  const addr = raw.match(/<([^>]+)>/)?.[1]?.trim() || raw;
+  return `mailto:${addr || "admin@localhost"}`;
 }
 
 export async function getOrCreateVapidPublicKey(): Promise<string> {

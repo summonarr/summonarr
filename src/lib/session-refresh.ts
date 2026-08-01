@@ -43,9 +43,18 @@ const NON_ADMIN_SLIDE_WINDOW_SECONDS = 3600;
 const FAST_CHECK_INTERVAL_SECONDS = 10;
 const SLOW_CHECK_INTERVAL_SECONDS = 60;
 
+export interface VerifyAndRefreshOptions {
+  // Set false by callers that CANNOT deliver a replacement token to the client — a
+  // server component can't set a cookie. Default true: every request-scoped caller
+  // (proxy, api-auth, /api/auth/me) hands the new token back and must keep rotating.
+  allowRotation?: boolean;
+}
+
 export async function verifyAndRefreshSession(
   token: string,
+  opts: VerifyAndRefreshOptions = {},
 ): Promise<VerifyAndRefreshResult | null> {
+  const allowRotation = opts.allowRotation !== false;
   const claims = await verifySessionJwt(token);
   if (!claims) return null;
   if (!claims.sessionId) return null;
@@ -202,7 +211,20 @@ export async function verifyAndRefreshSession(
   let rotationCutoffSec: number | null = null;
   const privilegeChanged =
     dbUser.role !== claims.role || dbPermsStr !== claimPermsStr;
-  if (privilegeChanged) {
+  if (privilegeChanged && !allowRotation) {
+    // Rotation is DESTRUCTIVE: it renames the AuthSession row and bumps
+    // sessionsRevokedAt past this token's iat, so the token the browser still holds is
+    // dead the moment it commits. Callers that can deliver the replacement do so
+    // (proxy.ts rewrites the forwarded cookie AND sets Set-Cookie); a server component
+    // cannot, so running it there destroyed the session and bounced the user to /login
+    // on their next request — reachable on the prefetch path proxy.ts's matcher skips,
+    // which is the whole reason guardrail 29 puts a DB-checked read here.
+    //
+    // The authz decision is unaffected: the fresh role below is what this render
+    // gates on, so a demoted user gets nothing elevated. The rotation still happens —
+    // on the next request through proxy/api-auth, which can complete it.
+    workingClaims = { ...workingClaims, role: dbUser.role };
+  } else if (privilegeChanged) {
     const newSessionId = randomUUID();
     const oldIatSec = typeof claims.iat === "number" ? claims.iat : Math.floor(now);
     const cutoffSec = oldIatSec + 1;

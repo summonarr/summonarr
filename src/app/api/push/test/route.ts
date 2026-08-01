@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
-import { sendApnsTestToUser } from "@/lib/push";
+import { sendApnsTestToUser, buildVapidContact } from "@/lib/push";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 type TestResult = {
@@ -62,7 +62,7 @@ export const POST = withAuth(async (_req, _ctx, session) => {
         })),
       );
     } else {
-      const vapidContact = `mailto:${cfg.smtpFrom || cfg.smtpUser || "admin@localhost"}`;
+      const vapidContact = buildVapidContact(cfg.smtpFrom, cfg.smtpUser);
       const webResults = await Promise.all(
         webSubs.map(async (sub): Promise<TestResult> => {
           try {

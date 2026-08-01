@@ -27,7 +27,9 @@ export async function readSummonarrSession(): Promise<SessionClaims | null> {
 // immediately (within the same dbCheckedAt fast-path window proxy.ts uses:
 // 10s for admins). Returns the DB-reconciled claims (role refreshed) or null.
 // Does not persist the refreshed cookie — these callers only need the authz
-// decision, and the next request re-checks. Returns null (deny the session
+// decision. That is also why rotation is disabled: it would kill the token the
+// browser still holds, and there is no way to hand back the replacement, so the
+// "next request re-checks" assumption would become "next request is logged out". Returns null (deny the session
 // path) if the DB check throws, so a DB hiccup falls through to the caller's
 // CRON_SECRET path rather than failing open.
 export async function readActiveSummonarrSession(): Promise<SessionClaims | null> {
@@ -35,7 +37,7 @@ export async function readActiveSummonarrSession(): Promise<SessionClaims | null
   const token = cookieStore.get(getSessionCookieName())?.value;
   if (!token) return null;
   try {
-    const result = await verifyAndRefreshSession(token);
+    const result = await verifyAndRefreshSession(token, { allowRotation: false });
     return result?.claims ?? null;
   } catch {
     return null;
@@ -64,6 +66,10 @@ export async function readActiveSummonarrSessionFromRequest(
   const token = bearer ?? parseSessionCookie(req.headers.get("cookie"));
   if (!token) return null;
   try {
+    // Rotation stays ENABLED here, unlike its cookie-only sibling above. This reader is
+    // bearer-first, and guardrail 6b lists sessionId rotation among the defenses that
+    // deliberately still apply to bearer sessions — a native client re-authenticates
+    // rather than being handed a mid-life token.
     const result = await verifyAndRefreshSession(token);
     return result?.claims ?? null;
   } catch {
