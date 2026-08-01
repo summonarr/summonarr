@@ -71,6 +71,20 @@ const transactions: TxRecord[] = [];
 let failCreateManyOn: string | null = null; // tx model whose createMany should throw
 
 const settings = new Map<string, string>();
+// Opt-in fixtures for the marking / notify pass. Empty by default so every existing
+// test keeps the "notify path never runs" guarantee above.
+interface PendingRequest {
+  id: string; tmdbId: number; mediaType: "MOVIE" | "TV"; requestedBy: string;
+  title: string; posterPath: string | null; notifiedAvailable: boolean;
+}
+interface RequesterRow {
+  id: string; role: string; permissions: bigint; mediaServerGrants: unknown; mediaServer: string | null;
+}
+let pendingRequests: PendingRequest[] = [];
+let requesterRows: RequesterRow[] = [];
+let casCalls = 0;
+const requestUpdateManys: unknown[] = [];
+
 const settingUpserts: Array<{ key: string; value: string }> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 const existingPlexByType = new Map<string, number[]>();
@@ -129,13 +143,23 @@ const fakePrisma = {
   jellyfinLibraryItem: {
     findMany: async (args: FindManyByTmdbArgs) => existingRowsFor(existingJellyfinByType, args),
   },
-  mediaRequest: { findMany: async () => [] },
+  mediaRequest: {
+    findMany: async () => pendingRequests.map((r) => ({ ...r })),
+    updateMany: async (args: unknown) => {
+      requestUpdateManys.push(args);
+      return { count: 0 };
+    },
+  },
   user: {
     findUnique: async (args: { where: { id: string } }) => {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    findMany: async () => [],
+    findMany: async (args: { where?: { id?: { in?: string[] } } }) => {
+      const want = args?.where?.id?.in;
+      if (!want) return [];
+      return requesterRows.filter((u) => want.includes(u.id)).map((u) => ({ ...u }));
+    },
     update: async () => ({}),
   },
   authSession: {
@@ -151,10 +175,17 @@ const fakePrisma = {
       return args.data;
     },
   },
-  // The notification CAS (claimAvailableNotificationWinners) must never fire in
-  // these fixtures — mediaRequest.findMany returns no pending requests.
+  // The notification CAS (claimAvailableNotificationWinners) is raw SQL. With no
+  // pending requests it must never fire, and throwing keeps that guarantee for every
+  // fixture that does not opt in. The visibility tests below DO seed pending
+  // requests, so there the call is counted instead — reaching the CAS at all is the
+  // failure those tests are looking for.
   $queryRaw: async () => {
-    throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
+    if (pendingRequests.length === 0) {
+      throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
+    }
+    casCalls++;
+    return [];
   },
   $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
     if (typeof arg === "function") {
@@ -276,12 +307,15 @@ const PLEX_ITEM_FULL = {
 };
 const PLEX_ITEM_MIN = { ratingKey: "rk604", type: "movie", title: "Two", Guid: [{ id: "tmdb://604" }] };
 const PLEX_ROW_603 = {
-  tmdbId: 603, mediaType: "MOVIE", filePath: "/data/movies/one.mkv", plexRatingKey: "rk603",
+  // serverInstance is part of every row pin: the deletes on these routes are scoped
+  // to the instance, so a row written without it lands on the DEFAULT server and
+  // silently relocates a named server's whole library.
+  tmdbId: 603, serverInstance: "", mediaType: "MOVIE", filePath: "/data/movies/one.mkv", plexRatingKey: "rk603",
   title: "Evil Movie One", year: "1999", overview: "A hacker learns the truth.",
   contentRating: "R", addedAt: new Date(1_700_000_000 * 1000),
 };
 const PLEX_ROW_604 = {
-  tmdbId: 604, mediaType: "MOVIE", filePath: null, plexRatingKey: "rk604",
+  tmdbId: 604, serverInstance: "", mediaType: "MOVIE", filePath: null, plexRatingKey: "rk604",
   title: "Two", year: null, overview: null, contentRating: null, addedAt: null,
 };
 
@@ -292,12 +326,12 @@ const JF_ITEM_FULL = {
 };
 const JF_ITEM_MIN = { Id: "jf-551", Name: "Second", ProviderIds: { Tmdb: "551" } };
 const JF_ROW_550 = {
-  tmdbId: 550, mediaType: "MOVIE", filePath: "/media/movies/fc.mkv", jellyfinItemId: "jf-550",
+  tmdbId: 550, serverInstance: "", mediaType: "MOVIE", filePath: "/media/movies/fc.mkv", jellyfinItemId: "jf-550",
   title: "Fight bClub/b", year: "1999", overview: "Rules apply.", contentRating: "R",
   communityRating: 8.8, addedAt: new Date("2026-07-01T00:00:00.000Z"),
 };
 const JF_ROW_551 = {
-  tmdbId: 551, mediaType: "MOVIE", filePath: null, jellyfinItemId: "jf-551",
+  tmdbId: 551, serverInstance: "", mediaType: "MOVIE", filePath: null, jellyfinItemId: "jf-551",
   title: "Second", year: null, overview: null, contentRating: null,
   communityRating: null, addedAt: null,
 };
@@ -357,6 +391,10 @@ beforeEach(() => {
   existingJellyfinByType.clear();
   plexFindManyWheres.length = 0;
   failCreateManyOn = null;
+  pendingRequests = [];
+  requesterRows = [];
+  requestUpdateManys.length = 0;
+  casCalls = 0;
   respond = (url) => {
     throw new Error(`unexpected fetch ${url} — script a responder for this test`);
   };
@@ -519,6 +557,91 @@ test("plex bodyless POST is recentOnly: /recentlyAdded fetch, insert-only of NEW
     [{ where: { serverInstance: "", plexRatingKey: { in: ["rk604"] } } }],
     "guardrail 13 violated: the Plex recentOnly path may only clear stale mappings for the " +
       "incoming batch's ratingKeys (default instance only) — any other deleteMany nukes the library when the window is empty",
+  );
+});
+
+test("a named instance resyncs ITS OWN rows: config, selection and every delete follow the slug", async () => {
+  configurePlex();
+  settings.set("plexRemoteServerUrl", PLEX_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  // A REAL Plex metadata item: tmdbId is carried in Guid, so a bare
+  // `{ tmdbId, ratingKey }` parses to nothing and the library comes back empty.
+  // The delete assertions below pass either way (a full replace deletes
+  // unconditionally), so an empty fixture silently made this test weaker than it
+  // reads — the insert assertions are what require real rows.
+  respond = plexMovieResponder([
+    { ratingKey: "rk700", type: "movie", title: "Seven Hundred", Guid: [{ id: "tmdb://700" }] },
+  ]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "remote" }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  // Every scoped write must name the instance being resynced. A delete that
+  // still said "" would wipe the DEFAULT server's library on a resync the admin
+  // aimed at a different server entirely.
+  const deletes = opsFor("plexLibraryItem", "deleteMany");
+  assert.ok(deletes.length > 0, "a full resync must delete before repopulating");
+  for (const d of deletes) {
+    const where = (d.args as { where?: { serverInstance?: unknown } }).where ?? {};
+    assert.equal(where.serverInstance, "remote", `a delete escaped the instance scope: ${JSON.stringify(where)}`);
+  }
+
+  // ...and so must every INSERTED row. Scoped deletes with UNSCOPED inserts is
+  // strictly worse than doing neither: the named server's rows are deleted and
+  // re-created under the schema default "", relocating its entire library onto the
+  // DEFAULT server — which un-restricts a restricted server (slug "" is visible to
+  // everyone) and drops its server-local ratingKeys into the default's namespace.
+  const creates = opsFor("plexLibraryItem", "createMany");
+  assert.ok(creates.length > 0, "a full resync must repopulate");
+  for (const c of creates) {
+    for (const row of (c.args as { data: Array<{ serverInstance?: unknown }> }).data) {
+      assert.equal(row.serverInstance, "remote", `an inserted row escaped the instance scope: ${JSON.stringify(row)}`);
+    }
+  }
+});
+
+test("a malformed instance slug is REJECTED, never coerced to the default", async () => {
+  // Coercion would aim a destructive scoped delete at the default server on a
+  // request that named something else — the worst possible reading of bad input.
+  configurePlex();
+  respond = plexMovieResponder([]);
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "../../etc" }) }));
+  assert.equal(res.status, 400);
+  const deletes = opsFor("plexLibraryItem", "deleteMany");
+  assert.equal(deletes.length, 0, "a rejected request must not have deleted anything");
+});
+
+test("with a SECOND Plex server registered, a resync leaves the shared TVEpisodeCache alone", async () => {
+  // TVEpisodeCache has no serverInstance: every Plex server shares one
+  // `source: "plex"` namespace. This route used to delete that namespace
+  // unscoped and repopulate from one server, destroying every other server's
+  // episode rows until the next orchestrator run. It can only own the cache when
+  // it is the only Plex server.
+  configurePlex();
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = plexMovieResponder([{ tmdbId: 700, ratingKey: "rk700" }]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const episodeOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+  assert.deepEqual(episodeOps, [], "the shared episode cache must not be touched while another Plex server exists");
+});
+
+test("as the ONLY Plex server it still rewrites the episode cache — single-server behaviour is unchanged", async () => {
+  configurePlex();
+  respond = plexMovieResponder([{ tmdbId: 700, ratingKey: "rk700" }]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.ok(
+    transactions.flatMap((t) => t.ops).some((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany"),
+    "a lone Plex server must still maintain the episode cache, exactly as before",
   );
 });
 
@@ -759,4 +882,83 @@ test("multi-server safety: the plex dedupe clone's prior-mapping lookup is defau
     (creates[0].args as { data: Array<{ tmdbId: number }> }).data.map((r) => r.tmdbId),
     [601],
   );
+});
+
+// ── restricted-server visibility gate (guardrail 35) ────────────────────────
+
+const REMOTE_MOVIE = { ratingKey: "rk700", type: "movie", title: "Seven Hundred", Guid: [{ id: "tmdb://700" }] };
+function pendingFor(userId: string): PendingRequest {
+  return { id: "req-1", tmdbId: 700, mediaType: "MOVIE", requestedBy: userId, title: "Seven Hundred", posterPath: null, notifiedAvailable: false };
+}
+function configureRestrictedRemote(): void {
+  configurePlex();
+  settings.set("plexRemoteServerUrl", PLEX_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote", restricted: true }]));
+  respond = plexMovieResponder([REMOTE_MOVIE]);
+}
+async function resyncRemote(): Promise<Response> {
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "remote" }) }));
+  await settleFireAndForget();
+  return res;
+}
+
+test("a RESTRICTED server does NOT flip or notify a requester holding no grant, and never burns the once-only claim", async () => {
+  // This route resyncs whichever server the body names, so a restricted one can now
+  // reach the marking pass — which had no visibility term. An ungranted requester was
+  // told a title on a server they cannot see was ready to watch, the row went
+  // permanently AVAILABLE while every read path still rendered it unavailable, and
+  // the notifiedAvailable claim was burned so the legitimate later notification could
+  // never fire.
+  configureRestrictedRemote();
+  pendingRequests = [pendingFor("u1")];
+  requesterRows = [{ id: "u1", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+
+  assert.equal((await resyncRemote()).status, 200);
+
+  assert.equal(casCalls, 0, "the CAS must never see a request the requester cannot see the server for");
+  assert.equal(requestUpdateManys.length, 0, "no AVAILABLE flip for an invisible server");
+});
+
+test("the SAME restricted server still notifies a requester who HAS the grant", async () => {
+  // The counterpart: without it, a gate that denied everyone would pass the test above.
+  configureRestrictedRemote();
+  pendingRequests = [pendingFor("u2")];
+  requesterRows = [{
+    id: "u2", role: "USER", permissions: 0n,
+    mediaServerGrants: { plex: { remote: { view: true } } }, mediaServer: null,
+  }];
+
+  assert.equal((await resyncRemote()).status, 200);
+
+  assert.equal(casCalls, 1, "a granted requester must reach the notification CAS exactly once");
+});
+
+test("a legacy ADMIN row whose permissions column was never seeded is NOT denied", async () => {
+  // `permissions` is @default(0) and only seeded by a manual one-shot script, so an
+  // upgraded deployment can hold role="ADMIN" with permissions=0. Reading the raw
+  // column here would deny the ADMIN short-circuit that every READ path grants (they
+  // all go through effectivePermissions), stranding the operator's own requests as
+  // PENDING while the UI insists the title is available.
+  configureRestrictedRemote();
+  pendingRequests = [pendingFor("admin1")];
+  requesterRows = [{ id: "admin1", role: "ADMIN", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+
+  assert.equal((await resyncRemote()).status, 200);
+
+  assert.equal(casCalls, 1, "an unseeded ADMIN must still be notified");
+});
+
+test("an UNRESTRICTED named server notifies everyone — the gate costs nothing when nothing is restricted", async () => {
+  configurePlex();
+  settings.set("plexRemoteServerUrl", PLEX_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }])); // no `restricted`
+  respond = plexMovieResponder([REMOTE_MOVIE]);
+  pendingRequests = [pendingFor("u3")];
+  requesterRows = [{ id: "u3", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+
+  assert.equal((await resyncRemote()).status, 200);
+
+  assert.equal(casCalls, 1, "an unrestricted server is visible to everyone");
 });

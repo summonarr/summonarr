@@ -954,6 +954,29 @@ export async function authorizeWithJellyfin(
     return null;
   }
 
+  // SECOND bucket, keyed on the credential rather than the caller — the bucket
+  // above is NOT sufficient on its own. When TRUST_PROXY is not "true" (the
+  // default docker deployment ships it blank), getClientIp falls back to
+  // untrustedBucket, a hash of the User-Agent — a header the caller sets. An
+  // attacker who rotates it per request gets a fresh bucket every time and an
+  // unlimited number of guesses, and stock Jellyfin has no account lockout of
+  // its own, which made this an unthrottled password-guessing proxy for the
+  // media server.
+  //
+  // Both sibling providers already carry such a bucket — plex keys on the token
+  // (`plex:${tokenKey}`) and QuickConnect on the secret
+  // (`jellyfin-qc-secret:${qcKey}`); only the username/password path lacked one.
+  // Keyed on the lowercased username so case variation cannot mint new budgets.
+  //
+  // TRADE-OFF, accepted deliberately: a per-username bucket lets an attacker
+  // spend a known user's budget and lock them out for the window. That is the
+  // standard cost of credential-keyed throttling, and it is strictly better than
+  // unlimited guessing — the window is 5 minutes, not an account disable.
+  if (!checkRateLimit(`jellyfin-user:${username.toLowerCase()}`, 10, 5 * 60 * 1000)) {
+    void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "rate_limited_username" } });
+    return null;
+  }
+
   const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
     console.error(`[jellyfin auth] Jellyfin URL is not configured for instance "${instance}"`);

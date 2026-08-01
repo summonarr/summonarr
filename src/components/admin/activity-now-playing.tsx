@@ -631,25 +631,24 @@ export function ActivityNowPlaying({
   initialSessions,
   source,
   mediaType,
-  initialPlexReachable,
+  plexReachability = [],
 }: {
   initialSessions: ActiveSessionLive[];
   source?: string;
   mediaType?: string;
-  // null = unknown (no Plex configured / not polled yet),
-  // true = Summonarr can reach the local Plex server (getPlexSessions succeeds),
-  // false = Summonarr cannot reach Plex (poll/connect failing). This tracks
-  // *local* reachability, not plex.tv remote access. Read server-side from
-  // Setting('plexServerReachable'); SSE updates flow via the plex:reachability
-  // event below.
-  initialPlexReachable?: boolean | null;
+  // One entry per configured Plex server. `reachable`: null = unknown (not
+  // configured / not polled yet), true = Summonarr can reach it
+  // (getPlexSessions succeeds), false = it cannot (poll/connect failing). This
+  // tracks *local* reachability, not plex.tv remote access. Read server-side
+  // from each instance's Setting; SSE updates flow via the plex:reachability
+  // event below, matched on `instance`.
+  plexReachability?: { instance: string; name: string; reachable: boolean | null }[];
 }) {
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
-  const [plexReachable, setPlexReachable] = useState<boolean | null>(
-    initialPlexReachable ?? null,
-  );
+  // Keyed by instance slug so one server's event can never overwrite another's.
+  const [reachability, setReachability] = useState(plexReachability);
 
   useLiveEvents((event) => {
     if (event.type === "connected") setConnected(true);
@@ -670,7 +669,9 @@ export function ActivityNowPlaying({
       });
     }
     if (event.type === "plex:reachability") {
-      setPlexReachable(event.reachable);
+      setReachability((prev) =>
+        prev.map((r) => (r.instance === event.instance ? { ...r, reachable: event.reachable } : r)),
+      );
     }
   });
 
@@ -695,30 +696,35 @@ export function ActivityNowPlaying({
         sub={sub}
         right={
           <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-            {plexReachable === false && (
-              <span
-                className="ds-mono"
-                title="Summonarr can't reach the Plex server — Plex play tracking and now-playing are paused until it's reachable again. Checked every poll via getPlexSessions."
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 5,
-                  fontSize: 10.5,
-                  color: "var(--ds-warning, #c84)",
-                  whiteSpace: "nowrap",
-                }}
-              >
+            {reachability
+              .filter((r) => r.reachable === false)
+              .map((r) => (
                 <span
+                  key={r.instance}
+                  className="ds-mono"
+                  title={`Summonarr can't reach ${r.name} — its play tracking and now-playing are paused until it's reachable again. Checked every poll via getPlexSessions.`}
                   style={{
-                    width: 6,
-                    height: 6,
-                    borderRadius: 999,
-                    background: "var(--ds-warning, #c84)",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 5,
+                    fontSize: 10.5,
+                    color: "var(--ds-warning, #c84)",
+                    whiteSpace: "nowrap",
                   }}
-                />
-                Plex unreachable
-              </span>
-            )}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 999,
+                      background: "var(--ds-warning, #c84)",
+                    }}
+                  />
+                  {/* The default server's name is "Plex", so a single-server
+                      deployment renders exactly the string it always did. */}
+                  {r.name} unreachable
+                </span>
+              ))}
             <span
               className="ds-mono"
               style={{

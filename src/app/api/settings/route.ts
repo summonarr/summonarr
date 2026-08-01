@@ -550,6 +550,18 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "apnsRelayKey",
     "recommendedIosBuild",
     "apnsRelayUrl",
+    // Webhook secrets must be clearable or the admin form silently lies: it
+    // offers a blank field to remove the secret, the write is skipped as an
+    // empty value, and the UI still reports Saved while the OLD secret stays
+    // valid. An operator who believed they had rotated or removed webhook auth
+    // had done neither. Clearing one makes that instance secretless, and the
+    // handlers reject a webhook when every instance secret is empty (401), so
+    // the end state is "this webhook is off", not "this webhook is open".
+    "webhookSecret",
+    "radarrWebhookSecret",
+    "sonarrWebhookSecret",
+    "radarr4kWebhookSecret",
+    "sonarr4kWebhookSecret",
   ]);
 
   const entries = Object.entries(body)

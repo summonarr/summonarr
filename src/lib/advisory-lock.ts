@@ -42,6 +42,22 @@ export async function withAdvisoryLock<T, U = T>(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WORK_TIMEOUT_MS;
   const controller = new AbortController();
   const client = new Client({ connectionString: process.env.DATABASE_URL });
+  // pg emits 'error' on the Client for CONNECTION-level failures that have no
+  // in-flight query to reject — a Postgres restart, an idle-connection reaper, a
+  // pg_terminate_backend, a network blip. This client is deliberately held open and
+  // IDLE for the whole of work() (up to 30 minutes by default) while the work runs
+  // on Prisma's own pool, which is precisely the window in which that happens.
+  //
+  // An EventEmitter that emits 'error' with NO listener re-throws it as an uncaught
+  // exception, so an unhandled one here takes down the entire app process — not just
+  // the cron run that opened it. Postgres releases session-scoped advisory locks when
+  // the session dies, so by the time this fires the lock is already free.
+  client.on("error", (err) => {
+    console.error(
+      `[advisory-lock] connection error while holding lock ${lockId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
   await client.connect();
   try {
     // Bound any single statement (and any transaction left idle) so a wedged query
@@ -78,9 +94,19 @@ export async function withAdvisoryLock<T, U = T>(
         if (timer) clearTimeout(timer);
       }
     } finally {
-      await client.query("SELECT pg_advisory_unlock($1::bigint)", [lockId]);
+      // On a dead connection this rejects, and because it sits in a finally it would
+      // REPLACE the error already propagating out of work() with a confusing
+      // secondary one. Postgres has already released the lock in that case, so
+      // logging and moving on is the correct outcome, not a silent swallow.
+      await client.query("SELECT pg_advisory_unlock($1::bigint)", [lockId]).catch((err) => {
+        console.error(
+          `[advisory-lock] failed to release lock ${lockId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
     }
   } finally {
-    await client.end();
+    // Same reasoning: end() on an already-broken socket must not mask the real error.
+    await client.end().catch(() => {});
   }
 }

@@ -4,10 +4,12 @@ import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
+import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
@@ -20,21 +22,45 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("plex-sync", () => syncPlex(request));
 }
 
-// DEFAULT-INSTANCE-ONLY BY DESIGN (mirrors /api/sync/jellyfin — Phase 1 parity):
-// this route syncs only the default ("") Plex server; named additional instances
-// sync via the /api/sync orchestrator's per-instance fan-out only. Every library
-// read/delete here is therefore scoped to serverInstance = "" so the admin Resync
-// can never wipe or mask a named instance's rows. (The episode-cache maintenance
-// is NOT scoped — TVEpisodeCache is TMDB-anchored shared data with no
-// serverInstance.)
+// Resyncs ONE Plex server — the default ("") unless the body names another via
+// `instance`. Every library read/delete is scoped to that server's
+// serverInstance, so resyncing one can never wipe or mask another's rows.
+//
+// TVEpisodeCache is the exception that needs care: it has NO serverInstance
+// column, so every Plex server's episodes share one `source: "plex"` namespace
+// and the only correct rewrite is a whole-table one built from EVERY server (the
+// orchestrator's job, where it is gated on all instances having been fetched).
+// A single-server resync cannot produce that union, so it rewrites the cache
+// ONLY when it is the sole configured Plex server. With more than one it leaves
+// the cache alone — previously it deleted `source: "plex"` unscoped and
+// repopulated from this server alone, silently destroying every other Plex
+// server's episode rows until the next orchestrator run.
 async function syncPlex(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
-  const [plexConfig, librariesRow] = await Promise.all([
-    getPlexConfig(),
-    prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
+  // Which server to resync. Absent ⇒ the default, so every existing caller (the
+  // admin Resync button, the connect form, the master-fill button) is unchanged.
+  // A malformed slug is rejected rather than coerced: coercing to "" would point
+  // a destructive scoped delete at the WRONG server.
+  const instance: MediaInstanceKey =
+    typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
+
+  // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
+  // instance with a setting.findMany, and this path is held to the same
+  // findUnique-only read shape as the other per-instance config readers
+  // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
+  // the safer error: a registered-but-unconfigured server has no episodes to
+  // contribute, so at worst this skips a rewrite the orchestrator will do anyway
+  // — the opposite mistake destroys another server rows.
+  const [plexConfig, librariesRow, plexInstances] = await Promise.all([
+    getPlexConfig(instance),
+    prisma.setting.findUnique({ where: { key: plexSettingKey(instance, "Libraries") } }),
+    getMediaInstances("plex"),
   ]);
 
   if (!plexConfig.url || !plexConfig.token) {
@@ -69,8 +95,18 @@ async function syncPlex(request: NextRequest) {
   // Full replace: clear unconditionally then insert. getPlexTVEpisodes throws on a fetch
   // failure (rejects → .catch, no clear), so an empty result is a genuinely empty library
   // and the stale episode ownership must be cleared rather than left behind.
-  getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
+  const ownsEpisodeCache = plexInstances.length <= 1;
+  if (!ownsEpisodeCache) {
+    console.warn(
+      `[sync/plex] ${plexInstances.length} Plex servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
+    );
+  }
+  (ownsEpisodeCache
+    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
+    : Promise.resolve(null)
+  )
     .then(async (episodes) => {
+      if (episodes === null) return;
       await prisma.$transaction(async (tx) => {
         // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
         // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
@@ -88,21 +124,31 @@ async function syncPlex(request: NextRequest) {
     return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
   };
 
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  // `serverInstance` is NOT optional here. Every delete on this path is scoped to
+  // `instance`, so omitting it on the insert made a named-instance resync delete that
+  // server's rows and re-insert them under the schema default "" — moving the whole
+  // library onto the DEFAULT server. That silently un-restricts a `restricted` server
+  // (slug "" is visible to everyone) and drops its server-local ratingKeys into the
+  // default's namespace, where a later fix-match would address the wrong server.
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
 
   // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge;
   // deduplicate by preferring the previously stored mapping to avoid flip-flopping on every
   // sync. Keep in agreement with deduplicatePlexRowsByRatingKey in /api/sync/route so the
   // two writers agree on the row set — including the per-instance scoping: ratingKeys are
   // small server-local integers, so the prior-mapping lookup must consult only the instance
-  // being written (here always the default — this route is default-instance-only).
+  // being written (`instance`, which the body may name — NOT always the default).
   type PlexRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string | null; plexRatingKey: string | null };
-  const deduplicateByRatingKey = async (
-    rows: PlexRow[],
+  // Generic in the row type so the caller's extra columns — `serverInstance` above in
+  // particular — survive in the TYPE and not just at runtime. A concrete PlexRow[]
+  // return would erase them, hiding the very field whose omission moved a named
+  // server's library onto the default.
+  const deduplicateByRatingKey = async <T extends PlexRow>(
+    rows: T[],
     mediaType: "MOVIE" | "TV",
     serverInstance: MediaInstanceKey,
-  ): Promise<PlexRow[]> => {
+  ): Promise<T[]> => {
     const ratingKeyCount = new Map<string, number>();
     for (const r of rows) {
       if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
@@ -138,20 +184,20 @@ async function syncPlex(request: NextRequest) {
     });
   };
 
-  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", DEFAULT_MEDIA_INSTANCE);
-  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    DEFAULT_MEDIA_INSTANCE);
+  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", instance);
+  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    instance);
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
-    // The already-present check is default-instance-scoped: a named instance's row for the same
-    // tmdbId must not mask inserting the default instance's own row.
+    // The already-present check is scoped to the instance being written: another server's
+    // row for the same tmdbId must not mask inserting this server's own row.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "TV", serverInstance: instance, tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
     ]);
@@ -172,9 +218,9 @@ async function syncPlex(request: NextRequest) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
       if (incomingRatingKeys.length > 0) {
-        // Default-instance-scoped: the same small integer ratingKey can legitimately
-        // exist on a named instance's server — only THIS server's stale mapping is stale.
-        await tx.plexLibraryItem.deleteMany({ where: { serverInstance: DEFAULT_MEDIA_INSTANCE, plexRatingKey: { in: incomingRatingKeys } } });
+        // Scoped to the instance being written: the same small integer ratingKey can
+        // legitimately exist on another server — only THIS server's mapping is stale.
+        await tx.plexLibraryItem.deleteMany({ where: { serverInstance: instance, plexRatingKey: { in: incomingRatingKeys } } });
       }
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
@@ -182,12 +228,11 @@ async function syncPlex(request: NextRequest) {
   } else {
 
     // Advisory lock 2001,1 — see comment in the recentOnly branch above. Full replace of
-    // the DEFAULT instance's rows only — a named instance's rows survive the admin Resync
-    // (they are owned by the orchestrator's per-instance fan-out).
+    // the rows belonging to `instance` ONLY; every other server's rows survive untouched.
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE } });
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: instance } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: instance } });
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
@@ -207,9 +252,42 @@ async function syncPlex(request: NextRequest) {
     select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
 
-  const toMark = requests.filter((req) =>
+  let toMark = requests.filter((req) =>
     req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
   );
+
+  // Per-user visibility gate for a RESTRICTED named server (guardrail 35). This run
+  // describes exactly ONE server, so unlike the orchestrator — which unions every
+  // server and needs per-tmdbId holder sets — the question is the same for every id:
+  // may this requester see `instance`? Only a restricted instance can answer no, so
+  // the default ("") server does no extra work and behaves byte-identically.
+  //
+  // PRE-CAS by construction: filtering `toMark` here keeps gated rows out of BOTH the
+  // claimAvailableNotificationWinners call and the two updateMany flips below, so a
+  // gated request keeps notifiedAvailable = false and stays PENDING/APPROVED. It is
+  // re-evaluated on every later run, and the once-only claim is never burned — so the
+  // legitimate notification still fires if the title lands on a server they can see,
+  // or if they are granted access later.
+  const instanceConfig = plexInstances.find((i) => i.slug === instance);
+  if (instanceConfig?.restricted === true && toMark.length > 0) {
+    const requesterRows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(toMark.map((r) => r.requestedBy))] } },
+      // `role` is NOT optional. The raw `permissions` column is @default(0) and is
+      // seeded only by a manual one-shot script, so an upgraded deployment can hold a
+      // role="ADMIN" row with permissions=0. Passing that raw would deny the ADMIN
+      // short-circuit HERE while every read path grants it (they all go through
+      // effectivePermissions) — stranding the operator's own requests as PENDING while
+      // the UI insists the title is available. Same reasoning as the orchestrator's
+      // loadRequesters.
+      select: { id: true, role: true, permissions: true, mediaServerGrants: true },
+    });
+    const byId = new Map(requesterRows.map((u) => [u.id, u]));
+    toMark = toMark.filter((r) => {
+      const u = byId.get(r.requestedBy);
+      if (!u) return false; // requester vanished mid-run — fail closed
+      return canViewMediaInstance(effectivePermissions(u.role, u.permissions), instanceConfig, parseMediaServerGrants(u.mediaServerGrants), "plex");
+    });
+  }
 
   if (toMark.length > 0) {
     const unnotified = toMark.filter((r) => !r.notifiedAvailable);
@@ -219,16 +297,11 @@ async function syncPlex(request: NextRequest) {
       // watch" ping from a Jellyfin resync (and vice versa); users with no preference
       // are notified by whichever source sees the item first.
       //
-      // The orchestrator's per-user media-server VISIBILITY gate (multi-server
-      // grants) deliberately has no counterpart here, and adding one would be dead
-      // code: this route is default-instance-only (see the header comment), so
-      // `movieIds`/`tvIds` above describe the "" server exclusively — and the
-      // default instance is visible to EVERY user by construction
-      // (defaultInstanceConfig hard-codes restricted:false, a "" registry entry is
-      // rejected, and canViewMediaInstance short-circuits true on slug ""). A
-      // restricted named instance can therefore never contribute a row to this
-      // route's decision. If this route is ever generalized to named instances,
-      // port the orchestrator's presentForRequester gate with it.
+      // The per-user media-server VISIBILITY gate now runs where `toMark` is built
+      // above — it has to, because this route IS generalized to named instances and a
+      // restricted one must not flip a request AVAILABLE (or notify) for a requester
+      // who cannot see that server. The split below is the separate, older concern:
+      // which SOURCE the user prefers, not which server they may see.
       const userRows = await prisma.user.findMany({
         where: { id: { in: unnotified.map((r) => r.requestedBy) } },
         select: { id: true, mediaServer: true },

@@ -84,10 +84,10 @@ test("unsubscribe releases the slot: listenerCount drops and the removed listene
   sseEmitter.off("event", a);
   assert.equal(sseEmitter.listenerCount("event"), before + 1);
 
-  emitSSE({ type: "plex:reachability", reachable: false });
+  emitSSE({ type: "plex:reachability", reachable: false, instance: "" });
   assert.equal(seenA.length, 1); // removed listener received nothing further
   assert.equal(seenB.length, 2); // surviving listener still receives
-  assert.deepEqual(seenB[1], { type: "plex:reachability", reachable: false });
+  assert.deepEqual(seenB[1], { type: "plex:reachability", reachable: false, instance: "" });
 
   sseEmitter.off("event", b);
   assert.equal(sseEmitter.listenerCount("event"), before);

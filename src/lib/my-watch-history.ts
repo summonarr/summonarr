@@ -199,7 +199,14 @@ export async function getMyWatchHistory(
         'tmdb:' || h."tmdbId"::text || ':' || COALESCE(h."mediaType"::text, '')
           || ':' || COALESCE(h."seasonNumber", -1)::text
           || ':' || COALESCE(h."episodeNumber", -1)::text
-      WHEN h."sourceItemId" IS NOT NULL THEN 'item:' || h."source" || ':' || h."sourceItemId"
+      -- serverInstance is part of the key. A sourceItemId is SERVER-LOCAL (a Plex
+      -- ratingKey is a small integer; Jellyfin derives its Guid from type+path, so two
+      -- servers mounting the same library produce the same id), and a user linked to
+      -- two servers resolves to one MediaServerUser row per instance. Without it, two
+      -- different unmatched titles — one per server — collapse into a single history
+      -- entry whose aggregates sum both. The tmdb: branch above deliberately does NOT
+      -- scope: a tmdbId is global, so the same film watched on either server IS one title.
+      WHEN h."sourceItemId" IS NOT NULL THEN 'item:' || h."source" || ':' || h."serverInstance" || ':' || h."sourceItemId"
       ELSE 'row:' || h."id"
     END`;
 

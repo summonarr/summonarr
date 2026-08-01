@@ -805,3 +805,62 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   assert.equal(claim.data.status, "IN_PROGRESS");
   assert.equal(opsOf("auditLog.create").length, 1, "the grab is audited");
 });
+
+// ── refetch instance routing (guardrail 32) ────────────────────────────────
+
+test("refetch searches the instance the caller names, not the default", async () => {
+  // Issue has no arrInstance column — the same series can sit on several instances —
+  // so the caller names it, exactly as the Replace flow does. Without this the search
+  // always went to the DEFAULT instance: a SEASON issue filed against the 4K copy
+  // re-grabbed and re-imported the HD one, leaving the reported problem untouched
+  // while the issue moved to IN_PROGRESS as though it had been handled.
+  issueRow = { id: "issue-rf1", status: "OPEN", reportedBy: "r", title: "Show", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, scope: "SEASON", seasonNumber: 2, episodeNumber: null };
+  settings.set("sonarr4kUrl", "http://sonarr-4k.example.com:8989");
+  settings.set("sonarr4kApiKey", "4k-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname === "/api/v3/series") return jsonResponse([{ id: 9, tvdbId: 121361 }]);
+    if (url.pathname === "/api/v3/command") return jsonResponse({ id: 1 });
+    throw new Error(`unexpected refetch fetch: ${url.href}`);
+  };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  const res = await patchIssue(admin.token, "issue-rf1", { refetch: true, instance: "4k" });
+  assert.equal(res.status, 200);
+
+  // The assertion that matters is WHICH server was contacted.
+  assert.ok(fetchCalls.length > 0, "refetch must reach Sonarr");
+  for (const u of fetchCalls) {
+    assert.equal(u.host, "sonarr-4k.example.com:8989", `a refetch call escaped to ${u.href}`);
+  }
+});
+
+test("refetch with no instance still targets the default — existing callers unchanged", async () => {
+  issueRow = { id: "issue-rf2", status: "OPEN", reportedBy: "r", title: "Show", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, scope: "SEASON", seasonNumber: 2, episodeNumber: null };
+  settings.set("sonarrUrl", "http://sonarr-hd.example.com:8989");
+  settings.set("sonarrApiKey", "hd-api-key");
+  settings.set("sonarr4kUrl", "http://sonarr-4k.example.com:8989");
+  settings.set("sonarr4kApiKey", "4k-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname === "/api/v3/series") return jsonResponse([{ id: 9, tvdbId: 121361 }]);
+    if (url.pathname === "/api/v3/command") return jsonResponse({ id: 1 });
+    throw new Error(`unexpected refetch fetch: ${url.href}`);
+  };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  assert.equal((await patchIssue(admin.token, "issue-rf2", { refetch: true })).status, 200);
+
+  assert.ok(fetchCalls.length > 0);
+  for (const u of fetchCalls) {
+    assert.equal(u.host, "sonarr-hd.example.com:8989", "an absent instance must mean the default, not a named one");
+  }
+});
+
+test("refetch REJECTS a malformed instance slug instead of coercing it to the default", async () => {
+  // Coercion would silently search the wrong server on a request that named another.
+  issueRow = { id: "issue-rf3", status: "OPEN", reportedBy: "r", title: "Show", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  const res = await patchIssue(admin.token, "issue-rf3", { refetch: true, instance: "../../etc" });
+  assert.equal(res.status, 400);
+  assert.equal(fetchCalls.length, 0, "a rejected request must not have contacted any server");
+});

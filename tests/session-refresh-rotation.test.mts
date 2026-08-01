@@ -169,3 +169,68 @@ test("revoke-all in the same second as sign-in still rejects (the deliberate <= 
 
   assert.equal(await verifyAndRefreshSession(token), null);
 });
+
+// ── the non-persisting caller opt-out ──────────────────────────────────────
+
+test("allowRotation:false surfaces the fresh role WITHOUT killing the presented token", async () => {
+  // Rotation is destructive — it renames the AuthSession row and stamps
+  // sessionsRevokedAt past the token's own iat, so the token the browser still holds
+  // dies the moment it commits. Callers that can hand back the replacement do so
+  // (proxy.ts rewrites the forwarded cookie AND sets Set-Cookie). A SERVER COMPONENT
+  // cannot set a cookie, so running it on the page-render path destroyed the session
+  // and bounced the user to /login on their next request — on the prefetch path
+  // proxy.ts's matcher skips, which is exactly why guardrail 29 puts a DB-checked read
+  // there in the first place.
+  const userId = "user-norotate-1";
+  dbSessionId = "sess-keep-1";
+  dbUser = makeDbUser({ role: "ISSUE_ADMIN" }); // DB promoted; token still says USER
+
+  const iat = Math.floor(Date.now() / 1000);
+  const token = await signSessionJwt(
+    {
+      id: userId, role: "USER", permissions: "0", provider: "credentials",
+      sessionId: dbSessionId, expiresAt: iat + 86_400,
+    },
+    { expiresInSeconds: 7_200, iat },
+  );
+  markUserForceRevalidate(userId);
+
+  const result = await verifyAndRefreshSession(token, { allowRotation: false });
+
+  // The authz decision — the only thing this caller needs — is still correct and fresh.
+  assert.ok(result, "the session must resolve");
+  assert.equal(result.claims.role, "ISSUE_ADMIN", "the render must gate on the DB role, not the stale claim");
+
+  // ...and none of the destructive half ran.
+  assert.equal(result.claims.sessionId, "sess-keep-1", "the sessionId must not rotate");
+  assert.equal(dbSessionId, "sess-keep-1", "the AuthSession row must not be renamed");
+  assert.equal(dbUser.sessionsRevokedAt, null, "sessionsRevokedAt must not be stamped");
+
+  // The decisive property: the token the browser holds still works afterwards.
+  markUserForceRevalidate(userId);
+  const stillValid = await verifyAndRefreshSession(token, { allowRotation: false });
+  assert.ok(stillValid, "the presented token must survive — otherwise the next request is a logout");
+});
+
+test("rotation is still the DEFAULT — every request-scoped caller keeps it", async () => {
+  // The opt-out must not become the general behaviour: proxy/api-auth CAN deliver the
+  // replacement, and rotation is what stops a leaked pre-change token being replayed.
+  const userId = "user-norotate-2";
+  dbSessionId = "sess-rotate-2";
+  dbUser = makeDbUser({ role: "ISSUE_ADMIN" });
+
+  const iat = Math.floor(Date.now() / 1000);
+  const token = await signSessionJwt(
+    {
+      id: userId, role: "USER", permissions: "0", provider: "credentials",
+      sessionId: dbSessionId, expiresAt: iat + 86_400,
+    },
+    { expiresInSeconds: 7_200, iat },
+  );
+  markUserForceRevalidate(userId);
+
+  const result = await verifyAndRefreshSession(token);
+  assert.ok(result);
+  assert.notEqual(result.claims.sessionId, "sess-rotate-2", "the default must still rotate");
+  assert.ok(dbUser.sessionsRevokedAt, "the default must still stamp the cutoff");
+});

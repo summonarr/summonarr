@@ -521,3 +521,20 @@ test("PATCH: writing a Sonarr URL + key with a healthy server → 200 with the r
   // And the sensitive key still stored plaintext (guardrail 7a holds on the success path too).
   assert.equal(upsertFor("sonarrApiKey")[0].create.value, "sonarr-plaintext");
 });
+
+// ── clearing a webhook secret ───────────────────────────────────────────────
+
+test("PATCH: an empty webhook secret is WRITTEN, not skipped — the admin form's clear must actually clear", async () => {
+  // Non-clearable keys skip empty writes so the client can echo back masked
+  // values without wiping them. A webhook secret caught that blanket rule: the
+  // form offers a blank field to remove the secret, the write was skipped, and
+  // the UI still said Saved while the OLD secret stayed valid — an operator who
+  // believed they had rotated or revoked webhook auth had done neither.
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(patchReq(JSON.stringify({ radarrWebhookSecret: "" }), admin.header), undefined);
+  assert.equal(res.status, 200);
+  const write = upsertCalls.find((u) => u.where.key === "radarrWebhookSecret");
+  assert.ok(write, "clearing a webhook secret must reach the database");
+  assert.equal(write.create.value, "", "it must be stored empty, not left at the previous secret");
+});
+

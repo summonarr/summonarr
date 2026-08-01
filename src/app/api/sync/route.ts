@@ -16,7 +16,7 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
-import { type MediaInstanceKey } from "@/lib/media-instances";
+import { type MediaInstanceKey, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -244,6 +244,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   const now = new Date();
   const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
+
+  // Guardrail 33: account removal DISABLES rather than scrubs, so a removed user keeps
+  // a live Discord link and would still be DMed. Suppression is documented as living at
+  // exactly two chokepoints — claimAvailableNotificationWinners (batch "now available")
+  // and notifyRequestStatusChange (single approve/decline/available) — and this
+  // "awaiting release" / "download pending" backstop is a THIRD requester-facing path
+  // that goes through neither. One batched read, not a per-request lookup.
+  const disabledRequesters = new Set<string>();
+  if (overdue.length > 0) {
+    const rows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(overdue.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
+      select: { id: true },
+    });
+    for (const r of rows) disabledRequesters.add(r.id);
+  }
+
   await runConcurrent(overdue, async (req) => {
     try {
       const downloading = req.mediaType === "MOVIE"
@@ -278,6 +294,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }
       }
       await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
+      // The backstop is CONSUMED for a disabled requester, not deferred: pendingNotifyAt
+      // is cleared above and the DM is dropped. That mirrors notify-available's
+      // deliberate claim-burn — re-enabling an account must not replay a backlog of
+      // stale "your download is pending" messages about requests long since resolved.
+      if (disabledRequesters.has(req.requestedBy)) return;
       if (!released) {
         await notifyUserAwaitingRelease(req.requestedBy, req.title, req.mediaType, soonestReleaseDate);
       } else {
@@ -589,15 +610,42 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   let plexMarked = 0;
   let jellyfinMarked = 0;
 
-  const [plexInstances, jellyfinInstances, plexLibrariesRow, jfLibrariesRow] = await Promise.all([
+  const [plexInstances, jellyfinInstances] = await Promise.all([
     // Every configured, connection-ready Plex/Jellyfin server (multi-server support) —
     // each instance's own url/token is resolved via getPlexConfig(instance.slug) /
     // getJellyfinConfig(instance.slug) inside its arm below.
     getSyncableMediaInstances("plex"),
     getSyncableMediaInstances("jellyfin"),
-    prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
-    prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
   ]);
+
+  // The library selection is PER SERVER, and must be: a Plex section key is a
+  // small integer scoped to one server, so server A's "1,2" names different
+  // libraries on server B. Applying one selection to every instance silently
+  // ingested the wrong sections from B and excluded the right ones — and since
+  // each instance's write is a scoped full replace, B's rows were then replaced
+  // with nothing and everything on B read as unavailable. Jellyfin ids are GUIDs
+  // so they collide less, but a single selection still cannot express "these
+  // libraries on A, those on B" and filtered B down to nothing just the same.
+  //
+  // An instance with no selection stored syncs ALL of its libraries, which is
+  // both the correct default and what every named instance gets until an admin
+  // chooses otherwise. The default instance's key is byte-identical to the
+  // legacy `plexLibraries`/`jellyfinLibraries`, so existing installs keep their
+  // exact selection with no migration.
+  const librarySelections = new Map<string, Set<string> | undefined>();
+  const selectionKeys = [
+    ...plexInstances.map((i) => plexSettingKey(i.slug, "Libraries")),
+    ...jellyfinInstances.map((i) => jellyfinSettingKey(i.slug, "Libraries")),
+  ];
+  const selectionRows = selectionKeys.length
+    ? await prisma.setting.findMany({ where: { key: { in: selectionKeys } }, select: { key: true, value: true } })
+    : [];
+  for (const row of selectionRows) {
+    const parsed = row.value
+      ? new Set(row.value.split(",").map((k) => k.trim()).filter(Boolean))
+      : undefined;
+    librarySelections.set(row.key, parsed?.size ? parsed : undefined);
+  }
 
   // Never reassigned — each configured instance's results are merged in via .set()
   // rather than replacing the map wholesale (union across servers of a type).
@@ -635,10 +683,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // Respect the admin's selected Plex libraries (mirrors /api/sync/plex). Without
       // this the scheduled full sync ingested EVERY section, marking media in an
       // excluded library as owned → availability false positives on every cron tick.
-      // One admin-facing setting, shared across every instance.
-      const selectedPlexKeys = plexLibrariesRow?.value
-        ? new Set(plexLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-        : undefined;
+      // Resolved per instance below, from THAT server's own selection.
 
       // Fan out over every configured, connection-ready Plex server (multi-server
       // support). Unlike arr, there's no per-request instance to attribute a fetch
@@ -656,6 +701,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             const serverUrl = cfg.url.replace(/\/$/, "");
             const token = cfg.token;
             const sections = await getPlexLibrarySections(serverUrl, token);
+            const selectedPlexKeys = librarySelections.get(plexSettingKey(instance.slug, "Libraries"));
             const [movieIds, tvIds] = await Promise.all([
               getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
               getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
@@ -754,7 +800,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       const allPlexEpisodeRows: Array<{ source: "plex" } & PlexTVEpisodeData> = [];
       for (const { slug, serverUrl, token, sections } of writable) {
         try {
-          const episodes = await getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections);
+          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections);
           allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
         } catch (err) {
           console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);
@@ -788,10 +834,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
       // Respect the admin's selected Jellyfin libraries (mirrors /api/sync/jellyfin);
       // otherwise the scheduled full sync ingests every library and marks excluded
-      // media as owned. One admin-facing setting, shared across every instance.
-      const selectedJellyfinIds = jfLibrariesRow?.value
-        ? new Set(jfLibrariesRow.value.split(",").map((k) => k.trim()).filter(Boolean))
-        : undefined;
+      // media as owned. Resolved per instance below, from THAT server's selection.
 
       // Fan out over every configured, connection-ready Jellyfin server (multi-server
       // support). Unlike arr, there's no per-request instance to attribute a fetch
@@ -808,6 +851,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             if (!cfg.url || !cfg.apiKey) return { slug: instance.slug, result: null }; // defensive; getSyncableMediaInstances already filters to configured ones
             const baseUrl = cfg.url.replace(/\/$/, "");
             const apiKey = cfg.apiKey;
+            const selectedJellyfinIds = librarySelections.get(jellyfinSettingKey(instance.slug, "Libraries"));
             const [movieIds, tvIds] = await Promise.all([
               getJellyfinTmdbIds(baseUrl, apiKey, "MOVIE", selectedJellyfinIds),
               getJellyfinTmdbIds(baseUrl, apiKey, "TV", selectedJellyfinIds),
@@ -893,7 +937,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           if (data.itemId) jfSeriesMap.set(data.itemId, tmdbId);
         }
         try {
-          const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, jfSeriesMap);
+          const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, librarySelections.get(jellyfinSettingKey(slug, "Libraries")), jfSeriesMap);
           allEpisodeRows.push(...episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
         } catch (err) {
           console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);

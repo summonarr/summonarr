@@ -47,6 +47,10 @@ const PLEX_INSTANCE_FIELDS: Record<PlexSettingField, true> = {
   ServerUrl: true,
   AdminToken: true,
   AdminEmail: true,
+  // App-written, not admin-editable — but still this instance's key, so removing
+  // the instance must take it too or the row is orphaned forever (nothing else
+  // ever writes a de-registered slug's keys).
+  ServerReachable: true,
   Libraries: true,
   PathStripPrefix: true,
   MoviePathStripPrefix: true,
@@ -93,6 +97,12 @@ interface InstancePayload {
   url?: string; // Jellyfin
   apiKey?: string; // Jellyfin, secret
   restrictSignIn?: boolean; // Jellyfin — omit to leave the stored value untouched
+  // Comma-joined library ids/section keys to sync from THIS server. Omit to
+  // leave untouched; "" clears the selection, which means "sync all libraries".
+  // Per-server because a Plex section key is only meaningful on the server it
+  // came from — see the orchestrator, where one shared selection silently
+  // ingested the wrong sections from every non-default instance.
+  libraries?: string;
   restricted?: boolean; // gate this server's library behind a per-user view grant
 }
 
@@ -113,7 +123,7 @@ function readRestrictSignIn(value: string | undefined): boolean {
 // would make every save silently clear the flag.
 async function readInstanceView(service: MediaServerService, slug: string, name: string, restricted: boolean) {
   if (service === "plex") {
-    const keys = [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken"), plexSettingKey(slug, "AdminEmail")];
+    const keys = [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken"), plexSettingKey(slug, "AdminEmail"), plexSettingKey(slug, "Libraries")];
     const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
     const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     return {
@@ -123,9 +133,10 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
       serverUrl: map[plexSettingKey(slug, "ServerUrl")] ?? "",
       adminEmail: map[plexSettingKey(slug, "AdminEmail")] ?? "",
       hasAdminToken: !!map[plexSettingKey(slug, "AdminToken")],
+      libraries: map[plexSettingKey(slug, "Libraries")] ?? "",
     };
   }
-  const keys = [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey"), jellyfinSettingKey(slug, "RestrictSignIn")];
+  const keys = [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey"), jellyfinSettingKey(slug, "RestrictSignIn"), jellyfinSettingKey(slug, "Libraries")];
   const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return {
@@ -135,6 +146,7 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
     url: map[jellyfinSettingKey(slug, "Url")] ?? "",
     hasApiKey: !!map[jellyfinSettingKey(slug, "ApiKey")],
     restrictSignIn: readRestrictSignIn(map[jellyfinSettingKey(slug, "RestrictSignIn")]),
+    libraries: map[jellyfinSettingKey(slug, "Libraries")] ?? "",
   };
 }
 
@@ -239,10 +251,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         await set(plexSettingKey(inst.slug, "ServerUrl"), typeof inst.serverUrl === "string" ? inst.serverUrl.trim() : undefined, false);
         await set(plexSettingKey(inst.slug, "AdminToken"), inst.adminToken, true);
         await set(plexSettingKey(inst.slug, "AdminEmail"), typeof inst.adminEmail === "string" ? inst.adminEmail.trim() : undefined, false);
+        await set(plexSettingKey(inst.slug, "Libraries"), typeof inst.libraries === "string" ? inst.libraries.trim() : undefined, false);
       } else {
         await set(jellyfinSettingKey(inst.slug, "Url"), typeof inst.url === "string" ? inst.url.trim() : undefined, false);
         await set(jellyfinSettingKey(inst.slug, "ApiKey"), inst.apiKey, true);
         await set(jellyfinSettingKey(inst.slug, "RestrictSignIn"), typeof inst.restrictSignIn === "boolean" ? String(inst.restrictSignIn) : undefined, false);
+        await set(jellyfinSettingKey(inst.slug, "Libraries"), typeof inst.libraries === "string" ? inst.libraries.trim() : undefined, false);
       }
     }
 

@@ -1,5 +1,6 @@
 // Runs once at server startup in the Node.js runtime only — safe to use Node APIs and import server-only modules here
 import { isLocalHost } from "@/lib/local-only";
+import { parseAuthUrl } from "@/lib/auth-url";
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
@@ -39,12 +40,22 @@ export async function register() {
       if (process.env.NODE_ENV === "production") process.exit(1);
     }
 
-    if (!process.env.AUTH_URL) {
+    // Validate that it PARSES, not merely that it is set. A scheme-less value
+    // ("requests.example.com" — the common typo) passes a presence check and then
+    // throws inside proxy.ts's buildLoginRedirect on every logged-out request,
+    // 500ing instead of redirecting, while also reading as "no host" in the
+    // public-host test below and quietly disarming that refusal.
+    const authUrl = parseAuthUrl(process.env.AUTH_URL);
+    if (!authUrl) {
       console.error(
-        "[startup] AUTH_URL is not set. Without it, the app falls back to trusting the incoming Host " +
-          "header for origin and redirect checks, which allows host-header injection attacks that redirect " +
-          "users to attacker-controlled domains. " +
-          "Set AUTH_URL to the public URL of this app (e.g. https://requests.yourdomain.com)."
+        process.env.AUTH_URL?.trim()
+          ? `[startup] AUTH_URL is set but is not an absolute http(s) URL: ${JSON.stringify(process.env.AUTH_URL)}. ` +
+              "It must include the scheme — https://requests.yourdomain.com, not requests.yourdomain.com. " +
+              "Login redirects and origin checks are built from it and will fail at request time."
+          : "[startup] AUTH_URL is not set. Without it, the app falls back to trusting the incoming Host " +
+              "header for origin and redirect checks, which allows host-header injection attacks that redirect " +
+              "users to attacker-controlled domains. " +
+              "Set AUTH_URL to the public URL of this app (e.g. https://requests.yourdomain.com)."
       );
       if (process.env.NODE_ENV === "production") {
         process.exit(1);
@@ -61,8 +72,7 @@ export async function register() {
     // boots with a loud warning — this is the default docker deployment, so DON'T exit on
     // a blank value (that would brick it).
     if (process.env.TRUST_PROXY === "true") {
-      const authUrl = process.env.AUTH_URL ?? "";
-      if (authUrl.startsWith("http://") && process.env.NODE_ENV === "production") {
+      if (authUrl?.protocol === "http:" && process.env.NODE_ENV === "production") {
         console.warn(
           "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
           "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
@@ -70,9 +80,10 @@ export async function register() {
         );
       }
     } else {
-      const authHost = (() => {
-        try { return new URL(process.env.AUTH_URL ?? "").hostname.toLowerCase(); } catch { return ""; }
-      })();
+      // Reuses the single parse above — a malformed AUTH_URL yields "" here, which
+      // reads as "not public" and skips the refusal below. That is only safe
+      // because the guard above already exited on it in production.
+      const authHost = authUrl?.hostname.toLowerCase() ?? "";
       // Treat as LAN unless AUTH_URL is a dotted FQDN with a routable-looking TLD:
       // loopback/RFC1918 IPs, "localhost", bare single-label hostnames, and private
       // mDNS/internal suffixes are all local. Err toward "local" so a misjudged host
@@ -243,8 +254,26 @@ export async function register() {
       .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
       .catch((err) => console.error("[account-lifecycle] startup error:", err));
 
+    // RUN ONCE EVER, not once per boot. The backfill binds User.plexUserId on an
+    // EMAIL match — precisely the link authorizeWithPlex deliberately refuses,
+    // calling it "the account-takeover surface" and demanding an explicit admin
+    // link, because a plex.tv email is user-changeable. As a one-shot bridge for
+    // rows predating plexUserId that trade is defensible; re-running it on every
+    // boot forever is not, because unmatched candidates stay candidates and the
+    // window never closes.
+    //
+    // The guard lives HERE, in the caller, not in the helper: the helper is
+    // documented and tested as re-runnable, and its own test states the
+    // once-guarantee belongs in instrumentation.ts. It already stamps
+    // plexUserIdBackfillRanAt when it completes — that marker was written and
+    // then never read by anything, which is what left the window open.
     import("@/lib/plex-user-backfill")
-      .then(({ runPlexUserBackfillIfNeeded }) => runPlexUserBackfillIfNeeded())
+      .then(async ({ runPlexUserBackfillIfNeeded }) => {
+        const { prisma } = await import("@/lib/prisma");
+        const ranAt = await prisma.setting.findUnique({ where: { key: "plexUserIdBackfillRanAt" } });
+        if (ranAt?.value) return;
+        await runPlexUserBackfillIfNeeded();
+      })
       .catch((err) => console.error("[plex-backfill] startup error:", err));
 
     // Open the Plex SSE notifications stream so we get real-time "session

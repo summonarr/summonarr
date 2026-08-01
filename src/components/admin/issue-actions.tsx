@@ -85,7 +85,9 @@ export function IssueActions({
       const res = await fetch(withBasePath(`/api/issues/${issueId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refetch: true }),
+        // Same instance the Replace picker selects — an issue about the 4K copy must
+        // re-search the 4K instance, not the default. "" when there is one instance.
+        body: JSON.stringify({ refetch: true, instance }),
       });
       const data: { arrError?: string } = await res.json();
       if (data.arrError) {

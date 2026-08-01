@@ -133,6 +133,7 @@ function makeTx() {
     watchlistItem: { deleteMany: rec("watchlistItem.deleteMany") },
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
+    userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
     mediaServerUser: {
       updateMany: rec("mediaServerUser.updateMany"),
       deleteMany: async () => {

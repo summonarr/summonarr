@@ -54,6 +54,7 @@
 // Erasable-TS only; node:assert/strict; guardrail 7 console capture (warn/error).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Client } from "pg";
 
 // ── env FIRST (prisma.ts pulls token-crypto; session reads NEXTAUTH_SECRET) ──
@@ -753,6 +754,53 @@ function configureJellyfinMultiServer(): void {
   settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
 }
 
+// Serves items only for the ONE library id it owns, keyed off the ParentId
+// Jellyfin's client sends when a selection is active — so a server asked for
+// another server's library id returns nothing, exactly as the real one would.
+function jellyfinResponderInLibrary(libraryId: string, movieTmdbIds: number[]): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/Items" && url.searchParams.get("IncludeItemTypes") === "Movie") {
+      const asked = url.searchParams.get("ParentId");
+      const items = asked === null || asked === libraryId ? movieTmdbIds : [];
+      return okJson({
+        Items: items.map((id) => ({ Id: `jf-${id}`, Name: `Movie ${id}`, ProviderIds: { Tmdb: String(id) } })),
+        TotalRecordCount: items.length,
+      });
+    }
+    if (url.pathname === "/Items" && url.searchParams.get("IncludeItemTypes") === "Series") {
+      return okJson({ Items: [], TotalRecordCount: 0 });
+    }
+    throw new Error(`unexpected Jellyfin fetch ${url.pathname}`);
+  };
+}
+
+test("multi-server: each Jellyfin instance filters by ITS OWN library selection, not the default server's", async () => {
+  // The Jellyfin half of the same bug. Library ids are GUIDs so they do not
+  // collide the way Plex section keys do — the failure is quieter but just as
+  // total: the named server is asked for a library id it has never heard of,
+  // matches nothing, and its scoped full-replace wipes its rows.
+  configureJellyfinMultiServer();
+  settings.set("jellyfinLibraries", "lib-default");
+  settings.set("jellyfinRemoteLibraries", "lib-remote");
+  const defaultResponder = jellyfinResponderInLibrary("lib-default", [300]);
+  const remoteResponder = jellyfinResponderInLibrary("lib-remote", [400]);
+  respond = (url) => (url.origin === JF_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "jf-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "jf-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(requests.get("jf-default-only")?.status, "AVAILABLE", "the default server's own selection still works");
+  assert.equal(
+    requests.get("jf-remote-only")?.status,
+    "AVAILABLE",
+    "the named server was asked for the DEFAULT server's library id, matched nothing, and contributed no availability",
+  );
+});
+
 test("multi-server: a request is marked AVAILABLE via the UNION of two independently-configured Jellyfin instances' libraries", async () => {
   configureJellyfinMultiServer();
   // Disjoint libraries — no overlap — so a match can only come from the UNION,
@@ -879,6 +927,94 @@ test("multi-server: a request is marked AVAILABLE via the UNION of two independe
     requests.get("req-remote-only")?.status,
     "AVAILABLE",
     "a title that exists ONLY on the second, named instance is still marked available — proves the union, not just the default instance's library, backs the decision",
+  );
+});
+
+// Like plexResponder but the section key is caller-chosen, so two servers can
+// number their libraries differently — which is the real-world case, since a
+// Plex section key is a small integer scoped to one server.
+function plexResponderOnSection(sectionKey: string, movieTmdbIds: number[]): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [{ key: sectionKey, title: "Movies", type: "movie" }] } });
+    }
+    if (url.pathname === `/library/sections/${sectionKey}/all`) {
+      return okJson({
+        MediaContainer: {
+          totalSize: movieTmdbIds.length,
+          Metadata: movieTmdbIds.map((id) => ({ ratingKey: `rk${id}`, type: "movie", title: `Movie ${id}`, Guid: [{ id: `tmdb://${id}` }] })),
+        },
+      });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}`);
+  };
+}
+
+test("every library-selection lookup in the orchestrator is keyed by an INSTANCE, never a hardcoded default", () => {
+  // Four sites read a selection: the Plex and Jellyfin library fetches, and the
+  // Plex and Jellyfin TV-episode fetches. The behavioural tests below cover the
+  // two library fetches; the episode ones feed TVEpisodeCache, whose per-instance
+  // content this harness does not assert, so a revert there survived the suite.
+  // Rather than leave half the fix unpinned, require all four to pass a slug —
+  // a literal "" would re-apply one server's selection to every server, which is
+  // the exact bug.
+  const source = readFileSync(new URL("../src/app/api/sync/route.ts", import.meta.url), "utf8");
+  const lookups = source.match(/librarySelections\.get\([^)]*\)/g) ?? [];
+  assert.equal(lookups.length, 4, "expected exactly the four selection lookups");
+  for (const l of lookups) {
+    assert.doesNotMatch(l, /SettingKey\(\s*""/, `${l} pins the DEFAULT server's selection onto every instance`);
+    assert.match(l, /SettingKey\((instance\.slug|slug)\s*,/, `${l} must key off the instance being synced`);
+  }
+});
+
+test("multi-server: each Plex instance filters by ITS OWN library selection, not the default server's", async () => {
+  // The bug this pins: one shared `plexLibraries` selection was applied to every
+  // instance. Section keys are per-server, so the default's "1" names a
+  // different library on the remote — the remote's real Movies section (7) was
+  // excluded, it contributed nothing, and because each instance's write is a
+  // scoped FULL REPLACE its rows were then replaced with nothing. Everything on
+  // that server silently read as unavailable.
+  configurePlexMultiServer();
+  settings.set("plexLibraries", "1");        // the default server's Movies
+  settings.set("plexRemoteLibraries", "7");  // the remote's Movies — a different key
+  const defaultResponder = plexResponderOnSection("1", [300]);
+  const remoteResponder = plexResponderOnSection("7", [400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-default-only", tmdbId: 300, mediaType: "MOVIE", requestedBy: "u1", status: "PENDING" });
+  seedRequest({ id: "req-remote-only", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(requests.get("req-default-only")?.status, "AVAILABLE", "the default server's own selection still works");
+  assert.equal(
+    requests.get("req-remote-only")?.status,
+    "AVAILABLE",
+    "the named server was filtered by the DEFAULT server's section keys — its real library was excluded and it contributed nothing",
+  );
+});
+
+test("multi-server: an instance with NO selection syncs all of its libraries rather than inheriting another server's", async () => {
+  // A named instance has no selection until an admin makes one, and the safe
+  // reading of "unset" is everything — not "whatever the default picked".
+  configurePlexMultiServer();
+  settings.set("plexLibraries", "1"); // default narrowed; remote left unset
+  const defaultResponder = plexResponderOnSection("1", [300]);
+  const remoteResponder = plexResponderOnSection("7", [400]);
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
+
+  seedRequest({ id: "req-remote-unset", tmdbId: 400, mediaType: "MOVIE", requestedBy: "u2", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(
+    requests.get("req-remote-unset")?.status,
+    "AVAILABLE",
+    "an unset selection must mean ALL libraries on that server, not the default's keys",
   );
 });
 

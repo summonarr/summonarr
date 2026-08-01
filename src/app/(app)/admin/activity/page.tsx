@@ -1,4 +1,6 @@
 import { authActive } from "@/lib/auth";
+import { plexSettingKey } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -114,6 +116,18 @@ export default async function ActivityPage({
   const fp = appendPlayHistoryFilter([periodCutoff], { source, mediaType });
   const fpJoin = appendPlayHistoryFilter([periodCutoff], { source, mediaType, tableAlias: "p" });
 
+  // Which Plex servers exist has to be known BEFORE the batch below, because it
+  // determines which Setting keys the reachability read asks for. One extra
+  // round-trip (the registry is a single Setting row) rather than widening the
+  // query to `startsWith: "plex"`, which would drag every instance's admin token
+  // through the decryption extension just to render a status chip.
+  const plexInstances = await getMediaInstances("plex");
+  const plexStatusKeys = plexInstances.flatMap((i) => [
+    plexSettingKey(i.slug, "ServerReachable"),
+    plexSettingKey(i.slug, "ServerUrl"),
+    plexSettingKey(i.slug, "AdminToken"),
+  ]);
+
   const [
     stats,
     activeSessions,
@@ -151,7 +165,7 @@ export default async function ActivityPage({
     getActivityCalendar(source, mediaType),
     getTranscodeOffenders({ days, source, mediaType }),
     prisma.setting.findMany({
-      where: { key: { in: ["plexServerReachable", "plexServerUrl", "plexAdminToken"] } },
+      where: { key: { in: plexStatusKeys } },
       select: { key: true, value: true },
     }),
     isPlayHistoryEnabled(),
@@ -200,17 +214,36 @@ export default async function ActivityPage({
   // probe. The poller only runs when play-history + Plex source are enabled and
   // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
   // value is stale, so gate the badge on the same conditions as its data source.
+  // Resolved PER SERVER. Each instance is gated on its OWN url+token, so an
+  // unconfigured named server contributes no chip rather than inheriting the
+  // default's verdict — and a configured one that goes down is finally visible,
+  // which is the whole point of making this per-instance.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
-  const plexConfigured = !!plexSettings.get("plexServerUrl") && !!plexSettings.get("plexAdminToken");
-  const plexSseActive = plexConfigured && phEnabled && plexSourceEnabled;
-  let initialPlexReachable: boolean | null = null;
-  const reachableValue = plexSettings.get("plexServerReachable");
-  if (plexSseActive && reachableValue) {
-    try {
-      const parsed = JSON.parse(reachableValue) as { reachable?: unknown };
-      if (typeof parsed.reachable === "boolean") initialPlexReachable = parsed.reachable;
-    } catch { /* leave null */ }
-  }
+  const plexReachability = plexInstances.map((inst) => {
+    const configured =
+      !!plexSettings.get(plexSettingKey(inst.slug, "ServerUrl")) &&
+      !!plexSettings.get(plexSettingKey(inst.slug, "AdminToken"));
+    // Only trust the flag when the poller that maintains it is running: it is
+    // written by the 5s poller (true on getPlexSessions success, false on throw)
+    // plus the SSE connect-time probe, which run only when play-history + the
+    // Plex source are enabled and url+token are set. Otherwise the value is
+    // stale, so gate the chip on the same conditions as its data source.
+    const live = configured && phEnabled && plexSourceEnabled;
+    let reachable: boolean | null = null;
+    const raw = plexSettings.get(plexSettingKey(inst.slug, "ServerReachable"));
+    if (live && raw) {
+      try {
+        const parsed = JSON.parse(raw) as { reachable?: unknown };
+        if (typeof parsed.reachable === "boolean") reachable = parsed.reachable;
+      } catch { /* leave null = unknown */ }
+    }
+    // The registry names the default instance "Default", which would render
+    // "Default unreachable" on a single-server deployment where it has always
+    // said "Plex" — exactly the kind of observable difference guardrail 35
+    // forbids. Label the default bare and qualify only named servers.
+    const name = inst.slug === "" ? "Plex" : `Plex (${inst.name})`;
+    return { instance: inst.slug, name, reachable };
+  });
 
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
@@ -223,47 +256,54 @@ export default async function ActivityPage({
     if (sourceItemIds.length > 0) {
       const historyMatches = await prisma.playHistory.findMany({
         where: { sourceItemId: { in: sourceItemIds }, tmdbId: { not: null } },
-        distinct: ["sourceItemId"],
+        // distinct + select BOTH carry serverInstance: a sourceItemId is issued by
+        // one server and two servers reuse the same ids, so distinct on the id
+        // alone collapses two servers rows into one and resolves the wrong tmdbId.
+        distinct: ["serverInstance", "sourceItemId"],
         orderBy: { startedAt: "desc" },
-        select: { sourceItemId: true, tmdbId: true, mediaType: true },
+        select: { sourceItemId: true, tmdbId: true, mediaType: true, serverInstance: true },
       });
       for (const h of historyMatches) {
         if (h.sourceItemId && h.tmdbId != null) {
-          resolvedTmdb[`item:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
+          resolvedTmdb[`item:${h.serverInstance}:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
         }
       }
     }
 
     const stillNeedLibrary = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.sourceItemId}`],
+      (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
     );
     if (stillNeedLibrary.length > 0) {
-      const plexKeys = stillNeedLibrary.filter((s: typeof stillNeedLibrary[0]) => s.source === "plex").map((s: typeof stillNeedLibrary[0]) => s.sourceItemId!);
-      const jellyfinKeys = stillNeedLibrary.filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin").map((s: typeof stillNeedLibrary[0]) => s.sourceItemId!);
+      const plexPairs = stillNeedLibrary
+        .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
+        .map((s: typeof stillNeedLibrary[0]) => ({ plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance }));
+      const jellyfinPairs = stillNeedLibrary
+        .filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin")
+        .map((s: typeof stillNeedLibrary[0]) => ({ jellyfinItemId: s.sourceItemId!, serverInstance: s.serverInstance }));
       const [plexItems, jellyfinItems] = await Promise.all([
-        plexKeys.length > 0
+        plexPairs.length > 0
           ? prisma.plexLibraryItem.findMany({
-              where: { plexRatingKey: { in: plexKeys } },
-              select: { tmdbId: true, mediaType: true, plexRatingKey: true },
+              where: { OR: plexPairs },
+              select: { tmdbId: true, mediaType: true, plexRatingKey: true, serverInstance: true },
             })
           : [],
-        jellyfinKeys.length > 0
+        jellyfinPairs.length > 0
           ? prisma.jellyfinLibraryItem.findMany({
-              where: { jellyfinItemId: { in: jellyfinKeys } },
-              select: { tmdbId: true, mediaType: true, jellyfinItemId: true },
+              where: { OR: jellyfinPairs },
+              select: { tmdbId: true, mediaType: true, jellyfinItemId: true, serverInstance: true },
             })
           : [],
       ]);
       for (const i of plexItems) {
-        if (i.plexRatingKey) resolvedTmdb[`item:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
       }
       for (const i of jellyfinItems) {
-        if (i.jellyfinItemId) resolvedTmdb[`item:${i.jellyfinItemId}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        if (i.jellyfinItemId) resolvedTmdb[`item:${i.serverInstance}:${i.jellyfinItemId}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
       }
     }
 
     const stillNeedTitle = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.sourceItemId}`]),
+      (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`]),
     );
     if (stillNeedTitle.length > 0) {
       const titles = [...new Set(stillNeedTitle.map((s: typeof stillNeedTitle[0]) => s.title))];
@@ -582,7 +622,7 @@ export default async function ActivityPage({
           initialSessions={serializedSessions}
           source={source}
           mediaType={mediaType}
-          initialPlexReachable={initialPlexReachable}
+          plexReachability={plexReachability}
         />
       )}
 

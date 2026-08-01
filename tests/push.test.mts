@@ -141,6 +141,7 @@ const {
   notifyUsersRequestsAvailablePush,
   notifyUsersRequestsApprovedPush,
   notifyUsersRequestsDeclinedPush,
+  buildVapidContact,
 } = await import("../src/lib/push.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -961,4 +962,29 @@ test("grab-completed outcome mapping: skipped-no-subs / delivered / failed (a to
   const fetchesBefore = fetchUrls.length;
   assert.equal(await notifyAdminGrabCompletedPush(data), "failed");
   assert.equal(fetchUrls.length, fetchesBefore);
+});
+
+// ── VAPID contact (RFC 8292 `sub` must be a URI) ────────────────────────────
+
+test("buildVapidContact unwraps an RFC 5322 display-name From into a parseable mailto:", () => {
+  // smtpFrom legitimately holds a header value — email.ts consumes it as one — and
+  // concatenating it raw into `mailto:` yields an unparseable URI. Push services that
+  // validate `sub` reject the signed JWT, so every web push fails with nothing in the
+  // log pointing at the From address. /api/push/test built the contact inline and
+  // reproduced exactly that, so the admin "send test notification" button failed on any
+  // deployment with a display-name From while real notifications worked.
+  assert.equal(buildVapidContact("Summonarr <noreply@host.tld>", null), "mailto:noreply@host.tld");
+  assert.equal(buildVapidContact('"Summonarr Requests" <a@b.co>', null), "mailto:a@b.co");
+  // Every accepted value must survive URL parsing — the property the unwrap exists for.
+  for (const from of ["Summonarr <noreply@host.tld>", "plain@host.tld"]) {
+    assert.doesNotThrow(() => new URL(buildVapidContact(from, null)));
+  }
+});
+
+test("buildVapidContact passes a bare address through and falls back sensibly", () => {
+  assert.equal(buildVapidContact("noreply@host.tld", null), "mailto:noreply@host.tld");
+  assert.equal(buildVapidContact("  spaced@host.tld  ", null), "mailto:spaced@host.tld");
+  assert.equal(buildVapidContact(null, "user@host.tld"), "mailto:user@host.tld", "smtpUser is the second choice");
+  assert.equal(buildVapidContact(null, null), "mailto:admin@localhost");
+  assert.equal(buildVapidContact("", ""), "mailto:admin@localhost");
 });

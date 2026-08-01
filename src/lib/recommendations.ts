@@ -132,12 +132,33 @@ async function buildExclusionSet(userId: string, linkedServerUserIds: string[], 
   return excluded;
 }
 
-// Pure(ish) compute — no writes. Returns [] for a cold-start user (zero
-// eligible seeds) without making any TMDB calls.
-export async function computeRecommendationsForUser(userId: string): Promise<RecommendationCandidate[]> {
+export interface RecommendationComputation {
+  candidates: RecommendationCandidate[];
+  // Whether the answer above can be trusted as "this is what the user should see".
+  //
+  // getMovieSuggestions/getTVSuggestions swallow their own upstream failures and
+  // return [] — deliberately, see the don't-cache-an-empty guard in tmdb.ts — so at
+  // this layer a TMDB outage is indistinguishable from "this title genuinely has no
+  // suggestions". A caller that REPLACES stored state must not treat an inconclusive
+  // empty as authoritative, or one bad cron run wipes every user's recommendations
+  // and reports success.
+  //
+  // True when there was nothing to compute from (no seeds — a legitimately empty
+  // answer that SHOULD clear stale rows), or when at least one seed came back with
+  // at least one raw suggestion (upstream is answering, so an empty result after
+  // exclusion is real). False only when seeds existed and not one yielded a single
+  // item — overwhelmingly an outage, and cheap to be wrong about: the caller just
+  // keeps yesterday's recommendations for one more cycle.
+  conclusive: boolean;
+}
+
+// Pure(ish) compute — no writes. Returns no candidates for a cold-start user (zero
+// eligible seeds) without making any TMDB calls. Read `conclusive` before acting on
+// an empty `candidates`: the two empties mean different things.
+export async function computeRecommendationsForUser(userId: string): Promise<RecommendationComputation> {
   const linkedServerUserIds = await resolveLinkedMediaServerUserIds(userId);
   const seeds = await selectSeeds(userId, linkedServerUserIds);
-  if (seeds.length === 0) return [];
+  if (seeds.length === 0) return { candidates: [], conclusive: true };
 
   const excluded = await buildExclusionSet(userId, linkedServerUserIds, seeds);
 
@@ -145,11 +166,17 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
     seed.mediaType === "MOVIE" ? getMovieSuggestions(seed.tmdbId) : getTVSuggestions(seed.tmdbId),
   );
 
+  // Counted BEFORE exclusion: a user who has already watched every suggestion is a
+  // conclusive empty (clear their stale rows), whereas zero items arriving at all is
+  // the outage case. Filtering first would collapse the two back together.
+  let rawSuggestions = 0;
+
   const scored = new Map<string, RecommendationCandidate>();
   seeds.forEach((seed, i) => {
     const result = suggestionResults[i];
     if (result.status !== "fulfilled") return;
     for (const item of result.value) {
+      rawSuggestions++;
       const mediaType = toDbMediaType(item.mediaType);
       const key = candidateKey(item.id, mediaType);
       if (excluded.has(key)) continue;
@@ -177,7 +204,7 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   ranked.forEach((c, i) => {
     c.rank = i;
   });
-  return ranked;
+  return { candidates: ranked, conclusive: rawSuggestions > 0 };
 }
 
 // Who the cron bothers computing for. authSessions.lastSeenAt (not a fresh
@@ -199,6 +226,7 @@ async function getActiveUserIds(): Promise<string[]> {
 export async function warmRecommendationsCache(): Promise<{
   usersEligible: number;
   usersUpdated: number;
+  usersSkipped: number;
   usersFailed: number;
   candidatesWritten: number;
 }> {
@@ -207,7 +235,13 @@ export async function warmRecommendationsCache(): Promise<{
   // One transaction PER USER, not one spanning all users — bounds the blast
   // radius of a single user's failure and keeps any one lock/timeout small.
   const results = await settleLimit(userIds, USER_CONCURRENCY, async (userId) => {
-    const candidates = await computeRecommendationsForUser(userId);
+    const { candidates, conclusive } = await computeRecommendationsForUser(userId);
+    // NEVER let an inconclusive run replace good rows with nothing. The write below
+    // is delete-then-insert, so an empty `candidates` produced by a TMDB outage
+    // would clear the user's shelf — and because the compute RESOLVES rather than
+    // throws, it would be counted as a successful update. Keep the stale set and
+    // recompute next cycle.
+    if (!conclusive) return null;
     await prisma.$transaction(
       async (tx) => {
         await tx.userRecommendation.deleteMany({ where: { userId } });
@@ -224,10 +258,15 @@ export async function warmRecommendationsCache(): Promise<{
   });
 
   let usersUpdated = 0;
+  let usersSkipped = 0;
   let usersFailed = 0;
   let candidatesWritten = 0;
   for (const r of results) {
     if (r.status === "fulfilled") {
+      if (r.value === null) {
+        usersSkipped++;
+        continue;
+      }
       usersUpdated++;
       candidatesWritten += r.value;
     } else {
@@ -235,7 +274,13 @@ export async function warmRecommendationsCache(): Promise<{
       console.error("[recommendations] per-user compute/write failed:", r.reason);
     }
   }
-  return { usersEligible: userIds.length, usersUpdated, usersFailed, candidatesWritten };
+  if (usersSkipped > 0) {
+    console.warn(
+      `[recommendations] kept the existing recommendations for ${usersSkipped}/${userIds.length} user(s) — ` +
+        "they had seeds but no suggestions came back at all (most likely a TMDB outage). Nothing was cleared.",
+    );
+  }
+  return { usersEligible: userIds.length, usersUpdated, usersSkipped, usersFailed, candidatesWritten };
 }
 
 function rowToTmdbMedia(row: {

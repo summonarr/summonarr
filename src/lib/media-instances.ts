@@ -58,6 +58,12 @@ export type PlexSettingField =
   | "ServerUrl"
   | "AdminToken"
   | "AdminEmail"
+  // Written by the app (not an admin form): whether Summonarr can reach THIS
+  // server, derived from getPlexSessions succeeding. Per-instance so a named
+  // server going down is visible rather than silently invisible behind the
+  // default server's status. Not a secret — MEDIA_INSTANCE_SECRET_RE matches
+  // only AdminToken/ApiKey, so this stays plaintext, which is correct.
+  | "ServerReachable"
   | "Libraries"
   | "PathStripPrefix"
   | "MoviePathStripPrefix"

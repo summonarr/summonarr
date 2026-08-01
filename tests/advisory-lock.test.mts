@@ -16,6 +16,7 @@
 // leak into other suites.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import type { EventEmitter } from "node:events";
 import { Client } from "pg";
 import {
   WARM_OMDB_LOCK_ID,
@@ -42,22 +43,44 @@ interface ClientProtoMock {
 const calls: Call[] = [];
 let tryLockRows: Array<{ acquired: boolean }> = [{ acquired: true }];
 
+// The client withAdvisoryLock news up internally, captured at connect() so a test
+// can drive its EventEmitter surface (pg's connection-level 'error' channel).
+let lastClient: EventEmitter | null = null;
+// Assigned via a call rather than `const self = this` — no-this-alias forbids the
+// alias form, and passing the receiver as an argument reads the same.
+function captureClient(client: EventEmitter): void {
+  lastClient = client;
+}
+// When set, a query whose text contains this string rejects — used to simulate a
+// dead connection at unlock/end time.
+let failQueryContaining: string | null = null;
+// When true, end() rejects, as it does on an already-broken socket.
+let failEnd = false;
+
 const proto = Client.prototype as unknown as ClientProtoMock;
-proto.connect = async () => {
+proto.connect = async function (this: EventEmitter) {
   calls.push({ op: "connect" });
+  captureClient(this);
 };
 proto.query = async (text, values) => {
   calls.push({ op: "query", text, values });
+  if (failQueryContaining && text.includes(failQueryContaining)) {
+    throw new Error("Connection terminated unexpectedly");
+  }
   if (text.includes("pg_try_advisory_lock")) return { rows: tryLockRows };
   return { rows: [] };
 };
 proto.end = async () => {
   calls.push({ op: "end" });
+  if (failEnd) throw new Error("Client was closed and is not queryable");
 };
 
 function reset(rows: Array<{ acquired: boolean }>): void {
   calls.length = 0;
   tryLockRows = rows;
+  lastClient = null;
+  failQueryContaining = null;
+  failEnd = false;
 }
 
 function queryTexts(): string[] {
@@ -194,4 +217,55 @@ test("timeout: rejects AdvisoryLockTimeoutError, aborts the signal, still unlock
   assert.ok(seenSignals[0].reason instanceof AdvisoryLockTimeoutError);
   assert.ok(queryTexts().some((t) => t.includes("pg_advisory_unlock")));
   assert.equal(calls.at(-1)?.op, "end");
+});
+
+// ── connection-level failures while the lock is held ────────────────────────
+
+test("a connection 'error' event while the lock is held does NOT take the process down", async () => {
+  // withAdvisoryLock holds this raw pg client open and IDLE for the whole of
+  // work() (up to 30 minutes) while the work itself runs on Prisma's pool. pg
+  // signals a Postgres restart / reaped connection / pg_terminate_backend by
+  // emitting 'error' on the Client — and an EventEmitter that emits 'error' with
+  // no listener re-throws it, which as an async socket callback in production is
+  // an uncaught exception that kills the whole app, not just this cron run.
+  reset([{ acquired: true }]);
+  const result = await withAdvisoryLock(
+    WARM_OMDB_LOCK_ID,
+    async () => {
+      assert.ok(lastClient, "the client should have been captured at connect()");
+      lastClient!.emit("error", new Error("terminating connection due to administrator command"));
+      return "work-completed";
+    },
+    () => "busy",
+  );
+  assert.equal(result, "work-completed", "the run must survive a connection error");
+  assert.ok(queryTexts().some((t) => t.includes("pg_advisory_unlock")));
+});
+
+test("a failing unlock does not REPLACE the error propagating out of work()", async () => {
+  // The unlock sits in a finally, so an unhandled rejection there overwrites the
+  // real failure with a confusing secondary one — and callers lose the actual
+  // reason the job died. Postgres frees session-scoped locks when the session
+  // ends, so there is nothing left to clean up in this case anyway.
+  reset([{ acquired: true }]);
+  failQueryContaining = "pg_advisory_unlock";
+  failEnd = true;
+  await assert.rejects(
+    withAdvisoryLock(
+      WARM_OMDB_LOCK_ID,
+      async () => {
+        throw new Error("the real failure");
+      },
+      () => "busy",
+    ),
+    /the real failure/,
+  );
+});
+
+test("a failing unlock does not turn an otherwise-successful run into a failure", async () => {
+  reset([{ acquired: true }]);
+  failQueryContaining = "pg_advisory_unlock";
+  failEnd = true;
+  const result = await withAdvisoryLock(WARM_OMDB_LOCK_ID, async () => "ok", () => "busy");
+  assert.equal(result, "ok");
 });
