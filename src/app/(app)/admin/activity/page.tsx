@@ -256,47 +256,54 @@ export default async function ActivityPage({
     if (sourceItemIds.length > 0) {
       const historyMatches = await prisma.playHistory.findMany({
         where: { sourceItemId: { in: sourceItemIds }, tmdbId: { not: null } },
-        distinct: ["sourceItemId"],
+        // distinct + select BOTH carry serverInstance: a sourceItemId is issued by
+        // one server and two servers reuse the same ids, so distinct on the id
+        // alone collapses two servers rows into one and resolves the wrong tmdbId.
+        distinct: ["serverInstance", "sourceItemId"],
         orderBy: { startedAt: "desc" },
-        select: { sourceItemId: true, tmdbId: true, mediaType: true },
+        select: { sourceItemId: true, tmdbId: true, mediaType: true, serverInstance: true },
       });
       for (const h of historyMatches) {
         if (h.sourceItemId && h.tmdbId != null) {
-          resolvedTmdb[`item:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
+          resolvedTmdb[`item:${h.serverInstance}:${h.sourceItemId}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
         }
       }
     }
 
     const stillNeedLibrary = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.sourceItemId}`],
+      (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
     );
     if (stillNeedLibrary.length > 0) {
-      const plexKeys = stillNeedLibrary.filter((s: typeof stillNeedLibrary[0]) => s.source === "plex").map((s: typeof stillNeedLibrary[0]) => s.sourceItemId!);
-      const jellyfinKeys = stillNeedLibrary.filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin").map((s: typeof stillNeedLibrary[0]) => s.sourceItemId!);
+      const plexPairs = stillNeedLibrary
+        .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
+        .map((s: typeof stillNeedLibrary[0]) => ({ plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance }));
+      const jellyfinPairs = stillNeedLibrary
+        .filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin")
+        .map((s: typeof stillNeedLibrary[0]) => ({ jellyfinItemId: s.sourceItemId!, serverInstance: s.serverInstance }));
       const [plexItems, jellyfinItems] = await Promise.all([
-        plexKeys.length > 0
+        plexPairs.length > 0
           ? prisma.plexLibraryItem.findMany({
-              where: { plexRatingKey: { in: plexKeys } },
-              select: { tmdbId: true, mediaType: true, plexRatingKey: true },
+              where: { OR: plexPairs },
+              select: { tmdbId: true, mediaType: true, plexRatingKey: true, serverInstance: true },
             })
           : [],
-        jellyfinKeys.length > 0
+        jellyfinPairs.length > 0
           ? prisma.jellyfinLibraryItem.findMany({
-              where: { jellyfinItemId: { in: jellyfinKeys } },
-              select: { tmdbId: true, mediaType: true, jellyfinItemId: true },
+              where: { OR: jellyfinPairs },
+              select: { tmdbId: true, mediaType: true, jellyfinItemId: true, serverInstance: true },
             })
           : [],
       ]);
       for (const i of plexItems) {
-        if (i.plexRatingKey) resolvedTmdb[`item:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
       }
       for (const i of jellyfinItems) {
-        if (i.jellyfinItemId) resolvedTmdb[`item:${i.jellyfinItemId}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        if (i.jellyfinItemId) resolvedTmdb[`item:${i.serverInstance}:${i.jellyfinItemId}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
       }
     }
 
     const stillNeedTitle = sessionsNeedingTmdb.filter(
-      (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.sourceItemId}`]),
+      (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`]),
     );
     if (stillNeedTitle.length > 0) {
       const titles = [...new Set(stillNeedTitle.map((s: typeof stillNeedTitle[0]) => s.title))];
