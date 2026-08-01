@@ -257,9 +257,15 @@ function tvItem(id: number): RawFixture {
 }
 
 const fetchCalls: string[] = [];
+// Simulates TMDB being unreachable. A network failure rejects, which lands in the
+// Promise.allSettled INSIDE getMovieSuggestions/getTVSuggestions — those swallow it
+// and return [], which is exactly why an outage is indistinguishable from "no
+// suggestions" one layer up and why the conclusive flag has to exist.
+let tmdbOutage = false;
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url.pathname);
+  if (tmdbOutage) throw new TypeError("fetch failed");
   // Not anchored to the start: TMDB's real paths carry a version prefix
   // (/3/movie/{id}/similar) — match the suffix shape regardless of it.
   const match = url.pathname.match(/\/(movie|tv)\/(\d+)\/(similar|recommendations)$/);
@@ -284,6 +290,7 @@ beforeEach(() => {
   userRecRows = [];
   suggestionsFor.clear();
   fetchCalls.length = 0;
+  tmdbOutage = false;
   transactionCalls = 0;
   watchlistFindManyCalls = 0;
 });
@@ -297,7 +304,7 @@ test("TV seeds route through getTVSuggestions and round-trip the Prisma MediaTyp
   suggestionsFor.set("tv:40", [tvItem(900)]);
 
   const result = await computeRecommendationsForUser("u1");
-  assert.deepEqual(result.map((c) => ({ tmdbId: c.tmdbId, mediaType: c.mediaType })), [{ tmdbId: 900, mediaType: "TV" }]);
+  assert.deepEqual(result.candidates.map((c) => ({ tmdbId: c.tmdbId, mediaType: c.mediaType })), [{ tmdbId: 900, mediaType: "TV" }]);
   assert.ok(fetchCalls.some((p) => p.endsWith("/tv/40/similar") || p.endsWith("/tv/40/recommendations")));
 });
 
@@ -305,7 +312,9 @@ test("cold start: a user with no watch history or watchlist gets [] with zero TM
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
   const result = await computeRecommendationsForUser("u1");
-  assert.deepEqual(result, []);
+  assert.deepEqual(result.candidates, []);
+  // No seeds is a LEGITIMATE empty — conclusive, so the caller clears stale rows.
+  assert.equal(result.conclusive, true);
   assert.equal(fetchCalls.length, 0);
 });
 
@@ -322,7 +331,7 @@ test("only watched:true rows seed the engine — a merely-sampled (watched:false
   suggestionsFor.set("movie:99", [movieItem(600)]); // must never be fetched — 99 isn't a seed
 
   const result = await computeRecommendationsForUser("u1");
-  assert.deepEqual(result.map((c) => c.tmdbId), [500]);
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId), [500]);
   assert.ok(!fetchCalls.some((p) => p.startsWith("/movie/99/")), "watched:false row must not become a seed");
 });
 
@@ -348,12 +357,12 @@ test("scoring: seed ranking (count desc, recency desc), recency-weighted contrib
   suggestionsFor.set("movie:30", [movieItem(999)]);
 
   const result = await computeRecommendationsForUser("u1");
-  const byId = new Map(result.map((c) => [c.tmdbId, c]));
+  const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
 
   // 999 = 1.0 (seed10) + 0.5 (seed20) + 1.5 (seed30) = 3.0; 888 = 0.5 (seed20 only).
   assert.equal(byId.get(999)?.score, 3.0);
   assert.equal(byId.get(888)?.score, 0.5);
-  assert.deepEqual(result.map((c) => c.tmdbId), [999, 888]); // ranked by score desc
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId), [999, 888]); // ranked by score desc
   assert.equal(byId.get(999)?.rank, 0);
   assert.equal(byId.get(888)?.rank, 1);
 });
@@ -382,7 +391,9 @@ test("exclusion covers the FULL current watchlist and watched-set, not just the 
   for (const id of [301, 302, 303, 304, 305]) suggestionsFor.set(`movie:${id}`, []);
 
   const result = await computeRecommendationsForUser("u1");
-  assert.deepEqual(result.map((c) => c.tmdbId).sort((a, b) => a - b), [555]);
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId).sort((a, b) => a - b), [555]);
+  // Seed 10 answered, so this empty-after-exclusion answer is trustworthy.
+  assert.equal(result.conclusive, true);
 });
 
 // ── warmRecommendationsCache: per-user transactions + active cohort ─────────
@@ -412,6 +423,7 @@ test("warmRecommendationsCache: one $transaction per eligible user, and the acti
   assert.equal(result.usersEligible, 1, "only the active, non-deactivated, non-purged, recently-seen user is eligible");
   assert.equal(result.usersUpdated, 1);
   assert.equal(result.usersFailed, 0);
+  assert.equal(result.usersSkipped, 0);
   assert.equal(result.candidatesWritten, 1);
   assert.equal(transactionCalls, 1, "exactly one transaction — never one spanning all users");
   assert.deepEqual(
@@ -460,4 +472,85 @@ test("getUserRecommendations: drift re-filtering drops a cached candidate the us
   const only = result[0];
   assert.equal(only.mediaType, "movie"); // lowercased for TmdbMedia, unlike the Prisma enum
   assert.equal(only.releaseYear, "2020"); // derived from releaseDate, not stored separately
+});
+
+// ── inconclusive vs legitimately-empty ──────────────────────────────────────
+
+function storedRec(userId: string, tmdbId: number): UserRecRow {
+  return {
+    id: `rec-${userId}-${tmdbId}`, userId, tmdbId, mediaType: "MOVIE",
+    title: `Movie ${tmdbId}`, overview: null, posterPath: null, backdropPath: null,
+    releaseDate: null, voteAverage: 7, score: 1, rank: 0, computedAt: daysAgo(1),
+  };
+}
+
+test("a TMDB outage yields an INCONCLUSIVE empty, not an authoritative one", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  tmdbOutage = true;
+
+  const result = await computeRecommendationsForUser("u1");
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.conclusive, false, "seeds existed but nothing came back — the caller must not trust this empty");
+});
+
+test("upstream answering with everything already excluded is a CONCLUSIVE empty", async () => {
+  // The discrimination that matters: empty alone must not imply inconclusive, or
+  // a user who has genuinely watched every suggestion keeps stale rows forever.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+    { mediaServerUserId: "msu1", tmdbId: 700, mediaType: "MOVIE", watched: true, startedAt: daysAgo(9) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(700)]); // the only suggestion is already watched
+
+  const result = await computeRecommendationsForUser("u1");
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.conclusive, true, "a real answer that filters down to nothing is authoritative");
+});
+
+// ── warmRecommendationsCache: never replace good rows with an outage ────────
+
+test("warmRecommendationsCache: a TMDB outage KEEPS existing recommendations and opens no transaction", async () => {
+  // The write is delete-then-insert, so an inconclusive empty used to clear the
+  // shelf — and, because the compute resolves rather than throws, be counted as a
+  // successful update. Every active user would be wiped by one bad cron run.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(1) }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  userRecRows = [storedRec("u1", 500), storedRec("u1", 501)];
+  tmdbOutage = true;
+
+  const result = await warmRecommendationsCache();
+
+  assert.deepEqual(userRecRows.map((r) => r.tmdbId).sort((a, b) => a - b), [500, 501], "yesterday's recommendations must survive");
+  assert.equal(transactionCalls, 0, "no destructive replace may even be attempted");
+  assert.equal(result.usersSkipped, 1);
+  assert.equal(result.usersUpdated, 0, "a skipped user must NOT be reported as updated");
+  assert.equal(result.candidatesWritten, 0);
+});
+
+test("warmRecommendationsCache: a CONCLUSIVE empty still clears the user's stale rows", async () => {
+  // Counterpart to the test above — pins that the guard did not simply stop the
+  // cron from ever clearing anything.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(1) }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+    { mediaServerUserId: "msu1", tmdbId: 700, mediaType: "MOVIE", watched: true, startedAt: daysAgo(9) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(700)]);
+  userRecRows = [storedRec("u1", 500)];
+
+  const result = await warmRecommendationsCache();
+
+  assert.deepEqual(userRecRows, [], "an authoritative empty answer must clear the shelf");
+  assert.equal(transactionCalls, 1);
+  assert.equal(result.usersUpdated, 1);
+  assert.equal(result.usersSkipped, 0);
 });
