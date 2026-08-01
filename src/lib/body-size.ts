@@ -72,11 +72,21 @@ export async function readJsonCapped<T = unknown>(
   const raw = new Uint8Array(await req.arrayBuffer());
   const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
   if (sizeCheck) return sizeCheck;
+  let parsed: unknown;
   try {
-    return JSON.parse(new TextDecoder().decode(raw)) as T;
+    parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
+  // A body of `null` (or a bare number/string/boolean) is VALID JSON, so it parsed
+  // cleanly and used to be handed back as if it were the expected object. Every
+  // caller then reads a property off it — and on `null` that is a TypeError, i.e. an
+  // unauthenticated 500 from a one-word request body. Every consumer types this as an
+  // object, so anything else is a malformed request, not a body.
+  if (parsed === null || typeof parsed !== "object") {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  return parsed as T;
 }
 
 // Tolerant variant for routes where a missing/empty/malformed body is VALID
@@ -94,9 +104,14 @@ export async function readJsonCappedOr<T>(
   const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
   if (sizeCheck) return sizeCheck;
   if (raw.byteLength === 0) return fallback;
+  let parsed: unknown;
   try {
-    return JSON.parse(new TextDecoder().decode(raw)) as T;
+    parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
     return fallback;
   }
+  // Same non-object guard as readJsonCapped, resolved the tolerant way: this variant's
+  // contract is "a body I cannot use means defaults", and `null` is exactly that.
+  if (parsed === null || typeof parsed !== "object") return fallback;
+  return parsed as T;
 }

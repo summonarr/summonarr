@@ -172,3 +172,35 @@ test("readJsonCappedOr still 413s over the cap — tolerance never disables the 
   assert.ok(viaBody instanceof NextResponse);
   assert.equal(viaBody.status, 413);
 });
+
+// ── valid JSON that is not an object ────────────────────────────────────────
+
+test("readJsonCapped 400s a `null` body instead of handing back null", async () => {
+  // `null` is VALID JSON, so it parsed cleanly and was returned as if it were the
+  // expected object. The caller's very next line reads a property off it, and on
+  // null that is a TypeError — an unauthenticated 500 from a 4-byte request body.
+  const res = await readJsonCapped(postJson("null"), 16 * KB);
+  assert.ok(res instanceof NextResponse);
+  assert.equal(res.status, 400);
+});
+
+test("readJsonCapped 400s bare primitives too — every consumer types the body as an object", async () => {
+  for (const body of ["123", '"hello"', "true"]) {
+    const res = await readJsonCapped(postJson(body), 16 * KB);
+    assert.ok(res instanceof NextResponse, `${body} should be rejected`);
+    assert.equal(res.status, 400, `${body} should be 400`);
+  }
+});
+
+test("readJsonCapped still accepts an ordinary object", async () => {
+  // Guards against the fix turning into a blanket rejection.
+  const res = await readJsonCapped<{ a: number }>(postJson('{"a":1}'), 16 * KB);
+  assert.ok(!(res instanceof NextResponse));
+  assert.deepEqual(res, { a: 1 });
+});
+
+test("readJsonCappedOr resolves a `null` body the tolerant way — the fallback, not null", async () => {
+  const fallback = { full: false };
+  assert.equal(await readJsonCappedOr(postJson("null"), 16 * KB, fallback), fallback);
+  assert.equal(await readJsonCappedOr(postJson("42"), 16 * KB, fallback), fallback);
+});
