@@ -4,7 +4,7 @@ import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey } from "@/lib/media-instances";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -34,7 +34,7 @@ async function syncPlex(request: NextRequest) {
 
   const [plexConfig, librariesRow] = await Promise.all([
     getPlexConfig(),
-    prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
+    prisma.setting.findUnique({ where: { key: plexSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
   ]);
 
   if (!plexConfig.url || !plexConfig.token) {

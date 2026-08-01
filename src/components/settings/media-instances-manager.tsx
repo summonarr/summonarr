@@ -45,6 +45,114 @@ interface InstanceView {
   // back through POST, so an absent field here would read as `false` and every
   // save would silently un-restrict the server.
   restricted: boolean;
+  // Comma-joined library ids/section keys to sync from THIS server. "" = sync
+  // everything. Round-tripped like `restricted`, so it must be carried through
+  // the draft: sending it back absent leaves it untouched, but sending "" would
+  // clear a real selection.
+  libraries?: string;
+}
+
+// Per-instance library picker. Deliberately load-on-demand: the list comes from
+// the SERVER (its own url+token), so there is nothing to show until the instance
+// is saved, and eagerly fetching for every configured instance on mount would
+// hit every media server every time the settings page opens.
+function InstanceLibraryPicker({
+  service,
+  slug,
+  canLoad,
+  value,
+  onChange,
+}: {
+  service: MediaServerService;
+  slug: string;
+  canLoad: boolean;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const [items, setItems] = useState<{ key: string; title: string }[] | null>(null);
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [error, setError] = useState("");
+
+  const selected = new Set(value.split(",").map((v) => v.trim()).filter(Boolean));
+
+  async function load() {
+    setState("loading");
+    setError("");
+    try {
+      const res = await fetch(
+        withBasePath(`/api/settings/${service}/libraries?instance=${encodeURIComponent(slug)}`),
+      );
+      const data: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        const msg = data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : "";
+        setError(msg || "Could not load libraries");
+        setState("error");
+        return;
+      }
+      // Plex returns sections ({key,title}); Jellyfin returns folders
+      // ({Id,Name}). Normalize to one shape — the stored value is the id in
+      // both cases, and it is only ever meaningful on THIS server.
+      const list = Array.isArray(data) ? data : [];
+      setItems(
+        list.map((raw) => {
+          const o = raw as Record<string, unknown>;
+          return {
+            key: String(o.key ?? o.Id ?? ""),
+            title: String(o.title ?? o.Name ?? ""),
+          };
+        }).filter((i) => i.key),
+      );
+      setState("idle");
+    } catch {
+      setError("Could not load libraries");
+      setState("error");
+    }
+  }
+
+  function toggle(key: string) {
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    onChange(Array.from(next).join(","));
+  }
+
+  return (
+    <div className="pt-1">
+      <div className="flex items-center gap-2">
+        <span className="text-sm text-zinc-300">Libraries</span>
+        {canLoad && (
+          <button
+            type="button"
+            onClick={load}
+            disabled={state === "loading"}
+            className="text-xs text-zinc-400 underline disabled:opacity-50"
+          >
+            {state === "loading" ? "Loading…" : items ? "Reload" : "Choose libraries"}
+          </button>
+        )}
+      </div>
+      {!canLoad && (
+        <p className="text-xs text-zinc-500">Save this server first, then its libraries can be listed.</p>
+      )}
+      {state === "error" && <p className="text-xs text-red-400">{error}</p>}
+      {items && items.length === 0 && <p className="text-xs text-zinc-500">No libraries found on this server.</p>}
+      {items && items.length > 0 && (
+        <div className="mt-1 space-y-1">
+          {items.map((i) => (
+            <label key={i.key} className="flex items-center gap-2 text-xs text-zinc-300">
+              <input type="checkbox" checked={selected.has(i.key)} onChange={() => toggle(i.key)} />
+              {i.title}
+            </label>
+          ))}
+        </div>
+      )}
+      {selected.size === 0 ? (
+        <p className="text-xs text-zinc-500">Nothing selected — every library on this server is synced.</p>
+      ) : (
+        <p className="text-xs text-zinc-500">{selected.size} selected — only these are synced.</p>
+      )}
+    </div>
+  );
 }
 
 interface Draft {
@@ -57,6 +165,7 @@ interface Draft {
   restricted: boolean; // both services — per-user view grant required
   hasToken: boolean;
   isNew: boolean;
+  libraries: string;
 }
 
 function toDraft(v: InstanceView, service: MediaServerService): Draft {
@@ -71,6 +180,7 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
     // unchecked (= "anyone may sign in") for a server that is actually
     // restricted.
     restrictSignIn: v.restrictSignIn ?? true,
+    libraries: v.libraries ?? "",
     // Strict === true, matching the registry normalizer this value came from
     // (media-instance-registry.ts). Unlike restrictSignIn the safe default is
     // OPEN: a restricted server nobody has been granted is invisible to every
@@ -136,7 +246,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // `restricted` defaults to FALSE for the opposite reason: an unrestricted
       // server is the status quo, and a restricted one with no grants yet issued
       // would be invisible to every non-admin the moment it finished syncing.
-      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true },
+      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true, libraries: "" },
     ]);
     setConfirmRemove(null);
     setStatus("idle");
@@ -175,6 +285,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // Outside the per-service spread on purpose: visibility is the one access
       // field BOTH services share (restrictSignIn below is Jellyfin-only).
       restricted: d.restricted,
+      libraries: d.libraries,
       ...(service === "plex"
         ? {
             serverUrl: d.url.trim(),
@@ -331,6 +442,19 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 </label>
               </div>
             )}
+
+            {/* Per-server library selection. Load-on-demand rather than eager:
+                enumerating needs THIS server's stored url+token, so it is only
+                possible once the instance has been saved. An empty selection
+                means "sync everything", which is what every named server does
+                until an admin narrows it. */}
+            <InstanceLibraryPicker
+              service={service}
+              slug={d.slug}
+              canLoad={!d.isNew && d.hasToken}
+              value={d.libraries}
+              onChange={(v) => update(idx, { libraries: v })}
+            />
 
             {/* Service-AGNOSTIC, unlike restrictSignIn above: a restricted
                 server's library contributes availability only for users granted

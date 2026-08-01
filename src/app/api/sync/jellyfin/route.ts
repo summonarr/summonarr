@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { DEFAULT_MEDIA_INSTANCE } from "@/lib/media-instances";
+import { DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -40,7 +40,7 @@ async function syncJellyfin(request: NextRequest) {
 
   const [jellyfinConfig, librariesRow] = await Promise.all([
     getJellyfinConfig(),
-    prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
+    prisma.setting.findUnique({ where: { key: jellyfinSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
   ]);
 
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) {

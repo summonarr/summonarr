@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { prisma } from "@/lib/prisma";
 import { getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -21,8 +22,8 @@ async function syncTvEpisodes() {
     await Promise.all([
       getPlexConfig(),
       getJellyfinConfig(),
-      prisma.setting.findUnique({ where: { key: "plexLibraries" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinLibraries" } }),
+      prisma.setting.findUnique({ where: { key: plexSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
+      prisma.setting.findUnique({ where: { key: jellyfinSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
     ]);
 
   const results = { plex: 0, jellyfin: 0, errors: [] as string[] };
