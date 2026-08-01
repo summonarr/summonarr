@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
+import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { prisma } from "@/lib/prisma";
 import {
   searchMovieInRadarr,
@@ -30,7 +31,7 @@ export const PATCH = withIssueAdmin(async (
 
   const { id } = await params;
 
-  const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: boolean }>(req, 16384);
+  const parsed = await readJsonCapped<{ status?: string; resolution?: string; refetch?: boolean; instance?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
@@ -40,21 +41,34 @@ export const PATCH = withIssueAdmin(async (
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   if (refetch) {
+    // Which Radarr/Sonarr instance holds the copy this issue is about. Issue has no
+    // arrInstance column — the same title can sit on several instances — so the caller
+    // names it, exactly as the sibling Replace flow does (issues/[id]/releases). Absent
+    // ⇒ the default, so every pre-existing caller is unchanged.
+    //
+    // Without this the search always went to the DEFAULT instance: a SEASON issue filed
+    // against the 4K copy re-grabbed and re-imported the HD one, leaving the reported
+    // problem untouched while the issue moved to IN_PROGRESS as though it were handled.
+    // Validated, never coerced — a bad slug must not silently retarget the default.
+    const instance = typeof body.instance === "string" ? body.instance.trim() : "";
+    if (!isValidInstanceSlug(instance)) {
+      return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    }
     let arrError: string | null = null;
     try {
       if (issue.mediaType === "MOVIE") {
-        await searchMovieInRadarr(issue.tmdbId);
+        await searchMovieInRadarr(issue.tmdbId, instance);
       } else {
         // Resolve authoritatively from tmdbId when the stored tvdbId is absent
         // (client-supplied tvdbId is no longer trusted, so older/null rows resolve here).
-        const tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId));
+        const tvdbId = issue.tvdbId ?? (await resolveTvdbIdFromTmdbId(issue.tmdbId, instance));
         if (!tvdbId) throw new Error("Could not resolve a TVDB ID for this series — cannot search in Sonarr");
         if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
-          await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber);
+          await searchEpisodeInSonarr(tvdbId, issue.seasonNumber, issue.episodeNumber, instance);
         } else if (issue.scope === "SEASON" && issue.seasonNumber != null) {
-          await searchSeasonInSonarr(tvdbId, issue.seasonNumber);
+          await searchSeasonInSonarr(tvdbId, issue.seasonNumber, instance);
         } else {
-          await searchSeriesInSonarr(tvdbId);
+          await searchSeriesInSonarr(tvdbId, instance);
         }
       }
       // CAS on status: don't clobber a RESOLVED issue if another admin closed it

@@ -244,6 +244,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
 
   const now = new Date();
   const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
+
+  // Guardrail 33: account removal DISABLES rather than scrubs, so a removed user keeps
+  // a live Discord link and would still be DMed. Suppression is documented as living at
+  // exactly two chokepoints — claimAvailableNotificationWinners (batch "now available")
+  // and notifyRequestStatusChange (single approve/decline/available) — and this
+  // "awaiting release" / "download pending" backstop is a THIRD requester-facing path
+  // that goes through neither. One batched read, not a per-request lookup.
+  const disabledRequesters = new Set<string>();
+  if (overdue.length > 0) {
+    const rows = await prisma.user.findMany({
+      where: { id: { in: [...new Set(overdue.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
+      select: { id: true },
+    });
+    for (const r of rows) disabledRequesters.add(r.id);
+  }
+
   await runConcurrent(overdue, async (req) => {
     try {
       const downloading = req.mediaType === "MOVIE"
@@ -278,6 +294,11 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }
       }
       await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
+      // The backstop is CONSUMED for a disabled requester, not deferred: pendingNotifyAt
+      // is cleared above and the DM is dropped. That mirrors notify-available's
+      // deliberate claim-burn — re-enabling an account must not replay a backlog of
+      // stale "your download is pending" messages about requests long since resolved.
+      if (disabledRequesters.has(req.requestedBy)) return;
       if (!released) {
         await notifyUserAwaitingRelease(req.requestedBy, req.title, req.mediaType, soonestReleaseDate);
       } else {
