@@ -522,6 +522,71 @@ test("plex bodyless POST is recentOnly: /recentlyAdded fetch, insert-only of NEW
   );
 });
 
+test("a named instance resyncs ITS OWN rows: config, selection and every delete follow the slug", async () => {
+  configurePlex();
+  settings.set("plexRemoteServerUrl", PLEX_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = plexMovieResponder([{ tmdbId: 700, ratingKey: "rk700" }]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "remote" }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  // Every scoped write must name the instance being resynced. A delete that
+  // still said "" would wipe the DEFAULT server's library on a resync the admin
+  // aimed at a different server entirely.
+  const deletes = opsFor("plexLibraryItem", "deleteMany");
+  assert.ok(deletes.length > 0, "a full resync must delete before repopulating");
+  for (const d of deletes) {
+    const where = (d.args as { where?: { serverInstance?: unknown } }).where ?? {};
+    assert.equal(where.serverInstance, "remote", `a delete escaped the instance scope: ${JSON.stringify(where)}`);
+  }
+});
+
+test("a malformed instance slug is REJECTED, never coerced to the default", async () => {
+  // Coercion would aim a destructive scoped delete at the default server on a
+  // request that named something else — the worst possible reading of bad input.
+  configurePlex();
+  respond = plexMovieResponder([]);
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "../../etc" }) }));
+  assert.equal(res.status, 400);
+  const deletes = opsFor("plexLibraryItem", "deleteMany");
+  assert.equal(deletes.length, 0, "a rejected request must not have deleted anything");
+});
+
+test("with a SECOND Plex server registered, a resync leaves the shared TVEpisodeCache alone", async () => {
+  // TVEpisodeCache has no serverInstance: every Plex server shares one
+  // `source: "plex"` namespace. This route used to delete that namespace
+  // unscoped and repopulate from one server, destroying every other server's
+  // episode rows until the next orchestrator run. It can only own the cache when
+  // it is the only Plex server.
+  configurePlex();
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = plexMovieResponder([{ tmdbId: 700, ratingKey: "rk700" }]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const episodeOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+  assert.deepEqual(episodeOps, [], "the shared episode cache must not be touched while another Plex server exists");
+});
+
+test("as the ONLY Plex server it still rewrites the episode cache — single-server behaviour is unchanged", async () => {
+  configurePlex();
+  respond = plexMovieResponder([{ tmdbId: 700, ratingKey: "rk700" }]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.ok(
+    transactions.flatMap((t) => t.ops).some((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany"),
+    "a lone Plex server must still maintain the episode cache, exactly as before",
+  );
+});
+
 test("the full flag is strictly boolean true: a truthy non-true value and a malformed body both fall back to recentOnly", async () => {
   configurePlex();
   respond = plexMovieResponder([]);

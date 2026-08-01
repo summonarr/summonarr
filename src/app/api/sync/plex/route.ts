@@ -4,7 +4,8 @@ import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -20,21 +21,45 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("plex-sync", () => syncPlex(request));
 }
 
-// DEFAULT-INSTANCE-ONLY BY DESIGN (mirrors /api/sync/jellyfin — Phase 1 parity):
-// this route syncs only the default ("") Plex server; named additional instances
-// sync via the /api/sync orchestrator's per-instance fan-out only. Every library
-// read/delete here is therefore scoped to serverInstance = "" so the admin Resync
-// can never wipe or mask a named instance's rows. (The episode-cache maintenance
-// is NOT scoped — TVEpisodeCache is TMDB-anchored shared data with no
-// serverInstance.)
+// Resyncs ONE Plex server — the default ("") unless the body names another via
+// `instance`. Every library read/delete is scoped to that server's
+// serverInstance, so resyncing one can never wipe or mask another's rows.
+//
+// TVEpisodeCache is the exception that needs care: it has NO serverInstance
+// column, so every Plex server's episodes share one `source: "plex"` namespace
+// and the only correct rewrite is a whole-table one built from EVERY server (the
+// orchestrator's job, where it is gated on all instances having been fetched).
+// A single-server resync cannot produce that union, so it rewrites the cache
+// ONLY when it is the sole configured Plex server. With more than one it leaves
+// the cache alone — previously it deleted `source: "plex"` unscoped and
+// repopulated from this server alone, silently destroying every other Plex
+// server's episode rows until the next orchestrator run.
 async function syncPlex(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
-  const [plexConfig, librariesRow] = await Promise.all([
-    getPlexConfig(),
-    prisma.setting.findUnique({ where: { key: plexSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
+  // Which server to resync. Absent ⇒ the default, so every existing caller (the
+  // admin Resync button, the connect form, the master-fill button) is unchanged.
+  // A malformed slug is rejected rather than coerced: coercing to "" would point
+  // a destructive scoped delete at the WRONG server.
+  const instance: MediaInstanceKey =
+    typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
+
+  // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
+  // instance with a setting.findMany, and this path is held to the same
+  // findUnique-only read shape as the other per-instance config readers
+  // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
+  // the safer error: a registered-but-unconfigured server has no episodes to
+  // contribute, so at worst this skips a rewrite the orchestrator will do anyway
+  // — the opposite mistake destroys another server rows.
+  const [plexConfig, librariesRow, plexInstances] = await Promise.all([
+    getPlexConfig(instance),
+    prisma.setting.findUnique({ where: { key: plexSettingKey(instance, "Libraries") } }),
+    getMediaInstances("plex"),
   ]);
 
   if (!plexConfig.url || !plexConfig.token) {
@@ -69,8 +94,18 @@ async function syncPlex(request: NextRequest) {
   // Full replace: clear unconditionally then insert. getPlexTVEpisodes throws on a fetch
   // failure (rejects → .catch, no clear), so an empty result is a genuinely empty library
   // and the stale episode ownership must be cleared rather than left behind.
-  getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
+  const ownsEpisodeCache = plexInstances.length <= 1;
+  if (!ownsEpisodeCache) {
+    console.warn(
+      `[sync/plex] ${plexInstances.length} Plex servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
+    );
+  }
+  (ownsEpisodeCache
+    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
+    : Promise.resolve(null)
+  )
     .then(async (episodes) => {
+      if (episodes === null) return;
       await prisma.$transaction(async (tx) => {
         // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
         // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
@@ -138,8 +173,8 @@ async function syncPlex(request: NextRequest) {
     });
   };
 
-  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", DEFAULT_MEDIA_INSTANCE);
-  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    DEFAULT_MEDIA_INSTANCE);
+  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", instance);
+  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    instance);
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
@@ -147,11 +182,11 @@ async function syncPlex(request: NextRequest) {
     // tmdbId must not mask inserting the default instance's own row.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: finalMovieRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
       prisma.plexLibraryItem.findMany({
-        where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "TV", serverInstance: instance, tmdbId: { in: finalTvRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
     ]);
@@ -174,7 +209,7 @@ async function syncPlex(request: NextRequest) {
       if (incomingRatingKeys.length > 0) {
         // Default-instance-scoped: the same small integer ratingKey can legitimately
         // exist on a named instance's server — only THIS server's stale mapping is stale.
-        await tx.plexLibraryItem.deleteMany({ where: { serverInstance: DEFAULT_MEDIA_INSTANCE, plexRatingKey: { in: incomingRatingKeys } } });
+        await tx.plexLibraryItem.deleteMany({ where: { serverInstance: instance, plexRatingKey: { in: incomingRatingKeys } } });
       }
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
@@ -186,8 +221,8 @@ async function syncPlex(request: NextRequest) {
     // (they are owned by the orchestrator's per-instance fan-out).
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE } });
-      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "MOVIE", serverInstance: instance } });
+      await tx.plexLibraryItem.deleteMany({ where: { mediaType: "TV", serverInstance: instance } });
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });

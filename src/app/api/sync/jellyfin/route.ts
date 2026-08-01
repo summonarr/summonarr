@@ -4,7 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
@@ -27,20 +28,43 @@ export async function POST(request: NextRequest) {
 // (recentOnly insert-only within the 2h window, or a full delete+replace), then
 // flips matching pending/approved requests to AVAILABLE and fires notifications.
 //
-// DEFAULT-INSTANCE-ONLY BY DESIGN (Phase 1 parity): this route syncs only the
-// default ("") Jellyfin server; named additional instances sync via the
-// /api/sync orchestrator's per-instance fan-out only. Every library read/delete
-// here is therefore scoped to serverInstance = "" so the admin Resync can never
-// wipe or mask a named instance's rows. (The episode-cache maintenance is NOT
-// scoped — TVEpisodeCache is TMDB-anchored shared data with no serverInstance.)
+// Resyncs ONE Jellyfin server — the default ("") unless the body names another
+// via `instance`. Every library read/delete is scoped to that server's
+// serverInstance, so resyncing one can never wipe or mask another's rows.
+//
+// TVEpisodeCache is the exception (see the Plex counterpart for the full
+// reasoning): no serverInstance column, one shared `source: "jellyfin"`
+// namespace, so a single-server resync cannot produce the whole-table union a
+// correct rewrite needs. It therefore rewrites the cache ONLY when it is the
+// sole configured Jellyfin server — the full path previously deleted
+// `source: "jellyfin"` unscoped and repopulated from this server alone, and even
+// the recentOnly path's tmdbId-scoped delete removes another server's episodes
+// for a show both of them hold.
 async function syncJellyfin(request: NextRequest) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
 
-  const [jellyfinConfig, librariesRow] = await Promise.all([
-    getJellyfinConfig(),
-    prisma.setting.findUnique({ where: { key: jellyfinSettingKey(DEFAULT_MEDIA_INSTANCE, "Libraries") } }),
+  // Which server to resync. Absent ⇒ the default, so existing callers are
+  // unchanged. A malformed slug is rejected rather than coerced to "", which
+  // would aim a destructive scoped delete at the wrong server.
+  const instance: MediaInstanceKey =
+    typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
+
+  // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
+  // instance with a setting.findMany, and this path is held to the same
+  // findUnique-only read shape as the other per-instance config readers
+  // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
+  // the safer error: a registered-but-unconfigured server has no episodes to
+  // contribute, so at worst this skips a rewrite the orchestrator will do anyway
+  // — the opposite mistake destroys another server rows.
+  const [jellyfinConfig, librariesRow, jellyfinInstances] = await Promise.all([
+    getJellyfinConfig(instance),
+    prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "Libraries") } }),
+    getMediaInstances("jellyfin"),
   ]);
 
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) {
@@ -89,6 +113,12 @@ async function syncJellyfin(request: NextRequest) {
       // (rejects → .catch), so an empty full result is a genuinely empty library whose
       // stale episode ownership must be cleared.
       if (episodeRecentOnly && episodes.length === 0) return;
+      if (jellyfinInstances.length > 1) {
+        console.warn(
+          `[sync/jellyfin] ${jellyfinInstances.length} Jellyfin servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
+        );
+        return;
+      }
       await prisma.$transaction(async (tx) => {
         // Advisory lock 2002,2 — Jellyfin TVEpisodeCache coordination. Shared with
         // /api/sync/route and /api/sync/tv-episodes so a recentOnly tmdbId-scoped delete can't
@@ -122,11 +152,11 @@ async function syncJellyfin(request: NextRequest) {
     // tmdbId must not mask inserting the default instance's own row.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.jellyfinLibraryItem.findMany({
-        where: { mediaType: "MOVIE", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: movieRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: movieRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
       prisma.jellyfinLibraryItem.findMany({
-        where: { mediaType: "TV", serverInstance: DEFAULT_MEDIA_INSTANCE, tmdbId: { in: tvRows.map((r) => r.tmdbId) } },
+        where: { mediaType: "TV", serverInstance: instance, tmdbId: { in: tvRows.map((r) => r.tmdbId) } },
         select: { tmdbId: true },
       }),
     ]);
@@ -149,7 +179,7 @@ async function syncJellyfin(request: NextRequest) {
     // until the next orchestrator run).
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
-      await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: DEFAULT_MEDIA_INSTANCE } });
+      await tx.jellyfinLibraryItem.deleteMany({ where: { serverInstance: instance } });
       if (movieRows.length > 0) await batchCreateMany(tx.jellyfinLibraryItem, movieRows);
       if (tvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, tvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
