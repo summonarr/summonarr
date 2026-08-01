@@ -58,7 +58,7 @@ function WebhookSecretField({
             type="password"
             value={secret}
             onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
-            placeholder="Leave blank to disable authentication"
+            placeholder="Leave blank to turn this webhook off"
             className="bg-zinc-800 border-zinc-700 font-mono text-sm"
           />
           <Button
