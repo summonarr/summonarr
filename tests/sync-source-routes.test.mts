@@ -38,6 +38,7 @@
 // advisory locks, and scripted upstreams. No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import dns from "node:dns/promises";
 
@@ -458,6 +459,76 @@ test("tv-episodes clears ONLY the jellyfin source when only Jellyfin is configur
   settings.set("jellyfinApiKey", "jf-key");
   await call(tvEpisodes);
   assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["jellyfin"]);
+});
+
+test("tv-episodes reads each server's OWN library selection", () => {
+  // Source-pinned: this harness's Plex responder returns no sections, so a
+  // selection filters nothing observable and a revert to the default's key
+  // survives every behavioural test here. The regression it guards is the same
+  // one the orchestrator had — a Plex section key is per-server, so applying the
+  // default's keys to another server builds its episode cache from the wrong
+  // libraries, or from none.
+  const source = readFileSync(new URL("../src/app/api/sync/tv-episodes/route.ts", import.meta.url), "utf8");
+  // `await` restricts this to CALL sites — a bare readSelection( also matches
+  // the function declaration, which has no instance and would fail spuriously.
+  const reads = source.match(/await readSelection\([^)]*\)/g) ?? [];
+  assert.equal(reads.length, 2, "expected one selection read per service");
+  for (const r of reads) {
+    assert.match(r, /SettingKey\(inst\.slug\s*,/, `${r} must use the instance being read, not a fixed default`);
+  }
+});
+
+test("tv-episodes rebuilds from the UNION of every configured Plex server", async () => {
+  // TVEpisodeCache has no serverInstance: all Plex servers share one `source`
+  // namespace, so the only correct rewrite is the union. Reading the default
+  // alone and then deleting the namespace destroyed the named server's rows.
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("plexRemoteServerUrl", "http://10.0.0.9:32400");
+  settings.set("plexRemoteAdminToken", "plex-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200);
+
+  const origins = new Set(fetchCalls.map((u) => u.origin));
+  assert.ok(origins.has("http://10.0.0.5:32400"), "the default server was not read");
+  assert.ok(origins.has("http://10.0.0.9:32400"), "the named server was not read — its episodes would be wiped by the rewrite");
+  assert.deepEqual(deletesOf("tVEpisodeCache").map((w) => w.source), ["plex"], "still exactly one whole-namespace replace");
+});
+
+test("tv-episodes leaves the cache UNTOUCHED when any configured server fails — never a partial union", async () => {
+  // A partial union is worse than doing nothing: the rewrite would delete the
+  // whole namespace and repopulate without the down server's episodes, so its
+  // per-episode availability vanishes for the length of the outage.
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("plexRemoteServerUrl", "http://10.0.0.9:32400");
+  settings.set("plexRemoteAdminToken", "plex-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  plexOk = false; // both servers fail their fetch
+
+  const res = await call(tvEpisodes);
+  assert.equal(res.status, 200, "a failing server is a partial result, not a route failure");
+  assert.deepEqual(deletesOf("tVEpisodeCache"), [], "nothing may be deleted on an incomplete union");
+  const body = await res.json();
+  assert.ok((body.skipped as string[]).includes("plex"), "the skip must be reported, not silent");
+});
+
+test("a named server's failure is labelled so the admin can tell WHICH one failed", async () => {
+  settings.set("plexServerUrl", "http://10.0.0.5:32400");
+  settings.set("plexAdminToken", "plex-token");
+  settings.set("plexRemoteServerUrl", "http://10.0.0.9:32400");
+  settings.set("plexRemoteAdminToken", "plex-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  plexOk = false;
+
+  const body = await (await call(tvEpisodes)).json();
+  const errs = body.errors as string[];
+  // The DEFAULT keeps its historical bare "Plex:" prefix — these strings are
+  // shown to the admin, and a single-server install must read exactly as before.
+  assert.ok(errs.some((e) => e.startsWith("Plex:")), `default server unlabelled: ${JSON.stringify(errs)}`);
+  assert.ok(errs.some((e) => e.startsWith("Plex (Remote):")), `named server unlabelled: ${JSON.stringify(errs)}`);
 });
 
 test("a FAILED Plex fetch leaves the plex rows intact and is reported, not thrown", async () => {
