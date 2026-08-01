@@ -194,6 +194,13 @@ export async function purgeUserDataInTx(
   await tx.watchlistItem.deleteMany({ where: { userId: id } });
   await tx.hiddenItem.deleteMany({ where: { userId: id } });
   await tx.notification.deleteMany({ where: { userId: id } });
+  // Recommendations are the same class of private per-user data as the two above —
+  // a DERIVED taste profile (what to watch next, computed from this person's watch
+  // history and watchlist), not shared content anyone else can see. The User model
+  // enumerates what deliberately survives de-identified — "requests/votes/issues" —
+  // and this is not in it. Leaving it behind meant an irreversible "delete my data"
+  // purge kept a per-user profile of exactly the kind erasure is meant to remove.
+  await tx.userRecommendation.deleteMany({ where: { userId: id } });
   // Re-check deactivation atomically in the same statement that scrubs the row.
   // The precondition read at the top of this function is several awaited
   // deletes ago — a concurrent reactivate can clear deactivatedAt in that

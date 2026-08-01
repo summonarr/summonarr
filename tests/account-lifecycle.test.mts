@@ -28,7 +28,9 @@
 //     (→ unique, unroutable deleted-<id>@deleted.invalid), image, passwordHash,
 //     discordId, notificationEmail, plexClientId/plexUserId/jellyfinUserId;
 //   - deleted outright: Account rows (OAuth tokens), AuthSessions, push subs,
-//     Discord link tokens + merge codes, watchlist / hidden / notifications;
+//     Discord link tokens + merge codes, watchlist / hidden / notifications /
+//     recommendations (the derived taste profile — same class of private per-user
+//     data, and NOT among the "requests/votes/issues" the User model keeps);
 //   - UNLINKED, never deleted: MediaServerUser rows get userId → null
 //     (guardrail 28 — hard-deleting would restrict on play history);
 //   - NEVER a hard-delete of the User row itself (requests/votes/issues stay
@@ -92,6 +94,7 @@ const baseTx = {
   watchlistItem: { deleteMany: record("watchlistItem", "deleteMany") },
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
+  userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
   user: {
     findUnique: async (args: unknown) => {
       ops.push({ op: "user.findUnique", args });
@@ -144,6 +147,7 @@ const PURGE_OPS = [
   "watchlistItem.deleteMany",
   "hiddenItem.deleteMany",
   "notification.deleteMany",
+  "userRecommendation.deleteMany",
   "user.updateMany",
 ];
 
