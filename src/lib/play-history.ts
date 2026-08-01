@@ -2522,12 +2522,18 @@ export async function getTranscodeOffenders(
   return result;
 }
 
+// Each part is NAME-tagged, not positional. Absent params were simply skipped, so the
+// key was an unlabelled join and two different filter sets could produce the same one:
+// `?source=MOVIE` is not a valid source, so appendPlayHistoryFilter ignores it and the
+// query runs UNFILTERED — but the value still entered the key, colliding with a
+// legitimate `?mediaType=MOVIE`. The unfiltered series was then served as the
+// movies-only one (and vice versa) for the whole TTL.
 function getCacheKey(prefix: string, params: Record<string, unknown>): string {
   const parts = [prefix];
-  if (params.days) parts.push(String(params.days));
-  if (params.source) parts.push(String(params.source));
-  if (params.mediaType) parts.push(String(params.mediaType));
-  if (params.limit) parts.push(String(params.limit));
+  if (params.days) parts.push(`d=${String(params.days)}`);
+  if (params.source) parts.push(`s=${String(params.source)}`);
+  if (params.mediaType) parts.push(`m=${String(params.mediaType)}`);
+  if (params.limit) parts.push(`n=${String(params.limit)}`);
   return parts.join(":");
 }
 
