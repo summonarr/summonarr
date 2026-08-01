@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.19.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.20.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,31 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.20.0
+
+**Added**
+
+- **Resync a single named media server.** The admin Resync buttons can now target any registered Plex/Jellyfin server rather than only the default one. Previously a named server could only be synced by waiting for the full orchestrator run.
+- **Per-server Plex reachability.** The connection badge reports each configured Plex server independently, so one unreachable server no longer makes the whole integration look down.
+
+**Fixed**
+
+- **A TMDB outage no longer wipes everyone's recommendations.** The warm job replaces each user's stored list, and an outage produced an empty result that looked identical to "nothing to recommend" — so the list was cleared and the run reported success. An inconclusive result now keeps the existing recommendations.
+- **Restricted servers no longer leak through a named resync.** Resyncing a named server re-filed its entire library under the default server, which is visible to everyone — exposing a restricted server's catalogue to users with no grant, and leaving the named server with no library rows until the next full sync.
+- **Requests are no longer marked available from a server you cannot see.** A restricted server could flip a request to Available and send the "ready to watch" notification to users without access, and the once-only notification was consumed so the legitimate one never arrived.
+- **A dropped database connection no longer takes the app down.** Any scheduled job holding the coordination lock crashed the whole process if PostgreSQL restarted or the connection was reaped mid-run.
+- **Library selection is applied per server.** One server's selected libraries were being applied to every configured server.
+- **The shared TV episode cache is rebuilt from every server.** A resync or episode refresh could wipe another server's episode data until the next full sync.
+- **Clearing a webhook secret now works.** The settings page reported "Saved" while the old secret stayed valid, so revoking or rotating one silently did nothing. The field's description was also wrong: leaving it blank turns the webhook off, it does not disable authentication.
+- **Issue "Refetch" searches the right Radarr/Sonarr instance.** An issue filed against the 4K copy re-grabbed the HD one and left the reported problem untouched.
+- **Removed accounts stop receiving Discord messages.** Disabled accounts still got "awaiting release" and "download pending" notifications.
+- **Deleting your data now removes your recommendation profile.** The admin purge left behind the per-user taste profile built from watch history and watchlist.
+- **Watch history no longer merges titles across two servers.** Unmatched items from different servers could collapse into one entry with combined play counts and watch time.
+- **A permission or role change no longer signs you out.** Editing a user's permissions could invalidate their session on the next page load and bounce them to the login screen.
+- **The admin "send test notification" button works with a display-name email address.** It failed on exactly the setups where real notifications worked.
+- **Bulk download-policy changes reach the right Jellyfin server**, and the admin Activity page no longer mixes up items with the same id on different servers.
+- Several smaller hardening fixes: the machine-session IP allowlist is enforced on every endpoint, malformed request bodies are rejected rather than causing an error, and a stale role could previously let the last admin remove their own account.
 
 ### v0.19.0
 
@@ -356,7 +381,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.19.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.20.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
