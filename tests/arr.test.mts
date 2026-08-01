@@ -158,6 +158,36 @@ test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId a
   assert.match(body, /return false;/, "disagreeing ids must return false (skip the flip), not null/true");
 });
 
+test("the Sonarr download check holds EVERY id to a positive-integer contract, upstream ones included", () => {
+  // Same source-pinning idiom as the test above, for the same reason (DB + network
+  // I/O in the function).
+  //
+  // Both payload ids are guarded, but the value Sonarr's own lookup returns used
+  // not to be — and it is not merely logged, it can BECOME `tvdbId` and then be
+  // compared with `===` against the library rows. A non-integer from a malformed
+  // or hostile upstream would make that comparison silently never match, so the
+  // function would answer "not downloaded" for a series Sonarr actually holds,
+  // instead of the honest `null` its tri-state contract reserves for unverifiable.
+  //
+  // The Number() wrappers on the warn() are the log-injection half: the webhook is
+  // secret-only authed with no schema, so an id arriving as a string could carry a
+  // newline and forge a second "[arr] …" line in the log. They are no-ops at
+  // runtime — the point is that the guarantee is visible AT the call site rather
+  // than several lines up, where neither a reader nor a scanner will look.
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  const fn = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
+  const body = fn.slice(0, fn.indexOf("\n}\n"));
+
+  const guards = body.match(/Number\.isInteger\(/g) ?? [];
+  assert.equal(guards.length, 3, "expected all three ids (tvdbId, tmdbId, and the resolved lookup) to be integer-guarded");
+  assert.match(body, /Number\.isInteger\(rawResolved\)/, "the upstream lookup result must be validated before use");
+  assert.match(
+    body,
+    /Number\(tvdbId\), Number\(claimedTmdbId\), Number\(resolved\)/,
+    "the warn() ids must be numerically coerced at the call site",
+  );
+});
+
 test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFetch", () => {
   // The constants are module-private and arrFetch does real network I/O, so a
   // runtime assertion isn't possible here. Pin the source text instead: this
