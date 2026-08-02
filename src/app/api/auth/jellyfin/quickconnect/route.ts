@@ -35,6 +35,18 @@ export const maxDuration = 30;
 // In-memory per-secret poll limiter; caps attempts per QuickConnect session without a DB round-trip
 interface PollEntry { count: number; expiresAt: number; }
 const pollCounts = new Map<string, PollEntry>();
+// Hard ceiling on the poll-count map. Entries are keyed on the CALLER-SUPPLIED secret
+// and this endpoint is unauthenticated, so an attacker polling with distinct secrets
+// inserted an entry per request. Nothing evicted them: an entry is only dropped when
+// that same key is polled again, so the map grew without bound for the life of the
+// process. Sweeping expired entries first keeps the ceiling from rejecting real
+// sessions — a genuine QuickConnect flow holds at most a handful of live keys.
+const MAX_POLL_KEYS = 10_000;
+function sweepExpiredPollCounts(now: number): void {
+  for (const [k, v] of pollCounts) {
+    if (v.expiresAt < now) pollCounts.delete(k);
+  }
+}
 const MAX_POLLS = 60;
 const QC_TTL = 15 * 60 * 1000;
 
@@ -131,6 +143,14 @@ export async function GET(req: NextRequest) {
   if (attempts > MAX_POLLS) {
     pollCounts.delete(countKey);
     return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
+  }
+  if (!existing && pollCounts.size >= MAX_POLL_KEYS) {
+    sweepExpiredPollCounts(now);
+    if (pollCounts.size >= MAX_POLL_KEYS) {
+      // Shed load rather than grow unbounded. 503 (not 410) so a legitimate client
+      // retries instead of treating its session as dead.
+      return NextResponse.json({ error: "QuickConnect is busy — try again shortly" }, { status: 503 });
+    }
   }
   pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
 

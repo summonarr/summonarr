@@ -30,7 +30,13 @@ export async function GET(request: NextRequest) {
   // forbids) or widening the shared api-auth signature (out of scope). Impact is
   // nil — this binary image proxy carries no Set-Cookie, and the next normal
   // withAuth request re-runs the sliding refresh, so the window is never lost.
-  const gate = await requireAuth({ role: "ISSUE_ADMIN" });
+  // Authenticate only — the MANAGE_ISSUES bitmask check below is the authorization.
+  // Requiring role ISSUE_ADMIN here 403'd a plain USER who had been GRANTED the bit,
+  // which guardrail 6a explicitly supports and the proxy's /api/admin backstop
+  // deliberately admits (it 403s only a caller with no admin-surface bit at all). Every
+  // sibling fix-match route gates on the bitmask via withIssueAdmin, so that user could
+  // open the fix-match picker and load candidates while every thumbnail returned 403.
+  const gate = await requireAuth();
   if (gate instanceof NextResponse) return gate;
   // Authoritative on the MANAGE_ISSUES bit (same gate as the sibling fix-match
   // routes' withIssueAdmin), so clearing the bit revokes thumbnail access too.

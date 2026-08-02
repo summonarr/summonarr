@@ -123,9 +123,21 @@ async function plexFetchAllPages<T>(
   token: string,
   processItems: (items: T[]) => void,
 ): Promise<void> {
+  // Hard ceiling on the walk. `total` comes from the SERVER's reported totalSize, so a
+  // hostile or buggy Plex answer that keeps reporting more (or always returns a full
+  // page) span this loop forever, streaming unbounded rows into the caller's accumulator.
+  // The URL is an admin Setting, which makes the host trusted-ish but not infallible.
+  // 2M items is far beyond any real library and still bounds memory and wall-clock.
+  const MAX_ITEMS = 2_000_000;
+  const MAX_PAGES = Math.ceil(MAX_ITEMS / PLEX_PAGE_SIZE);
+  let pages = 0;
   let start = 0;
   let total = Infinity;
   while (start < total) {
+    if (++pages > MAX_PAGES) {
+      console.warn(`[plex] paginated fetch hit the ${MAX_ITEMS}-item ceiling at start=${start}; truncating.`);
+      break;
+    }
     const sep = baseUrl.includes("?") ? "&" : "?";
     const res = await plexFetch(
       `${baseUrl}${sep}X-Plex-Container-Start=${start}&X-Plex-Container-Size=${PLEX_PAGE_SIZE}`,

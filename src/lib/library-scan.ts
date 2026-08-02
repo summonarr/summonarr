@@ -91,20 +91,35 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   const entry = pending.get(mediaType);
   if (!entry) return;
 
+  // An UNREADABLE queue is already modelled — both helpers return null and the branches
+  // below defer + retry rather than scan prematurely. A THROW was not: arrFetch raises on
+  // a timeout, a non-2xx, or an unreachable host, and that escaped runScan entirely.
+  // `pending` is cleared only further down (after the scan is registered in-flight), so
+  // the entry survived forever and every later scheduleLibraryScan short-circuited on
+  // it — scans for that media type never ran again until a restart. Fold a throw into
+  // the same "can't read it, assume pending" answer.
   let stillInQueue: boolean;
-  if (entry.tmdbId !== undefined) {
-    const downloading = mediaType === "movie"
-      ? await isMovieDownloadingInRadarr(entry.tmdbId, entry.variant)
-      : await isSeriesDownloadingInSonarr(entry.tmdbId, entry.variant);
-    // null = queue unreadable → treat as "still pending" so we defer + retry
-    // rather than scan prematurely against a download that may be in flight.
-    stillInQueue = downloading !== false;
-  } else {
-    const count = mediaType === "movie"
-      ? await countRadarrQueue(entry.variant)
-      : await countSonarrQueue(entry.variant);
-    // null = couldn't read the queue → defer rather than scan prematurely.
-    stillInQueue = count === null || count > 0;
+  try {
+    if (entry.tmdbId !== undefined) {
+      const downloading = mediaType === "movie"
+        ? await isMovieDownloadingInRadarr(entry.tmdbId, entry.variant)
+        : await isSeriesDownloadingInSonarr(entry.tmdbId, entry.variant);
+      // null = queue unreadable → treat as "still pending" so we defer + retry
+      // rather than scan prematurely against a download that may be in flight.
+      stillInQueue = downloading !== false;
+    } else {
+      const count = mediaType === "movie"
+        ? await countRadarrQueue(entry.variant)
+        : await countSonarrQueue(entry.variant);
+      // null = couldn't read the queue → defer rather than scan prematurely.
+      stillInQueue = count === null || count > 0;
+    }
+  } catch (err) {
+    console.warn(
+      `[library-scan] ${sanitizeForLog(mediaType)} arr queue check failed, treating as pending:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    stillInQueue = true;
   }
 
   if (stillInQueue) {

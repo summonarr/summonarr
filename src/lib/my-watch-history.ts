@@ -136,12 +136,22 @@ export async function resolveLinkedMediaServerUserIds(summonarrUserId: string): 
     where: { id: summonarrUserId },
     select: { plexUserId: true, jellyfinUserId: true },
   });
+  // The FK branch is unconditional — a MANUAL LINK an admin pinned to this user must
+  // still be honored, which is the whole point of pinning.
+  //
+  // The provider-subject branches, however, are AUTOMATIC resolution, and guardrail 34
+  // requires those to skip a pinned row entirely. An admin's manual UNLINK clears
+  // `userId` and sets `manualUserLink`, so the FK branch correctly stopped matching —
+  // but the subject branches matched the very same row on plexUserId/jellyfinUserId
+  // and handed the history straight back, so the detach did nothing the user could
+  // see. The same slip re-surfaced a row an admin had deliberately re-assigned to a
+  // DIFFERENT account.
   const identityOr: Prisma.MediaServerUserWhereInput[] = [{ userId: summonarrUserId }];
   if (me?.plexUserId) {
-    identityOr.push({ source: "plex", sourceUserId: me.plexUserId });
+    identityOr.push({ source: "plex", sourceUserId: me.plexUserId, manualUserLink: false });
   }
   if (me?.jellyfinUserId) {
-    identityOr.push({ source: "jellyfin", sourceUserId: me.jellyfinUserId });
+    identityOr.push({ source: "jellyfin", sourceUserId: me.jellyfinUserId, manualUserLink: false });
   }
   const linked = await prisma.mediaServerUser.findMany({
     where: { OR: identityOr },
@@ -368,6 +378,7 @@ const ANCHOR_SELECT = {
   episodeNumber: true,
   episodeTitle: true,
   sourceItemId: true,
+  serverInstance: true,
   platform: true,
   player: true,
   device: true,
@@ -407,7 +418,17 @@ export async function getMyWatchHistoryEntry(
       episodeNumber: anchor.episodeNumber,
     };
   } else if (anchor.sourceItemId != null) {
-    groupWhere = { tmdbId: null, source: anchor.source, sourceItemId: anchor.sourceItemId };
+    // serverInstance is part of the identity, matching the list query's consolidation
+    // key. A sourceItemId is server-local — two Plex servers reuse the same small
+    // integer ratingKeys — so without it this detail view expands into a group the LIST
+    // never formed: two unrelated unmatched titles merged, with their plays interleaved
+    // and their totals summed, disagreeing with the row the user clicked.
+    groupWhere = {
+      tmdbId: null,
+      source: anchor.source,
+      serverInstance: anchor.serverInstance,
+      sourceItemId: anchor.sourceItemId,
+    };
   } else {
     groupWhere = { id: anchor.id };
   }

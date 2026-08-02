@@ -4,7 +4,7 @@ import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -25,7 +25,12 @@ function escapeIlike(s: string): string {
 export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, session) => {
   // The grouped path runs two heavy window-function/aggregate raw queries over
   // the full PlayHistory table per request; throttle per admin to bound abuse.
-  if (!checkRateLimit(`play-history:${session.user.id}:${getClientIp(request.headers)}`, 120, 60_000)) {
+  // Keyed on the session ALONE. getClientIp falls back to a hash of the User-Agent
+  // whenever TRUST_PROXY is not "true" (the default docker deployment), so folding it in
+  // let one admin session mint a fresh bucket per UA string and multiply its own
+  // allowance against these heavy window-function queries. A caller-controlled component
+  // can only ever widen a limit.
+  if (!checkRateLimit(`play-history:${session.user.id}`, 120, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again shortly" }, { status: 429 });
   }
 

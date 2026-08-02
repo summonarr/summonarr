@@ -66,6 +66,20 @@ export function peekRateLimit(key: string, limit: number, windowMs: number): boo
 // peek/record split). Same Map/window/LRU bookkeeping as checkRateLimit's
 // recording path, minus the over-limit short-circuit — callers gate with
 // peekRateLimit first. No-op when limit semantics are disabled at the callsite.
+// Removes the most recent hit for `key` — the "this attempt turned out to be
+// legitimate" half of an atomic reserve-then-refund. Exists because peek-then-record is
+// NOT atomic across concurrent requests: peekRateLimit is synchronous, but the password
+// verify between it and recordFailure is awaited, so N concurrent attempts all observe
+// an under-limit bucket and all proceed. Reserving with checkRateLimit (which checks and
+// pushes in one synchronous step) and refunding on success closes that window while
+// keeping the original intent — a SUCCESSFUL login must not consume the account bucket.
+export function refundHit(key: string): void {
+  const entry = windows.get(key);
+  if (!entry || entry.hits.length === 0) return;
+  entry.hits.pop();
+  if (entry.hits.length === 0) windows.delete(key);
+}
+
 export function recordFailure(key: string, windowMs: number): void {
   const now = Date.now();
   const cutoff = now - windowMs;

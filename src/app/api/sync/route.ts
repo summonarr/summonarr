@@ -1017,6 +1017,27 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // synced; skip the demote entirely while a configured source is down.
   const plexConfiguredEnabled = plexEnabled && plexInstances.length > 0;
   const jellyfinConfiguredEnabled = jellyfinEnabled && jellyfinInstances.length > 0;
+  // REGISTERED, not syncable. plexInstances/jellyfinInstances above are
+  // getSyncableMediaInstances — CONFIGURED servers only — so a registered server whose
+  // url/token an admin cleared silently drops out of this run's union while its
+  // PlexLibraryItem/JellyfinLibraryItem rows are deliberately preserved (guardrail 35).
+  // It never enters `fetched`, so it cannot make plexSyncSucceeded false either. A title
+  // living only on that server therefore read as absent and its requests were demoted
+  // AVAILABLE -> APPROVED, from data that simply was not consulted. One registry
+  // findUnique per service.
+  const [registeredPlex, registeredJellyfin] = await Promise.all([
+    getMediaInstances("plex"),
+    getMediaInstances("jellyfin"),
+  ]);
+  const plexUnionIncomplete = registeredPlex.length > plexInstances.length;
+  const jellyfinUnionIncomplete = registeredJellyfin.length > jellyfinInstances.length;
+  if (plexUnionIncomplete || jellyfinUnionIncomplete) {
+    console.warn(
+      `[sync] skipping AVAILABLE->APPROVED demotes: ${plexUnionIncomplete ? registeredPlex.length - plexInstances.length : 0} Plex and ` +
+      `${jellyfinUnionIncomplete ? registeredJellyfin.length - jellyfinInstances.length : 0} Jellyfin server(s) are registered but not configured, ` +
+      "so their preserved library rows are not in this run's union and absence cannot be proven.",
+    );
+  }
   const toRevert = available.filter((req) => {
     // Only consult the ARR cache when the integration is enabled AND this run refreshed
     // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
@@ -1031,6 +1052,9 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     // from a library we never reached this run.
     if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
     if (jellyfinConfiguredEnabled && !jellyfinSyncSucceeded) return false;
+    // Same "can't prove absence" rule, for a server that is registered but no longer
+    // configured: its rows survive and this run never looked at them.
+    if (plexUnionIncomplete || jellyfinUnionIncomplete) return false;
     const inArr = req.mediaType === "MOVIE"
       ? inRadarrSet.has(vkey(req.tmdbId, req.arrInstance))
       : inSonarrSet.has(vkey(req.tmdbId, req.arrInstance));

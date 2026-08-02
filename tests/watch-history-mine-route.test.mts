@@ -140,9 +140,14 @@ shadowPrismaModel(prisma, "mediaServerUser", {
     return msuRows
       .filter((r) =>
         args.where.OR.some((branch) =>
-          Object.entries(branch).every(
-            ([key, value]) => (r as unknown as Record<string, unknown>)[key] === value,
-          ),
+          Object.entries(branch).every(([key, value]) => {
+            const actual = (r as unknown as Record<string, unknown>)[key];
+            // manualUserLink is @default(false) in the schema and these fixtures omit
+            // it, so model the default — otherwise `undefined !== false` drops every
+            // row the subject branches should match.
+            if (key === "manualUserLink") return (actual ?? false) === value;
+            return actual === value;
+          }),
         ),
       )
       .map((r) => ({ id: r.id }));

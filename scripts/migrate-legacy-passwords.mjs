@@ -7,7 +7,8 @@
 // scrypt cutover landed in commit 62f0a62.
 //
 // Default mode reports the count and lists affected users. `--nullify` clears
-// the column for those users, which forces them through the password-reset
+// the column for those users. Recovery is scripts/reset-password.mjs, run by an
+// operator with DB access — NOT a self-service password-reset
 // flow on next login. Once this script reports zero rows (or you have run
 // --nullify), the bcrypt verify branch in src/lib/password-hash.ts and the
 // bcryptjs npm dep are safe to delete.
@@ -85,7 +86,8 @@ async function main() {
       console.log("  1. Have each listed user sign in once — the credentials provider");
       console.log("     will auto-rehash their password to scrypt.");
       console.log("  2. Re-run with --nullify to clear passwordHash for these rows;");
-      console.log("     affected users must then reset their password to sign in.");
+      console.log("     affected users CANNOT sign in until an operator runs");
+      console.log("     scripts/reset-password.mjs for each of them — there is no in-app reset.");
       console.log("");
       console.log("Do NOT remove the bcryptjs dependency while this list is non-empty.");
       process.exitCode = 1;
@@ -103,7 +105,7 @@ async function main() {
     );
     console.log("");
     console.log(`Nullified ${update.rowCount} legacy passwordHash row(s).`);
-    console.log("Affected users must use the password-reset flow on next sign-in.");
+    console.log("Affected users cannot sign in until you run scripts/reset-password.mjs for each. There is no self-service reset in the app: credentials sign-in rejects a NULL hash, and /api/profile/password refuses to set one (it reads NULL as an SSO account). Run it for at least one ADMIN before signing out.");
   } finally {
     await client.end();
   }

@@ -189,8 +189,12 @@ export default async function ActivityPage({
       ...fpJoin.params,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+      // `watched = true` is NOT optional: the "Plays per day" chart this label sits on
+      // is built from getPlayHistoryStats' wwhere, which filters watched plays. Counting
+      // every row here meant the stated busiest day could be a day the chart shows as a
+      // trough — a day of many abandoned starts outranking a day of real viewing.
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}
+       FROM "PlayHistory" WHERE "startedAt" >= $1 AND "watched" = true${fp.sql}
        GROUP BY day ORDER BY count DESC LIMIT 1`,
       ...fp.params,
     ),
@@ -323,8 +327,15 @@ export default async function ActivityPage({
 
   const effectiveSessions = activeSessions.map((s: typeof activeSessions[0]) => {
     if (s.tmdbId != null) return { ...s, effectiveTmdbId: s.tmdbId, effectiveMediaType: s.mediaType };
+    // The `item:` key is serverInstance-scoped — a sourceItemId is server-local, so two
+    // servers reuse the same ids. EVERY write above uses `item:<instance>:<id>`; reading
+    // a bare `item:<id>` here matched nothing at all, so every session that the lookup
+    // chain had correctly resolved fell through to the title fallback on the next line.
+    // That is worse than the collision it replaced: the title fallback matches across
+    // media types, and its answer is then PERSISTED to ActiveSession by the backfill
+    // below — so a wrong id became durable.
     const resolved =
-      (s.sourceItemId ? resolvedTmdb[`item:${s.sourceItemId}`] : undefined)
+      (s.sourceItemId ? resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`] : undefined)
       ?? resolvedTmdb[`title:${s.title}`];
     return {
       ...s,

@@ -8,6 +8,7 @@ import {
   checkRateLimit,
   peekRateLimit,
   recordFailure,
+  refundHit,
   getClientIp,
 } from "../src/lib/rate-limit.ts";
 
@@ -254,4 +255,50 @@ test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", (
   }
   // Evicted => fresh bucket; without eviction this would still be false.
   assert.equal(checkRateLimit(victim, 1, windowMs), true);
+});
+
+// ── reserve-then-refund (the login gate) ───────────────────────────────────
+
+test("concurrent attempts cannot all pass the gate — reserving is atomic where peeking was not", () => {
+  // peekRateLimit is synchronous, but the password verify between it and
+  // recordFailure is AWAITED, so N concurrent sign-in attempts every one observed an
+  // under-limit bucket and every one got a real password verification regardless of
+  // the limit. This simulates that interleaving: gate all attempts BEFORE any of them
+  // reports its outcome.
+  const key = `atomic-${Math.round(performance.now() * 1000)}`;
+  const LIMIT = 3;
+
+  const peeked = Array.from({ length: 10 }, () => peekRateLimit(key, LIMIT, 60_000));
+  assert.equal(peeked.filter(Boolean).length, 10, "peek lets every concurrent attempt through — the bug");
+
+  const reserved = Array.from({ length: 10 }, () => checkRateLimit(key, LIMIT, 60_000));
+  assert.equal(reserved.filter(Boolean).length, LIMIT, "reserving admits exactly the limit, whatever the interleaving");
+});
+
+test("refundHit gives a reserved slot back so a successful sign-in does not consume the bucket", () => {
+  // The property the peek/record split existed for: the account bucket counts real
+  // FAILED verifications, not successful ones. Reserving would break that without a
+  // refund on the success path.
+  const key = `refund-${Math.round(performance.now() * 1000)}`;
+  const LIMIT = 2;
+
+  for (let i = 0; i < 50; i++) {
+    assert.ok(checkRateLimit(key, LIMIT, 60_000), `a successful sign-in must never exhaust the bucket (iteration ${i})`);
+    refundHit(key); // success path
+  }
+
+  // A genuine failure keeps its reservation, and the limit still bites.
+  assert.ok(checkRateLimit(key, LIMIT, 60_000));
+  assert.ok(checkRateLimit(key, LIMIT, 60_000));
+  assert.equal(checkRateLimit(key, LIMIT, 60_000), false, "two failures must still exhaust a limit of 2");
+});
+
+test("refundHit on an unknown or empty key is a no-op, never a negative count", () => {
+  assert.doesNotThrow(() => refundHit("never-seen-key"));
+  const key = `empty-${Math.round(performance.now() * 1000)}`;
+  assert.ok(checkRateLimit(key, 1, 60_000));
+  refundHit(key);
+  refundHit(key); // extra refund must not create headroom beyond a fresh bucket
+  assert.ok(checkRateLimit(key, 1, 60_000));
+  assert.equal(checkRateLimit(key, 1, 60_000), false);
 });
