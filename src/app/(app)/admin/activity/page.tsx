@@ -323,8 +323,15 @@ export default async function ActivityPage({
 
   const effectiveSessions = activeSessions.map((s: typeof activeSessions[0]) => {
     if (s.tmdbId != null) return { ...s, effectiveTmdbId: s.tmdbId, effectiveMediaType: s.mediaType };
+    // The `item:` key is serverInstance-scoped — a sourceItemId is server-local, so two
+    // servers reuse the same ids. EVERY write above uses `item:<instance>:<id>`; reading
+    // a bare `item:<id>` here matched nothing at all, so every session that the lookup
+    // chain had correctly resolved fell through to the title fallback on the next line.
+    // That is worse than the collision it replaced: the title fallback matches across
+    // media types, and its answer is then PERSISTED to ActiveSession by the backfill
+    // below — so a wrong id became durable.
     const resolved =
-      (s.sourceItemId ? resolvedTmdb[`item:${s.sourceItemId}`] : undefined)
+      (s.sourceItemId ? resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`] : undefined)
       ?? resolvedTmdb[`title:${s.title}`];
     return {
       ...s,
