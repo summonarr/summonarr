@@ -1801,9 +1801,15 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const arcRateParams = [...arcHistogramParams, completionPct / 100];
   const arcGapIdx = params.length + 1;
   const completionIdx = params.length + 2;
+  // Identity for the arc partition. tmdbId and mediaType are BOTH NULL on an unmatched
+  // play, and SQL PARTITION BY treats NULLs as equal — so every unmatched play by a user
+  // collapsed into ONE arc spanning unrelated titles, and the completion rate was
+  // computed across them. Fall back to the title, matching how the sibling topMedia
+  // query identifies an unmatched item.
   const arcCte = `WITH base AS (
        SELECT "mediaServerUserId", "tmdbId", "mediaType",
               "seasonNumber", "episodeNumber",
+              COALESCE("tmdbId"::text, 'title:' || LOWER(COALESCE("title", ''))) AS arc_key,
               "startedAt", "playDuration", "duration", "completed"
        FROM "PlayHistory" WHERE ${where}
      ),
@@ -1817,7 +1823,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
          END AS arc_start
        FROM base
        WINDOW w AS (
-         PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+         PARTITION BY "mediaServerUserId", arc_key, "mediaType",
                       COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
          ORDER BY "startedAt"
        )
@@ -1825,7 +1831,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
      arc_ids AS (
        SELECT *,
          SUM(arc_start) OVER (
-           PARTITION BY "mediaServerUserId", "tmdbId", "mediaType",
+           PARTITION BY "mediaServerUserId", arc_key, "mediaType",
                         COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
            ORDER BY "startedAt"
            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
