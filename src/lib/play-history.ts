@@ -1972,21 +1972,37 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
       ...arcHistogramParams,
     ),
 
+    // PlayHistory.bitrate is kbps (see schema.prisma), but some sources report bps, so
+    // an implausibly large value is rescaled. The cutoff is 1_000_000, NOT 100_000:
+    // 100_000 kbps is 100 Mbps, which is INSIDE the legitimate range — UHD Blu-ray
+    // remuxes run 80-128 Mbps — so a genuine 4K session was divided by 1000 and
+    // reported at a thousandth of its real bitrate (128000 kbps showed as 0.128 Mbps),
+    // erasing the heaviest sessions from the very stat meant to surface them.
+    // 1_000_000 kbps would be 1 Tbps, so anything above it is certainly bps. The
+    // remaining gap — a bps-reported stream under 1 Mbps — is rare for video and
+    // contributes little bandwidth, so this trades a common high-impact error for a
+    // rare low-impact one.
+    //
+    // Byte conversion is DECIMAL throughout (/1000/1000), matching the kbps input and
+    // the avg_mbps figure beside it. It previously divided by 1024 twice, mixing a
+    // decimal-k numerator with binary denominators: the result was 2.4% above true GiB
+    // and 4.6% below true GB — neither convention, and inconsistent with the Mbps
+    // number on the same panel.
     prisma.$queryRawUnsafe<{ avg_mbps: number | null; total_gb: number | null }[]>(
-      `SELECT AVG(CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END / 1000.0)::float8 AS avg_mbps,
+      `SELECT AVG(CASE WHEN "bitrate" > 1000000 THEN "bitrate" / 1000.0 ELSE "bitrate" END / 1000.0)::float8 AS avg_mbps,
               (SUM(
-                (CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)::float8
+                (CASE WHEN "bitrate" > 1000000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)::float8
                 * "playDuration"::float8
-              ) / 8.0 / 1024.0 / 1024.0)::float8 AS total_gb
+              ) / 8.0 / 1000.0 / 1000.0)::float8 AS total_gb
        FROM "PlayHistory" WHERE ${where} AND "bitrate" IS NOT NULL AND "bitrate" > 0`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ day: string; gb: number }[]>(
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day,
               (SUM(
-                (CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)::float8
+                (CASE WHEN "bitrate" > 1000000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)::float8
                 * "playDuration"::float8
-              ) / 8.0 / 1024.0 / 1024.0)::float8 AS gb
+              ) / 8.0 / 1000.0 / 1000.0)::float8 AS gb
        FROM "PlayHistory"
        WHERE ${where} AND "bitrate" IS NOT NULL AND "bitrate" > 0
        GROUP BY day ORDER BY day`,
@@ -2053,11 +2069,11 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prisma.$queryRawUnsafe<{ bucket: string; count: bigint }[]>(
       `SELECT CASE
          WHEN "bitrate" IS NULL OR "bitrate" <= 0 THEN 'Unknown'
-         WHEN (CASE WHEN "bitrate" > 100000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 2 THEN '<2 Mbps'
-         WHEN (CASE WHEN "bitrate" > 100000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 5 THEN '2-5 Mbps'
-         WHEN (CASE WHEN "bitrate" > 100000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 10 THEN '5-10 Mbps'
-         WHEN (CASE WHEN "bitrate" > 100000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 20 THEN '10-20 Mbps'
-         WHEN (CASE WHEN "bitrate" > 100000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 50 THEN '20-50 Mbps'
+         WHEN (CASE WHEN "bitrate" > 1000000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 2 THEN '<2 Mbps'
+         WHEN (CASE WHEN "bitrate" > 1000000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 5 THEN '2-5 Mbps'
+         WHEN (CASE WHEN "bitrate" > 1000000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 10 THEN '5-10 Mbps'
+         WHEN (CASE WHEN "bitrate" > 1000000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 20 THEN '10-20 Mbps'
+         WHEN (CASE WHEN "bitrate" > 1000000 THEN "bitrate"/1000000.0 ELSE "bitrate"/1000.0 END) < 50 THEN '20-50 Mbps'
          ELSE '50+ Mbps'
        END AS bucket, COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where}
@@ -2329,7 +2345,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
   // bitrate is normalized like the rest of the stats layer: Jellyfin reports bps
   // (>100000), Plex kbps — divide the former by 1000 to get kbps before the
   // Mbps / GB math (mirrors the total_gb query in getPlayHistoryStatsUncached).
-  const normBitrate = `(CASE WHEN "bitrate" > 100000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)`;
+  const normBitrate = `(CASE WHEN "bitrate" > 1000000 THEN "bitrate" / 1000.0 ELSE "bitrate" END)`;
 
   const [agg, reasons, resolutions, titles, topUserRows] = await Promise.all([
     prisma.$queryRawUnsafe<
@@ -2372,7 +2388,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
          COUNT(*) FILTER (WHERE "location" = 'wan')::bigint AS net_wan,
          COUNT(*) FILTER (WHERE "location" = 'relay' OR "relayed" = true)::bigint AS net_relay,
          (AVG(${normBitrate} / 1000.0) FILTER (WHERE "bitrate" > 0))::float8 AS avg_mbps,
-         (COALESCE(SUM((${normBitrate})::float8 * "playDuration"::float8) FILTER (WHERE "bitrate" > 0), 0) / 8.0 / 1024.0 / 1024.0)::float8 AS total_gb
+         (COALESCE(SUM((${normBitrate})::float8 * "playDuration"::float8) FILTER (WHERE "bitrate" > 0), 0) / 8.0 / 1000.0 / 1000.0)::float8 AS total_gb
        FROM "PlayHistory" WHERE ${where}`,
       ...params,
     ),
