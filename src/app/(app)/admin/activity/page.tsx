@@ -189,8 +189,12 @@ export default async function ActivityPage({
       ...fpJoin.params,
     ),
     prisma.$queryRawUnsafe<{ day: string; count: bigint }[]>(
+      // `watched = true` is NOT optional: the "Plays per day" chart this label sits on
+      // is built from getPlayHistoryStats' wwhere, which filters watched plays. Counting
+      // every row here meant the stated busiest day could be a day the chart shows as a
+      // trough — a day of many abandoned starts outranking a day of real viewing.
       `SELECT to_char(date_trunc('day', "startedAt"), 'YYYY-MM-DD') AS day, COUNT(*)::bigint AS count
-       FROM "PlayHistory" WHERE "startedAt" >= $1${fp.sql}
+       FROM "PlayHistory" WHERE "startedAt" >= $1 AND "watched" = true${fp.sql}
        GROUP BY day ORDER BY count DESC LIMIT 1`,
       ...fp.params,
     ),
