@@ -73,7 +73,7 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 
 // ── in-memory state ──────────────────────────────────────────────────────────
 type DbUser = { id: string; plexUserId: string | null; jellyfinUserId: string | null };
-type DbMsu = { id: string; source: string; sourceUserId: string; userId: string | null; active: boolean };
+type DbMsu = { id: string; source: string; sourceUserId: string; userId: string | null; active: boolean; manualUserLink?: boolean };
 type DbPlay = {
   id: string;
   mediaServerUserId: string;
@@ -184,7 +184,12 @@ shadowPrismaModel(prisma, "mediaServerUser", {
       .filter((m) =>
         or.some((clause) => {
           if ("userId" in clause) return m.userId === clause.userId;
-          return m.source === clause.source && m.sourceUserId === clause.sourceUserId;
+          if (m.source !== clause.source || m.sourceUserId !== clause.sourceUserId) return false;
+          // The real query narrows the SUBJECT branches on manualUserLink (the FK
+          // branch above is deliberately unnarrowed), so the stub has to model it or
+          // an admin's manual pin is invisible to these tests.
+          if ("manualUserLink" in clause) return (m.manualUserLink ?? false) === clause.manualUserLink;
+          return true;
         }),
       )
       .map((m) => ({ id: m.id }));
@@ -702,4 +707,41 @@ test("Wrapped's aggregates fan out once a year is settled", async () => {
   years = [2026];
   await getMyWrapped("u-local");
   assert.ok(opsOf("$queryRawUnsafe").length > 1);
+});
+
+// ── guardrail 34: an admin's manual pin wins over subject matching ──────────
+
+test("a manually UNLINKED row stays hidden — the provider-subject match must not hand it back", async () => {
+  // An admin unlink clears userId AND sets manualUserLink, so the FK branch correctly
+  // stops matching. The subject branches matched the SAME row on plexUserId and handed
+  // it straight back, so the detach changed nothing the user could see — history an
+  // admin deliberately took away was still on their page.
+  serverUsers = [
+    { id: "msu-unlinked", source: "plex", sourceUserId: "plex-777", userId: null, active: true, manualUserLink: true },
+  ];
+  assert.deepEqual(await resolveLinkedMediaServerUserIds("u-plex"), []);
+});
+
+test("a manual LINK to this user is still honored — the FK branch is deliberately unnarrowed", async () => {
+  // The counterpart: pinning must not become "pinned rows are invisible". An admin who
+  // binds a server identity to an account by hand expects exactly that history to show.
+  serverUsers = [
+    { id: "msu-pinned", source: "plex", sourceUserId: "plex-000", userId: "u-plex", active: true, manualUserLink: true },
+  ];
+  assert.deepEqual(await resolveLinkedMediaServerUserIds("u-plex"), ["msu-pinned"]);
+});
+
+test("a row an admin pinned to a DIFFERENT account does not leak through subject matching", async () => {
+  serverUsers = [
+    { id: "msu-theirs", source: "plex", sourceUserId: "plex-777", userId: "u-local", active: true, manualUserLink: true },
+  ];
+  assert.deepEqual(await resolveLinkedMediaServerUserIds("u-plex"), [], "a reassigned identity belongs to the other account");
+});
+
+test("an ordinary unpinned row still resolves by provider subject", async () => {
+  // Guards against the fix silently disabling subject matching altogether.
+  serverUsers = [
+    { id: "msu-auto", source: "plex", sourceUserId: "plex-777", userId: null, active: true },
+  ];
+  assert.deepEqual(await resolveLinkedMediaServerUserIds("u-plex"), ["msu-auto"]);
 });
