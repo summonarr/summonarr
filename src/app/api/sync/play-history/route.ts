@@ -31,6 +31,7 @@ import {
   markPlexSessionFinalized,
   pruneRecentlyFinalized,
   reconcilePlexEventStream,
+  stopAllPlexEventStreams,
   setPlexReachable,
 } from "@/lib/plex-events";
 
@@ -819,6 +820,12 @@ async function syncPlayHistory(request: NextRequest) {
   }
 
   if (!(await isPlayHistoryEnabled())) {
+    // Tear the SSE streams down rather than just declining to poll. This early return is
+    // BEFORE the reconcile below, so a stream opened while tracking was on stayed open
+    // and kept writing PlayHistory + ActiveSession rows from Plex timeline events — the
+    // admin turned tracking off and history kept accruing. Idempotent; the next enabled
+    // tick re-creates the managers via the normal reconcile.
+    stopAllPlexEventStreams();
     return NextResponse.json({ message: "Play history tracking is disabled" });
   }
 

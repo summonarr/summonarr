@@ -1,4 +1,5 @@
 import "server-only";
+import { settleLimit } from "./concurrency";
 import { prisma } from "./prisma";
 import { notifyUserRequestApproved, notifyUserRequestAvailable, notifyUserRequestDeclined, notifyUsersRequestsAvailable } from "./discord-notify";
 import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUsersRequestsAvailablePush } from "./push";
@@ -185,20 +186,32 @@ export async function notifyUsersRequestsAvailableEmail(
     return [];
   });
   const prefByUserId = new Map(userPrefs.map((u) => [u.id, u]));
-  for (const w of winners) {
+  // BOUNDED (guardrail 31), and awaited. Each send opens its own SMTP connection, and
+  // firing the whole winner set at once blew past the per-client concurrent-connection
+  // cap every real relay enforces (Office 365 allows 3, Gmail ~10) — so a backlog pass,
+  // which is exactly when this fans out widest, had most of its mail rejected. The
+  // "now available" claim is a once-only CAS that has ALREADY been burned by the time
+  // this runs, so a dropped send is never retried: that mail is simply lost.
+  const recipients = winners.flatMap((w) => {
     const u = prefByUserId.get(w.requestedBy);
-    if (!u || !u.emailOnAvailable) continue;
+    if (!u || !u.emailOnAvailable) return [];
     const to = resolveUserNotificationEmail(u);
-    if (!to) continue;
-    notifyUserRequestAvailableEmail({
+    return to ? [{ w, to }] : [];
+  });
+  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ w, to }) => {
+    await notifyUserRequestAvailableEmail({
       toEmail: to,
       title: w.title,
       mediaType: w.mediaType,
       posterPath: w.posterPath ?? null,
       tmdbId: w.tmdbId ?? undefined,
     }).catch((err) => console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err));
-  }
+  });
 }
+
+// SMTP connections are the scarce resource, not CPU: every real relay caps concurrent
+// connections per client (Office 365 allows 3, Gmail ~10). Stay under the tightest.
+const EMAIL_SEND_CONCURRENCY = 3;
 
 // Poll for up to 12 minutes (24 × 30 s) before giving up — covers slow Plex/Jellyfin scan propagation after a webhook
 const ITEM_POLL_INTERVAL_MS = 30_000;

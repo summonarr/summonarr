@@ -849,6 +849,20 @@ async function reconcileManagerMap(): Promise<void> {
 // starts/stops/restarts SSE connections as needed. Cheap to call repeatedly —
 // the sync route invokes this every 5s so settings edits via the admin UI
 // propagate within one tick.
+// Stop every Plex SSE stream and drop its manager. Called when play-history tracking is
+// turned OFF: the 5s poller returns early in that case and so never reaches
+// reconcilePlexEventStream, and reconcileManagerMap tears down only managers whose slug
+// left the REGISTRY — neither path consults the enabled flag. An already-open stream
+// therefore kept receiving Plex timeline events and writing PlayHistory + ActiveSession
+// rows after an admin had explicitly disabled tracking. Idempotent: a no-op once empty,
+// and the next enabled poll re-creates the managers through the normal reconcile.
+export function stopAllPlexEventStreams(): void {
+  for (const [slug, mgr] of managers) {
+    mgr.stop();
+    managers.delete(slug);
+  }
+}
+
 export async function reconcilePlexEventStream(): Promise<void> {
   if (mapReconciling) {
     mapReconcilePending = true;
