@@ -153,6 +153,7 @@ function matches(row: DbPlay, where: Record<string, unknown> | undefined): boole
     if (
       k === "id" || k === "tmdbId" || k === "mediaType" || k === "seasonNumber" ||
       k === "episodeNumber" || k === "source" || k === "sourceItemId" ||
+      k === "serverInstance" ||
       k === "watched" || k === "completed"
     ) {
       if ((row as unknown as Record<string, unknown>)[k] !== v) return false;
@@ -744,4 +745,30 @@ test("an ordinary unpinned row still resolves by provider subject", async () => 
     { id: "msu-auto", source: "plex", sourceUserId: "plex-777", userId: null, active: true },
   ];
   assert.deepEqual(await resolveLinkedMediaServerUserIds("u-plex"), ["msu-auto"]);
+});
+
+// ── detail view must group the way the list consolidates ───────────────────
+
+test("the detail group is serverInstance-scoped — two servers' identical ratingKeys stay separate", async () => {
+  // A sourceItemId is server-local: two Plex servers reuse the same small integer
+  // ratingKeys, which is exactly why the LIST query's consolidation key carries
+  // serverInstance. Without it here, expanding a row built a group the list never
+  // formed — two unrelated unmatched titles merged, plays interleaved and totals
+  // summed, disagreeing with the row the user actually clicked.
+  serverUsers = [
+    { id: "msu-a", source: "plex", sourceUserId: "plex-777", userId: "u-plex", active: true },
+  ];
+  plays = [
+    play({ id: "p-default", mediaServerUserId: "msu-a", sourceItemId: "12345", title: "Home Video A" }),
+    play({ id: "p-remote", mediaServerUserId: "msu-a", sourceItemId: "12345", title: "Home Video B" }),
+  ];
+  (plays[1] as unknown as Record<string, unknown>).serverInstance = "remote";
+
+  const entry = await getMyWatchHistoryEntry("u-plex", "p-default");
+  assert.ok(entry, "the anchor row must resolve");
+  assert.deepEqual(
+    entry.plays.map((p: { id: string }) => p.id),
+    ["p-default"],
+    "the other server's identically-keyed row must not join this group",
+  );
 });

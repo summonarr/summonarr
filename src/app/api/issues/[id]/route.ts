@@ -167,8 +167,13 @@ export const PATCH = withIssueAdmin(async (
       .then((u) => !!u && u.deactivatedAt == null)
       .catch(() => false);
 
+    // An issue admin resolving their OWN reported issue must not be notified about it —
+    // on a single-admin self-hosted instance that is the common case. The inbox row
+    // below already honoured this; Discord and push did not, so the admin got pinged by
+    // their own action on every resolve.
+    const selfAction = issue.reportedBy === session.user.id;
     void reporterActive.then((active) => {
-      if (!active) return;
+      if (!active || selfAction) return;
       notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution).catch(() => {});
       notifyUserIssueResolvedPush({
         userId: issue.reportedBy,
@@ -181,7 +186,7 @@ export const PATCH = withIssueAdmin(async (
     // An issue admin resolving their OWN reported issue shouldn't get a
     // self-notification inbox row ("Your reported issue was resolved"). Mirrors the
     // selfAction guard the request routes use.
-    if (issue.reportedBy !== session.user.id) {
+    if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_RESOLVED",
         title: issue.title,

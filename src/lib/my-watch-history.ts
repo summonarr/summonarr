@@ -378,6 +378,7 @@ const ANCHOR_SELECT = {
   episodeNumber: true,
   episodeTitle: true,
   sourceItemId: true,
+  serverInstance: true,
   platform: true,
   player: true,
   device: true,
@@ -417,7 +418,17 @@ export async function getMyWatchHistoryEntry(
       episodeNumber: anchor.episodeNumber,
     };
   } else if (anchor.sourceItemId != null) {
-    groupWhere = { tmdbId: null, source: anchor.source, sourceItemId: anchor.sourceItemId };
+    // serverInstance is part of the identity, matching the list query's consolidation
+    // key. A sourceItemId is server-local — two Plex servers reuse the same small
+    // integer ratingKeys — so without it this detail view expands into a group the LIST
+    // never formed: two unrelated unmatched titles merged, with their plays interleaved
+    // and their totals summed, disagreeing with the row the user clicked.
+    groupWhere = {
+      tmdbId: null,
+      source: anchor.source,
+      serverInstance: anchor.serverInstance,
+      sourceItemId: anchor.sourceItemId,
+    };
   } else {
     groupWhere = { id: anchor.id };
   }
