@@ -1038,88 +1038,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       "so their preserved library rows are not in this run's union and absence cannot be proven.",
     );
   }
-  const toRevert = available.filter((req) => {
-    // Only consult the ARR cache when the integration is enabled AND this run refreshed
-    // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
-    // enabled-but-UNCONFIGURED instance all leave that instance's cache meaningless —
-    // skip the demote. (The old global radarrSyncSucceeded flag read true after the
-    // no-op empty loop of an unconfigured integration, so its empty cache masqueraded
-    // as an authoritatively-empty library and mass-demoted every arr-backed AVAILABLE
-    // request the moment an admin cleared the arr connection with the flag still on.)
-    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncedSlugs.has(req.arrInstance))) return false;
-    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncedSlugs.has(req.arrInstance))) return false;
-    // Don't demote while a configured library source is down — we can't prove absence
-    // from a library we never reached this run.
-    if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
-    if (jellyfinConfiguredEnabled && !jellyfinSyncSucceeded) return false;
-    // Same "can't prove absence" rule, for a server that is registered but no longer
-    // configured: its rows survive and this run never looked at them.
-    if (plexUnionIncomplete || jellyfinUnionIncomplete) return false;
-    const inArr = req.mediaType === "MOVIE"
-      ? inRadarrSet.has(vkey(req.tmdbId, req.arrInstance))
-      : inSonarrSet.has(vkey(req.tmdbId, req.arrInstance));
-    // Only count a source's map as authoritative-present when it actually synced.
-    const inLibrary = req.mediaType === "MOVIE"
-      ? (plexSyncSucceeded && plexMovieIds.has(req.tmdbId)) || (jellyfinSyncSucceeded && jfMovieIds.has(req.tmdbId))
-      : (plexSyncSucceeded && plexTvIds.has(req.tmdbId))    || (jellyfinSyncSucceeded && jfTvIds.has(req.tmdbId));
-    return !inArr && !inLibrary;
-  });
-  const revertedIds = new Set<string>();
-  if (toRevert.length > 0) {
-    const result = await prisma.mediaRequest.updateMany({
-      // CAS on status: only demote rows still AVAILABLE. toRevert is built from the
-      // run-start `available` snapshot, so a row that a concurrent path moved out of
-      // AVAILABLE must not be blind-written back to APPROVED.
-      where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE" },
-      // Clear pendingNotifyAt on demote: a stale overdue timestamp left from the
-      // original approve would otherwise fire a false "download pending" notify
-      // once the row is back to APPROVED.
-      data: { status: "APPROVED", pendingNotifyAt: null },
-    });
-    reverted = result.count;
-    for (const r of toRevert) revertedIds.add(r.id);
-  }
-
-  // Snapshot taken once after both library writes complete; both marking passes share this exact set.
-  // Changes made by the Plex pass are NOT visible to the Jellyfin pass — intentional by design.
-  //
-  // Exclude rows we just reverted from AVAILABLE→APPROVED in this same run.
-  // Otherwise markLibraryRequests below could re-flip them to AVAILABLE if
-  // they're present in Plex/Jellyfin but absent from the ARR caches —
-  // triggering exactly the same-run flap the revert was added to prevent.
-  // Those items get a fresh look on the next sync run when the caches and
-  // status are coherent.
-  const stillPendingAll = await prisma.mediaRequest.findMany({
-    where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
-  });
-  const stillPending = revertedIds.size === 0
-    ? stillPendingAll
-    : stillPendingAll.filter((r) => !revertedIds.has(r.id));
-
-  // ── Per-user media-server visibility (multi-server grants) ─────────────────
-  //
-  // A `restricted` Plex/Jellyfin instance contributes availability ONLY to users
-  // granted `view` on it, so "is this request's title available" stopped being
-  // one global answer: the SAME title on the SAME server is available to a
-  // granted requester and not-yet-available to an ungranted one. The AVAILABLE
-  // flip and the notification both follow that per-requester answer — an
-  // ungranted requester's row stays PENDING/APPROVED and un-notified until a
-  // copy lands on a server they can see, or until the grant is issued.
-  //
-  // Cost: no extra round-trip. plexInstances/jellyfinInstances were read once at
-  // the top of this run (getSyncableMediaInstances → MediaInstanceConfig carries
-  // `restricted`), and the two grant columns ride the user.findMany the
-  // marking/notify passes already issue — never a per-requester query
-  // (guardrail 31). visibleInstancesFor is the PURE resolver built for exactly
-  // this many-requesters-one-registry-read shape.
-  //
-  // NOT applied to the two ARR marking passes above, deliberately: Radarr/Sonarr
-  // availability is server-agnostic (the *arr knows a file exists in a root
-  // folder, not which media server indexes it), so there is no per-instance
-  // presence to gate on. In every real topology the *arr feeds the DEFAULT
-  // server, which is visible to everyone by construction.
-  //
+  // Hoisted above the revert (it used to sit below markLibraryRequests): the demote is
+  // a per-user decision too, so it needs the same visibility helpers the marking pass
+  // uses. Pure const declarations with no dependency on anything between here and
+  // their old home.
   // visibilityEnforced is the byte-identical escape hatch (guardrail 35): with
   // no restricted instance configured — every single-server deployment, and
   // every multi-server one that hasn't opted in — every configured slug is
@@ -1201,6 +1123,102 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const vis = visibilityOf(requesters, req.requestedBy);
     return (service === "plex" ? vis.plex : vis.jellyfin).some((slug) => holders.has(slug));
   };
+
+  // Loaded once for the whole demote pass when any instance is restricted; skipped
+  // entirely otherwise, so a deployment with nothing restricted issues exactly the
+  // queries it did before (guardrail 35's byte-identical rule).
+  const revertRequesters = visibilityEnforced
+    ? await loadRequesters(available.map((r) => r.requestedBy))
+    : new Map<string, RequesterRow>();
+
+  const toRevert = available.filter((req) => {
+    // Only consult the ARR cache when the integration is enabled AND this run refreshed
+    // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
+    // enabled-but-UNCONFIGURED instance all leave that instance's cache meaningless —
+    // skip the demote. (The old global radarrSyncSucceeded flag read true after the
+    // no-op empty loop of an unconfigured integration, so its empty cache masqueraded
+    // as an authoritatively-empty library and mass-demoted every arr-backed AVAILABLE
+    // request the moment an admin cleared the arr connection with the flag still on.)
+    if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncedSlugs.has(req.arrInstance))) return false;
+    if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncedSlugs.has(req.arrInstance))) return false;
+    // Don't demote while a configured library source is down — we can't prove absence
+    // from a library we never reached this run.
+    if (plexConfiguredEnabled && !plexSyncSucceeded) return false;
+    if (jellyfinConfiguredEnabled && !jellyfinSyncSucceeded) return false;
+    // Same "can't prove absence" rule, for a server that is registered but no longer
+    // configured: its rows survive and this run never looked at them.
+    if (plexUnionIncomplete || jellyfinUnionIncomplete) return false;
+    const inArr = req.mediaType === "MOVIE"
+      ? inRadarrSet.has(vkey(req.tmdbId, req.arrInstance))
+      : inSonarrSet.has(vkey(req.tmdbId, req.arrInstance));
+    // Only count a source's map as authoritative-present when it actually synced, and
+    // ask the question PER REQUESTER — the same predicate the marking pass uses. Reading
+    // the global union here meant a restricted server the requester holds no grant for
+    // still counted as "present", so their request stayed AVAILABLE for a copy they
+    // cannot watch and the UI has always rendered as unavailable. presentForRequester
+    // checks the union FIRST and short-circuits to it whenever nothing is restricted, so
+    // the common case costs exactly what it did before.
+    const inLibrary =
+      (plexSyncSucceeded && presentForRequester(req, "plex", revertRequesters)) ||
+      (jellyfinSyncSucceeded && presentForRequester(req, "jellyfin", revertRequesters));
+    return !inArr && !inLibrary;
+  });
+  const revertedIds = new Set<string>();
+  if (toRevert.length > 0) {
+    const result = await prisma.mediaRequest.updateMany({
+      // CAS on status: only demote rows still AVAILABLE. toRevert is built from the
+      // run-start `available` snapshot, so a row that a concurrent path moved out of
+      // AVAILABLE must not be blind-written back to APPROVED.
+      where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE" },
+      // Clear pendingNotifyAt on demote: a stale overdue timestamp left from the
+      // original approve would otherwise fire a false "download pending" notify
+      // once the row is back to APPROVED.
+      data: { status: "APPROVED", pendingNotifyAt: null },
+    });
+    reverted = result.count;
+    for (const r of toRevert) revertedIds.add(r.id);
+  }
+
+  // Snapshot taken once after both library writes complete; both marking passes share this exact set.
+  // Changes made by the Plex pass are NOT visible to the Jellyfin pass — intentional by design.
+  //
+  // Exclude rows we just reverted from AVAILABLE→APPROVED in this same run.
+  // Otherwise markLibraryRequests below could re-flip them to AVAILABLE if
+  // they're present in Plex/Jellyfin but absent from the ARR caches —
+  // triggering exactly the same-run flap the revert was added to prevent.
+  // Those items get a fresh look on the next sync run when the caches and
+  // status are coherent.
+  const stillPendingAll = await prisma.mediaRequest.findMany({
+    where: { status: { in: ["PENDING", "APPROVED"] } },
+    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+  });
+  const stillPending = revertedIds.size === 0
+    ? stillPendingAll
+    : stillPendingAll.filter((r) => !revertedIds.has(r.id));
+
+  // ── Per-user media-server visibility (multi-server grants) ─────────────────
+  //
+  // A `restricted` Plex/Jellyfin instance contributes availability ONLY to users
+  // granted `view` on it, so "is this request's title available" stopped being
+  // one global answer: the SAME title on the SAME server is available to a
+  // granted requester and not-yet-available to an ungranted one. The AVAILABLE
+  // flip and the notification both follow that per-requester answer — an
+  // ungranted requester's row stays PENDING/APPROVED and un-notified until a
+  // copy lands on a server they can see, or until the grant is issued.
+  //
+  // Cost: no extra round-trip. plexInstances/jellyfinInstances were read once at
+  // the top of this run (getSyncableMediaInstances → MediaInstanceConfig carries
+  // `restricted`), and the two grant columns ride the user.findMany the
+  // marking/notify passes already issue — never a per-requester query
+  // (guardrail 31). visibleInstancesFor is the PURE resolver built for exactly
+  // this many-requesters-one-registry-read shape.
+  //
+  // NOT applied to the two ARR marking passes above, deliberately: Radarr/Sonarr
+  // availability is server-agnostic (the *arr knows a file exists in a root
+  // folder, not which media server indexes it), so there is no per-instance
+  // presence to gate on. In every real topology the *arr feeds the DEFAULT
+  // server, which is visible to everyone by construction.
+  //
 
   const markLibraryRequests = async (
     movieIds: Map<number, unknown>,

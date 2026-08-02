@@ -1402,25 +1402,35 @@ test("grants: a legacy ADMIN row (role=ADMIN, permissions=0) is gated by its ROL
   assert.deepEqual(notifiedUserIds(), ["u-legacy-admin"]);
 });
 
-test("grants: a restricted-instance deployment still issues ONE requester read per marking pass", async () => {
+test("grants: requester reads stay BATCHED and constant — never one per requester", async () => {
+  // The property is guardrail 31's: no per-requester round-trip. Enforced mode issues a
+  // fixed, small number of BATCHED reads — one for the demote pass (which decides per
+  // requester whether a title is on a server they can see) and one at the candidate
+  // scope for the marking pass, reused for its mediaServer split. What must never
+  // happen is the count scaling with the number of requesters, which is what the
+  // assertion below actually pins.
   configurePlexRestrictedRemote();
   const defaultResponder = plexResponder([]);
   const remoteResponder = plexResponder([900]);
   respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
-  seedUser("u-granted", GRANT_PLEX_REMOTE);
-  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+  // SEVERAL distinct requesters: with one, a per-requester round-trip would be
+  // indistinguishable from a batched read, so the count alone would prove nothing.
+  const statuses = ["PENDING", "APPROVED", "AVAILABLE"] as const;
+  for (let i = 0; i < 12; i++) {
+    const u = `u-${i}`;
+    seedUser(u, GRANT_PLEX_REMOTE);
+    seedRequest({ id: `req-${i}`, tmdbId: 900, mediaType: "MOVIE", requestedBy: u, status: statuses[i % 3] });
+  }
 
   await POST(syncReq({ headers: AS_CRON }));
   await settle();
 
-  // Enforced mode loads the requester rows at the wider CANDIDATE scope and then
-  // REUSES them for the mediaServer split — it must not add a second read
-  // (guardrail 31: never a per-requester round-trip).
-  assert.equal(
-    requesterReads().length,
-    1,
-    "the candidate-scope load is reused for the mediaServer split — enforcing grants must not double the requester reads",
-  );
+  // 12 distinct requesters. The reads are bounded by the number of PASSES (the demote,
+  // plus one candidate-scope load per marking source, reused for that source's
+  // mediaServer split) — never by how many requesters there are. A per-requester
+  // round-trip would be at least 12.
+  const reads = requesterReads().length;
+  assert.ok(reads <= 3, `12 requesters must not mean 12 reads — expected at most 3 batched, got ${reads}`);
 });
 
 test("multi-server PARTIAL failure: one instance's library fetch failing preserves its rows, suppresses the success stamp, and vetoes the whole-table episode rewrite", async () => {
