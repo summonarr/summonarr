@@ -1029,8 +1029,15 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     getMediaInstances("plex"),
     getMediaInstances("jellyfin"),
   ]);
-  const plexUnionIncomplete = registeredPlex.length > plexInstances.length;
-  const jellyfinUnionIncomplete = registeredJellyfin.length > jellyfinInstances.length;
+  // `plexInstances.length > 0` is load-bearing. getMediaInstances ALWAYS synthesizes the
+  // default instance, so a service with nothing configured reads as 1 registered vs 0
+  // syncable — "incomplete" — and without this term the guard below disabled demotes on
+  // every deployment not running BOTH Plex and Jellyfin, which is most of them. A service
+  // that is entirely unconfigured is already handled by the plexConfiguredEnabled /
+  // jellyfinConfiguredEnabled guards; this one is only about a service in USE that has a
+  // registered server missing its connection details.
+  const plexUnionIncomplete = plexInstances.length > 0 && registeredPlex.length > plexInstances.length;
+  const jellyfinUnionIncomplete = jellyfinInstances.length > 0 && registeredJellyfin.length > jellyfinInstances.length;
   if (plexUnionIncomplete || jellyfinUnionIncomplete) {
     console.warn(
       `[sync] skipping AVAILABLE->APPROVED demotes: ${plexUnionIncomplete ? registeredPlex.length - plexInstances.length : 0} Plex and ` +

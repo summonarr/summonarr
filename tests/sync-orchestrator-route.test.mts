@@ -399,6 +399,9 @@ type Req = InstanceType<typeof NextRequest>;
 const PLEX_BASE = "http://10.77.0.1:32400"; // RFC1918 literal: admin SSRF mode, no DNS
 const JF_BASE = "http://10.77.0.2:8096";
 const PLEX_ORIGIN = new URL(PLEX_BASE).origin;
+// RFC1918 literal like the others: admin-configured SSRF mode, no DNS lookup.
+const RADARR_BASE = "http://10.77.0.3:7878";
+const RADARR_ORIGIN = new URL(RADARR_BASE).origin;
 const COOKIE = getSessionCookieName();
 const AS_CRON = { authorization: `Bearer ${CRON_SECRET}` };
 
@@ -419,6 +422,29 @@ function configureBothServers(): void {
 
 // Plex: one movie section; the listed tmdbIds become movie rows. No show
 // section, so the TV + episode passes fetch nothing (getPlexTVEpisodes no-ops).
+// ── Radarr fixture ──────────────────────────────────────────────────────────
+// The AVAILABLE -> APPROVED demote is gated on the integration being enabled AND this
+// run having refreshed the REQUEST'S OWN instance (radarrSyncedSlugs). With no Radarr
+// configured, getSyncableArrInstances returns nothing, that set stays empty, and the
+// demote short-circuits before any library logic runs — which is why this suite could
+// not reach the demote path at all until now.
+function configureRadarr(): void {
+  settings.set("radarrUrl", RADARR_BASE);
+  settings.set("radarrApiKey", "radarr-api-key");
+}
+
+// Answers the one endpoint getRadarrWantedTmdbIds hits. `tmdbIds` are the movies Radarr
+// knows about; anything absent is genuinely not in Radarr, which is the precondition for
+// a demote (the request is neither in an arr nor in a library the requester can see).
+function radarrResponder(tmdbIds: number[] = []): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/api/v3/movie") {
+      return okJson(tmdbIds.map((tmdbId) => ({ tmdbId, hasFile: true })));
+    }
+    throw new Error(`unexpected Radarr fetch ${url.href}`);
+  };
+}
+
 function plexResponder(movieTmdbIds: number[]): (url: URL) => Response {
   return (url) => {
     if (url.pathname === "/library/sections") {
@@ -1645,4 +1671,82 @@ test("a second concurrent run (lock 2000 busy) is gated: skipped:true, no fetch,
   assert.equal(fetchCalls.length, 0, "the gated run must not fetch any library");
   assert.equal(transactions.length, 0, "the gated run must not open any transaction");
   assert.equal(casCalls.length, 0, "the gated run must not touch the notification CAS");
+});
+
+// ── the AVAILABLE -> APPROVED demote is a PER-REQUESTER decision ────────────
+
+test("demote: an AVAILABLE request reverts when its only holder is a restricted server the requester cannot see", async () => {
+  // The demote used to read the GLOBAL library union, so a restricted server the
+  // requester holds no grant for still counted as "present" and kept the request
+  // AVAILABLE — for a copy they cannot watch, and which every read path has always
+  // rendered as unavailable. It asks per requester now, the same way the marking pass
+  // decides whether to flip a request TO available in the first place.
+  configurePlexRestrictedRemote();
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]); // Radarr does not know this movie
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-ungranted", {});
+  seedRequest({ id: "req-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(
+    requests.get("req-ungranted")?.status,
+    "APPROVED",
+    "a title held only by a server this requester cannot see is not available TO THEM",
+  );
+});
+
+test("demote: the SAME title stays AVAILABLE for a requester who holds the grant", async () => {
+  // The counterpart. Without it a demote that fired for everyone would satisfy the test
+  // above, so this is what stops the per-requester gate becoming a blanket revert.
+  configurePlexRestrictedRemote();
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]);
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-granted")?.status, "AVAILABLE", "a granted requester keeps their availability");
+});
+
+test("demote: a service with NOTHING configured must not look like an incomplete union", async () => {
+  // getMediaInstances always synthesizes the default instance, so an unconfigured
+  // service reads as 1 registered vs 0 syncable. Without the in-use term on that check,
+  // the "registered but unconfigured, can't prove absence" guard fired on every
+  // deployment not running BOTH Plex and Jellyfin — silently disabling demotes for
+  // almost everyone. This pins that a Plex-only deployment still demotes.
+  configurePlexRestrictedRemote(); // Plex configured; Jellyfin entirely absent
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]);
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-nojf", {});
+  seedRequest({ id: "req-nojf", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-nojf", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-nojf")?.status, "APPROVED", "an unconfigured Jellyfin must not veto Plex-based demotes");
 });
