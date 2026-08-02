@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.20.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.20.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,22 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.20.1
+
+**Fixed**
+
+- **The admin Activity page lost the title on every now-playing session.** A key mismatch introduced in v0.20.0 meant the resolved TMDB id was never found, so sessions fell back to a title-only match — which can match the wrong media type, and that wrong id was then saved permanently.
+- **Turning off play-history tracking now actually stops it.** The Plex event stream stayed open after the setting was disabled and kept recording watch history.
+- **High-bitrate streams no longer vanish from the bandwidth stats.** Anything above 100 Mbps — a 4K remux, typically — was recorded at a thousandth of its real bitrate, so the heaviest sessions were missing from the figures meant to show them. Bandwidth totals are also now exact rather than ~2% out.
+- **An admin unlinking a server identity now actually hides that watch history.** The unlink appeared to do nothing because the history was still resolved through the provider id.
+- **Requests are no longer wrongly marked unavailable** when a media server is registered but its connection details have been cleared — its library was silently left out of the check.
+- **"Now available" emails are no longer dropped** when several land at once. They were opened faster than mail relays accept connections, and the notification is only sent once, so those emails were lost for good.
+- **Users with the Manage Issues permission can see fix-match thumbnails.** Every thumbnail returned an error unless the account also had the Issue Admin role.
+- **Admins are no longer notified about their own issue resolutions** over Discord and push.
+- **Watch-history detail no longer merges two servers' items** that happen to share an id, and completion-rate stats no longer merge unrelated unmatched titles into one.
+- **The "busiest day" figure now matches the chart above it** — it was counting abandoned starts the chart excludes.
+- Several smaller hardening fixes: rate limits that could be widened by changing a browser header, an unbounded Plex library fetch, a stats cache key that could return another filter's data, and a migration script that pointed at a recovery flow which does not exist.
 
 ### v0.20.0
 
@@ -381,7 +397,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.20.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.20.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
