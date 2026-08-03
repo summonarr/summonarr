@@ -1,5 +1,5 @@
 // Runs once at server startup in the Node.js runtime only — safe to use Node APIs and import server-only modules here
-import { isLocalHost } from "@/lib/local-only";
+import { evaluateLocalOnlyStartup } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
 
 export async function register() {
@@ -65,54 +65,39 @@ export async function register() {
     // TRUST_PROXY governs whether X-Forwarded-* is trusted (per-IP rate limiting) and
     // whether the local-only Host guard (src/lib/local-only.ts) is active. That Host
     // guard is SPOOFABLE — footgun-prevention for a LAN deployment, NOT a boundary for
-    // an internet-facing one. So: trust the proxy when told; otherwise run local-only,
-    // but REFUSE to boot when AUTH_URL is a PUBLIC host (an internet-facing deployment
-    // that forgot to put a trusted proxy in front — the one case the Host guard cannot
-    // protect). A LAN/loopback AUTH_URL (or unset/false TRUST_PROXY) stays supported and
-    // boots with a loud warning — this is the default docker deployment, so DON'T exit on
-    // a blank value (that would brick it).
-    if (process.env.TRUST_PROXY === "true") {
-      if (authUrl?.protocol === "http:" && process.env.NODE_ENV === "production") {
-        console.warn(
-          "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
-          "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
-          "IP-based rate limiting can be bypassed via header spoofing."
-        );
-      }
-    } else {
+    // an internet-facing one, so PRODUCTION local-only mode must be a deliberate
+    // choice: either a trusted proxy (TRUST_PROXY=true) or an explicit
+    // SUMMONARR_ALLOW_LOCAL_ONLY=true. The full rule set (including the
+    // non-overridable public-AUTH_URL refusal) lives in evaluateLocalOnlyStartup;
+    // this is only the wiring. Development never fails.
+    //
+    // NOTE: a production deployment with TRUST_PROXY blank and no opt-in now REFUSES
+    // to boot. That is the point — a blank value used to mean "silently rely on a
+    // spoofable header". The error names the exact line to add; .env.example and the
+    // docker README ship it.
+    const proxyDecision = evaluateLocalOnlyStartup({
+      nodeEnv: process.env.NODE_ENV,
+      trustProxy: process.env.TRUST_PROXY,
+      allowLocalOnly: process.env.SUMMONARR_ALLOW_LOCAL_ONLY,
       // Reuses the single parse above — a malformed AUTH_URL yields "" here, which
-      // reads as "not public" and skips the refusal below. That is only safe
-      // because the guard above already exited on it in production.
-      const authHost = authUrl?.hostname.toLowerCase() ?? "";
-      // Treat as LAN unless AUTH_URL is a dotted FQDN with a routable-looking TLD:
-      // loopback/RFC1918 IPs, "localhost", bare single-label hostnames, and private
-      // mDNS/internal suffixes are all local. Err toward "local" so a misjudged host
-      // never bricks a legitimate LAN deployment — false negatives just keep today's
-      // behaviour; only a clearly-public AUTH_URL without a trusted proxy is refused.
-      // A bracketed IPv6 literal (URL.hostname keeps the brackets) is also treated as
-      // a host: isLocalHost() handles loopback/link-local/ULA, so only a PUBLIC IPv6
-      // literal slips past the dotted-FQDN test and is correctly flagged here.
-      const PRIVATE_SUFFIXES = [".local", ".lan", ".internal", ".home", ".home.arpa", ".localhost"];
-      const authIsPublic =
-        !!authHost &&
-        authHost !== "localhost" &&
-        (authHost.includes(".") || authHost.startsWith("[")) &&
-        !isLocalHost(authHost) &&
-        !PRIVATE_SUFFIXES.some((s) => authHost.endsWith(s));
-      if (process.env.NODE_ENV === "production" && authIsPublic) {
-        console.error(
-          "[startup] AUTH_URL is a public host but TRUST_PROXY is not 'true'. An internet-facing " +
-            "deployment MUST run behind a trusted reverse proxy with TRUST_PROXY=true — the local-only " +
-            "Host-header guard is spoofable and cannot protect a public instance. Set TRUST_PROXY=true " +
-            "(and have the proxy strip client-supplied X-Forwarded-* headers). Refusing to start."
-        );
-        process.exit(1);
-      }
+      // reads as "not public". That is only safe because the guard above already
+      // exited on it in production.
+      authHost: authUrl?.hostname.toLowerCase() ?? "",
+    });
+    if (proxyDecision.fatal) {
+      console.error(proxyDecision.message);
+      process.exit(1);
+    }
+    if (proxyDecision.message) console.warn(proxyDecision.message);
+    if (
+      proxyDecision.mode === "trusted-proxy" &&
+      authUrl?.protocol === "http:" &&
+      process.env.NODE_ENV === "production"
+    ) {
       console.warn(
-        "[startup] TRUST_PROXY is not 'true' — LOCAL-ONLY mode (LAN/loopback). Per-IP rate limiting is " +
-          "disabled (single shared bucket) and the local-only guard trusts the (spoofable) Host header, " +
-          "which is NOT a security boundary. Set TRUST_PROXY=true behind a trusted reverse proxy for any " +
-          "internet-facing deployment; keep local-only instances off the public internet."
+        "[startup] TRUST_PROXY=true but AUTH_URL uses http:// — ensure the reverse proxy strips " +
+        "X-Forwarded-For from untrusted clients; if the app is directly internet-exposed, " +
+        "IP-based rate limiting can be bypassed via header spoofing."
       );
     }
 
