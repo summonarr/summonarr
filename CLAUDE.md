@@ -95,7 +95,18 @@ Multi-stage Docker (`node:26.3.0-alpine3.23`, five stages: deps → prisma-gen �
 
 ## Releasing — PR-then-tag flow
 
-The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit. The Docker image tag (`v<X.Y.Z>`) is what users actually pull, so the README examples must agree with the package version or `SUMMONARR_VERSION=v<X.Y.Z>` will point at an image that doesn't exist.
+The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit.
+
+**The git tag is `v<X.Y.Z>`; the published image tag is bare `<X.Y.Z>`. NEVER write a `v` into a `SUMMONARR_VERSION` example.**
+
+- `docker/metadata-action`'s `type=semver,pattern={{version}}` **strips the `v`** ([docker-publish.yml](.github/workflows/docker-publish.yml)), so pushing git tag `v0.20.2` publishes `:0.20.2`, `:0.20`, `:0`, `:latest`, `:sha-<short>` — and no `:v0.20.2`.
+- [docker-container/docker-compose.yml](docker-container/docker-compose.yml) interpolates the value straight in: `ghcr.io/summonarr/summonarr:${SUMMONARR_VERSION:-latest}`. A `v`-prefixed value therefore resolves to a tag that does not exist and the pull fails with `manifest unknown`.
+- This shipped broken for two releases — `:v0.20.1` and `:v0.20.2` both 404 in GHCR while `:0.20.1` / `:0.20.2` are fine — because this file told you to write the `v`. Verify a pin before documenting it:
+
+```bash
+TOK=$(curl -s "https://ghcr.io/token?scope=repository:summonarr/summonarr:pull&service=ghcr.io" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" https://ghcr.io/v2/summonarr/summonarr/manifests/<X.Y.Z>
+```
 
 The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, merge, *then* tag the merge commit on `main`. Tagging before the merge orphans the tag on a feature-branch commit unreachable from `main` — `git describe` breaks, `:v<X.Y.Z>` and `:main` reference different SHAs, and the [docker-publish workflow](.github/workflows/docker-publish.yml) builds the same release twice from two different commits. (`v0.9.1` and `v0.9.2` were tagged this way; both are orphan tags. Don't repeat it.)
 
@@ -106,7 +117,7 @@ The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, mer
 1. [package.json](package.json) — `"version": "<X.Y.Z>"` (root field).
 2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both; `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
 3. [README.md](README.md) — `Status: v<X.Y.Z> beta` line and the `Summonarr v<X.Y.Z> is a beta release` line under Beta testing.
-4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=v<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block).
+4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block). **Bare semver, no `v`** — see above.
 5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source entries from `git log v<previous>..HEAD --oneline`, surfacing user-visible changes only (skip `chore`, `refactor`, `deps`). Conventional-commit scopes translate cleanly.
 
 ```bash
@@ -132,11 +143,11 @@ git push origin v<X.Y.Z>
 
 ### Why this order
 
-- The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) once on the `main` push → publishes `:main` and `:sha-<merge>`.
-- The tag push fires it a second time → publishes `:v<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>`. Because both events hit the **same commit**, the second build hits the GHA buildx cache (`cache-from: type=gha` on [docker-publish.yml:98](.github/workflows/docker-publish.yml#L98)) and finishes in ~3 min instead of ~15.
-- Tag is reachable from `main` — `git describe` works, and `:latest` / `:main` / `:v<X.Y.Z>` all reference the same commit SHA.
+- The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) on the `main` push, but the job **deliberately skips** when the push contains a `chore(release):` commit (the `if:` at [docker-publish.yml:55](.github/workflows/docker-publish.yml#L55)) — the tag push publishes the same SHA, so building here would duplicate ~11 min of work. A *non-release* push to `main` still publishes `:main` and `:sha-<short>`.
+- The tag push then runs the only build for the release → publishes `:<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>` (bare semver — the `v` is stripped, see above). Expect ~11-15 min: this is a cold multi-arch `linux/amd64,linux/arm64` build, NOT a cache hit off an earlier main-push build, because that one skipped.
+- Tag is reachable from `main` — `git describe` works, and `:latest` / `:<X.Y.Z>` / `:sha-<merge>` all reference the same commit SHA.
 
-**NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=v<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
+**NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
 
 There is no version constant in `src/`. Don't add one — `package.json` + the git tag is the source of truth, and a third copy is a third place to forget.
 

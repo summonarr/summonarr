@@ -170,7 +170,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.20.2`.                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.20.2` (no `v` — the published tags are bare semver).                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -440,7 +440,7 @@ If no row matches the email, the script exits with code `2` and **no changes are
 ### Prerequisites
 
 - The `summonarr` container is **running and healthy** (check with `docker ps`).
-- You're on a Summonarr image **≥ `v0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=v0.11.1` in `.env`, or run `:latest`.
+- You're on a Summonarr image **≥ `0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=0.11.1` in `.env`, or run `:latest`.
 - You can run `docker exec` against the container — usually means root or membership in the `docker` group.
 - The new password is **at least 8 characters**. The script refuses anything shorter with exit code `1`.
 
@@ -562,7 +562,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.20.2
+SUMMONARR_VERSION=0.20.2
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:
