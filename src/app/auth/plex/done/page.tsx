@@ -131,8 +131,18 @@ export default function PlexDonePage() {
     // it must go through withBasePath or a subpath deployment lands at the origin
     // root. siteUrl is admin-configured and already absolute; withBasePath passes
     // absolute URLs through untouched.
+    //
+    // A real deep link wins over siteUrl: safeRedirect rejects any candidate whose
+    // origin differs from this one, so siteUrl can only ever resolve to the app
+    // root — trying it first silently dropped the callbackUrl on every Plex
+    // sign-in, while credentials/QuickConnect router.push(callbackUrl) honoured it.
+    // Both candidates still go through safeRedirect (same-origin only).
+    const deepLink =
+      auth.callbackUrl && auth.callbackUrl !== "/"
+        ? safeRedirect(withBasePath(auth.callbackUrl))
+        : null;
     window.location.href =
-      safeRedirect(auth.siteUrl) ?? safeRedirect(withBasePath(auth.callbackUrl)) ?? withBasePath("/");
+      deepLink ?? safeRedirect(auth.siteUrl) ?? withBasePath("/");
   }
 
   async function completeSettings(auth: SettingsAuth) {

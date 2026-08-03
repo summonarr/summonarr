@@ -37,19 +37,18 @@ export default async function TVDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  // Start the session read concurrently with the TMDB details fetch. The no-op
-  // catch only marks the promise handled if notFound() fires first — the await
-  // below still rethrows a requireAppSession() redirect/failure exactly as before.
-  const sessionPromise = requireAppSession();
-  sessionPromise.catch(() => {});
+  // The gate MUST precede the TMDB fetch. On the RSC layout-skip path (proxy
+  // skipped by a prefetch header, (app)/layout render skipped by a matching
+  // Next-Router-State-Tree) this page's own requireAppSession() is the ONLY
+  // check — overlapping it with getTVDetails let an unauthenticated caller
+  // burn TMDB/OMDB/MDBList quota and write cache rows before the redirect fired.
+  const session = await requireAppSession();
   let media;
   try {
     media = await getTVDetails(Number(id));
   } catch {
     notFound();
   }
-
-  const session = await sessionPromise;
 
   const provider = session?.user.provider;
   const providerSources =
