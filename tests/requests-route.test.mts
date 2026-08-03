@@ -398,10 +398,21 @@ shadowPrismaModel(prisma, "radarrAvailableItem", {
 shadowPrismaModel(prisma, "sonarrAvailableItem", {
   findUnique: async () => null,
 });
+// LAZY thenable, mirroring a real PrismaPromise: the query is dispatched only once
+// a continuation is attached. An eager `async` stub cannot tell a detached
+// `void deleteMany(...)` (which never runs in production) from one terminating in
+// `.catch` — this shape pins that the route's `.catch` is load-bearing.
 shadowPrismaModel(prisma, "deletionVote", {
-  deleteMany: async (args: unknown) => {
-    rec("deletionVote.deleteMany", args);
-    return { count: 0 };
+  deleteMany: (args: unknown) => {
+    const run = async (): Promise<{ count: number }> => {
+      rec("deletionVote.deleteMany", args);
+      return { count: 0 };
+    };
+    return {
+      then: (onOk?: unknown, onErr?: unknown) => run().then(onOk as never, onErr as never),
+      catch: (onErr?: unknown) => run().catch(onErr as never),
+      finally: (onDone?: unknown) => run().finally(onDone as never),
+    };
   },
 });
 // The pending-branch notify fan-out reads push subscriptions; empty ⇒ the push
@@ -594,7 +605,7 @@ test("the Setting-driven request rate limit 429s past the cap with Retry-After",
   assert.deepEqual(await second.json(), { error: "Too many requests — try again later" });
 });
 
-test("body handling: oversized → 413 (64 KB cap), malformed → 400, missing ids → 400, missing token → 403, over-long note → 400", async () => {
+test("body handling: oversized → 413 (64 KB cap), malformed → 400, missing ids → 400, missing/non-string token → 403, over-long note → 400", async () => {
   const { userId, token } = await mintSession();
 
   const oversized = await post(token, null, JSON.stringify({ note: "x".repeat(70_000) }));
@@ -611,6 +622,15 @@ test("body handling: oversized → 413 (64 KB cap), malformed → 400, missing i
   const tokenless = await post(token, { tmdbId: 603, mediaType: "MOVIE" });
   assert.equal(tokenless.status, 403);
   assert.deepEqual(await tokenless.json(), { error: "Invalid or expired request token" });
+
+  // A TRUTHY non-string token is the case the old `!_token` guard missed:
+  // verifyRequestToken → Buffer.from(a, "hex") throws ERR_INVALID_ARG_TYPE, which
+  // escaped the handler as a 500. It must land on the same 403 as a bad string.
+  for (const bad of [123, {}, true] as const) {
+    const res = await post(token, { tmdbId: 603, mediaType: "MOVIE", _token: bad });
+    assert.equal(res.status, 403, `non-string _token ${JSON.stringify(bad)} must 403, not 500`);
+    assert.deepEqual(await res.json(), { error: "Invalid or expired request token" });
+  }
 
   const longNote = await post(token, requestBody(userId, { note: "n".repeat(501) }));
   assert.equal(longNote.status, 400);

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getTVSeasonEpisodes } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { settleLimit } from "@/lib/concurrency";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
 
 export interface TVSeasonResponse {
@@ -53,37 +54,54 @@ export const GET = withAuth(async (
 
   const ownedRows = sources.length === 0 ? [] : await prisma.tVEpisodeCache.findMany({
     where: { tmdbId, seasonNumber, source: { in: sources } },
-    select: { episodeNumber: true, source: true },
+    select: {
+      episodeNumber: true,
+      source: true,
+      episodeName: true,
+      airDate: true,
+      stillPath: true,
+      runtime: true,
+      overview: true,
+    },
   });
 
   // Fire-and-forget cache warm: backfill owned episodes' cached metadata from the
   // fresh TMDB fetch. Unawaited by design — it's not part of the response, and a
   // failed update self-heals on the next fetch. Errors swallowed intentionally.
+  // Bounded (guardrail 31): `ownedRows` scales with season size × visible sources,
+  // and rows whose cached metadata already matches are skipped, so a warm cache
+  // issues zero writes.
   if (ownedRows.length > 0 && episodes.length > 0) {
     const metaMap = new Map(episodes.map((e) => [e.episodeNumber, e]));
-    Promise.all(
-      ownedRows.map((row) => {
-        const ep = metaMap.get(row.episodeNumber);
-        if (!ep) return Promise.resolve();
-        return prisma.tVEpisodeCache.update({
-          where: {
-            source_tmdbId_seasonNumber_episodeNumber: {
-              source: row.source,
-              tmdbId,
-              seasonNumber,
-              episodeNumber: row.episodeNumber,
-            },
+    void settleLimit(ownedRows, 5, async (row) => {
+      const ep = metaMap.get(row.episodeNumber);
+      if (!ep) return;
+      const next = {
+        episodeName: ep.name ?? null,
+        airDate:     ep.airDate ?? null,
+        stillPath:   ep.stillPath ?? null,
+        runtime:     ep.runtime ?? null,
+        overview:    ep.overview || null,
+      };
+      if (
+        row.episodeName === next.episodeName
+        && row.airDate === next.airDate
+        && row.stillPath === next.stillPath
+        && row.runtime === next.runtime
+        && row.overview === next.overview
+      ) return;
+      await prisma.tVEpisodeCache.update({
+        where: {
+          source_tmdbId_seasonNumber_episodeNumber: {
+            source: row.source,
+            tmdbId,
+            seasonNumber,
+            episodeNumber: row.episodeNumber,
           },
-          data: {
-            episodeName: ep.name ?? null,
-            airDate:     ep.airDate ?? null,
-            stillPath:   ep.stillPath ?? null,
-            runtime:     ep.runtime ?? null,
-            overview:    ep.overview || null,
-          },
-        }).catch(() => {});
-      })
-    ).catch(() => {});
+        },
+        data: next,
+      }).catch(() => {});
+    });
   }
 
   const ownedSet = new Set<number>();

@@ -36,11 +36,12 @@ export default async function MovieDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  // Start the session read concurrently with the TMDB details fetch. The no-op
-  // catch only marks the promise handled if notFound() fires first — the await
-  // below still rethrows a requireAppSession() redirect/failure exactly as before.
-  const sessionPromise = requireAppSession();
-  sessionPromise.catch(() => {});
+  // The gate MUST precede the TMDB fetch. On the RSC layout-skip path (proxy
+  // skipped by a prefetch header, (app)/layout render skipped by a matching
+  // Next-Router-State-Tree) this page's own requireAppSession() is the ONLY
+  // check — overlapping it with getMovieDetails let an unauthenticated caller
+  // burn TMDB/OMDB/MDBList quota and write cache rows before the redirect fired.
+  const session = await requireAppSession();
   let media;
   try {
     media = await getMovieDetails(Number(id));
@@ -48,7 +49,6 @@ export default async function MovieDetailPage({
     notFound();
   }
 
-  const session = await sessionPromise;
   // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
   // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
   // in-library gates on the "report issue" / "vote to delete" actions — so scoping the

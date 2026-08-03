@@ -5,6 +5,7 @@ import { normalizeEmail } from "@/lib/auth";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { getJellyfinUserEmail } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
@@ -109,12 +110,31 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       } else {
         let reportedEmail: string | null = null;
         if (jellyfinUserId) {
-          const { url, apiKey } = await getJellyfinConfig();
-          if (url && apiKey) {
+          // Multi-server (guardrail 35): the session carries no instance slug, and
+          // User.jellyfinUserId holds whichever server's GUID the user actually
+          // authenticated against — so asking the DEFAULT server about it returns
+          // nothing and 403s every named-instance user. MediaServerUser records the
+          // instance the identity was seen on; when that row is missing (sign-in
+          // restriction off and the library never synced) probe each registered
+          // instance instead. A Jellyfin GUID is per-server unique, so a hit can
+          // only be this user's own account.
+          const serverUser = await prisma.mediaServerUser.findFirst({
+            where: { source: "jellyfin", sourceUserId: jellyfinUserId },
+            select: { serverInstance: true },
+          });
+          const slugs = serverUser
+            ? [serverUser.serverInstance]
+            : (await getMediaInstances("jellyfin")).map((i) => i.slug);
+          for (const slug of slugs) {
+            const { url, apiKey } = await getJellyfinConfig(slug);
+            if (!url || !apiKey) continue;
             // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
             // reads Settings (no encryptToken at the call site — guardrail 7a holds).
             const fromJellyfin = await getJellyfinUserEmail(url, apiKey, jellyfinUserId);
-            if (fromJellyfin) reportedEmail = normalizeEmail(fromJellyfin);
+            if (fromJellyfin) {
+              reportedEmail = normalizeEmail(fromJellyfin);
+              break;
+            }
           }
         }
 

@@ -296,6 +296,33 @@ function jellyfinMovieResponder(items: unknown[]): (url: URL) => Response {
     throw new Error(`unexpected Jellyfin fetch ${url}`);
   };
 }
+// One TMDB-identified Series (plus its single episode) so the episode-cache
+// fire-and-forget has real work to do: getJellyfinTVEpisodes short-circuits on an
+// empty series map, so a movies-only fixture would report "zero Episode fetches"
+// no matter what the route does.
+function jellyfinSeriesResponder(): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url}`);
+    switch (url.searchParams.get("IncludeItemTypes")) {
+      case "Movie":
+        return okJson({ Items: [], TotalRecordCount: 0 });
+      case "Series":
+        return okJson({
+          Items: [{ Id: "jf-show-1", Name: "Show One", ProviderIds: { Tmdb: "1399" } }],
+          TotalRecordCount: 1,
+        });
+      case "Episode":
+        return okJson({
+          Items: [{ SeriesId: "jf-show-1", ParentIndexNumber: 1, IndexNumber: 1 }],
+          TotalRecordCount: 1,
+        });
+      default:
+        throw new Error(`unexpected Jellyfin fetch ${url}`);
+    }
+  };
+}
+const episodeFetches = () =>
+  fetchCalls.filter((c) => c.url.pathname === "/Items" && c.url.searchParams.get("IncludeItemTypes") === "Episode");
 
 // Wire payloads + the exact rows the route must derive from them (including the
 // sanitizeStr `<>`-strip and the epoch-seconds → Date conversion).
@@ -642,6 +669,43 @@ test("as the ONLY Plex server it still rewrites the episode cache — single-ser
   assert.ok(
     transactions.flatMap((t) => t.ops).some((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany"),
     "a lone Plex server must still maintain the episode cache, exactly as before",
+  );
+});
+
+test("with a SECOND Jellyfin server registered, a resync leaves the shared TVEpisodeCache alone — and never walks the Episode list", async () => {
+  // Same shared-namespace reasoning as the Plex twin above. The ownership check
+  // has to run BEFORE the fetch, not inside the .then(): deciding afterwards
+  // page-walked every Episode in the library against the upstream server and then
+  // discarded the whole result.
+  configureJellyfin();
+  settings.set("jellyfinInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = jellyfinSeriesResponder();
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const episodeOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+  assert.deepEqual(episodeOps, [], "the shared episode cache must not be touched while another Jellyfin server exists");
+  assert.equal(
+    episodeFetches().length,
+    0,
+    "a resync that cannot own the episode cache must not pay for the library-wide Episode walk",
+  );
+});
+
+test("as the ONLY Jellyfin server it still walks episodes and rewrites the cache — single-server behaviour is unchanged", async () => {
+  configureJellyfin();
+  respond = jellyfinSeriesResponder();
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.equal(episodeFetches().length, 1, "a lone Jellyfin server must still walk the Episode list");
+  assert.ok(
+    transactions.flatMap((t) => t.ops).some((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany"),
+    "a lone Jellyfin server must still maintain the episode cache, exactly as before",
   );
 });
 

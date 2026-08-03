@@ -185,7 +185,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "reason must be a string under 200 characters" }, { status: 400 });
   }
 
-  if (!_token || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
+  // typeof-guard BEFORE verifyRequestToken: readJsonCapped<T>'s generic is a
+  // compile-time cast only, so a truthy non-string (`123`, `{}`) slipped past the
+  // old `!_token` check and threw ERR_INVALID_ARG_TYPE out of Buffer.from(a, "hex")
+  // as a 500 instead of this 403. Empty string is non-verifying and still 403s.
+  if (typeof _token !== "string" || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
     return NextResponse.json({ error: "Invalid or expired request token" }, { status: 403 });
   }
 

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
+import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
 // Raw Jellyfin user shape — intentionally permissive so nothing is filtered
@@ -31,8 +32,18 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-export const GET = withAdmin(async (_req, _ctx, _session) => {
-  const { url, apiKey } = await getJellyfinConfig();
+export const GET = withAdmin(async (req, _ctx, _session) => {
+  // Which server to diagnose. Both halves of the comparison must describe the
+  // SAME instance: the /Users fetch used to resolve getJellyfinConfig() with no
+  // argument (the default server) while dbCount spanned every configured
+  // Jellyfin, so `gap` subtracted an all-instances total from a single-instance
+  // fetch and read a healthy multi-server setup as phantom DB rows. Defaults to
+  // "" so a single-server deployment is byte-identical.
+  const instance = new URL(req.url).searchParams.get("instance") ?? DEFAULT_MEDIA_INSTANCE;
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
+    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+  }
+  const { url, apiKey } = await getJellyfinConfig(instance);
 
   if (!url || !apiKey) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 400 });
@@ -90,9 +101,12 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   const skipped = breakdown.filter((u) => u.wouldBeSkipped);
   const processed = breakdown.filter((u) => !u.wouldBeSkipped);
 
-  const dbCount = await prisma.mediaServerUser.count({ where: { source: "jellyfin", active: true } });
+  const dbCount = await prisma.mediaServerUser.count({
+    where: { source: "jellyfin", serverInstance: instance, active: true },
+  });
 
   return NextResponse.json({
+    serverInstance: instance,
     httpStatus,
     fetchError,
     responseShape,

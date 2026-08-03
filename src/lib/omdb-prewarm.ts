@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { getOmdbRatingsForTmdb, isOmdbQuotaLocked } from "./omdb";
+import { fetchAndCacheOmdbForTmdb, isOmdbQuotaLocked } from "./omdb";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
 
 const CONCURRENCY = 5;
@@ -94,7 +94,12 @@ export async function prewarmOmdbCache(): Promise<{
       batch.map((item) => {
         const type = item.mediaType === "MOVIE" ? "movie" : "tv";
         const releaseDate = releaseDateByKey.get(`${type}:${item.tmdbId}:details`) ?? null;
-        return getOmdbRatingsForTmdb(item.tmdbId, type, releaseDate);
+        // Force-fetch rather than getOmdbRatingsForTmdb: that getter is cache-first and
+        // serves any UNEXPIRED row warm, so every row in the 0-25%-remaining band this
+        // pass exists to renew would be "refreshed" with no upstream call at all (and
+        // still counted as fetched below). Mirrors mdblist-prewarm/tmdb-prewarm, which
+        // both call their fetch-and-store entry point directly.
+        return fetchAndCacheOmdbForTmdb(item.tmdbId, type, `omdb:tmdb:${type}:${item.tmdbId}`, releaseDate);
       })
     );
     for (const r of results) {

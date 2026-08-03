@@ -189,11 +189,26 @@ const settings = new Map<string, string>();
 
 // ── recorders ─────────────────────────────────────────────────────────────
 const settingUpserts: Array<{ key: string; value: string }> = [];
+// The create-only staleness baseline: a configured source that has NEVER synced clean has
+// no marker row, so the 24h stale window has no origin and the notify fallback can never
+// engage. Recorded separately from upserts — a seed must never masquerade as a success.
+const settingCreateManyData: Array<{ key: string; value: string }> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 const notificationCreateManyData: Array<Record<string, unknown>> = [];
 const tmdbCacheDeleteManyCalls: unknown[] = [];
 const mediaRequestFindManyWheres: Array<ReqWhere | undefined> = [];
 const plexLibraryItemFindManyWheres: Array<Record<string, unknown> | undefined> = []; // the dedupe prior-mapping lookup
+// Slugs whose PRESERVED library rows survive from an earlier run (guardrail 35 keeps the
+// rows of a registered-but-unconfigured server). The demote guard probes for exactly
+// these: a slug with rows this run never consulted vetoes the demote, one with none —
+// e.g. a default that was never configured at all — does not.
+const preservedRowSlugs = { plexLibraryItem: new Set<string>(), jellyfinLibraryItem: new Set<string>() };
+const preservedRowFindFirsts: Array<{ model: string; slugs: string[] | undefined }> = [];
+function preservedRowHit(model: "plexLibraryItem" | "jellyfinLibraryItem", slugs: string[] | undefined) {
+  preservedRowFindFirsts.push({ model, slugs });
+  const hit = (slugs ?? []).some((s) => preservedRowSlugs[model].has(s));
+  return hit ? { tmdbId: 1 } : null;
+}
 // The de-registered-instance sweep runs OUTSIDE any transaction (top-level
 // prisma), so its deletes land here rather than in the TxRecord journal.
 const orphanSweepDeletes: Array<{ model: string; where: Record<string, unknown> | undefined }> = [];
@@ -286,6 +301,16 @@ const fakePrisma = {
       settings.set(args.where.key, args.create.value);
       return args.create;
     },
+    createMany: async (args: { data: Array<{ key: string; value: string }>; skipDuplicates?: boolean }) => {
+      let count = 0;
+      for (const row of args.data) {
+        settingCreateManyData.push(row);
+        if (args.skipDuplicates && settings.has(row.key)) continue; // ON CONFLICT DO NOTHING
+        settings.set(row.key, row.value);
+        count++;
+      }
+      return { count };
+    },
     deleteMany: async () => ({ count: 0 }),
   },
   user: {
@@ -338,6 +363,11 @@ const fakePrisma = {
       plexLibraryItemFindManyWheres.push(args?.where);
       return [];
     },
+    // The demote guard's "does this registered-but-unconfigured slug ACTUALLY still hold
+    // preserved rows?" probe. Answers from preservedRowSlugs so a never-configured
+    // instance (no rows) is distinguishable from one whose token an admin cleared.
+    findFirst: async (args?: { where?: { serverInstance?: { in?: string[] } } }) =>
+      preservedRowHit("plexLibraryItem", args?.where?.serverInstance?.in),
     // The end-of-run sweep for de-registered instances (top-level, not in a tx).
     deleteMany: async (args?: { where?: Record<string, unknown> }) => {
       orphanSweepDeletes.push({ model: "plexLibraryItem", where: args?.where });
@@ -345,6 +375,8 @@ const fakePrisma = {
     },
   },
   jellyfinLibraryItem: {
+    findFirst: async (args?: { where?: { serverInstance?: { in?: string[] } } }) =>
+      preservedRowHit("jellyfinLibraryItem", args?.where?.serverInstance?.in),
     deleteMany: async (args?: { where?: Record<string, unknown> }) => {
       orphanSweepDeletes.push({ model: "jellyfinLibraryItem", where: args?.where });
       return { count: 0 };
@@ -399,6 +431,9 @@ type Req = InstanceType<typeof NextRequest>;
 const PLEX_BASE = "http://10.77.0.1:32400"; // RFC1918 literal: admin SSRF mode, no DNS
 const JF_BASE = "http://10.77.0.2:8096";
 const PLEX_ORIGIN = new URL(PLEX_BASE).origin;
+// RFC1918 literal like the others: admin-configured SSRF mode, no DNS lookup.
+const RADARR_BASE = "http://10.77.0.3:7878";
+const RADARR_ORIGIN = new URL(RADARR_BASE).origin;
 const COOKIE = getSessionCookieName();
 const AS_CRON = { authorization: `Bearer ${CRON_SECRET}` };
 
@@ -419,6 +454,29 @@ function configureBothServers(): void {
 
 // Plex: one movie section; the listed tmdbIds become movie rows. No show
 // section, so the TV + episode passes fetch nothing (getPlexTVEpisodes no-ops).
+// ── Radarr fixture ──────────────────────────────────────────────────────────
+// The AVAILABLE -> APPROVED demote is gated on the integration being enabled AND this
+// run having refreshed the REQUEST'S OWN instance (radarrSyncedSlugs). With no Radarr
+// configured, getSyncableArrInstances returns nothing, that set stays empty, and the
+// demote short-circuits before any library logic runs — which is why this suite could
+// not reach the demote path at all until now.
+function configureRadarr(): void {
+  settings.set("radarrUrl", RADARR_BASE);
+  settings.set("radarrApiKey", "radarr-api-key");
+}
+
+// Answers the one endpoint getRadarrWantedTmdbIds hits. `tmdbIds` are the movies Radarr
+// knows about; anything absent is genuinely not in Radarr, which is the precondition for
+// a demote (the request is neither in an arr nor in a library the requester can see).
+function radarrResponder(tmdbIds: number[] = []): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/api/v3/movie") {
+      return okJson(tmdbIds.map((tmdbId) => ({ tmdbId, hasFile: true })));
+    }
+    throw new Error(`unexpected Radarr fetch ${url.href}`);
+  };
+}
+
 function plexResponder(movieTmdbIds: number[]): (url: URL) => Response {
   return (url) => {
     if (url.pathname === "/library/sections") {
@@ -499,6 +557,10 @@ beforeEach(() => {
   transactions.length = 0;
   execRawOrder.length = 0;
   settingUpserts.length = 0;
+  settingCreateManyData.length = 0;
+  preservedRowSlugs.plexLibraryItem.clear();
+  preservedRowSlugs.jellyfinLibraryItem.clear();
+  preservedRowFindFirsts.length = 0;
   auditRows.length = 0;
   notificationCreateManyData.length = 0;
   tmdbCacheDeleteManyCalls.length = 0;
@@ -552,7 +614,7 @@ test("Bearer CRON_SECRET authorizes and drives the full pipeline (library writes
   // The run reached the library-replace stage for both sources and the tail purge.
   assert.equal(txTouching("plexLibraryItem").length, 1, "authorized run must replace the Plex library");
   assert.equal(txTouching("jellyfinLibraryItem").length, 1, "authorized run must replace the Jellyfin library");
-  assert.equal(tmdbCacheDeleteManyCalls.length, 1);
+  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "the tail purge is two passes: everything else now, ratings on a grace");
   // A CRON_SECRET run has no session to attribute — no LIBRARY_SYNC audit row.
   assert.equal(auditRows.length, 0);
 });
@@ -1402,25 +1464,35 @@ test("grants: a legacy ADMIN row (role=ADMIN, permissions=0) is gated by its ROL
   assert.deepEqual(notifiedUserIds(), ["u-legacy-admin"]);
 });
 
-test("grants: a restricted-instance deployment still issues ONE requester read per marking pass", async () => {
+test("grants: requester reads stay BATCHED and constant — never one per requester", async () => {
+  // The property is guardrail 31's: no per-requester round-trip. Enforced mode issues a
+  // fixed, small number of BATCHED reads — one for the demote pass (which decides per
+  // requester whether a title is on a server they can see) and one at the candidate
+  // scope for the marking pass, reused for its mediaServer split. What must never
+  // happen is the count scaling with the number of requesters, which is what the
+  // assertion below actually pins.
   configurePlexRestrictedRemote();
   const defaultResponder = plexResponder([]);
   const remoteResponder = plexResponder([900]);
   respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url) : defaultResponder(url));
-  seedUser("u-granted", GRANT_PLEX_REMOTE);
-  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "PENDING" });
+  // SEVERAL distinct requesters: with one, a per-requester round-trip would be
+  // indistinguishable from a batched read, so the count alone would prove nothing.
+  const statuses = ["PENDING", "APPROVED", "AVAILABLE"] as const;
+  for (let i = 0; i < 12; i++) {
+    const u = `u-${i}`;
+    seedUser(u, GRANT_PLEX_REMOTE);
+    seedRequest({ id: `req-${i}`, tmdbId: 900, mediaType: "MOVIE", requestedBy: u, status: statuses[i % 3] });
+  }
 
   await POST(syncReq({ headers: AS_CRON }));
   await settle();
 
-  // Enforced mode loads the requester rows at the wider CANDIDATE scope and then
-  // REUSES them for the mediaServer split — it must not add a second read
-  // (guardrail 31: never a per-requester round-trip).
-  assert.equal(
-    requesterReads().length,
-    1,
-    "the candidate-scope load is reused for the mediaServer split — enforcing grants must not double the requester reads",
-  );
+  // 12 distinct requesters. The reads are bounded by the number of PASSES (the demote,
+  // plus one candidate-scope load per marking source, reused for that source's
+  // mediaServer split) — never by how many requesters there are. A per-requester
+  // round-trip would be at least 12.
+  const reads = requesterReads().length;
+  assert.ok(reads <= 3, `12 requesters must not mean 12 reads — expected at most 3 batched, got ${reads}`);
 });
 
 test("multi-server PARTIAL failure: one instance's library fetch failing preserves its rows, suppresses the success stamp, and vetoes the whole-table episode rewrite", async () => {
@@ -1599,9 +1671,40 @@ test("the expired-TmdbCache purge fires near the end (deleteMany where expiresAt
   await POST(syncReq({ headers: AS_CRON }));
   await settle();
 
-  assert.equal(tmdbCacheDeleteManyCalls.length, 1, "one expired-cache purge per run");
-  const arg = tmdbCacheDeleteManyCalls[0] as { where?: { expiresAt?: { lt?: Date } } };
-  assert.ok(arg.where?.expiresAt?.lt instanceof Date, "the purge must scope to expiresAt < now, not wipe the whole cache");
+  type PurgeArg = {
+    where?: {
+      expiresAt?: { lt?: Date };
+      NOT?: { OR?: Array<{ key?: { startsWith?: string } }> };
+      OR?: Array<{ key?: { startsWith?: string } }>;
+    };
+  };
+  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "two purge passes per run");
+  const [general, ratings] = tmdbCacheDeleteManyCalls as PurgeArg[];
+  assert.ok(general.where?.expiresAt?.lt instanceof Date, "the purge must scope to expiresAt < now, not wipe the whole cache");
+
+  // The ratings namespaces are a serve-stale surface: getCacheStale/getCacheStaleMany
+  // never delete an expired row because it is still a HIT. This purge was the only thing
+  // deleting them, one SYNC_INTERVAL after expiry — so a provider outage lost the badges
+  // entirely instead of falling back to the previous values. They are excluded from the
+  // immediate pass and reaped on a long grace instead.
+  // Nested under OR deliberately: the two prefixes are mutually exclusive, so a bare
+  // `NOT: [a, b]` would be a silent no-op if a list-NOT compiles to NOT(a AND b).
+  assert.deepEqual(
+    general.where?.NOT,
+    { OR: [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }] },
+    "the immediate purge must spare the two serve-stale ratings namespaces",
+  );
+  assert.deepEqual(
+    ratings.where?.OR,
+    [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }],
+    "the grace purge targets exactly those namespaces — `:tmdb:` scoped, so the list caches and omdb:<imdbId> still expire immediately",
+  );
+  const graceCutoff = ratings.where?.expiresAt?.lt as Date;
+  assert.ok(graceCutoff instanceof Date, "the grace purge is still expiry-scoped, never a blanket delete");
+  assert.ok(
+    Date.now() - graceCutoff.getTime() >= 29 * 24 * 60 * 60 * 1000,
+    "the ratings grace must be far wider than one sync interval, or serve-stale is still collapsed",
+  );
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1635,4 +1738,203 @@ test("a second concurrent run (lock 2000 busy) is gated: skipped:true, no fetch,
   assert.equal(fetchCalls.length, 0, "the gated run must not fetch any library");
   assert.equal(transactions.length, 0, "the gated run must not open any transaction");
   assert.equal(casCalls.length, 0, "the gated run must not touch the notification CAS");
+});
+
+// ── the AVAILABLE -> APPROVED demote is a PER-REQUESTER decision ────────────
+
+test("demote: an AVAILABLE request reverts when its only holder is a restricted server the requester cannot see", async () => {
+  // The demote used to read the GLOBAL library union, so a restricted server the
+  // requester holds no grant for still counted as "present" and kept the request
+  // AVAILABLE — for a copy they cannot watch, and which every read path has always
+  // rendered as unavailable. It asks per requester now, the same way the marking pass
+  // decides whether to flip a request TO available in the first place.
+  configurePlexRestrictedRemote();
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]); // Radarr does not know this movie
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-ungranted", {});
+  seedRequest({ id: "req-ungranted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-ungranted", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(
+    requests.get("req-ungranted")?.status,
+    "APPROVED",
+    "a title held only by a server this requester cannot see is not available TO THEM",
+  );
+});
+
+test("demote: the SAME title stays AVAILABLE for a requester who holds the grant", async () => {
+  // The counterpart. Without it a demote that fired for everyone would satisfy the test
+  // above, so this is what stops the per-requester gate becoming a blanket revert.
+  configurePlexRestrictedRemote();
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]);
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-granted", GRANT_PLEX_REMOTE);
+  seedRequest({ id: "req-granted", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-granted", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-granted")?.status, "AVAILABLE", "a granted requester keeps their availability");
+});
+
+test("demote: a service with NOTHING configured must not look like an incomplete union", async () => {
+  // getMediaInstances always synthesizes the default instance, so an unconfigured
+  // service reads as 1 registered vs 0 syncable. Without the in-use term on that check,
+  // the "registered but unconfigured, can't prove absence" guard fired on every
+  // deployment not running BOTH Plex and Jellyfin — silently disabling demotes for
+  // almost everyone. This pins that a Plex-only deployment still demotes.
+  configurePlexRestrictedRemote(); // Plex configured; Jellyfin entirely absent
+  configureRadarr();
+  const defaultResponder = plexResponder([]);
+  const remoteResponder = plexResponder([900]);
+  const radarr = radarrResponder([]);
+  respond = (url) =>
+    url.origin === RADARR_ORIGIN ? radarr(url)
+      : url.origin === PLEX_REMOTE_ORIGIN ? remoteResponder(url)
+        : defaultResponder(url);
+
+  seedUser("u-nojf", {});
+  seedRequest({ id: "req-nojf", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-nojf", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-nojf")?.status, "APPROVED", "an unconfigured Jellyfin must not veto Plex-based demotes");
+});
+
+test("demote: a NAMED-only Plex deployment still demotes — the synthesized default holds no rows, so absence IS provable", async () => {
+  // getMediaInstances always synthesizes the default, so an operator who uses Plex
+  // exclusively through a named instance and never fills in the legacy default's
+  // connection fields reads as 2 registered vs 1 syncable on EVERY run. A raw count
+  // comparison made that permanently "incomplete" and vetoed every demote forever — yet
+  // the guard's rationale ("its preserved rows are not in this run's union") is vacuous
+  // for a server that was never configured: it has no rows.
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  configureRadarr();
+  const radarr = radarrResponder([]);
+  const remoteResponder = plexResponder([]); // the remote no longer holds it either
+  respond = (url) => (url.origin === RADARR_ORIGIN ? radarr(url) : remoteResponder(url));
+
+  seedRequest({ id: "req-named-only", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-named", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.deepEqual(
+    preservedRowFindFirsts.filter((p) => p.model === "plexLibraryItem").map((p) => p.slugs),
+    [[""]],
+    "the veto probes exactly the registered-but-unsyncable slugs — here the never-configured default",
+  );
+  assert.equal(
+    requests.get("req-named-only")?.status,
+    "APPROVED",
+    "a never-configured default instance holds no preserved rows and must not disable demotes",
+  );
+});
+
+test("demote: a registered instance that still HOLDS preserved rows does veto the demote", async () => {
+  // The counterpart, and the intent this must not regress: an admin who clears a
+  // configured server's token drops it out of this run's union while guardrail 35
+  // deliberately preserves its rows. A title living only there reads as absent from data
+  // never consulted, so the demote stays off.
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "attic", name: "Attic" }]));
+  preservedRowSlugs.plexLibraryItem.add("attic"); // registered, token cleared, rows survive
+  configureRadarr();
+  const radarr = radarrResponder([]);
+  const remoteResponder = plexResponder([]);
+  respond = (url) => (url.origin === RADARR_ORIGIN ? radarr(url) : remoteResponder(url));
+
+  seedRequest({ id: "req-attic", tmdbId: 900, mediaType: "MOVIE", requestedBy: "u-attic", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(
+    requests.get("req-attic")?.status,
+    "AVAILABLE",
+    "we cannot prove absence from a server whose preserved rows this run never consulted",
+  );
+  assert.ok(
+    warns.some((w) => w.includes("skipping AVAILABLE->APPROVED demotes")),
+    "the veto is announced, naming how many servers are in that state",
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stale-sync notify fallback — a source that has NEVER synced clean
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("a configured source that has NEVER synced clean gets a create-only staleness baseline", async () => {
+  // The 24h fallback ("treat a long-broken source's data as valid so the OTHER source can
+  // satisfy the notify gate alone") keys off lastPlexSyncSucceededAt, which is stamped
+  // ONLY on a clean run. Without a baseline a source that was never healthy has no row at
+  // all, so the window has no origin, *Stale is false forever, and every user pinned to
+  // that source is starved permanently — the exact failure the fallback exists to prevent.
+  configureBothServers();
+  respond = (url) =>
+    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+  seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.deepEqual(
+    settingCreateManyData.map((r) => r.key),
+    ["lastPlexSyncSucceededAt"],
+    "only the failing source with no marker is seeded; a source that synced clean is stamped by its own upsert",
+  );
+  assert.ok(
+    !settingUpserts.some((u) => u.key === "lastPlexSyncSucceededAt"),
+    "the baseline is a create-only seed — a failed run must never look like a success",
+  );
+  assert.ok(
+    settings.has("lastJellyfinSyncSucceededAt"),
+    "the healthy source is stamped normally",
+  );
+});
+
+test("the staleness baseline never overwrites a real success stamp, and is not seeded on a clean run", async () => {
+  // skipDuplicates is what makes the seed idempotent: a source that succeeded hours ago
+  // and is failing now keeps its true last-success timestamp, so the 24h window is
+  // measured from when it was actually healthy.
+  configureBothServers();
+  const realSuccess = String(Date.now() - 6 * 60 * 60 * 1000);
+  settings.set("lastPlexSyncSucceededAt", realSuccess);
+  respond = (url) =>
+    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+  seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(settings.get("lastPlexSyncSucceededAt"), realSuccess, "an existing success stamp survives the seed");
+
+  // A run where both sources sync clean seeds nothing at all.
+  settingCreateManyData.length = 0;
+  settings.clear();
+  configureBothServers();
+  respond = bothServersRespond([550], [550]);
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.deepEqual(settingCreateManyData, [], "a clean run seeds no baseline");
 });

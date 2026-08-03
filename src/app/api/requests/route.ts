@@ -151,7 +151,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
   }
 
-  if (!_token || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
+  // typeof-guard BEFORE verifyRequestToken: readJsonCapped<T>'s generic is a
+  // compile-time cast only, so a truthy non-string (`123`, `{}`) slipped past the
+  // old `!_token` check and threw ERR_INVALID_ARG_TYPE out of Buffer.from(a, "hex")
+  // as a 500 instead of this 403. Empty string is non-verifying and still 403s.
+  if (typeof _token !== "string" || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
     return NextResponse.json({ error: "Invalid or expired request token" }, { status: 403 });
   }
 
@@ -572,7 +576,18 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // A request and a deletion vote for the same title are contradictory. The vote route
   // already blocks voting when you've requested; mirror it here by clearing the caller's
   // own delete-vote on request, so a vote-then-request can't leave both rows persisting.
-  void prisma.deletionVote.deleteMany({ where: { userId: session.user.id, tmdbId, mediaType } });
+  // .catch is required, not decorative: a Prisma model method returns a LAZY
+  // PrismaPromise that only dispatches once a continuation is attached, so a bare
+  // `void deleteMany(...)` never ran at all. It also handles the rejection, which —
+  // detached after the response — would otherwise escape as a process-level
+  // unhandledRejection with no request context (same shape as requests/bulk).
+  void prisma.deletionVote
+    .deleteMany({ where: { userId: session.user.id, tmdbId, mediaType } })
+    .catch((err) =>
+      console.error(
+        `[requests] deletionVote cleanup failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
+      ),
+    );
 
   if (createdBranch === "auto-approve") {
     emitSSE({ type: "request:new", requestId: request.id, userId: session.user.id });

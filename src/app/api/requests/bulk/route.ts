@@ -606,14 +606,13 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
     if (row.status !== "APPROVED") {
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
     }
+    let pushedTvdbId: number | null = null;
     try {
       if (p.mediaType === "MOVIE") {
         await addMovieToRadarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
       } else {
-        const tvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
-        await prisma.mediaRequest.update({ where: { id: row.id }, data: { tvdbId } });
+        pushedTvdbId = await addSeriesToSonarr(p.tmdbId, p.arrInstance, undefined, targetUserId);
       }
-      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
     } catch (err) {
       console.error(
         `[requests/bulk] auto-approve push failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
@@ -626,6 +625,24 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
       emitSSE({ type: "request:updated", requestId: row.id, status: "PENDING", userId: targetUserId });
       return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "created" };
     }
+
+    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
+    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
+    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
+    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
+    // The task must still self-catch: mapLimit is a bounded Promise.all (guardrail 31),
+    // so an escaping error here would reject the whole bulk run.
+    if (pushedTvdbId !== null) {
+      await prisma.mediaRequest
+        .updateMany({ where: { id: row.id }, data: { tvdbId: pushedTvdbId } })
+        .catch((err) =>
+          console.error(
+            `[requests/bulk] tvdbId bookkeeping write failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
+          ),
+        );
+    }
+
+    return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
   });
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];

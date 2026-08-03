@@ -23,9 +23,13 @@
 //   - the SLIDING-WINDOW decision: a slow-path verify ALWAYS re-signs (the
 //     refreshed token carries dbCheckedAt and rides the fast path next time);
 //     a long-TTL (rememberMe/mobile) non-admin token slides down to exactly
-//     3600s; a token inside its final hour is NOT extended; the slide is
-//     capped at the sign-in `expiresAt` deadline; a non-admin past that
-//     deadline is rejected outright; ADMIN skips the slide entirely (and —
+//     3600s; a token inside its final hour IS slid back up (the slide moves
+//     BOTH ways, so an active rememberMe session lives to its sign-in
+//     deadline instead of dying ~1h after the first DB check) — pinned both
+//     as a single re-sign and as a compound walk across the 3600s mark under
+//     a faked Date CLASS (jose reads `new Date()`, not just Date.now); the
+//     slide is capped at the sign-in `expiresAt` deadline; a non-admin past
+//     that deadline is rejected outright; ADMIN skips the slide entirely (and —
 //     pinned as CURRENT behavior — ignores `expiresAt`, being governed by the
 //     7d iat ceiling instead, enforced here on the slow path too);
 //   - the passwordChangedAt cutoff (before/same-second/after boundaries) and
@@ -391,7 +395,12 @@ test("a long-TTL (rememberMe/mobile) non-admin token slides down to exactly the 
   assert.equal(result.refreshed.expiresInSeconds, 3600);
 });
 
-test("a non-admin token inside its final hour is NOT slid forward — remaining life is preserved", async () => {
+test("a non-admin token inside its final hour IS slid back up to the full 3600s window", async () => {
+  // The slide is symmetric: it clamps a long-TTL token DOWN on the first DB
+  // check and re-extends it on every later one. A shorten-only slide preserved
+  // the token's ABSOLUTE exp forever, so every non-admin cookie session died
+  // ~1h after sign-in no matter how active the user was (the compound walk
+  // below pins the end-to-end consequence).
   const now0 = nowSec();
   const { token } = await mint({
     expiresInSeconds: 1800, // already below the 3600s window
@@ -399,9 +408,10 @@ test("a non-admin token inside its final hour is NOT slid forward — remaining 
   });
   const result = await verifyAndRefreshSession(token);
   assert.ok(result?.refreshed);
-  assert.ok(
-    result.refreshed.expiresInSeconds <= 1800 && result.refreshed.expiresInSeconds >= 1700,
-    `the re-sign must keep the remaining ~1800s, got ${result.refreshed.expiresInSeconds}`,
+  assert.equal(
+    result.refreshed.expiresInSeconds,
+    3600,
+    "an active session's remaining life must be pushed back out to the inactivity window",
   );
 });
 
@@ -426,6 +436,61 @@ test("a non-admin session past its expiresAt deadline is rejected even though th
     expiresAt: now0 - 10, // …but the sign-in deadline already passed
   });
   assert.equal(await verifyAndRefreshSession(token), null);
+});
+
+test("an ACTIVE non-admin rememberMe session survives past the 3600s window — and a >1h gap still logs it out", async () => {
+  // The compound outcome the single-step pins above cannot see: a shorten-only
+  // slide left the token's ABSOLUTE exp at the first slow-path check, so an
+  // actively-browsing user was bounced to /login ~1h after sign-in and the
+  // admin-configurable sessionMaxDuration/sessionMobileDuration were dead.
+  //
+  // jose reads the clock via `new Date()`, not Date.now, so walking a token
+  // across its own exp needs the whole Date CLASS faked.
+  const RealDate = Date;
+  let fakeNowMs = RealDate.now();
+  class FakeDate extends RealDate {
+    constructor(...args: unknown[]) {
+      if (args.length === 0) super(fakeNowMs);
+      else super(...(args as [number]));
+    }
+    static now(): number {
+      return fakeNowMs;
+    }
+  }
+  globalThis.Date = FakeDate as unknown as DateConstructor;
+  try {
+    const start = Math.floor(fakeNowMs / 1000);
+    const { token } = await mint({
+      iat: start,
+      expiresInSeconds: 30 * DAY, // the rememberMe TTL as minted at sign-in
+      expiresAt: start + 30 * DAY,
+    });
+
+    // Browse every 5 minutes for two hours, riding each refreshed token forward.
+    let current = token;
+    for (let elapsed = 300; elapsed <= 7_200; elapsed += 300) {
+      fakeNowMs = (start + elapsed) * 1000;
+      const step = await verifyAndRefreshSession(current);
+      assert.ok(step?.refreshed, `an active session must still verify at t+${elapsed}s`);
+      assert.equal(
+        step.refreshed.expiresInSeconds,
+        3600,
+        `each DB check must re-extend to the full window, at t+${elapsed}s`,
+      );
+      current = step.refreshed.token;
+    }
+
+    // …and the inactivity timeout keeps its teeth: a gap longer than the window
+    // arrives on an already-expired JWT, which verifySessionJwt rejects.
+    fakeNowMs = (start + 7_200 + 3_601) * 1000;
+    assert.equal(
+      await verifyAndRefreshSession(current),
+      null,
+      "a >1h idle gap must still end the session",
+    );
+  } finally {
+    globalThis.Date = RealDate;
+  }
 });
 
 test("ADMIN skips the inactivity slide and — pinned CURRENT behavior — ignores the expiresAt deadline", async () => {

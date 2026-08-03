@@ -9,10 +9,18 @@ import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked } fro
 import { mapLimit } from "@/lib/concurrency";
 
 // Cap concurrent OMDB fallback chains. Each chain does a TMDB external_ids lookup
-// + an OMDB fetch + cache reads/writes; an unbounded Promise.all over up to
-// MAX_BATCH (200) misses would saturate the Prisma pool and burst OMDB (free tier
-// is 1k/day). 6 keeps it gentle while still parallelizing.
+// + an OMDB fetch + cache reads/writes; an unbounded Promise.all over the miss set
+// would saturate the Prisma pool and burst OMDB (free tier is 1k/day). 6 keeps it
+// gentle while still parallelizing.
 const OMDB_FALLBACK_CONCURRENCY = 6;
+
+// Cap the COUNT of OMDB chains awaited in the request path (blocking mode only).
+// Concurrency alone doesn't bound the spend: the miss set is as long as the caller's
+// item list, and callers like /top pass the whole pooled catalogue (~hundreds of
+// titles) rather than one page — enough to exhaust the free tier's 1k/day on a
+// single cold load and trip the quota lockout site-wide. The overflow is deferred to
+// after(), so the cache still fills and the next load serves those titles warm.
+const MAX_BLOCKING_OMDB_MISSES = 200;
 
 // MDBList provides richer data than OMDB; this is the canonical merge function for list-based flows.
 function applyMdblist(item: TmdbMedia, d: MdblistRatings): TmdbMedia {
@@ -213,6 +221,8 @@ export async function attachRatingsUnified(
   }
 
   const misses: TmdbMedia[] = [];
+  // Misses past MAX_BLOCKING_OMDB_MISSES: warmed after the response instead of inline.
+  let deferredOmdb: TmdbMedia[] = [];
   // Keyed by `${mediaType}:${id}`, NOT bare tmdbId — a movie and a TV show can
   // share a TMDB id (independent id spaces), so a bare-id map would cross-
   // contaminate their ratings within a single batch.
@@ -265,14 +275,16 @@ export async function attachRatingsUnified(
         // whole page, which is exactly what the hasAnyMdblistRating gate above prevents.
         const useFallback = !probe || !probe.found || !hasAnyMdblistRating(probe.data);
         if (useFallback) {
-          await mapLimit(mdbMisses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
+          deferredOmdb = mdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
+          await mapLimit(mdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
             const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
             if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
           });
         }
       }
     } else {
-      await mapLimit(misses, OMDB_FALLBACK_CONCURRENCY, async (item) => {
+      deferredOmdb = misses.slice(MAX_BLOCKING_OMDB_MISSES);
+      await mapLimit(misses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
         const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
         if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
       });
@@ -280,9 +292,9 @@ export async function attachRatingsUnified(
   }
 
   // Stale revalidation never blocks the response — only genuine misses are fetched
-  // inline above; entries served stale refresh after the response, same as the
-  // non-blocking path.
-  if (staleMdblist.length > 0 || staleOmdb.length > 0) {
+  // inline above (capped at MAX_BLOCKING_OMDB_MISSES); entries served stale, and the
+  // capped-out misses, refresh after the response, same as the non-blocking path.
+  if (staleMdblist.length > 0 || staleOmdb.length > 0 || deferredOmdb.length > 0) {
     after(async () => {
       if (staleMdblist.length > 0 && !isMdblistQuotaLocked()) {
         // Same quota-efficient shape as the non-blocking path: one batch POST per media
@@ -296,6 +308,12 @@ export async function attachRatingsUnified(
           movieStale.length > 0 ? fetchMdblistBatch(movieStale, "movie") : Promise.resolve(new Map<number, MdblistRatings>()),
           tvStale.length    > 0 ? fetchMdblistBatch(tvStale,    "tv")    : Promise.resolve(new Map<number, MdblistRatings>()),
         ]);
+      }
+      if (deferredOmdb.length > 0) {
+        // Misses the inline cap left unfetched: warm them here so they're served from
+        // the table on the next load rather than being chased in the request path.
+        await mapLimit(deferredOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
+          getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
       }
       if (staleOmdb.length > 0) {
         // Items whose warm data came from an expired OMDB row: the single-item getter

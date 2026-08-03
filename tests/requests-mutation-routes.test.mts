@@ -160,6 +160,9 @@ type ReqRow = {
   tvdbId: number | null; createdAt: Date;
 };
 let reqRows: ReqRow[] = [];
+// Makes ONLY the post-Sonarr tvdbId bookkeeping write fail (the CAS transitions
+// never carry tvdbId), so a test can prove that write is outside the rollback try.
+let failTvdbBookkeeping = false;
 
 function matchReq(r: ReqRow, where: Record<string, unknown> | undefined): boolean {
   if (!where) return true;
@@ -199,6 +202,7 @@ shadowPrismaModel(prisma, "mediaRequest", {
   },
   updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
     rec("mediaRequest.updateMany", args);
+    if (failTvdbBookkeeping && "tvdbId" in args.data) throw new Error("P2024 pool timeout");
     let n = 0;
     for (const r of reqRows) {
       if (!matchReq(r, args.where)) continue;
@@ -353,6 +357,7 @@ beforeEach(() => {
   arrOk = true;
   arrFailTmdbIds = new Set();
   profilesOk = true;
+  failTvdbBookkeeping = false;
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -443,6 +448,37 @@ test("a FAILED ARR push rolls the row back to PENDING", async () => {
   assert.equal(reqRows.find((r) => r.id === "ok")!.status, "APPROVED");
   assert.equal(reqRows.find((r) => r.id === "bad")!.status, "PENDING", "a failed push must not leave the row APPROVED");
   assert.equal(reqRows.find((r) => r.id === "bad")!.pendingNotifyAt, null);
+});
+
+// Sonarr has ALREADY accepted the series when the tvdbId write runs, so that write
+// must sit outside the try whose catch rolls APPROVED → PENDING — otherwise a
+// P2025 (row deleted mid-push) or a transient pool error reverts a request Sonarr
+// is actively grabbing. Mirrors the documented hoist in requests/route.ts.
+test("the post-Sonarr tvdbId write is an updateMany OUTSIDE the rollback try", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "tv1", requestedBy: owner.userId, mediaType: "TV", tmdbId: 1399 })];
+  const res = await doPatch(token, "tv1", { status: "APPROVED" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].tvdbId, 4242);
+  const write = opsOf("mediaRequest.updateMany").find((o) => "tvdbId" in (o.args as { data: Record<string, unknown> }).data);
+  assert.ok(write, "the tvdbId write must go through updateMany — it no-ops on a concurrently deleted row");
+  assert.deepEqual((write.args as { where: Record<string, unknown> }).where, { id: "tv1" });
+  assert.ok(
+    !opsOf("mediaRequest.update").some((o) => "tvdbId" in ((o.args as { data?: Record<string, unknown> }).data ?? {})),
+    "a bare update would throw P2025 on a deleted row and trip the rollback",
+  );
+});
+
+test("a FAILED tvdbId bookkeeping write must NOT roll a grabbed request back to PENDING", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "tv1", requestedBy: owner.userId, mediaType: "TV", tmdbId: 1399 })];
+  failTvdbBookkeeping = true;
+  const res = await doBatch(token, { ids: ["tv1"], status: "APPROVED" });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].status, "APPROVED", "a bookkeeping failure is not an ARR push failure");
+  assert.ok(reqRows[0].pendingNotifyAt instanceof Date, "the 90s backstop must stay armed");
 });
 
 test("a rolled-back row is NOT notified — no misleading Approved ping", async () => {

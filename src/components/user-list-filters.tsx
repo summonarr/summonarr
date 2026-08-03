@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, X } from "@/components/icons";
 
@@ -115,6 +115,16 @@ export function SearchBox({
     setValue(initial);
   }
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The pending timer closes over the pathname captured when it was scheduled,
+  // so one that survives unmount router.push()es back to the route the user just
+  // left (and adds a bogus history entry). Same cleanup as live-refresh.tsx.
+  useEffect(
+    () => () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    },
+    [],
+  );
 
   const push = useCallback(
     (next: string) => {

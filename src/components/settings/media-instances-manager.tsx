@@ -447,8 +447,19 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 enumerating needs THIS server's stored url+token, so it is only
                 possible once the instance has been saved. An empty selection
                 means "sync everything", which is what every named server does
-                until an admin narrows it. */}
+                until an admin narrows it.
+
+                Keyed by SLUG, not by the card's index: the picker holds a
+                server-scoped `items` list with no reset-on-slug-change effect,
+                so after a mid-list removal React would reuse the fiber and show
+                the removed server's section keys on the next card — ticking one
+                writes a key that doesn't exist on that server, and its scoped
+                full-sync then wipes its library. The card itself stays on
+                `key={idx}` on purpose: `d.slug` is editable while `isNew`, so
+                keying the card on it would remount (and steal focus from) the
+                slug field on every keystroke. */}
             <InstanceLibraryPicker
+              key={`${service}-${d.slug}`}
               service={service}
               slug={d.slug}
               canLoad={!d.isNew && d.hasToken}

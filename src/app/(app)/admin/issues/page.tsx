@@ -26,11 +26,14 @@ const SCOPE_LABELS: Record<string, string> = {
 const VALID_FILTERS = ["ALL", "OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type FilterValue = (typeof VALID_FILTERS)[number];
 
-// Collapses duplicate reports (same tmdbId+type+scope+season+episode) into one
-// group, keeping the newest as representative; ordered by report count desc.
+// Collapses duplicate reports (same tmdbId+mediaType+type+scope+season+episode)
+// into one group, keeping the newest as representative; ordered by report count
+// desc. TMDB ids are namespaced per type, so mediaType must be part of the key —
+// a movie and a show can share one id.
 function groupIssues<T extends {
   id: string;
   tmdbId: number;
+  mediaType: string;
   issueType: string;
   scope: string;
   seasonNumber: number | null;
@@ -40,7 +43,7 @@ function groupIssues<T extends {
 }>(issues: T[]): { representative: T; count: number; reporterNames: string[] }[] {
   const map = new Map<string, T[]>();
   for (const issue of issues) {
-    const key = `${issue.tmdbId}::${issue.issueType}::${issue.scope}::${issue.seasonNumber ?? ""}::${issue.episodeNumber ?? ""}`;
+    const key = `${issue.tmdbId}::${issue.mediaType}::${issue.issueType}::${issue.scope}::${issue.seasonNumber ?? ""}::${issue.episodeNumber ?? ""}`;
     const group = map.get(key) ?? [];
     group.push(issue);
     map.set(key, group);

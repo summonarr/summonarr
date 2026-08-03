@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.20.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.20.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,34 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.20.2
+
+**Fixed**
+
+- **"Remember me" now actually keeps you signed in.** Non-admin sessions were only ever shortened and never re-extended, so a browser session expired about an hour after sign-in no matter how much you were using it — the longer session lengths in settings were unreachable.
+- **The admin Library page no longer invents TV mismatches, or hides real ones.** With the usual `/data/movies` + `/data/tv` layout every TV row collapsed onto a single entry, so at most one TV title was ever compared. Genuine mismatches were invisible, and two correctly-matched libraries could produce a false mismatch pairing two unrelated shows — which, if acted on, re-pointed a correct show at the wrong TMDB entry.
+- **TV rows on the admin Library page now show their Sonarr status.** The lookup checked the season folder against Sonarr's series path, so a TV row never resolved a verdict at all.
+- **Plex sign-in returns you to the page you started from** instead of always landing on the home page.
+- **Requests are no longer starved on a server that has never synced cleanly.** The 24-hour fallback meant to notify you anyway could never engage.
+- **Requests no longer stay stuck as Available** on deployments where a registered media server was never configured — that permanently blocked the change back to Approved.
+- **A request Sonarr has already accepted is no longer rolled back to Pending** by a failure in the bookkeeping write that follows it.
+- **Rating badges survive a provider outage.** The hourly cache clean-up was deleting the very rows the fallback relies on.
+- **A frozen Plex stream is detected again.** A small playback-position correction counted as movement, so the stall detector never fired and a dead session could sit on the now-playing card indefinitely.
+- **Completion-rate stats no longer merge unrelated unmatched titles** into a single viewing arc.
+- **Deactivated accounts no longer receive "download pending" Discord messages.**
+- **Notification-email verification works when signed in on a named Jellyfin server** — it always checked the default server.
+- **Quality-profile lists respect per-user instance access**, which also stops them revealing which named instances exist.
+- **Movie and TV detail pages check your session before fetching**, so an unauthenticated request cannot consume TMDB or OMDB quota.
+- **Removing a media server no longer carries its library selection onto the next server** in the list.
+- **The user-search box no longer bounces you back** to the list you just navigated away from.
+- **Posters no longer occasionally show a film's artwork on a TV row** that shares its TMDB id.
+- Smaller fixes: a malformed request token returned a server error instead of a permission error, a vote-cleanup write could silently never run, and season views issued one unbounded database write per episode.
+
+**Changed**
+
+- **The Top page no longer waits on missing ratings before rendering.** Titles whose ratings are not cached yet drop out of a minimum-IMDb filter on the first load and appear on the next — matching how the mobile app already behaves.
+- **External ratings refresh shortly before they expire** rather than only after, so a rating is less often missing on first view. This uses somewhat more of the daily OMDB quota.
 
 ### v0.20.1
 
@@ -397,7 +425,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.20.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.20.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

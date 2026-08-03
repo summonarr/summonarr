@@ -24,7 +24,10 @@
 //    server-native keys (plexRatingKey/jellyfinItemId) the fix-match UI needs;
 //  - TV items key on the SERIES folder (first path segment after the
 //    configured strip prefix), not the season/episode path, and the sonarr
-//    verdict lookup uses that same series key;
+//    verdict lookup uses that same series key. Mount inference is therefore
+//    per (serverInstance, MEDIA TYPE): one mount across movies + TV stops at
+//    their shared parent, leaving the library dir on every TV rel so segment 0
+//    is "tv" for every show and the whole TV half collapses onto one key;
 //  - the ARR tie-breaker reads the cached `arr:radarr|sonarr:paths:name` map
 //    (folder-basename → tmdbId): arr agreeing with Plex flags the JELLYFIN
 //    side and vice versa; an arr id matching neither side yields a verdict of
@@ -419,6 +422,39 @@ test("TV matches key on the SERIES folder (strip prefix applied) and consult the
   assert.equal(m.arrVerdict, "jellyfin");
 });
 
+test("TV keys stay per-show with NO strip prefix configured — mounts are inferred per media type", async () => {
+  // The default deployment: movies and TV in sibling library dirs, no
+  // *TvPathStripPrefix set (the settings UI's own /api/admin/library-sample-paths
+  // preview infers its mount per media type, so the field correctly reads as
+  // unnecessary). Inferring ONE mount across both types stops at the shared
+  // parent (/data/), leaving "tv/" on every TV rel — and toMatchKey takes
+  // segment 0 for TV, so EVERY show collapses onto the single key "tv": the real
+  // Show A mismatch disappears behind the last writer and two unrelated shows
+  // get paired instead.
+  plexRows = [
+    plexItem(100, "MOVIE", "/data/movies/Foo (2020)/foo.mkv"),
+    plexItem(300, "TV", "/data/tv/Show A/Season 01/e01.mkv"),
+    plexItem(400, "TV", "/data/tv/Show B/Season 01/e01.mkv"),
+  ];
+  jfRows = [
+    jfItem(100, "MOVIE", "/media/movies/Foo (2020)/foo.mkv"),
+    jfItem(3999, "TV", "/media/tv/Show A/Season 01/e01.mkv"),
+    jfItem(400, "TV", "/media/tv/Show B/Season 01/e01.mkv"),
+  ];
+
+  assert.deepEqual(
+    (await getBadMatches()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
+    [["Show A", 300, 3999]],
+  );
+
+  // Both shows wrong: two DISTINCT keys, not one merged row.
+  jfRows[2] = jfItem(4999, "TV", "/media/tv/Show B/Season 01/e01.mkv");
+  assert.deepEqual(
+    (await getBadMatches()).map((m) => [m.relativePath, m.plex.tmdbId, m.jellyfin.tmdbId]),
+    [["Show A", 300, 3999], ["Show B", 400, 4999]],
+  );
+});
+
 test("activeType filters the report to the requested media type", async () => {
   settingRows = [
     { key: "plexTvPathStripPrefix", value: "tv" },
@@ -437,14 +473,14 @@ test("activeType filters the report to the requested media type", async () => {
     jfItem(400, "TV", "/data/tv/ShowY/Season 02/e5.mkv"),
   ];
 
-  // In a mixed library the inferred mount stops at /plexmedia/ (movies/ and
-  // tv/ diverge one segment in), so movie rels keep the "movies/" library dir
-  // — only a *MoviePathStripPrefix would peel it, and none is configured here.
+  // Mounts are inferred per (instance, MEDIA TYPE), so the movie rows infer
+  // /plexmedia/movies/ (not the /plexmedia/ shared parent) and the "movies/"
+  // library dir never reaches the key — no *MoviePathStripPrefix needed.
   const all = await getBadMatches();
-  assert.deepEqual(all.map((m) => m.relativePath), ["movies/Alpha (2020)/Alpha.mkv", "ShowX"]);
+  assert.deepEqual(all.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv", "ShowX"]);
 
   const movies = await getBadMatches("MOVIE");
-  assert.deepEqual(movies.map((m) => m.relativePath), ["movies/Alpha (2020)/Alpha.mkv"]);
+  assert.deepEqual(movies.map((m) => m.relativePath), ["Alpha (2020)/Alpha.mkv"]);
 
   const tv = await getBadMatches("TV");
   assert.deepEqual(tv.map((m) => m.relativePath), ["ShowX"]);

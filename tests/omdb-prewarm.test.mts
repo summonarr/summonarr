@@ -8,13 +8,14 @@
 //     omdbApiKey Setting read and the library scan; no-API-key aborts before
 //     the scan; an empty library returns zeros after it;
 //   - the skip-vs-fetch triage on the 25%-of-original-TTL freshness threshold,
-//     and — PINS CURRENT BEHAVIOR — that a sub-threshold-but-UNEXPIRED row is
-//     "re-fetched" through getOmdbRatingsForTmdb, which serves it warm: the
-//     counter says fetched (or notFound for a sentinel) with zero network;
+//     and that a sub-threshold-but-UNEXPIRED row is genuinely re-fetched
+//     upstream (the prewarm calls fetchAndCacheOmdbForTmdb, NOT the cache-first
+//     getOmdbRatingsForTmdb, which would have served it warm and still counted
+//     it as fetched);
 //   - the details-blob releaseDate pass-through (witnessed via the written
 //     rows' age-scaled TTLs) and cross-source dedup of the item list;
-//   - per-item failure isolation: one rejected chain counts failed without
-//     aborting batch-mates or the run;
+//   - failure isolation: a rejected chain counts failed without aborting the
+//     run — later batches are still issued;
 //   - the mid-run quota stop: once a batch trips the OMDB lockout, the
 //     post-batch check breaks the loop and later batches are never issued.
 //
@@ -26,7 +27,8 @@
 // owns the TTL bucket values used as pass-through witnesses here.
 //
 // Ordering notes: the OMDB quota lockout is module-global with no reset
-// export, and this file's clock (Date-only mock timers) is never advanced —
+// export, and this file's clock (Date-only mock timers) is advanced exactly
+// once — in the failure-isolation test, past omdb.ts's 30s getApiKey memo —
 // so the two lockout tests run LAST: the mid-run-stop test trips the lockout
 // and the locked-at-start test rides it.
 //
@@ -113,9 +115,16 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", libraryDelegate("jellyfin"));
 const DEFAULT_KEY = "test-omdb-key";
 let omdbApiKeyValue: string | null = DEFAULT_KEY;
 const settingReads: string[] = [];
+// 1-based index of the read (within a test) that should explode — the only way
+// left to reject an item's chain, since fetchAndCacheOmdbForTmdb catches
+// everything downstream of its own getApiKey call.
+let settingReadFailAt: number | null = null;
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
     settingReads.push(args.where.key);
+    if (settingReadFailAt !== null && settingReads.length === settingReadFailAt) {
+      throw new Error(`setting read exploded for ${args.where.key}`);
+    }
     return args.where.key === "omdbApiKey" && omdbApiKeyValue !== null
       ? { key: "omdbApiKey", value: omdbApiKeyValue }
       : null;
@@ -126,14 +135,9 @@ type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 const cacheUpserts: CacheRow[] = [];
 const cacheFindManyCalls: string[][] = [];
-const cacheFindUniqueRejectKeys = new Set<string>();
 shadowPrismaModel(prisma, "tmdbCache", {
-  // Point reads back getCache/getCacheStale inside the omdb chain; a scripted
-  // per-key rejection is the deterministic way to make one item's chain reject.
+  // Point reads back getCache/getCacheStale inside the omdb chain.
   findUnique: async (args: { where: { key: string } }) => {
-    if (cacheFindUniqueRejectKeys.has(args.where.key)) {
-      throw new Error(`cache read exploded for ${args.where.key}`);
-    }
     return cacheRows.get(args.where.key) ?? null;
   },
   // Batch reads back the prewarm's freshness pass and its details-blob pass.
@@ -197,10 +201,10 @@ beforeEach(() => {
   tables.jellyfin = [];
   libCalls.length = 0;
   settingReads.length = 0;
+  settingReadFailAt = null;
   cacheRows.clear();
   cacheUpserts.length = 0;
   cacheFindManyCalls.length = 0;
-  cacheFindUniqueRejectKeys.clear();
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -270,33 +274,38 @@ test("cold items run the external_ids→OMDB chain: found counts fetched, a null
   assert.equal(cacheRows.get("omdb:tmdb:tv:1399")?.expiresAt.getTime(), Date.now() + 30 * DAY_MS);
 });
 
-test("triage: a fresh row skips; sub-threshold-but-UNEXPIRED rows count fetched/notFound with ZERO network (PINS CURRENT BEHAVIOR); only absent rows fetch", async () => {
+test("triage: a fresh row skips; sub-threshold-but-UNEXPIRED rows are genuinely re-fetched upstream (a stale rating is rewritten, a sentinel re-resolves); absent rows fetch", async () => {
   tables.plex = [
-    { tmdbId: 700, mediaType: "MOVIE" }, // fresh ratings row → skipped
-    { tmdbId: 701, mediaType: "MOVIE" }, // <25% left but unexpired → "fetched", served warm
+    { tmdbId: 700, mediaType: "MOVIE" }, // fresh ratings row → skipped, untouched
+    { tmdbId: 701, mediaType: "MOVIE" }, // <25% left but unexpired → force-fetched
     { tmdbId: 702, mediaType: "MOVIE" }, // no row → the real chain
-    { tmdbId: 703, mediaType: "MOVIE" }, // <25% left, sentinel → notFound, no network
+    { tmdbId: 703, mediaType: "MOVIE" }, // <25% left, sentinel → force-fetched, re-resolves
   ];
   seedCacheRow("omdb:tmdb:movie:700", 20 * HOUR_MS, ratingsRow("tt700", "7.0"));
   seedCacheRow("omdb:tmdb:movie:701", 1 * HOUR_MS, ratingsRow("tt701", "7.1"));
   seedCacheRow("omdb:tmdb:movie:703", 1 * HOUR_MS, JSON.stringify({ _notFound: true }));
 
-  // Any fetch for 700/701/703 falls through to the throwing default and would
-  // reject that item's chain — the counters below would show it as failed.
+  // Any fetch for 700 falls through to the throwing default and would reject
+  // that item's chain — the counters below would show it as failed.
   respond = (url) => {
-    if (url.pathname === "/3/movie/702/external_ids") return jsonResponse({ imdb_id: "tt0000702" });
+    const m = url.pathname.match(/^\/3\/movie\/(701|702|703)\/external_ids$/);
+    if (m) return jsonResponse({ imdb_id: `tt0000${m[1]}` });
     if (url.hostname === "www.omdbapi.com") return jsonResponse({ Response: "True", imdbRating: "5.0" });
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  // 701 is below the prewarm's 25% threshold so it is "re-fetched" — but the
-  // underlying getOmdbRatingsForTmdb serves any UNEXPIRED row from cache, so
-  // no request leaves the process and the near-expiry row stays until it truly
-  // expires. The counter still reports it as fetched (703's sentinel as
-  // notFound). Flip this pin if the prewarm ever purges near-expiry rows the
-  // way mdblist-prewarm purges sentinels.
-  assert.deepEqual(await prewarmOmdbCache(), { total: 4, fetched: 2, notFound: 1, skipped: 1, failed: 0 });
-  assert.equal(fetchCalls.length, 2); // 702's external_ids + OMDB — nothing else
+  // The prewarm force-fetches through fetchAndCacheOmdbForTmdb, so a row below
+  // the 25% threshold is renewed BEFORE it expires rather than served warm by
+  // the cache-first getter (which would have reported `fetched` for zero work).
+  assert.deepEqual(await prewarmOmdbCache(), { total: 4, fetched: 3, notFound: 0, skipped: 1, failed: 0 });
+  assert.equal(fetchCalls.length, 6); // 701/702/703 × (external_ids + OMDB)
+
+  // 701's near-expiry row really was rewritten (7.1 → 5.0) and 703's sentinel
+  // re-resolved into ratings; 700 stayed fresh and was never written.
+  const row701 = JSON.parse(cacheRows.get("omdb:tmdb:movie:701")!.data) as { imdbRating: string };
+  assert.equal(row701.imdbRating, "5.0");
+  assert.ok(!cacheRows.get("omdb:tmdb:movie:703")!.data.includes("_notFound"));
+  assert.ok(!cacheUpserts.some((u) => u.key === "omdb:tmdb:movie:700"));
 });
 
 test("no TMDB read token: cold items degrade to notFound with zero fetches and zero cache writes", async () => {
@@ -316,26 +325,26 @@ test("no TMDB read token: cold items degrade to notFound with zero fetches and z
 
 // ── failure isolation ───────────────────────────────────────────────────────
 
-test("a rejected item counts failed and neither batch-mates nor the run abort", async () => {
-  tables.plex = [
-    { tmdbId: 730, mediaType: "MOVIE" },
-    { tmdbId: 731, mediaType: "MOVIE" },
-    { tmdbId: 732, mediaType: "MOVIE" },
-  ];
-  // Reject the point read getCacheStale makes for 731 — the chain's first await.
-  cacheFindUniqueRejectKeys.add("omdb:tmdb:movie:731");
+test("a rejected chain counts failed without aborting the run — the next batch is still issued", async () => {
+  tables.plex = Array.from({ length: 6 }, (_, i): Row => ({ tmdbId: 740 + i, mediaType: "MOVIE" }));
+  // fetchAndCacheOmdbForTmdb swallows every downstream failure into a
+  // found:false result, so the omdbApiKey read it makes FIRST is the only
+  // remaining rejection source — and omdb.ts memoizes that read for 30s, so
+  // advance the clock past the memo to make batch 1 genuinely hit prisma.
+  // Read #1 of this run is the prewarm's own direct key check; #2 is the
+  // coalesced getApiKey for batch 1 (740-744); #3 is batch 2's, which succeeds.
+  mock.timers.tick(10 * 60 * 1000);
+  settingReadFailAt = 2;
   respond = (url) => {
-    const m = url.pathname.match(/^\/3\/movie\/(730|732)\/external_ids$/);
-    if (m) return jsonResponse({ imdb_id: `tt0000${m[1]}` });
+    if (url.pathname === "/3/movie/745/external_ids") return jsonResponse({ imdb_id: "tt0000745" });
     if (url.hostname === "www.omdbapi.com") return jsonResponse({ Response: "True", imdbRating: "6.0" });
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  assert.deepEqual(await prewarmOmdbCache(), { total: 3, fetched: 2, notFound: 0, skipped: 0, failed: 1 });
+  assert.deepEqual(await prewarmOmdbCache(), { total: 6, fetched: 1, notFound: 0, skipped: 0, failed: 5 });
   assert.ok(warns.some((w) => w.includes("[omdb-prewarm] item failed:")));
-  // The batch-mates completed their full chains despite the rejection.
-  assert.ok(cacheRows.has("omdb:tmdb:movie:730"));
-  assert.ok(cacheRows.has("omdb:tmdb:movie:732"));
+  // Batch 2 ran to completion after batch 1 rejected wholesale.
+  assert.ok(cacheRows.has("omdb:tmdb:movie:745"));
 });
 
 // ── quota lockout (LAST — module-global state, clock never advances) ────────

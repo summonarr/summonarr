@@ -18,10 +18,11 @@ import { serializePermissions } from "@/lib/permissions";
 //      cannot be replayed after a privilege change.
 //   5. Refresh mediaServer for credentials/oidc tokens (plex/jellyfin/jellyfin-qc
 //      sessions have their mediaServer pinned at sign-in).
-//   6. Sliding window for non-ADMIN: shorten the JWT exp to now+3600, capped at
-//      the original session deadline (`expiresAt` claim). This keeps active
-//      mobile/rememberMe sessions alive while enforcing a 1-hour inactivity
-//      timeout — matches the existing semantics.
+//   6. Sliding window for non-ADMIN: move the JWT exp to now+3600, capped at
+//      the original session deadline (`expiresAt` claim). It slides BOTH ways —
+//      down for a fresh long-TTL token, back up on every later DB check. This
+//      keeps active mobile/rememberMe sessions alive while enforcing a 1-hour
+//      inactivity timeout.
 //   7. Hard ceiling for ADMIN: reject after iat + 7d regardless of exp.
 //
 // dbCheckedAt skip optimization keeps the hot path off the DB: if the token was
@@ -271,23 +272,28 @@ export async function verifyAndRefreshSession(
     }
   }
 
-  // Sliding window for non-ADMIN: shorten exp to now+3600, capped at the original
+  // Sliding window for non-ADMIN: move exp to now+3600, capped at the original
   // session deadline. The cap (`expiresAt` claim) is the value set at sign-in by
-  // initializeTokenOnSignIn — it never moves, so sliding keeps the effective
-  // expiry at the original TTL. (The sole exception is the same-second
-  // privilege-change rotation below, where signedIat = cutoff+1 makes exp land
-  // ≤2s past the deadline once; the DB AuthSession row / sessionsRevokedAt remain
-  // the real boundary, so this is immaterial.)
+  // initializeTokenOnSignIn — it never moves, so the session can never outlive
+  // its original TTL. (The sole exception is the same-second privilege-change
+  // rotation below, where signedIat = cutoff+1 makes exp land ≤2s past the
+  // deadline once; the DB AuthSession row / sessionsRevokedAt remain the real
+  // boundary, so this is immaterial.)
+  //
+  // The slide is UNCONDITIONAL — it clamps a fresh long-TTL token down to the
+  // 1-hour window AND re-extends it on every later DB-checked request. A
+  // shorten-only slide pinned exp at the first slow-path check, so every
+  // non-ADMIN cookie session died ~1h after sign-in no matter how active the
+  // user was, making sessionMaxDuration/sessionMobileDuration unreachable. The
+  // inactivity timeout is unaffected: a gap longer than the window still arrives
+  // on an already-expired JWT, which verifySessionJwt rejects above.
   let resignExpiresIn: number | null = null;
   if (workingClaims.role !== "ADMIN") {
     const sessionDeadline = workingClaims.expiresAt;
     if (typeof sessionDeadline === "number") {
       if (now >= sessionDeadline) return null;
-      const currentExp = workingClaims.exp;
-      if (typeof currentExp === "number" && currentExp > now + NON_ADMIN_SLIDE_WINDOW_SECONDS) {
-        const newExp = Math.min(now + NON_ADMIN_SLIDE_WINDOW_SECONDS, sessionDeadline);
-        resignExpiresIn = newExp - now;
-      }
+      const newExp = Math.min(now + NON_ADMIN_SLIDE_WINDOW_SECONDS, sessionDeadline);
+      resignExpiresIn = newExp - now;
     }
   }
 

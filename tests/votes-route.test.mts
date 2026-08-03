@@ -500,11 +500,20 @@ test("field validation 400s: missing ids, non-integer tmdbId, junk mediaType, ov
   assert.equal(opsOf("deletionVote.create").length, 0);
 });
 
-test("the request token is required and scoped to the caller: garbage and another user's token both 403", async () => {
+test("the request token is required and scoped to the caller: garbage, non-string and another user's token all 403", async () => {
   const { token } = await mintSession();
   const garbage = await post(token, { tmdbId: 603, mediaType: "MOVIE", _token: "deadbeef" });
   assert.equal(garbage.status, 403);
   assert.deepEqual(await garbage.json(), { error: "Invalid or expired request token" });
+
+  // A TRUTHY non-string token is the case the old `!_token` guard missed:
+  // verifyRequestToken → Buffer.from(a, "hex") throws ERR_INVALID_ARG_TYPE, which
+  // escaped the handler as a 500. It must land on the same 403 as a bad string.
+  for (const bad of [123, {}, true] as const) {
+    const res = await post(token, { tmdbId: 603, mediaType: "MOVIE", _token: bad });
+    assert.equal(res.status, 403, `non-string _token ${JSON.stringify(bad)} must 403, not 500`);
+    assert.deepEqual(await res.json(), { error: "Invalid or expired request token" });
+  }
 
   // A perfectly valid token minted for a DIFFERENT user must not transfer.
   const stolen = await post(token, {
