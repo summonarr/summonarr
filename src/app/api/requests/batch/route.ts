@@ -187,6 +187,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
 
     // failedIds is declared at function scope above (reused by the SSE emit).
     await settleLimit(approved, ARR_CONCURRENCY, async (r) => {
+      let pushedTvdbId: number | null = null;
       try {
         const variant = r.arrInstance;
         // Honor the profile the requester chose at request time (REQUEST_ADVANCED);
@@ -196,12 +197,18 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         if (r.mediaType === "MOVIE") {
           await addMovieToRadarr(r.tmdbId, variant, profileId, r.requestedBy);
         } else {
-          const tvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
-          await prisma.mediaRequest.update({ where: { id: r.id }, data: { tvdbId } });
+          pushedTvdbId = await addSeriesToSonarr(r.tmdbId, variant, profileId, r.requestedBy);
         }
       } catch (err) {
         console.error("[arr] Batch approve push failed for", r.id, err);
         failedIds.add(r.id);
+      }
+      // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
+      // series by this point, so a P2025 (row deleted mid-push) or transient DB error
+      // must not land the id in failedIds and roll a genuinely-grabbed request back to
+      // PENDING. updateMany no-ops on a concurrently deleted row instead of throwing.
+      if (pushedTvdbId !== null) {
+        await prisma.mediaRequest.updateMany({ where: { id: r.id }, data: { tvdbId: pushedTvdbId } });
       }
     });
 

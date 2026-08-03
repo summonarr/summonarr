@@ -856,12 +856,12 @@ async function handleComponent(interaction: any): Promise<void> {
           // Keep the admin request list live (every other creation path emits).
           emitSSE({ type: "request:new", requestId: request.id, userId: dbUser.id });
           let arrFailed = false;
+          let pushedTvdbId: number | null = null;
           try {
             if (mediaType === "MOVIE") {
               await addMovieToRadarr(selected.id, routedSlug, undefined, dbUser.id);
             } else {
-              const tvdbId = await addSeriesToSonarr(selected.id, routedSlug, undefined, dbUser.id);
-              await prisma.mediaRequest.update({ where: { id: request.id }, data: { tvdbId } });
+              pushedTvdbId = await addSeriesToSonarr(selected.id, routedSlug, undefined, dbUser.id);
             }
           } catch (err) {
             console.error("[interactions] arr push failed:", err);
@@ -870,6 +870,13 @@ async function handleComponent(interaction: any): Promise<void> {
             // pendingNotifyAt too: the push failed, so there's no download to pend.
             await prisma.mediaRequest.updateMany({ where: { id: request.id, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
             arrFailed = true;
+          }
+          // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
+          // series by this point, so a P2025 (row deleted mid-push) or transient DB error
+          // must not trip the APPROVED->PENDING rollback and leave Sonarr grabbing content
+          // the DB says is pending. updateMany no-ops on a concurrently deleted row.
+          if (!arrFailed && pushedTvdbId !== null) {
+            await prisma.mediaRequest.updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } });
           }
           if (arrFailed) {
             // Corrective SSE: request:new above announced this row as APPROVED, but
@@ -1117,14 +1124,14 @@ async function handleComponent(interaction: any): Promise<void> {
           return;
         }
         let arrFailed = false;
+        let pushedTvdbId: number | null = null;
         try {
           if (request.mediaType === "MOVIE") {
             // Forward the requester's stored quality profile (a REQUEST_ADVANCED web
             // requester may have chosen one) — parity with requests/[id] approve.
             await addMovieToRadarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
           } else {
-            const tvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
-            await prisma.mediaRequest.update({ where: { id: requestId }, data: { tvdbId } });
+            pushedTvdbId = await addSeriesToSonarr(request.tmdbId, request.arrInstance, request.qualityProfileId ?? undefined, request.requestedBy);
           }
         } catch (err) {
           console.error("[interactions] admin_approve arr push failed:", err);
@@ -1132,6 +1139,13 @@ async function handleComponent(interaction: any): Promise<void> {
           // may have flipped this row to AVAILABLE since we claimed it.
           await prisma.mediaRequest.updateMany({ where: { id: requestId, status: "APPROVED" }, data: { status: "PENDING", pendingNotifyAt: null } });
           arrFailed = true;
+        }
+        // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
+        // series by this point, so a P2025 (row deleted mid-push) or transient DB error
+        // must not trip the APPROVED->PENDING rollback and leave Sonarr grabbing content
+        // the DB says is pending. updateMany no-ops on a concurrently deleted row.
+        if (!arrFailed && pushedTvdbId !== null) {
+          await prisma.mediaRequest.updateMany({ where: { id: requestId }, data: { tvdbId: pushedTvdbId } });
         }
         // Audit the Discord-driven approval the same way the HTTP /api/requests/[id] PATCH path does.
         // Without this, an admin clicking "Approve" in Discord leaves no trace in the audit log.

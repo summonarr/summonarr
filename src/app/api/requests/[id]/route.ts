@@ -277,12 +277,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     const effectiveProfileId = qualityProfileId ?? updated.qualityProfileId ?? undefined;
     let arrError: string | null = null;
     let arrPushSucceeded = false;
+    let pushedTvdbId: number | null = null;
     try {
       if (updated.mediaType === "MOVIE") {
         await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
-        await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
+        pushedTvdbId = await addSeriesToSonarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
       }
       arrPushSucceeded = true;
     } catch (err) {
@@ -298,6 +298,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       // Correct the optimistic APPROVED SSE emitted before the push — without this,
       // clients show the request stuck APPROVED when it's actually back to PENDING.
       emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
+    }
+
+    // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series
+    // by this point, so a P2025 (row deleted mid-push) or transient DB error must not trip
+    // the APPROVED->PENDING rollback and leave Sonarr grabbing content the DB says is
+    // pending. updateMany no-ops on a concurrently deleted row instead of throwing.
+    if (pushedTvdbId !== null) {
+      await prisma.mediaRequest.updateMany({ where: { id }, data: { tvdbId: pushedTvdbId } });
     }
 
     // Only notify if ARR push actually succeeded — otherwise the user gets a
@@ -351,12 +359,19 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
           }
         }
 
+        const requester = await prisma.user.findUnique({ where: { id: updated.requestedBy }, select: { deactivatedAt: true } });
+        await prisma.mediaRequest.update({ where: { id }, data: { pendingNotifyAt: null } });
+        // Guardrail 33: a disabled account keeps a live Discord link. CONSUME the backstop
+        // rather than defer it (pendingNotifyAt cleared above, DM dropped) so re-enabling
+        // an account doesn't replay a stale "download pending" backlog — same reasoning as
+        // the orchestrator's disabledRequesters short-circuit in /api/sync.
+        if (requester?.deactivatedAt) return;
+
         if (!released) {
           await notifyUserAwaitingRelease(updated.requestedBy, updated.title, updated.mediaType, soonestReleaseDate);
         } else {
           await notifyUserDownloadPending(updated.requestedBy, updated.title, updated.mediaType);
         }
-        await prisma.mediaRequest.update({ where: { id }, data: { pendingNotifyAt: null } });
       } catch (err) {
         console.error("[download-check] 90s status check failed:", err);
       }
