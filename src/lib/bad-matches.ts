@@ -223,7 +223,8 @@ function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey)
   };
 }
 
-// Relative-path keyspace for one service, normalised PER SERVER INSTANCE.
+// Relative-path keyspace for one service, normalised PER (SERVER INSTANCE,
+// MEDIA TYPE).
 //
 // Grouping first is the whole correctness story: commonPathPrefix infers a
 // bind-mount root from the longest shared prefix of the paths it is handed, so
@@ -232,6 +233,15 @@ function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey)
 // stays an absolute path the other service can never match — and the report
 // silently empties out, reading as "no problems found".
 //
+// Media type is part of that grouping for the same reason: in the normal layout
+// (/data/movies + /data/tv) one mount inferred across BOTH types stops at the
+// shared parent, so every TV rel keeps its library-dir segment and toMatchKey —
+// which takes segment 0 for TV — reduces EVERY show to the single key "tv". The
+// whole TV half of the map then collapses onto one entry (last writer wins),
+// hiding every real mismatch and pairing two unrelated shows. Per-type mounts
+// also match what /api/admin/library-sample-paths previews to the admin, so the
+// *TvPathStripPrefix field reads as unnecessary because it genuinely is.
+//
 // The groups then merge into ONE keyspace, because the Plex↔Jellyfin join is
 // relative-path based and cannot be instance-scoped (the same file is normally
 // on a Plex server AND a Jellyfin server, under unrelated slugs). Two instances
@@ -239,25 +249,37 @@ function stripResolver(cfg: Record<string, string>, settingKey: StripSettingKey)
 // collapses two entries for one physical file rather than corrupting anything;
 // the default instance is merged last so it wins that collapse.
 function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType: "MOVIE" | "TV") => string): Map<string, PathEntry> {
-  const byInstance = new Map<string, LibraryRow[]>();
+  // `<slug> <MEDIATYPE>` — a slug can hold no space (isValidMediaInstanceSlug),
+  // so the first one always separates the two halves.
+  const byGroup = new Map<string, LibraryRow[]>();
   for (const row of rows) {
     if (!row.filePath) continue;
-    const group = byInstance.get(row.serverInstance);
+    const groupKey = `${row.serverInstance} ${row.mediaType}`;
+    const group = byGroup.get(groupKey);
     if (group) group.push(row);
-    else byInstance.set(row.serverInstance, [row]);
+    else byGroup.set(groupKey, [row]);
   }
 
   const out = new Map<string, PathEntry>();
-  const ordered = [...byInstance.keys()].sort((a, b) =>
-    a === DEFAULT_MEDIA_INSTANCE ? 1 : b === DEFAULT_MEDIA_INSTANCE ? -1 : a.localeCompare(b),
-  );
-  for (const instance of ordered) {
-    const group = byInstance.get(instance)!;
+  const instanceOf = (groupKey: string) => groupKey.slice(0, groupKey.indexOf(" "));
+  const ordered = [...byGroup.keys()].sort((a, b) => {
+    const ai = instanceOf(a);
+    const bi = instanceOf(b);
+    if (ai === bi) return a.localeCompare(b);
+    return ai === DEFAULT_MEDIA_INSTANCE ? 1 : bi === DEFAULT_MEDIA_INSTANCE ? -1 : ai.localeCompare(bi);
+  });
+  for (const groupKey of ordered) {
+    const group = byGroup.get(groupKey)!;
     const mount = commonPathPrefix(group.map((r) => r.filePath));
     for (const item of group) {
       const rel = stripMountPoint(item.filePath, mount);
       if (!rel) continue;
-      out.set(toMatchKey(normaliseRelPath(rel, stripFor(instance, item.mediaType)), item.mediaType), {
+      const matchKey = toMatchKey(normaliseRelPath(rel, stripFor(item.serverInstance, item.mediaType)), item.mediaType);
+      // An empty key is not an identity: paths sharing no first segment infer a
+      // "" mount, and every such row would otherwise pile onto one blank entry
+      // and pair two unrelated titles.
+      if (!matchKey) continue;
+      out.set(matchKey, {
         tmdbId: item.tmdbId, mediaType: item.mediaType, filePath: item.filePath!,
         key: item.key, serverInstance: item.serverInstance, title: item.title, year: item.year,
       });

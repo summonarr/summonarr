@@ -220,20 +220,33 @@ function normaliseRelPath(rel: string, stripPrefix: string): string {
 // segment, the inferred mount collapses to "", nothing is stripped, and the
 // Plex↔Jellyfin join misses every item — the bad-match list silently empties and
 // the relative paths shown in the diff columns turn into raw absolute paths.
+//
+// It must not see two MEDIA TYPES at once either: in the normal layout
+// (/data/movies + /data/tv) one mount across both stops at the shared parent, so
+// every TV rel keeps its library-dir segment and toMatchKey — segment 0 for TV —
+// reduces EVERY show to the single key "tv", collapsing the whole TV half of the
+// map onto one entry and pairing unrelated shows.
 
 type StripPrefixField = "MoviePathStripPrefix" | "TvPathStripPrefix";
 type StripSettingKey = (instance: MediaInstanceKey, field: StripPrefixField) => string;
 
-function mountsByInstance(rows: { serverInstance: string; filePath: string | null }[]): Map<string, string> {
+// Keyed `<slug> <MEDIATYPE>` (a slug can hold no space), so every lookup must
+// use mountKey() rather than the bare serverInstance.
+function mountKey(row: { serverInstance: string; mediaType: "MOVIE" | "TV" }): string {
+  return `${row.serverInstance} ${row.mediaType}`;
+}
+
+function mountsByInstance(rows: { serverInstance: string; mediaType: "MOVIE" | "TV"; filePath: string | null }[]): Map<string, string> {
   const paths = new Map<string, (string | null)[]>();
   for (const r of rows) {
     if (!r.filePath) continue;
-    const g = paths.get(r.serverInstance);
+    const k = mountKey(r);
+    const g = paths.get(k);
     if (g) g.push(r.filePath);
-    else paths.set(r.serverInstance, [r.filePath]);
+    else paths.set(k, [r.filePath]);
   }
   const out = new Map<string, string>();
-  for (const [instance, group] of paths) out.set(instance, commonPathPrefix(group));
+  for (const [key, group] of paths) out.set(key, commonPathPrefix(group));
   return out;
 }
 
@@ -475,20 +488,27 @@ export default async function LibraryDiffPage({
   // a Jellyfin server, under unrelated slugs). Two instances holding the same
   // relative path is a mirrored library, so the collapse is correct; the
   // default-last ordering decides the winner deterministically.
+  // An empty match key is not an identity: paths sharing no first segment infer
+  // a "" mount, and every such row would otherwise pile onto one blank entry and
+  // pair two unrelated titles.
   const plexPathMap = new Map<string, PlexPathEntry>();
   for (const item of defaultInstanceLast(plexItems)) {
     if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, plexMountPoints.get(item.serverInstance) ?? "");
+    const rel = stripMountPoint(item.filePath, plexMountPoints.get(mountKey(item)) ?? "");
+    if (!rel) continue;
     const plexPrefix = plexStripFor(item.serverInstance, item.mediaType);
-    if (rel) plexPathMap.set(toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
+    const matchKey = toMatchKey(normaliseRelPath(rel, plexPrefix), item.mediaType);
+    if (matchKey) plexPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, ratingKey: item.plexRatingKey, title: item.title, year: item.year });
   }
 
   const jellyfinPathMap = new Map<string, JellyfinPathEntry>();
   for (const item of defaultInstanceLast(jellyfinItems)) {
     if (!item.filePath) continue;
-    const rel = stripMountPoint(item.filePath, jellyfinMountPoints.get(item.serverInstance) ?? "");
+    const rel = stripMountPoint(item.filePath, jellyfinMountPoints.get(mountKey(item)) ?? "");
+    if (!rel) continue;
     const jellyfinPrefix = jellyfinStripFor(item.serverInstance, item.mediaType);
-    if (rel) jellyfinPathMap.set(toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType), { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
+    const matchKey = toMatchKey(normaliseRelPath(rel, jellyfinPrefix), item.mediaType);
+    if (matchKey) jellyfinPathMap.set(matchKey, { tmdbId: item.tmdbId, mediaType: item.mediaType, serverInstance: item.serverInstance, filePath: item.filePath, itemId: item.jellyfinItemId, title: item.title, year: item.year });
   }
 
   type RawBadMatch = {
@@ -517,10 +537,25 @@ export default async function LibraryDiffPage({
     tvArrMapPromise,
   ]);
 
+  // Sonarr keys by the SERIES folder, but a TV lookup off folderOf(filePath)
+  // yields the SEASON folder (Plex stores an episode leaf) or the TV library
+  // root (Jellyfin stores the series folder itself) and never matches. Index the
+  // sonarr paths by folder BASENAME so the show-folder key lines up — the same
+  // split src/lib/bad-matches.ts makes; the full-path map stays for
+  // tvArrPathByTmdbId below.
+  const tvArrByName = new Map<string, number>();
+  for (const [path, id] of tvArrMap) {
+    const name = path.split("/").pop();
+    if (name && !tvArrByName.has(name)) tvArrByName.set(name, id);
+  }
+
   const badMatches: BadMatch[] = filteredRawBadMatches.map((m, i) => {
-    const arrMap = m.plexItem.mediaType === "MOVIE" ? movieArrMap : tvArrMap;
-    const folder = folderOf(m.plexItem.filePath) || folderOf(m.jellyfinItem.filePath);
-    const arrTmdbId = arrMap.get(folder) ?? null;
+    // toMatchKey already reduced a TV relativePath to the show folder; movies
+    // keep their full relative file path, so they look the file's parent
+    // directory up against the full-path radarr map.
+    const arrTmdbId = m.plexItem.mediaType === "TV"
+      ? (tvArrByName.get(m.relativePath) ?? null)
+      : (movieArrMap.get(folderOf(m.plexItem.filePath) || folderOf(m.jellyfinItem.filePath)) ?? null);
 
     let arrVerdict: ArrVerdict = null;
     if (arrTmdbId !== null) {
@@ -566,11 +601,14 @@ export default async function LibraryDiffPage({
     arrTmdbSet: (item: LibraryItem) => Set<number>,
   ): DiffItem[] =>
     items.map((item) => {
-      const map       = arrMap(item);
-      const arrTmdbId = item.filePath ? (map.get(folderOf(item.filePath)) ?? null) : null;
+      const mediaRelPath = stripMountPoint(item.filePath, mountPoints.get(mountKey(item)) ?? "");
+      // TV resolves against the series-folder basename index (see tvArrByName);
+      // movies keep the full-path radarr lookup off the file's parent dir.
+      const arrTmdbId = item.mediaType === "TV"
+        ? (mediaRelPath ? (tvArrByName.get(mediaRelPath.split("/")[0]) ?? null) : null)
+        : (item.filePath ? (arrMap(item).get(folderOf(item.filePath)) ?? null) : null);
       const inArr     = arrTmdbSet(item).has(item.tmdbId);
 
-      const mediaRelPath = stripMountPoint(item.filePath, mountPoints.get(item.serverInstance) ?? "");
       const arrFallbackPath = (!mediaRelPath && item.mediaType === "TV")
         ? (tvArrPathByTmdbId.get(item.tmdbId) ?? null)
         : null;
