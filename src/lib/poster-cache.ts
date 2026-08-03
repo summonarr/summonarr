@@ -70,11 +70,22 @@ export async function resolvePosterPathMap(
   // Per numeric id, the set of namespaces any caller asked about. An id requested
   // with an unknown mediaType contributes both.
   const wanted = new Map<number, Set<"movie" | "tv">>();
+  // Per numeric id, the namespaces a caller named EXPLICITLY. Tracked separately
+  // because `wanted` is a union across items: one untyped row (or a typed row of
+  // the OTHER medium) sharing the number would otherwise make the id look
+  // "unknown" and hand the typed row the wrong medium's art.
+  const explicit = new Map<number, Set<"movie" | "tv">>();
   for (const item of items) {
     if (item.tmdbId == null) continue;
+    const namespaces = namespacesFor(item.mediaType);
     const set = wanted.get(item.tmdbId) ?? new Set<"movie" | "tv">();
-    for (const ns of namespacesFor(item.mediaType)) set.add(ns);
+    for (const ns of namespaces) set.add(ns);
     wanted.set(item.tmdbId, set);
+    if (namespaces.length === 1) {
+      const named = explicit.get(item.tmdbId) ?? new Set<"movie" | "tv">();
+      for (const ns of namespaces) named.add(ns);
+      explicit.set(item.tmdbId, named);
+    }
   }
   if (wanted.size === 0) return {};
 
@@ -99,14 +110,22 @@ export async function resolvePosterPathMap(
 
   const missing: string[] = [];
   for (const [id, namespaces] of wanted) {
-    // Unknown mediaType ⇒ both namespaces were requested, but either one
-    // answers the question (finalize mirrors it), so one hit ends the search.
-    if (namespaces.size > 1 && (map[`movie:${id}`] || map[`tv:${id}`])) continue;
+    const named = explicit.get(id);
     for (const ns of namespaces) {
-      if (!map[`${ns}:${id}`]) missing.push(`${ns}:${id}`);
+      if (map[`${ns}:${id}`]) continue;
+      // A namespace the caller NAMED is always resolved on its own — the other
+      // medium's hit is not an answer for it.
+      if (named?.has(ns)) {
+        missing.push(`${ns}:${id}`);
+        continue;
+      }
+      // Unknown mediaType ⇒ both namespaces were requested, but either one
+      // answers the question (finalize mirrors it), so one hit ends the search.
+      if (map[`movie:${id}`] || map[`tv:${id}`]) continue;
+      missing.push(`${ns}:${id}`);
     }
   }
-  if (missing.length === 0) return finalize(map, wanted);
+  if (missing.length === 0) return finalize(map, wanted, explicit);
 
   const rows = await prisma.tmdbCache.findMany({
     where: { key: { in: missing.map((k) => `${k}:details`) } },
@@ -128,23 +147,28 @@ export async function resolvePosterPathMap(
       // ignore unparseable cache rows
     }
   }
-  return finalize(map, wanted);
+  return finalize(map, wanted, explicit);
 }
 
 // An id whose mediaType the caller did NOT know was looked up in both
 // namespaces; mirror whichever one hit onto the other so a `posterPathKey(id,
-// null)` lookup (which spells "movie:<id>") still resolves. Ids requested with a
-// known mediaType are untouched, so a real movie/TV collision stays separate.
+// null)` lookup (which spells "movie:<id>") still resolves. A namespace some
+// caller NAMED is never filled from the other one: `wanted` is a union per
+// numeric id, so a single untyped row (or a typed row of the other medium)
+// sharing the number would otherwise leak a movie's art onto the TV row —
+// exactly the cross-namespace bug `posterPathKey` above documents.
 function finalize(
   map: Record<string, string>,
   wanted: Map<number, Set<"movie" | "tv">>,
+  explicit: Map<number, Set<"movie" | "tv">>,
 ): Record<string, string> {
   for (const [id, namespaces] of wanted) {
     if (namespaces.size < 2) continue;
+    const named = explicit.get(id);
     const movie = map[`movie:${id}`];
     const tv = map[`tv:${id}`];
-    if (movie && !tv) map[`tv:${id}`] = movie;
-    else if (tv && !movie) map[`movie:${id}`] = tv;
+    if (movie && !tv && !named?.has("tv")) map[`tv:${id}`] = movie;
+    else if (tv && !movie && !named?.has("movie")) map[`movie:${id}`] = tv;
   }
   return map;
 }

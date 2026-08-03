@@ -191,14 +191,17 @@ export default async function TopRatedPage({
   let totalTvCount: number;
 
   if (filtersActive) {
-    // Block on ratings when minImdb is active — applyFilters needs a parsed rating, and
-    // non-blocking enrichment leaves uncached items unrated and filtered out.
+    // Ratings enrichment is NOT blocking here, matching the native /api/top-rated route:
+    // the pool is the whole catalogue (hundreds of titles), so awaiting its ratings misses
+    // would burn the OMDB daily quota on one cold load. Trade-off: a title whose rating is
+    // still uncached drops out of the minImdb filter on the first load and reappears on the
+    // next, once the post-response warm has filled the cache.
     const [enrichedMovies, enrichedTV] = await Promise.all([
       showMovies && allMovies.length > 0
-        ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session?.user.id, { show4k, blockRatings: !!minImdb }))
+        ? backfillMetadata(allMovies).then((m) => attachAllAvailability(m, session?.user.id, { show4k }))
         : Promise.resolve([] as TmdbMedia[]),
       showTV && allTV.length > 0
-        ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session?.user.id, { show4k, blockRatings: !!minImdb }))
+        ? backfillMetadata(allTV).then((t) => attachAllAvailability(t, session?.user.id, { show4k }))
         : Promise.resolve([] as TmdbMedia[]),
     ]);
     const filteredMovies = sortByRating(applyFilters(enrichedMovies, filterOpts), sortBy);

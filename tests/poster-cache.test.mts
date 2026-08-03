@@ -255,6 +255,38 @@ test("a movie and a TV title sharing one tmdbId keep their OWN posters", async (
   assert.equal(urls[1399], `${W342}/show.jpg`);
 });
 
+test("a NAMED namespace is resolved on its own even when its twin already hit", async () => {
+  // `wanted` is a union per numeric id, so a MOVIE item and a TV item sharing
+  // one number both mark it as "two namespaces requested". That must not let the
+  // movie hit short-circuit the TV lookup: the TV `:details` row has to be
+  // queried, or the TV row renders the film's art.
+  reset({
+    core: [{ tmdbId: 1399, mediaType: "MOVIE", posterPath: "/movie-1399.jpg" }],
+    cache: [{ key: "tv:1399:details", data: JSON.stringify({ posterPath: "/tv-1399.jpg" }) }],
+  });
+  const map = await resolvePosterPathMap([
+    { tmdbId: 1399, mediaType: "MOVIE" },
+    { tmdbId: 1399, mediaType: "TV" },
+  ]);
+  assert.deepEqual(cacheCalls, [["tv:1399:details"]]); // the named miss, nothing else
+  assert.equal(map[posterPathKey(1399, "MOVIE")], "/movie-1399.jpg");
+  assert.equal(map[posterPathKey(1399, "TV")], "/tv-1399.jpg");
+});
+
+test("an untyped sibling never mirrors its art onto a NAMED namespace", async () => {
+  // One unmapped row (mediaType null) alongside a real TV play of the same
+  // number. Only MOVIE data exists, so the TV row must stay absent (letter
+  // placeholder) rather than inherit the movie poster; the untyped row still
+  // resolves through its "movie:<id>" spelling.
+  reset({ core: [{ tmdbId: 1399, mediaType: "MOVIE", posterPath: "/movie-1399.jpg" }] });
+  const map = await resolvePosterPathMap([
+    { tmdbId: 1399, mediaType: null },
+    { tmdbId: 1399, mediaType: "TV" },
+  ]);
+  assert.equal(map[posterPathKey(1399, null)], "/movie-1399.jpg");
+  assert.equal(map[posterPathKey(1399, "TV")], undefined);
+});
+
 test("path variant skips paths posterUrl would reject and empties out to {}", async () => {
   reset({
     core: [{ tmdbId: 50, posterPath: "no-leading-slash.jpg" }],
