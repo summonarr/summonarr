@@ -1842,7 +1842,7 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
        SELECT SUM("playDuration") AS arc_play,
               MAX("duration") AS arc_dur
        FROM arc_ids
-       GROUP BY "mediaServerUserId", "tmdbId", "mediaType",
+       GROUP BY "mediaServerUserId", arc_key, "mediaType",
                 COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1), arc_id
      )`;
 

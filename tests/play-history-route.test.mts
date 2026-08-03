@@ -803,6 +803,32 @@ test("GUARDRAIL 20: a BACKWARD seek is movement — the anchor refreshes and the
   );
 });
 
+test("GUARDRAIL 20: a sub-tolerance BACKSTEP is clamped, so it is NOT movement and a 61s-old anchor still stall-finalizes", async () => {
+  const past = PLEX_STALL_THRESHOLD_MS + 1_000;
+  const ghost = seed(makeRow("g20-jitter", {
+    state: "playing", progressMs: 100_000n, progressUpdatedAt: agoReal(past), lastSeenAt: agoReal(past),
+  }));
+  // 100000 → 95000 is a 5s backstep, INSIDE the 10s jitter tolerance, so
+  // nextProgressMs clamps back to the stored 100000 and the snapshot can never
+  // converge. Counting that as movement would refresh progressUpdatedAt on
+  // every 5s tick forever and the stall detector could never fire.
+  plexSnapshot = [plexSnap("g20-jitter", { viewOffset: 95_000 })];
+
+  await POST(phReq({ headers: AS_CRON }));
+  await settle();
+
+  const rows = historyRows();
+  assert.equal(rows.length, 1, "guardrail 20: a clamped backstep is not movement — the frozen ghost is finalized at 60s");
+  assert.equal(
+    rows[0].sourceSessionId,
+    `g20-jitter:${ghost.startedAt.toISOString()}`,
+    "guardrail 19: the stall finalize carries the sessionKey:startedAt dedup key",
+  );
+  assert.equal(isPlexSessionRecentlyFinalized("plex:g20-jitter"), true, "the stall-finalized ghost is ledgered against re-create");
+  assert.equal(activeStore.has("plex:g20-jitter"), false, "the ghost's ActiveSession row is CAS-deleted by the finalize");
+  assert.equal(activeUpdatesFor("plex:g20-jitter").length, 0, "the stall path returns before the in-place update");
+});
+
 test("GUARDRAIL 20: a frozen playhead still WITHIN the 60s threshold updates in place (no stall, no anchor refresh)", async () => {
   seed(makeRow("g20-young", {
     state: "playing", progressMs: 400_000n, progressUpdatedAt: agoReal(30_000), lastSeenAt: agoReal(30_000),

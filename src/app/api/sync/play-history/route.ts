@@ -288,7 +288,15 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           // has a FROZEN viewOffset, so `!==` is false there and the stall
           // still fires at 60s as intended. Use inequality, not greater-than.
           const priorProgressMs = Number(existing.progressMs);
-          const playheadMoved = s.viewOffset !== priorProgressMs;
+          // A small backward step is clamped out below (nextProgressMs keeps the
+          // fresher stored value), so it can NEVER converge: counting it as
+          // movement refreshes progressUpdatedAt on every tick forever and the
+          // 60s stall detector can never fire. A genuine seek-back (> tolerance)
+          // IS written through, so it still counts as movement.
+          const isJitterBackstep =
+            s.viewOffset < priorProgressMs
+            && priorProgressMs - s.viewOffset <= PROGRESS_JITTER_TOLERANCE_MS;
+          const playheadMoved = s.viewOffset !== priorProgressMs && !isJitterBackstep;
           // True resume from a non-playing state. Without this branch, a
           // pause longer than PLEX_STALL_THRESHOLD_MS (60s) ends with
           // progressUpdatedAt stuck at the moment the user paused. The first
@@ -330,11 +338,9 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           const increment = computePlaytimeIncrement(existing, now);
           // Clamp out stale-snapshot backward jitter (see PROGRESS_JITTER_
           // TOLERANCE_MS): keep the fresher stored value on a small backward
-          // step, write through a genuine seek-back. playheadMoved above stays
-          // on the raw snapshot so liveness/stall detection is unaffected.
-          const isJitterBackstep =
-            s.viewOffset < priorProgressMs
-            && priorProgressMs - s.viewOffset <= PROGRESS_JITTER_TOLERANCE_MS;
+          // step, write through a genuine seek-back. isJitterBackstep is
+          // computed above so liveness is measured against the value actually
+          // written.
           const nextProgressMs = isJitterBackstep ? priorProgressMs : s.viewOffset;
           const nextProgressPercent = s.duration > 0 ? (nextProgressMs / s.duration) * 100 : 0;
           // CAS on (id, lastSeenAt): if SSE or another path deleted/updated the
