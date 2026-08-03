@@ -47,6 +47,17 @@ const CONCURRENCY_LIMIT = 5;
 // the wasted lookups ~24×.
 const ARR_REPUSH_BACKOFF_MS = 24 * 60 * 60 * 1000;
 
+// The tail purge below reaps every expired TmdbCache row, but the two ratings namespaces
+// are a deliberate serve-stale surface: an expired row is still a hit. Give them a long
+// grace so a provider outage falls back to the previous values instead of no badges at
+// all. `:tmdb:` is load-bearing — bare `mdblist:`/`omdb:` also match the list caches and
+// `omdb:<imdbId>`, which are read through getCache and should still expire immediately.
+const STALE_RATINGS_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
+const STALE_RATINGS_KEY_PREFIXES = [
+  { key: { startsWith: "mdblist:tmdb:" } },
+  { key: { startsWith: "omdb:tmdb:" } },
+];
+
 async function runConcurrent<T>(
   items: T[],
   fn: (item: T) => Promise<void>
@@ -1036,12 +1047,28 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // that is entirely unconfigured is already handled by the plexConfiguredEnabled /
   // jellyfinConfiguredEnabled guards; this one is only about a service in USE that has a
   // registered server missing its connection details.
-  const plexUnionIncomplete = plexInstances.length > 0 && registeredPlex.length > plexInstances.length;
-  const jellyfinUnionIncomplete = jellyfinInstances.length > 0 && registeredJellyfin.length > jellyfinInstances.length;
+  // A raw count comparison is not enough either: getMediaInstances synthesizes the
+  // default, so a deployment using a service EXCLUSIVELY through a named instance —
+  // legacy default fields never filled in — reads as 2 registered vs 1 syncable on every
+  // run and vetoed every demote forever. The guard's own rationale ("its preserved
+  // library rows are not in this run's union") is vacuous for a server that was never
+  // configured: it holds no rows, so absence IS provable. Veto only on a missing slug
+  // that ACTUALLY still holds rows. The existence probe is gated behind both cheap
+  // terms, so the common single-server path issues no extra query.
+  const syncablePlexSlugs = new Set(plexInstances.map((i) => i.slug));
+  const missingPlex = registeredPlex.filter((i) => !syncablePlexSlugs.has(i.slug)).map((i) => i.slug);
+  const syncableJellyfinSlugs = new Set(jellyfinInstances.map((i) => i.slug));
+  const missingJellyfin = registeredJellyfin.filter((i) => !syncableJellyfinSlugs.has(i.slug)).map((i) => i.slug);
+  const plexUnionIncomplete =
+    plexInstances.length > 0 && missingPlex.length > 0 &&
+    !!(await prisma.plexLibraryItem.findFirst({ where: { serverInstance: { in: missingPlex } }, select: { tmdbId: true } }));
+  const jellyfinUnionIncomplete =
+    jellyfinInstances.length > 0 && missingJellyfin.length > 0 &&
+    !!(await prisma.jellyfinLibraryItem.findFirst({ where: { serverInstance: { in: missingJellyfin } }, select: { tmdbId: true } }));
   if (plexUnionIncomplete || jellyfinUnionIncomplete) {
     console.warn(
-      `[sync] skipping AVAILABLE->APPROVED demotes: ${plexUnionIncomplete ? registeredPlex.length - plexInstances.length : 0} Plex and ` +
-      `${jellyfinUnionIncomplete ? registeredJellyfin.length - jellyfinInstances.length : 0} Jellyfin server(s) are registered but not configured, ` +
+      `[sync] skipping AVAILABLE->APPROVED demotes: ${plexUnionIncomplete ? missingPlex.length : 0} Plex and ` +
+      `${jellyfinUnionIncomplete ? missingJellyfin.length : 0} Jellyfin server(s) are registered but not configured, ` +
       "so their preserved library rows are not in this run's union and absence cannot be proven.",
     );
   }
@@ -1383,6 +1410,24 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     const lastPlexSuccessAt = parseTs(lastPlexSuccessRow?.value);
     const lastJellyfinSuccessAt = parseTs(lastJellyfinSuccessRow?.value);
     const nowMs = Date.now();
+    // Seed a baseline the first time a configured source fails with NO recorded success:
+    // the marker is only ever stamped on a clean run, so a source that has never synced
+    // clean has no row, `*Stale` can never become true, and the fallback below starves
+    // every user pinned to that source forever — the exact failure mode it exists to
+    // prevent. skipDuplicates keeps it idempotent and can never overwrite a real success
+    // stamp; a later clean run upserts over it. Recording a failure-time origin (not
+    // treating a missing row as instantly stale) preserves the 24h within-window guard.
+    const staleBaselineSeeds: Array<{ key: string; value: string }> = [];
+    if (plexConfigured && !plexSyncSucceeded && lastPlexSuccessAt == null) {
+      staleBaselineSeeds.push({ key: "lastPlexSyncSucceededAt", value: String(nowMs) });
+    }
+    if (jellyfinConfigured && !jellyfinSyncSucceeded && lastJellyfinSuccessAt == null) {
+      staleBaselineSeeds.push({ key: "lastJellyfinSyncSucceededAt", value: String(nowMs) });
+    }
+    if (staleBaselineSeeds.length > 0) {
+      await prisma.setting.createMany({ data: staleBaselineSeeds, skipDuplicates: true })
+        .catch((err) => console.error("[sync] failed to seed the stale-sync baseline:", err));
+    }
     const plexStale = plexConfigured && !plexSyncSucceeded &&
       lastPlexSuccessAt != null && (nowMs - lastPlexSuccessAt) > STALE_SYNC_FALLBACK_MS;
     const jellyfinStale = jellyfinConfigured && !jellyfinSyncSucceeded &&
@@ -1455,8 +1500,27 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   }
 
   try {
+    // The two ratings namespaces are read through getCacheStale/getCacheStaleMany, which
+    // deliberately never delete an expired row — an expired ratings row is still a HIT,
+    // served immediately and revalidated after the response. This purge was the only
+    // thing deleting them, within one SYNC_INTERVAL of expiry, collapsing that
+    // serve-stale window to under an hour and turning a stale hit into a cold miss for
+    // the rest of the row's life (no badges at all while a provider is down or quota-
+    // locked — precisely the outage serve-stale exists for). Reap them on a long grace
+    // instead. The prefixes must carry `:tmdb:`: bare `mdblist:`/`omdb:` also match the
+    // list caches and `omdb:<imdbId>`, which ARE read via getCache and should still be
+    // purged at expiry.
     await prisma.tmdbCache.deleteMany({
-      where: { expiresAt: { lt: new Date() } },
+      // `NOT: { OR: [...] }`, not a bare `NOT: [...]`: the two prefixes are mutually
+      // exclusive, so if a list-NOT compiled to NOT(a AND b) the exclusion would be a
+      // silent no-op. The nested form is unambiguously "neither prefix".
+      where: { expiresAt: { lt: new Date() }, NOT: { OR: STALE_RATINGS_KEY_PREFIXES } },
+    });
+    await prisma.tmdbCache.deleteMany({
+      where: {
+        expiresAt: { lt: new Date(Date.now() - STALE_RATINGS_GRACE_MS) },
+        OR: STALE_RATINGS_KEY_PREFIXES,
+      },
     });
   } catch (err) {
     console.error("[sync] TMDB cache purge failed:", err);
