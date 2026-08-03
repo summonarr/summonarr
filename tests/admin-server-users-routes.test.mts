@@ -364,8 +364,10 @@ test("the diagnose DB count is scoped to active Jellyfin rows", async () => {
   const t = await mintSession();
   msuRows = [msu({ id: "a" }), msu({ id: "b", active: false }), msu({ id: "c", source: "plex" })];
   await getDiagnose(t);
-  const where = opsOf("mediaServerUser.count")[0].args as { source: string; active: boolean };
-  assert.deepEqual(where, { source: "jellyfin", active: true });
+  const where = opsOf("mediaServerUser.count")[0].args as { source: string; serverInstance: string; active: boolean };
+  // serverInstance too: the /Users fetch is per-instance, so the count it is
+  // compared against must be scoped to the same server or `gap` is meaningless.
+  assert.deepEqual(where, { source: "jellyfin", serverInstance: "", active: true });
 });
 
 // ── 3: the bulk snapshot race ────────────────────────────────────────────────
