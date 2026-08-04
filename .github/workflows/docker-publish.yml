@@ -75,11 +75,16 @@ jobs:
           # Read-only gate; nothing is pushed back. (zizmor:artipacked)
           persist-credentials: false
 
+      # NO `cache: 'npm'` here, deliberately — unlike ci.yml, which caches
+      # freely. This workflow PUBLISHES release artifacts, and the GitHub
+      # Actions cache is writable from other refs, so a poisoned npm cache
+      # entry would be restored into the job that decides whether a release
+      # ships. A gate that can be fed its inputs by an attacker is not a gate.
+      # (zizmor:cache-poisoning) The cost is one cold `npm ci` per release.
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '26'
-          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
