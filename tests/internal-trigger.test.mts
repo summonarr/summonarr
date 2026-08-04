@@ -210,5 +210,37 @@ test("a hung orchestrator is aborted after exactly 30s and surfaces as a warn, n
   await pending; // resolves (never rejects) via the catch → warn path
   assert.equal(sawSignal?.aborted, true);
   assert.equal(warns.length, 1);
-  assert.match(warns[0], /^\[internal-trigger\] full sync trigger failed: /);
+
+  // The wait expiring is NOT a failure and must not say so. The route never
+  // observes `request.signal` (runSyncOrchestrator discards the only
+  // AbortSignal it gets), and nothing awaits this promise, so the orchestrator
+  // runs to completion regardless — withCronRunRecording still records it.
+  // Calling that "failed" sent operators chasing a sync that was working.
+  assert.match(warns[0], /^\[internal-trigger\] sync still running after 30000ms; stopped waiting/);
+  assert.doesNotMatch(warns[0], /failed/, "our own deadline must not be reported as a failure");
+});
+
+test("a GENUINE transport error still reads as a failure, even though a self-abort no longer does", async () => {
+  // The discriminator is the abort reason, not merely 'the fetch rejected'.
+  // If this ever regresses to reporting everything as 'still running', a
+  // server that is not listening at all would look like a healthy slow sync.
+  respond = () => {
+    throw new Error("ECONNREFUSED 127.0.0.1:3000");
+  };
+  await triggerFullSync();
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /^\[internal-trigger\] full sync trigger failed: ECONNREFUSED/);
+  assert.doesNotMatch(warns[0], /still running/);
+});
+
+test("an EXTERNAL abort (not our deadline) is reported as a failure, not as a slow sync", async () => {
+  // Only the reason we set ourselves may take the soft path. A DOMException
+  // AbortError arriving from anywhere else is a real fault.
+  respond = () => {
+    throw new DOMException("This operation was aborted", "AbortError");
+  };
+  await triggerFullSync();
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /full sync trigger failed: This operation was aborted/);
+  assert.doesNotMatch(warns[0], /still running/);
 });

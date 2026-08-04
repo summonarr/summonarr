@@ -84,8 +84,8 @@ Typechecking is **dual-compiler**: `npm run typecheck` runs the native TS 7 comp
 
 ## Environment
 
-Required: `DATABASE_URL`, `NEXTAUTH_SECRET` (≥32 chars), `TOKEN_ENCRYPTION_KEY` (**exactly 64 hex chars / 32 bytes** — the AES-256-GCM key for all encrypted `Setting.value` / `Account` token fields; checked **first** at boot via `assertTokenEncryptionKey()` and `process.exit(1)` on failure in *every* environment, not just production), `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (production refuses to boot only when `AUTH_URL` is a *public* host and this isn't `true` — an internet-facing instance must sit behind a trusted reverse proxy; a LAN/loopback `AUTH_URL` boots in local-only mode with the spoofable Host guard. NEVER unconditionally exit on a blank value — the default docker deployment ships it blank. See [instrumentation.ts](src/instrumentation.ts)). `TMDB_READ_TOKEN` is functionally required (core browse/search) but is **warn-only** at boot — its absence logs a warning and the app still starts.
-Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN`, `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `TRUSTED_PROXY_HOPS` (default 1), `DELAYED_JOBS_MAX_{PENDING,QUEUE,CONCURRENCY}`, and the cron interval knobs (`SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, plus `LIST_CACHE_SYNC_INTERVAL`, `WARM_ACTIVITY_INTERVAL`, `WARM_MDBLIST_INTERVAL`, `WARM_OMDB_INTERVAL`, `SCRUB_AUDIT_PII_INTERVAL`, `TRASH_SYNC_INTERVAL`, `PURGE_SESSIONS_INTERVAL`), `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
+Required: `DATABASE_URL`, `NEXTAUTH_SECRET` (≥32 chars), `TOKEN_ENCRYPTION_KEY` (**exactly 64 hex chars / 32 bytes** — the AES-256-GCM key for all encrypted `Setting.value` / `Account` token fields; checked **first** at boot via `assertTokenEncryptionKey()` and `process.exit(1)` on failure in *every* environment, not just production), `AUTH_URL`, `CRON_SECRET` (≥32 chars), `TRUST_PROXY` (an internet-facing instance must sit behind a trusted reverse proxy with this set to exactly `"true"`; it is also the sole gate on reading `X-Forwarded-For`/`X-Real-IP`). **In production, a blank/non-`"true"` value means LOCAL-ONLY mode and now FAILS CLOSED** — the Host guard it relies on is client-supplied and spoofable, so boot is refused unless the operator explicitly sets `SUMMONARR_ALLOW_LOCAL_ONLY=true`; a *public* `AUTH_URL` is refused either way and the opt-in cannot unlock it. Development never fails. The whole rule set is one pure function, `evaluateLocalOnlyStartup` ([src/lib/local-only.ts](src/lib/local-only.ts)), called from [instrumentation.ts](src/instrumentation.ts) — put changes there, not inline in the boot sequence. This supersedes the former "NEVER exit on a blank `TRUST_PROXY`" rule: the default docker deployment still ships it blank, so `.env.example` and [docker-container/README.md](docker-container/README.md) ship the opt-in alongside it and the Upgrading section calls it out. `TMDB_READ_TOKEN` is functionally required (core browse/search) but is **warn-only** at boot — its absence logs a warning and the app still starts.
+Optional: `OIDC_{ISSUER,CLIENT_ID,CLIENT_SECRET,DISPLAY_NAME}`, `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN`, `SUMMONARR_ALLOW_LOCAL_ONLY` (see `TRUST_PROXY` above — required to run local-only in production), `BACKUP_DB_PASSWORD` (≥12 chars), `BASE_PATH`, `AUTH_TRUSTED_ORIGIN`, `TRUSTED_PROXY_HOPS` (default 1), `DELAYED_JOBS_MAX_{PENDING,QUEUE,CONCURRENCY}`, and the cron interval knobs (`SYNC_INTERVAL`, `UPCOMING_SYNC_INTERVAL`, `RATINGS_SYNC_INTERVAL`, `PLAY_HISTORY_SYNC_INTERVAL`, plus `LIST_CACHE_SYNC_INTERVAL`, `WARM_ACTIVITY_INTERVAL`, `WARM_MDBLIST_INTERVAL`, `WARM_OMDB_INTERVAL`, `SCRUB_AUDIT_PII_INTERVAL`, `TRASH_SYNC_INTERVAL`, `PURGE_SESSIONS_INTERVAL`), `SSE_MAX_LISTENERS` (default 500; bounds **both** the emitter listener cap and the concurrent SSE connection cap in `/api/events` — intentionally one knob, see [src/lib/sse-emitter.ts](src/lib/sse-emitter.ts)).
 
 Jellyfin is **not** an env var — its server URL + API key are stored as the `jellyfinUrl` / `jellyfinApiKey` Settings, configured in Admin → Settings → Media. Login (standard + QuickConnect), library sync, play-history, fix-match, and server-user admin all read the URL via `getConfiguredJellyfinUrl()` ([src/lib/jellyfin-config.ts](src/lib/jellyfin-config.ts)). There is no `JELLYFIN_URL` fallback.
 
@@ -95,7 +95,18 @@ Multi-stage Docker (`node:26.3.0-alpine3.23`, five stages: deps → prisma-gen �
 
 ## Releasing — PR-then-tag flow
 
-The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit. The Docker image tag (`v<X.Y.Z>`) is what users actually pull, so the README examples must agree with the package version or `SUMMONARR_VERSION=v<X.Y.Z>` will point at an image that doesn't exist.
+The project version is duplicated across four files. Drift is the default unless every bump touches all of them in the same commit.
+
+**The git tag is `v<X.Y.Z>`; the published image tag is bare `<X.Y.Z>`. NEVER write a `v` into a `SUMMONARR_VERSION` example.**
+
+- `docker/metadata-action`'s `type=semver,pattern={{version}}` **strips the `v`** ([docker-publish.yml](.github/workflows/docker-publish.yml)), so pushing git tag `v0.20.2` publishes `:0.20.2`, `:0.20`, `:0`, `:latest`, `:sha-<short>` — and no `:v0.20.2`.
+- [docker-container/docker-compose.yml](docker-container/docker-compose.yml) interpolates the value straight in: `ghcr.io/summonarr/summonarr:${SUMMONARR_VERSION:-latest}`. A `v`-prefixed value therefore resolves to a tag that does not exist and the pull fails with `manifest unknown`.
+- This shipped broken for two releases — `:v0.20.1` and `:v0.20.2` both 404 in GHCR while `:0.20.1` / `:0.20.2` are fine — because this file told you to write the `v`. Verify a pin before documenting it:
+
+```bash
+TOK=$(curl -s "https://ghcr.io/token?scope=repository:summonarr/summonarr:pull&service=ghcr.io" | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])")
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOK" https://ghcr.io/v2/summonarr/summonarr/manifests/<X.Y.Z>
+```
 
 The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, merge, *then* tag the merge commit on `main`. Tagging before the merge orphans the tag on a feature-branch commit unreachable from `main` — `git describe` breaks, `:v<X.Y.Z>` and `:main` reference different SHAs, and the [docker-publish workflow](.github/workflows/docker-publish.yml) builds the same release twice from two different commits. (`v0.9.1` and `v0.9.2` were tagged this way; both are orphan tags. Don't repeat it.)
 
@@ -106,7 +117,7 @@ The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, mer
 1. [package.json](package.json) — `"version": "<X.Y.Z>"` (root field).
 2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both; `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
 3. [README.md](README.md) — `Status: v<X.Y.Z> beta` line and the `Summonarr v<X.Y.Z> is a beta release` line under Beta testing.
-4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=v<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block).
+4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block). **Bare semver, no `v`** — see above.
 5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source entries from `git log v<previous>..HEAD --oneline`, surfacing user-visible changes only (skip `chore`, `refactor`, `deps`). Conventional-commit scopes translate cleanly.
 
 ```bash
@@ -132,11 +143,11 @@ git push origin v<X.Y.Z>
 
 ### Why this order
 
-- The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) once on the `main` push → publishes `:main` and `:sha-<merge>`.
-- The tag push fires it a second time → publishes `:v<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>`. Because both events hit the **same commit**, the second build hits the GHA buildx cache (`cache-from: type=gha` on [docker-publish.yml:98](.github/workflows/docker-publish.yml#L98)) and finishes in ~3 min instead of ~15.
-- Tag is reachable from `main` — `git describe` works, and `:latest` / `:main` / `:v<X.Y.Z>` all reference the same commit SHA.
+- The PR merge fires [docker-publish.yml](.github/workflows/docker-publish.yml) on the `main` push, but the job **deliberately skips** when the push contains a `chore(release):` commit (the `if:` at [docker-publish.yml:55](.github/workflows/docker-publish.yml#L55)) — the tag push publishes the same SHA, so building here would duplicate ~11 min of work. A *non-release* push to `main` still publishes `:main` and `:sha-<short>`.
+- The tag push then runs the only build for the release → publishes `:<X.Y.Z>`, `:<X.Y>`, `:<X>`, `:latest`, and `:sha-<merge>` (bare semver — the `v` is stripped, see above). Expect ~11-15 min: this is a cold multi-arch `linux/amd64,linux/arm64` build, NOT a cache hit off an earlier main-push build, because that one skipped.
+- Tag is reachable from `main` — `git describe` works, and `:latest` / `:<X.Y.Z>` / `:sha-<merge>` all reference the same commit SHA.
 
-**NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=v<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
+**NEVER** force-move a published tag (`git push --force origin v<X.Y.Z>`) to fix a misplaced one. Anyone with `SUMMONARR_VERSION=<X.Y.Z>` pinned silently gets new bits on the next pull, and `:latest` re-resolves on `docker compose pull`. Cut a new patch release instead.
 
 There is no version constant in `src/`. Don't add one — `package.json` + the git tag is the source of truth, and a third copy is a third place to forget.
 
@@ -264,6 +275,34 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     ```
 
     CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.
+
+    **When checking `--check` by hand, do NOT pipe it.** `node scripts/generate-licenses.mts --check | tail -5` reports `tail`'s exit code, not the script's — a stale file reads as a pass. Run it bare, or `… >/dev/null && echo PASS || echo FAIL`.
+
+18a. **High/critical vulnerabilities BLOCK the release, and the only way past is a dated, owned exception.**
+
+    Why:
+    - Every scanner in this repo was observability-only: Trivy ran `exit-code: '0'` in all three places, `audit:deps` was `continue-on-error: true`, `npm audit` wasn't in CI at all, and `dependency-review` only inspects a PR's dependency *diff* — so it is blind to a vulnerable dependency already in the lockfile. Nothing could fail a release. A HIGH in a production dependency (`fast-uri`, GHSA-7p8r-x3mc-p8w7) sat in the tree as a direct result.
+    - `ci.yml` also runs on `pull_request` only, while `docker-publish.yml` runs on tag pushes. A tag placed on any commit published `:latest` with no security check on that tree.
+
+    Rules:
+    - **The gate is the `security-gate` job in [docker-publish.yml](.github/workflows/docker-publish.yml)**, and `build-and-push` `needs:` it. It runs on every trigger this workflow has, which is what closes the tag hole. Do not remove the `needs:` edge — that silently un-gates publishing while leaving a green-looking job in the graph.
+    - **PR-time advisory checks stay non-blocking on purpose.** An advisory filed overnight against a transitive package must not fail an unrelated PR. Blocking belongs at the release, where the risk becomes someone else's. Don't "fix" the `continue-on-error: true` on `audit:deps`.
+    - **Exceptions live in [.github/security-exceptions.json](.github/security-exceptions.json)** and require `id` (GHSA), `package`, `owner`, `expires` (ISO date), `reason`. An **expired entry is a hard failure**, not a silent pass — expiry that degrades to "allow" makes every entry permanent by neglect. A package-name match alone never suppresses: the advisory **id** must match too, or accepting one advisory would blanket-accept the next one filed against that package.
+    - `npm run security:exceptions` validates the file alone — no network, no advisory feed — so it is blocking in CI and can only fail on this repo's own file.
+
+    ```bash
+    npm run security:gate         # what blocks the release (high+, allowlist-aware)
+    npm run security:exceptions   # validate the exception file (blocking in CI)
+    ```
+
+    - Trivy's scheduled runs are blocking; its push/PR runs are not. A weekly job that can never go red is not an alert.
+    - **The image is scanned BEFORE it is published.** `security-gate` builds the runner image single-arch (`platforms: linux/amd64`, `load: true`) and Trivy-scans the loaded image with `exit-code: 1`. Single-arch is not a shortcut — `load: true` exports to the local docker daemon so Trivy can read it, and **a multi-arch manifest cannot be loaded**, which is why this was previously only possible post-publish. `provenance: false` is REQUIRED alongside `load: true` (BuildKit cannot export attestations to the docker exporter and the build fails). The build shares the GHA cache with the publish job and with ci.yml's `docker-build`, so it is normally a cache hit and it primes the amd64 half of the multi-arch release build.
+    - The post-publish scan stays `exit-code: 1` for the two things the pre-push gate structurally cannot cover: the **arm64** half of the manifest (not loadable) and the **exact published digest**. Divergence between the two is the signal.
+    - **Dry-run the gate before you need it.** `workflow_dispatch` takes a `gate_only` boolean that runs `security-gate` and skips publishing entirely, so a surprise high/critical surfaces when someone chooses to look rather than when it blocks a release mid-flight:
+
+    ```bash
+    gh workflow run docker-publish.yml -f gate_only=true
+    ```
 
 19. **The live 5s poller is the SOLE writer for Jellyfin play history. There is no backfill cron.**
 

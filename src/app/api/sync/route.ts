@@ -137,12 +137,18 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   }
 
   const seenRatingKeys = new Set<string>();
-  return rows.filter((r) => {
+  // Collected, not logged per row. The same handful of conflations recurs on
+  // EVERY sync — they describe a stable property of the library, not an event
+  // — so a line per dropped item made the library sync the loudest thing in
+  // the log while saying nothing new each time. One summary per run keeps the
+  // signal (how many, which keys, which instance) without the repetition.
+  const dropped: string[] = [];
+  const kept = rows.filter((r) => {
     if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
     const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
     if (fixed !== undefined) {
       if (r.tmdbId !== fixed) {
-        console.warn(`[sync] conflated ratingKey=${r.plexRatingKey}: dropping tmdb=${r.tmdbId}, keeping fixed tmdb=${fixed}`);
+        dropped.push(`${r.plexRatingKey}→${fixed} (dropped ${r.tmdbId})`);
         return false;
       }
     } else if (seenRatingKeys.has(r.plexRatingKey)) {
@@ -151,6 +157,14 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
     seenRatingKeys.add(r.plexRatingKey);
     return true;
   });
+
+  if (dropped.length > 0) {
+    console.warn(
+      `[sync] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
+        `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
+    );
+  }
+  return kept;
 }
 
 async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): Promise<NextResponse> {

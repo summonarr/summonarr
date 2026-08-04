@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.20.2",
+  "version": "0.21.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -14,6 +14,8 @@
     "typecheck": "node node_modules/tsgo/bin/tsc --noEmit",
     "typecheck:classic": "node node_modules/typescript/bin/tsc --noEmit",
     "audit:deps": "node scripts/audit-deps.mts",
+    "security:gate": "node scripts/audit-deps.mts --allowlist --no-outdated",
+    "security:exceptions": "node scripts/audit-deps.mts --allowlist-only",
     "audit:routes": "node scripts/audit-routes.mts",
     "audit:openapi": "node scripts/audit-openapi.mts",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
@@ -39,10 +41,11 @@
     "defu": ">=6.1.5",
     "find-my-way": "^9.7.0",
     "@hono/node-server": "^2.0.5",
-    "brace-expansion@5": "^5.0.8",
+    "brace-expansion@5": "^5.0.9",
     "minimatch": {
-      "brace-expansion": "^5.0.8"
+      "brace-expansion": "^5.0.9"
     },
+    "fast-uri": "^3.1.5",
     "hono": "^4.12.27",
     "postcss": "^8.5.18",
     "sharp": "^0.35.0",

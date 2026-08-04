@@ -10,6 +10,31 @@
 // apply. The call is intentionally to the public route so the full path
 // (proxy → isCronAuthorized → withAdvisoryLock → runSyncOrchestrator) is used.
 
+/** How long the trigger waits before giving up on the response. */
+export const TRIGGER_WAIT_MS = 30_000;
+
+/**
+ * Abort reason used when our own wait expires.
+ *
+ * The distinction it carries is load-bearing: the sync route never observes
+ * `request.signal` (the only AbortSignal it receives is withAdvisoryLock's, and
+ * runSyncOrchestrator explicitly discards it), and nothing awaits this promise
+ * — the Plex timeline handler calls it as `void triggerLibrarySync()`. So an
+ * expired wait cancels nothing; the orchestrator runs to completion and
+ * withCronRunRecording still records the run. A genuine transport error
+ * (ECONNREFUSED — the server is not listening) is a real problem and must keep
+ * reading as a failure.
+ *
+ * If anything ever wires `request.signal` into the orchestrator, this
+ * reasoning changes and the message below has to change with it.
+ */
+class TriggerWaitExpired extends Error {
+  constructor() {
+    super(`internal sync trigger stopped waiting after ${TRIGGER_WAIT_MS}ms`);
+    this.name = "TriggerWaitExpired";
+  }
+}
+
 export async function triggerFullSync(): Promise<void> {
   const secret = process.env.CRON_SECRET;
   if (!secret) return; // no auth token available — silently skip (matches prior behaviour)
@@ -24,8 +49,17 @@ export async function triggerFullSync(): Promise<void> {
 
   // Cap the wait so a slow or stuck orchestrator run does not hold the
   // debounced Plex timeline handler indefinitely.
+  //
+  // Giving abort() an explicit reason is what lets the catch below tell "we
+  // stopped waiting" apart from "the request genuinely failed". A bare
+  // abort() yields a generic `AbortError: This operation was aborted`, which
+  // read as a failed sync in the logs and sent operators chasing a
+  // non-problem.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
+  const timeout = setTimeout(
+    () => controller.abort(new TriggerWaitExpired()),
+    TRIGGER_WAIT_MS,
+  );
 
   try {
     // Await so errors are visible; the body is ignored on success (the handler
@@ -46,8 +80,17 @@ export async function triggerFullSync(): Promise<void> {
   } catch (err) {
     // Do not throw — the caller (Plex timeline path) already treats this as
     // best-effort and only logs at warn level. Keep the same contract.
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[internal-trigger] full sync trigger failed: ${msg}`);
+    if (controller.signal.reason instanceof TriggerWaitExpired) {
+      // Our own deadline, not a failure. The sync is still running; say so,
+      // and do not use the word "failed" for something that did not fail.
+      console.warn(
+        `[internal-trigger] sync still running after ${TRIGGER_WAIT_MS}ms; stopped waiting ` +
+          `(the run continues — see the sync:full entry under Admin → Settings → System)`,
+      );
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[internal-trigger] full sync trigger failed: ${msg}`);
+    }
   } finally {
     clearTimeout(timeout);
   }

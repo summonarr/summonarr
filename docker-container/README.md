@@ -22,6 +22,8 @@ Prefer building from source? See the root [`docker-compose.yml`](../docker-compo
 14. [Common commands](#common-commands)
 
 > **Production deployments should sit behind a TLS-terminating reverse proxy** (Nginx, Caddy, Traefik, …). Configure the proxy to forward `Host`, `X-Forwarded-For` / `X-Real-IP`, and `X-Forwarded-Proto`; then set `AUTH_URL=https://your.domain` and `TRUST_PROXY=true` in `.env`. Specific proxy configs are out of scope for this README — consult your proxy's documentation.
+>
+> **Running without a reverse proxy** (`TRUST_PROXY` unset or `false`) puts the app in **local-only mode**, which is appropriate *only* behind network controls or on a genuinely private host — a LAN-only machine, a loopback-bound port, or one firewalled off from the internet. That mode is gated by the client-supplied `Host` header alone, which is spoofable and therefore not a security boundary, so production requires the explicit `SUMMONARR_ALLOW_LOCAL_ONLY=true` acknowledgement and refuses to start without it.
 
 ## Prerequisites
 
@@ -88,7 +90,10 @@ CRON_SECRET=...              # ≥ 32 chars
 POSTGRES_PASSWORD=...
 TOKEN_ENCRYPTION_KEY=...     # exactly 64 hex chars (32 bytes)
 TRUST_PROXY=false            # set to "true" when behind Nginx/Traefik/Caddy
+SUMMONARR_ALLOW_LOCAL_ONLY=true   # required with TRUST_PROXY=false — see below
 ```
+
+> **`SUMMONARR_ALLOW_LOCAL_ONLY=true` is required for the LAN/localhost setup above.** With `TRUST_PROXY=false` the app runs in **local-only mode**, where the only thing separating it from the internet is the `Host` header the *client* sends — and `Host` is trivially spoofed, so it is **not** an access control. Production refuses to boot in that mode until you acknowledge it with this variable. Set it only if this host is genuinely private: a LAN-only machine, a loopback-bound port, or one firewalled off from the internet. **If you expose Summonarr to the internet, drop this variable, put it behind a reverse proxy, and set `TRUST_PROXY=true`** — the opt-in is not a substitute, and it cannot unlock a public `AUTH_URL` (that combination is refused either way).
 
 Everything else (`BACKUP_DB_PASSWORD`, `OIDC_*`, schedule overrides, …) is optional — see [Environment variables](#environment-variables). Jellyfin is configured in-app (Admin → Settings → Media), not via env var.
 
@@ -124,7 +129,8 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `CRON_SECRET`          | **≥ 32 chars**                             | Bearer token for `/api/sync*` and `/api/cron*`. The internal cron loop reads this from the container environment.                                                                        |
 | `POSTGRES_PASSWORD`    | any; `openssl rand -base64 32` recommended | Password for the bundled Postgres. The entrypoint URL-encodes this and derives `DATABASE_URL` from it automatically.                                                                     |
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
-| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`; a LAN/loopback `AUTH_URL` boots in local-only mode. |
+| `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. |
+| `SUMMONARR_ALLOW_LOCAL_ONLY` | `"true"` to enable; default off      | **Required whenever `TRUST_PROXY` is not `"true"`** — production refuses to boot in local-only mode without it. Local-only mode is gated solely by the client-supplied, spoofable `Host` header, so it is safe only on a genuinely private host (LAN-only, loopback-bound, or firewalled). Set it to acknowledge that your network provides the access control. It cannot unlock a public `AUTH_URL`. |
 
 ### Strongly recommended in production
 
@@ -170,7 +176,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=v0.20.2`.                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.21.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -440,7 +446,7 @@ If no row matches the email, the script exits with code `2` and **no changes are
 ### Prerequisites
 
 - The `summonarr` container is **running and healthy** (check with `docker ps`).
-- You're on a Summonarr image **≥ `v0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=v0.11.1` in `.env`, or run `:latest`.
+- You're on a Summonarr image **≥ `0.11.1`** (the script was added in that release). Pin with `SUMMONARR_VERSION=0.11.1` in `.env`, or run `:latest`.
 - You can run `docker exec` against the container — usually means root or membership in the `docker` group.
 - The new password is **at least 8 characters**. The script refuses anything shorter with exit code `1`.
 
@@ -555,6 +561,8 @@ docker compose up -d
 docker compose logs -f summonarr   # watch prisma db push apply any schema changes
 ```
 
+> **Upgrading a LAN/localhost deployment (`TRUST_PROXY` unset or `false`)?** Add `SUMMONARR_ALLOW_LOCAL_ONLY=true` to `.env` *before* `docker compose up -d`. Production now refuses to start in local-only mode without that explicit opt-in — see [`TRUST_PROXY` / `SUMMONARR_ALLOW_LOCAL_ONLY`](#environment-variables). The boot log names the exact variable if you hit it. Deployments already running `TRUST_PROXY=true` behind a reverse proxy are unaffected.
+
 Schema changes are applied on every container start via `prisma db push` (no migrations directory, no manual step). Destructive schema changes (dropped columns, narrowed types) will **fail fast at boot** instead of silently clobbering data — apply those by hand with explicit intent when they come up.
 
 Before upgrading across a minor version, skim the commit history for `feat`/`perf` entries under the `sync`, `plex`, `jellyfin`, or `arr` scopes — those are the changes most likely to affect external-service wiring.
@@ -562,7 +570,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=v0.20.2
+SUMMONARR_VERSION=0.21.0
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

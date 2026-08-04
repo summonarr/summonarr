@@ -1,59 +1,11 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
+import { DISCORD_SLASH_COMMANDS } from "@/lib/discord-commands";
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
-
-const SLASH_COMMANDS = [
-  {
-    name: "request",
-    description: "Request a movie or TV show to be added to the library",
-    options: [
-      {
-        name: "type",
-        description: "Movie or TV show",
-        type: 3,
-        required: true,
-        choices: [
-          { name: "Movie", value: "movie" },
-          { name: "TV Show", value: "tv" },
-        ],
-      },
-      {
-        name: "query",
-        description: "Title to search for",
-        type: 3,
-        required: true,
-        min_length: 1,
-        max_length: 200,
-      },
-    ],
-  },
-  {
-    name: "status",
-    description: "Check the status of your recent media requests",
-  },
-  {
-    name: "link",
-    description: "Link your Discord account to your Summonarr account",
-    options: [
-      {
-        name: "token",
-        description: "Link token from your Profile page",
-        type: 3,
-        required: true,
-        min_length: 1,
-        // 32 to fit the 32-hex link token (generate-link: randomBytes(16).toString("hex")).
-        // At 20, Discord rejected every token client- and server-side before it ever
-        // reached the handler, so the /link flow was unusable. Re-run "Register commands"
-        // after changing this so Discord picks up the new option schema.
-        max_length: 32,
-      },
-    ],
-  },
-];
 
 export const POST = withAdmin(async (_req, _ctx, _session) => {
   const rows = await prisma.setting.findMany({
@@ -75,7 +27,7 @@ export const POST = withAdmin(async (_req, _ctx, _session) => {
       Authorization: `Bot ${cfg.discordBotToken}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(SLASH_COMMANDS),
+    body: JSON.stringify(DISCORD_SLASH_COMMANDS),
     allowedHosts: DISCORD_HOSTS,
   });
 

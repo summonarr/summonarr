@@ -8,9 +8,17 @@ name: Trivy
 #     and scans the final runtime surface, including Alpine OS packages
 #     that aren't visible from source alone.
 #
-# Findings upload as SARIF to the GitHub Security tab. `exit-code: 0`
-# keeps the job non-blocking — treat the Security tab as the source of
-# truth, not PR status.
+# Findings upload as SARIF to the GitHub Security tab.
+#
+# Blocking policy: push/PR runs are observability only (`exit-code: 0`) so
+# an advisory filed overnight can't fail an unrelated PR. SCHEDULED runs are
+# blocking, because a weekly job that can never go red is not an alert — a
+# new high/critical in the published image or the lockfile has to surface
+# somewhere, and nobody watches a green checkmark.
+#
+# Release enforcement lives elsewhere and is unconditional: the
+# `security-gate` job in docker-publish.yml blocks publishing on the same
+# severities, with a dated exception file as the only way past.
 
 on:
   push:
@@ -55,7 +63,8 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-fs.sarif
-          exit-code: '0'
+          # Blocking on the weekly heartbeat only — see the header.
+          exit-code: ${{ github.event_name == 'schedule' && '1' || '0' }}
           # Generated Prisma client is regenerated on every build
           # (CLAUDE.md guardrail 12). Skip it to avoid upstream noise.
           skip-dirs: 'node_modules,.next,src/generated'
@@ -102,7 +111,8 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-image.sarif
-          exit-code: '0'
+          # Blocking on the weekly heartbeat only — see the header.
+          exit-code: ${{ github.event_name == 'schedule' && '1' || '0' }}
 
       - name: Upload SARIF
         if: always()

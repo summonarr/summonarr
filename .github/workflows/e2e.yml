@@ -51,6 +51,12 @@ jobs:
       AUTH_URL: "http://localhost:3000"
       # TRUST_PROXY=false keeps the localhost AUTH_URL check happy.
       TRUST_PROXY: "false"
+      # This job actually BOOTS the app under NODE_ENV=production, and
+      # TRUST_PROXY=false means local-only mode — which fails closed in
+      # production without an explicit opt-in (evaluateLocalOnlyStartup in
+      # src/lib/local-only.ts). A throwaway CI runner bound to localhost is
+      # exactly the private host the opt-in is for.
+      SUMMONARR_ALLOW_LOCAL_ONLY: "true"
       # TOKEN_ENCRYPTION_KEY must be exactly 64 hex chars.
       TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       # TMDB calls fail with this dummy token; data-dependent pages render

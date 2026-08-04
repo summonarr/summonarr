@@ -302,6 +302,44 @@ test("TRUST_PROXY=true disables the Host gate entirely (reverse-proxy deployment
   assertPassedThrough(res);
 });
 
+test("the Host gate is NOT an internet-facing access control — any client can spoof its way past it", async () => {
+  // THE reason production local-only mode now demands an explicit opt-in
+  // (evaluateLocalOnlyStartup; tests/local-only.test.mts owns that policy).
+  // Host is chosen by the CALLER, so an internet-exposed local-only instance is
+  // reachable by anyone who simply claims a private Host — no proximity to the
+  // LAN required, and nothing here can tell the difference.
+  for (const spoofed of ["127.0.0.1", "localhost", "10.0.0.1", "192.168.1.1", "[::1]"]) {
+    const res = await proxyLocalOnly(
+      req("/login", {
+        // Deliberately hostile shape: a public origin, forwarded headers naming
+        // a public client IP, and a Host the attacker picked.
+        headers: {
+          host: spoofed,
+          origin: EVIL,
+          "x-forwarded-for": "203.0.113.9",
+          "x-forwarded-host": "summonarr.example.com",
+        },
+      }),
+    );
+    assertPassedThrough(res, `a spoofed Host of ${spoofed} passes the gate — it is not a boundary`);
+  }
+});
+
+test("local-only mode reads the real Host only — X-Forwarded-Host cannot open OR close the gate", async () => {
+  // The gate must key off the connection's own Host header, never a forwarded
+  // one: trusting X-Forwarded-Host would let an untrusted client rewrite the
+  // gate's input (and, behind a proxy, is exactly the header a proxy sets).
+  const publicHostForwardedPrivate = await proxyLocalOnly(
+    req("/login", { headers: { host: "summonarr.example.com", "x-forwarded-host": "127.0.0.1" } }),
+  );
+  assert.equal(publicHostForwardedPrivate.status, 403, "a forwarded private host must not unlock the gate");
+
+  const privateHostForwardedPublic = await proxyLocalOnly(
+    req("/login", { headers: { host: "127.0.0.1", "x-forwarded-host": "summonarr.example.com" } }),
+  );
+  assertPassedThrough(privateHostForwardedPublic, "the real Host decides, not the forwarded one");
+});
+
 // ── the 426 force-upgrade gate (guardrail 24) ───────────────────────────────
 
 test("a positively-stale native build is refused with 426 on mutating /api — even with a VALID bearer session, pre-auth, zero DB reads", async () => {

@@ -150,9 +150,23 @@ jobs:
           (cd /tmp/prune-prisma-gen && npm ci --dry-run --no-audit --no-fund)
           (cd /tmp/prune-migrate-deps && npm ci --dry-run --no-audit --no-fund)
 
-      # Dependency audit reports CVEs in the lockfile. Kept non-blocking
-      # because upstream advisory churn shouldn't gate PRs — Dependabot
-      # opens patch PRs weekly. The Actions log + summary is the signal.
+      # Validates .github/security-exceptions.json only: every entry has an
+      # owner, a reason and an unexpired ISO date. BLOCKING, and safe to be:
+      # it makes no network call and reads no advisory feed, so it can only
+      # fail on this repo's own file. This is what stops a "temporary"
+      # acceptance from quietly becoming permanent — the release gate in
+      # docker-publish.yml enforces the same rule, but at PR time you learn
+      # an exception lapsed before it blocks a release.
+      - name: Security exceptions are owned and unexpired
+        run: npm run security:exceptions
+
+      # Dependency audit reports CVEs in the lockfile. Deliberately still
+      # non-blocking HERE: an advisory filed overnight against a transitive
+      # package shouldn't fail an unrelated PR, and Dependabot opens patch
+      # PRs weekly. This is no longer the only line of defence — the
+      # `security-gate` job in docker-publish.yml runs the same audit as a
+      # BLOCKING gate before anything is published, so a high/critical
+      # finding stops the release even though it doesn't stop a PR.
       - name: Dependency audit
         run: npm run audit:deps
         continue-on-error: true

@@ -10,6 +10,7 @@ import { sendTestEmail } from "@/lib/email";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
+import { DISCORD_SLASH_COMMANDS } from "@/lib/discord-commands";
 import { FEATURE_KEYS, invalidateFeatureFlagCache } from "@/lib/features";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
@@ -811,23 +812,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         }
 
         const DISCORD_API = "https://discord.com/api/v10";
-        const SLASH_COMMANDS = [
-          { name: "request", description: "Request a movie or TV show to be added to the library", options: [
-            { name: "type", description: "Movie or TV show", type: 3, required: true, choices: [{ name: "Movie", value: "movie" }, { name: "TV Show", value: "tv" }] },
-            { name: "query", description: "Title to search for", type: 3, required: true, min_length: 1, max_length: 200 },
-          ]},
-          { name: "status", description: "Check the status of your recent media requests" },
-          { name: "link", description: "Link your Discord account to your Summonarr account", options: [
-            { name: "token", description: "Link token from your Profile page", type: 3, required: true, min_length: 1, max_length: 20 },
-          ]},
-        ];
         const url = cfg.discordGuildId
           ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
           : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
         const res = await safeFetchTrusted(url, {
           method: "PUT",
           headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify(SLASH_COMMANDS),
+          body: JSON.stringify(DISCORD_SLASH_COMMANDS),
           allowedHosts: ["discord.com"],
           timeoutMs: 15_000,
         });
