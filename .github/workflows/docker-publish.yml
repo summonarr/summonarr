@@ -79,10 +79,16 @@ jobs:
       # freely. This workflow PUBLISHES release artifacts, and the GitHub
       # Actions cache is writable from other refs, so a poisoned npm cache
       # entry would be restored into the job that decides whether a release
-      # ships. A gate that can be fed its inputs by an attacker is not a gate.
-      # (zizmor:cache-poisoning) The cost is one cold `npm ci` per release.
+      # ships. A gate whose inputs an attacker can supply is not a gate.
+      # The cost is one cold `npm ci` per release.
+      #
+      # zizmor's cache-poisoning rule still flags setup-node on capability
+      # ("enables caching by default") even with no `cache:` input, at which
+      # point the action restores nothing. The version stays pinned rather
+      # than falling back to the runner's ambient Node, because a security
+      # gate should be deterministic about what it runs.
       - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0 # zizmor: ignore[cache-poisoning]
         with:
           node-version: '26'
 
