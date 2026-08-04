@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.20.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.21.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,17 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.21.0
+
+**Changed**
+
+- **Action required before upgrading if you run without a reverse proxy.** Add `SUMMONARR_ALLOW_LOCAL_ONLY=true` to your `.env` if `TRUST_PROXY` is unset or `false` — the app now refuses to start in local-only mode without it, and the startup log names the same variable if you hit it. The reason: local-only mode is guarded solely by the `Host` header the *client* sends, and `Host` is trivially spoofed, so it was never a real barrier — anything that can reach the port can claim a private `Host` and be served. Setting the variable is you confirming the host is genuinely private (LAN-only, bound to loopback, or firewalled), with your network providing the access control. **If Summonarr is reachable from the internet, put it behind a reverse proxy and set `TRUST_PROXY=true` instead** — that is the supported shape, and it cannot be substituted with the new opt-in. **Deployments already running `TRUST_PROXY=true` are unaffected and need no change.**
+
+**Fixed**
+
+- **The Discord `/link` command accepts your token again.** Saving anything in Admin → Settings re-registered the slash commands with a 20-character limit on the link token, while the tokens minted on your Profile page are 32 characters — so Discord rejected every token before the command even ran, and the fix applied by the **Register commands** button was undone by the next settings save. After upgrading, hit **Register commands** once (or save any Discord setting) to publish the corrected command.
+- **Pinning a Docker image version works.** The documented `SUMMONARR_VERSION=v0.20.2` spelling pointed at a tag that does not exist — published tags are bare semver — so the pull failed with `manifest unknown`. Drop the `v`: `SUMMONARR_VERSION=0.21.0`.
 
 ### v0.20.2
 
@@ -425,7 +436,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.20.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.21.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
