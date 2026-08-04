@@ -167,12 +167,15 @@ async function syncPlex(request: NextRequest) {
     }
 
     const seenRatingKeys = new Set<string>();
-    return rows.filter((r) => {
+    // One summary per run rather than a line per dropped row — see the
+    // matching comment in the orchestrator's copy in ../route.ts.
+    const dropped: string[] = [];
+    const kept = rows.filter((r) => {
       if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
       const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
       if (fixed !== undefined) {
         if (r.tmdbId !== fixed) {
-          console.warn(`[sync/plex] conflated ratingKey=${r.plexRatingKey}: dropping tmdb=${r.tmdbId}, keeping fixed tmdb=${fixed}`);
+          dropped.push(`${r.plexRatingKey}→${fixed} (dropped ${r.tmdbId})`);
           return false;
         }
       } else if (seenRatingKeys.has(r.plexRatingKey)) {
@@ -182,6 +185,14 @@ async function syncPlex(request: NextRequest) {
       seenRatingKeys.add(r.plexRatingKey);
       return true;
     });
+
+    if (dropped.length > 0) {
+      console.warn(
+        `[sync/plex] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
+          `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
+      );
+    }
+    return kept;
   };
 
   let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", instance);
