@@ -308,14 +308,59 @@ echo "Starting Summonarr..."
 # Uses Node's built-in fetch so the secret never appears in the process list.
 # Exits non-zero when the call did not succeed (non-2xx or fetch threw) so the
 # scheduler can hold the job for a short retry instead of waiting a full interval.
+# NOTE: node:http, NOT fetch — deliberately.
+#
+# `fetch` is undici, whose default `headersTimeout` is 300s. Response headers
+# are not sent until the route handler RETURNS, so any cron job that runs
+# longer than five minutes made fetch throw. _cron_next then scored the job as
+# failed and rescheduled it at CRON_RETRY_INTERVAL (300s) instead of its real
+# interval — so a full library sync that legitimately takes >5min on a large
+# library could never report success, and the hourly sync silently became a
+# permanent every-5-minutes full library delete-and-repopulate loop.
+#
+# A per-request AbortSignal cannot fix this: headersTimeout is a dispatcher
+# setting, and raising it needs undici's Agent, which is not importable from
+# the runtime image. node:http imposes no implicit cap, so the deadline is
+# explicit and generous here.
+#
+# The default (2100s = 35min) sits just ABOVE the orchestrator's own bound
+# (advisory-lock DEFAULT_WORK_TIMEOUT_MS = 30min) so the SERVER decides when a
+# run has gone wrong — it aborts, returns non-2xx, and the retry is then a real
+# retry. Override with CRON_CALL_TIMEOUT (seconds).
 _cron_sync() {
   SYNC_CALL_URL="$1" SYNC_CALL_LABEL="$2" SYNC_CALL_QUIET="${3:-}" \
+  SYNC_CALL_TIMEOUT_MS="$(( $(_cron_int "${CRON_CALL_TIMEOUT:-2100}" 2100) * 1000 ))" \
     node --input-type=module <<'JSEOF'
-const { SYNC_CALL_URL: url, SYNC_CALL_LABEL: label, CRON_SECRET, SYNC_CALL_QUIET: quiet } = process.env;
+import http from 'node:http';
+const {
+  SYNC_CALL_URL: url,
+  SYNC_CALL_LABEL: label,
+  CRON_SECRET,
+  SYNC_CALL_QUIET: quiet,
+  SYNC_CALL_TIMEOUT_MS: timeoutRaw,
+} = process.env;
+const timeoutMs = Number(timeoutRaw) > 0 ? Number(timeoutRaw) : 2100000;
 try {
-  const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` } });
-  if (!r.ok) {
-    console.log(`[${label} failed: ${r.status}]`);
+  const status = await new Promise((resolve, reject) => {
+    const req = http.request(
+      url,
+      { method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` } },
+      (res) => {
+        res.resume();                                   // drain and discard the body
+        res.on('end', () => resolve(res.statusCode));
+        res.on('error', reject);
+      },
+    );
+    // Inactivity timeout. These endpoints send nothing until the handler
+    // returns, so for this caller inactivity is the same as total elapsed.
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`no response after ${Math.round(timeoutMs / 1000)}s`));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  if (status < 200 || status >= 300) {
+    console.log(`[${label} failed: ${status}]`);
     process.exit(1);
   }
   if (!quiet) console.log(`[${label} ok]`);
