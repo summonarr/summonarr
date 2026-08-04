@@ -276,6 +276,34 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the `--check` and fails the PR if the committed file is stale. Do not delete `node_modules` LICENSE files in any Dockerfile slimming step, and do not lower this to a non-blocking CI step — a stale notices file is a license violation in the shipped image, not a lint nit.
 
+    **When checking `--check` by hand, do NOT pipe it.** `node scripts/generate-licenses.mts --check | tail -5` reports `tail`'s exit code, not the script's — a stale file reads as a pass. Run it bare, or `… >/dev/null && echo PASS || echo FAIL`.
+
+18a. **High/critical vulnerabilities BLOCK the release, and the only way past is a dated, owned exception.**
+
+    Why:
+    - Every scanner in this repo was observability-only: Trivy ran `exit-code: '0'` in all three places, `audit:deps` was `continue-on-error: true`, `npm audit` wasn't in CI at all, and `dependency-review` only inspects a PR's dependency *diff* — so it is blind to a vulnerable dependency already in the lockfile. Nothing could fail a release. A HIGH in a production dependency (`fast-uri`, GHSA-7p8r-x3mc-p8w7) sat in the tree as a direct result.
+    - `ci.yml` also runs on `pull_request` only, while `docker-publish.yml` runs on tag pushes. A tag placed on any commit published `:latest` with no security check on that tree.
+
+    Rules:
+    - **The gate is the `security-gate` job in [docker-publish.yml](.github/workflows/docker-publish.yml)**, and `build-and-push` `needs:` it. It runs on every trigger this workflow has, which is what closes the tag hole. Do not remove the `needs:` edge — that silently un-gates publishing while leaving a green-looking job in the graph.
+    - **PR-time advisory checks stay non-blocking on purpose.** An advisory filed overnight against a transitive package must not fail an unrelated PR. Blocking belongs at the release, where the risk becomes someone else's. Don't "fix" the `continue-on-error: true` on `audit:deps`.
+    - **Exceptions live in [.github/security-exceptions.json](.github/security-exceptions.json)** and require `id` (GHSA), `package`, `owner`, `expires` (ISO date), `reason`. An **expired entry is a hard failure**, not a silent pass — expiry that degrades to "allow" makes every entry permanent by neglect. A package-name match alone never suppresses: the advisory **id** must match too, or accepting one advisory would blanket-accept the next one filed against that package.
+    - `npm run security:exceptions` validates the file alone — no network, no advisory feed — so it is blocking in CI and can only fail on this repo's own file.
+
+    ```bash
+    npm run security:gate         # what blocks the release (high+, allowlist-aware)
+    npm run security:exceptions   # validate the exception file (blocking in CI)
+    ```
+
+    - Trivy's scheduled runs are blocking; its push/PR runs are not. A weekly job that can never go red is not an alert.
+    - **The image is scanned BEFORE it is published.** `security-gate` builds the runner image single-arch (`platforms: linux/amd64`, `load: true`) and Trivy-scans the loaded image with `exit-code: 1`. Single-arch is not a shortcut — `load: true` exports to the local docker daemon so Trivy can read it, and **a multi-arch manifest cannot be loaded**, which is why this was previously only possible post-publish. `provenance: false` is REQUIRED alongside `load: true` (BuildKit cannot export attestations to the docker exporter and the build fails). The build shares the GHA cache with the publish job and with ci.yml's `docker-build`, so it is normally a cache hit and it primes the amd64 half of the multi-arch release build.
+    - The post-publish scan stays `exit-code: 1` for the two things the pre-push gate structurally cannot cover: the **arm64** half of the manifest (not loadable) and the **exact published digest**. Divergence between the two is the signal.
+    - **Dry-run the gate before you need it.** `workflow_dispatch` takes a `gate_only` boolean that runs `security-gate` and skips publishing entirely, so a surprise high/critical surfaces when someone chooses to look rather than when it blocks a release mid-flight:
+
+    ```bash
+    gh workflow run docker-publish.yml -f gate_only=true
+    ```
+
 19. **The live 5s poller is the SOLE writer for Jellyfin play history. There is no backfill cron.**
 
     Why:

@@ -11,10 +11,23 @@
  *   node scripts/audit-deps.mts --min=moderate # fail on "moderate" or above
  *   node scripts/audit-deps.mts --json         # emit machine-readable JSON
  *   node scripts/audit-deps.mts --no-outdated  # skip the outdated check
+ *   node scripts/audit-deps.mts --allowlist    # honour .github/security-exceptions.json
+ *   node scripts/audit-deps.mts --allowlist-only  # ONLY validate the exception file
+ *
+ * The `--allowlist` mode is what makes this safe to run as a BLOCKING release
+ * gate. Without an escape hatch, a blocking dependency audit fails the build
+ * for an advisory published overnight against a transitive package with no fix
+ * yet — which is exactly why this check was previously `continue-on-error` and
+ * therefore gated nothing at all. With it, an advisory can be consciously
+ * accepted for a bounded time by a named owner, and the gate itself enforces
+ * that the acceptance expires.
+ *
+ * An EXPIRED exception is a hard failure, not a silent pass. Expiry that
+ * degrades to "allow" would make every entry permanent by neglect.
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Severity = "info" | "low" | "moderate" | "high" | "critical";
@@ -59,7 +72,21 @@ interface CliOptions {
   minSeverity: Severity;
   json: boolean;
   includeOutdated: boolean;
+  useAllowlist: boolean;
+  allowlistOnly: boolean;
 }
+
+/** One accepted advisory from .github/security-exceptions.json. */
+interface SecurityException {
+  id: string;
+  package: string;
+  owner: string;
+  /** ISO date (YYYY-MM-DD), UTC. */
+  expires: string;
+  reason: string;
+}
+
+const EXCEPTIONS_PATH = ".github/security-exceptions.json";
 
 interface AdvisoryFinding {
   source: number;
@@ -101,11 +128,17 @@ function parseArgs(argv: string[]): CliOptions {
     minSeverity: "high",
     json: false,
     includeOutdated: true,
+    useAllowlist: false,
+    allowlistOnly: false,
   };
   for (const arg of argv) {
     if (arg === "--json") opts.json = true;
     else if (arg === "--no-outdated") opts.includeOutdated = false;
-    else if (arg.startsWith("--min=")) {
+    else if (arg === "--allowlist") opts.useAllowlist = true;
+    else if (arg === "--allowlist-only") {
+      opts.allowlistOnly = true;
+      opts.useAllowlist = true;
+    } else if (arg.startsWith("--min=")) {
       const value = arg.slice("--min=".length) as Severity;
       if (!SEVERITY_ORDER.includes(value)) {
         console.error(
@@ -116,7 +149,8 @@ function parseArgs(argv: string[]): CliOptions {
       opts.minSeverity = value;
     } else if (arg === "--help" || arg === "-h") {
       console.log(
-        "Usage: node scripts/audit-deps.mts [--min=low|moderate|high|critical] [--json] [--no-outdated]",
+        "Usage: node scripts/audit-deps.mts [--min=low|moderate|high|critical] [--json]\n" +
+          "                                   [--no-outdated] [--allowlist] [--allowlist-only]",
       );
       process.exit(0);
     }
@@ -330,9 +364,190 @@ function determineExitCode(totals: Record<Severity, number>, min: Severity): num
   return 0;
 }
 
+// ── Exception allowlist ──────────────────────────────────────────────────────
+
+/**
+ * Reads and structurally validates `.github/security-exceptions.json`.
+ *
+ * Every field is mandatory and a malformed entry is a hard error rather than a
+ * skipped one: an exception that silently fails to parse would read as "no
+ * exceptions" here while a human reading the file believes an advisory is
+ * consciously accepted. Those two states must never look the same.
+ */
+function loadExceptions(cwd: string): { exceptions: SecurityException[]; errors: string[] } {
+  const path = join(cwd, EXCEPTIONS_PATH);
+  if (!existsSync(path)) return { exceptions: [], errors: [] };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    return { exceptions: [], errors: [`${EXCEPTIONS_PATH} is not valid JSON: ${String(error)}`] };
+  }
+
+  const raw = (parsed as { exceptions?: unknown })?.exceptions;
+  if (raw === undefined) return { exceptions: [], errors: [] };
+  if (!Array.isArray(raw)) {
+    return { exceptions: [], errors: [`${EXCEPTIONS_PATH}: "exceptions" must be an array`] };
+  }
+
+  const errors: string[] = [];
+  const exceptions: SecurityException[] = [];
+  raw.forEach((entry, index) => {
+    const where = `${EXCEPTIONS_PATH}[${index}]`;
+    if (typeof entry !== "object" || entry === null) {
+      errors.push(`${where}: must be an object`);
+      return;
+    }
+    const record = entry as Record<string, unknown>;
+    const missing = (["id", "package", "owner", "expires", "reason"] as const).filter(
+      (field) => typeof record[field] !== "string" || (record[field] as string).trim() === "",
+    );
+    if (missing.length > 0) {
+      errors.push(`${where}: missing/empty required field(s): ${missing.join(", ")}`);
+      return;
+    }
+    const expires = record.expires as string;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires) || Number.isNaN(Date.parse(`${expires}T00:00:00Z`))) {
+      errors.push(`${where}: "expires" must be an ISO date (YYYY-MM-DD), got "${expires}"`);
+      return;
+    }
+    exceptions.push(entry as unknown as SecurityException);
+  });
+
+  return { exceptions, errors };
+}
+
+/** Whether `advisory` is covered by `exception` (GHSA id or advisory URL). */
+function exceptionCovers(exception: SecurityException, pkg: string, advisory: AdvisoryFinding): boolean {
+  if (exception.package !== pkg) return false;
+  const id = exception.id.trim();
+  return advisory.url?.includes(id) === true || advisory.title?.includes(id) === true;
+}
+
+/** An exception is expired once the day AFTER `expires` has begun (UTC). */
+function isExpired(exception: SecurityException, now: Date): boolean {
+  return now.getTime() > Date.parse(`${exception.expires}T23:59:59Z`);
+}
+
+interface AllowlistOutcome {
+  /** Vulnerabilities still counted against the gate. */
+  remaining: VulnReport[];
+  /** Advisories suppressed by a live exception. */
+  suppressed: Array<{ pkg: string; exception: SecurityException }>;
+  /** Blocking problems: expired entries and malformed file contents. */
+  failures: string[];
+  /** Non-blocking hygiene: entries matching no live advisory. */
+  stale: SecurityException[];
+}
+
+/**
+ * Applies the allowlist to a set of vulnerabilities.
+ *
+ * An advisory is dropped from the gate ONLY when a non-expired exception names
+ * both its package and its identifier. A package-level match alone is not
+ * enough — accepting one advisory must not blanket-accept the next one filed
+ * against the same package.
+ */
+function applyAllowlist(
+  reports: VulnReport[],
+  exceptions: SecurityException[],
+  now: Date,
+): AllowlistOutcome {
+  const failures: string[] = [];
+  const suppressed: AllowlistOutcome["suppressed"] = [];
+  const used = new Set<SecurityException>();
+
+  const live: SecurityException[] = [];
+  for (const exception of exceptions) {
+    if (isExpired(exception, now)) {
+      failures.push(
+        `EXPIRED exception for ${exception.package} (${exception.id}) — expired ${exception.expires}, ` +
+          `owner ${exception.owner}. Fix the advisory or take a fresh, dated decision.`,
+      );
+    } else {
+      live.push(exception);
+    }
+  }
+
+  const remaining: VulnReport[] = [];
+  for (const report of reports) {
+    const kept = report.via.filter((advisory) => {
+      const match = live.find((exception) => exceptionCovers(exception, report.package, advisory));
+      if (!match) return true;
+      used.add(match);
+      suppressed.push({ pkg: report.package, exception: match });
+      return false;
+    });
+    // A package whose advisories are all excepted drops out of the gate; one
+    // with any advisory left stays, carrying only the unexcepted advisories.
+    if (kept.length > 0) remaining.push({ ...report, via: kept });
+  }
+
+  return {
+    remaining,
+    suppressed,
+    failures,
+    stale: live.filter((exception) => !used.has(exception)),
+  };
+}
+
+/** Re-tallies severities after allowlisting, from the surviving advisories. */
+function tallyFromReports(reports: VulnReport[]): Record<Severity, number> {
+  const totals: Record<Severity, number> = {
+    info: 0,
+    low: 0,
+    moderate: 0,
+    high: 0,
+    critical: 0,
+  };
+  for (const report of reports) {
+    // Rank the package by its worst SURVIVING advisory, not the original
+    // entry severity — otherwise excepting the only critical advisory would
+    // still leave the package counted as critical.
+    const worst = report.via.reduce<Severity>(
+      (acc, advisory) => (SEVERITY_RANK[advisory.severity] > SEVERITY_RANK[acc] ? advisory.severity : acc),
+      "info",
+    );
+    totals[worst] += 1;
+  }
+  return totals;
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   const cwd = process.cwd();
+
+  // The exception file is parsed FIRST and its structural errors are fatal on
+  // their own, so a malformed file can never be mistaken for "no exceptions".
+  const { exceptions, errors: exceptionErrors } = opts.useAllowlist
+    ? loadExceptions(cwd)
+    : { exceptions: [] as SecurityException[], errors: [] as string[] };
+
+  if (opts.allowlistOnly) {
+    // Validation-only mode: deterministic, needs no network, and safe to run
+    // as a blocking PR check — it cannot be tripped by a new upstream
+    // advisory, only by a malformed or expired entry in this repo's own file.
+    const expired = exceptions.filter((exception) => isExpired(exception, new Date()));
+    const problems = [
+      ...exceptionErrors,
+      ...expired.map(
+        (exception) =>
+          `EXPIRED exception for ${exception.package} (${exception.id}) — expired ${exception.expires}, owner ${exception.owner}.`,
+      ),
+    ];
+    console.log(color("\n  Security Exception Validation", COLORS.bold + COLORS.cyan));
+    console.log(color("  ─────────────────────────────", COLORS.dim));
+    if (problems.length > 0) {
+      for (const problem of problems) console.log(`  ${color("✗", COLORS.red)} ${problem}`);
+      console.log();
+      process.exit(1);
+    }
+    console.log(
+      `\n  ${color("✓", COLORS.green)} ${exceptions.length} exception(s); none expired or malformed.\n`,
+    );
+    process.exit(0);
+  }
 
   const directDependencies = loadDirectDependencies(cwd);
 
@@ -340,8 +555,35 @@ function main(): void {
     process.stdout.write(color("Running npm audit…\n", COLORS.dim));
   }
   const auditJson = runJson("npm", ["audit", "--json"], cwd) as NpmAuditJson;
-  const vulnerabilities = collectVulnerabilities(auditJson);
-  const totals = tallySeverities(vulnerabilities);
+  let vulnerabilities = collectVulnerabilities(auditJson);
+  let totals = tallySeverities(vulnerabilities);
+
+  let allowlistFailures: string[] = [...exceptionErrors];
+  if (opts.useAllowlist) {
+    const outcome = applyAllowlist(vulnerabilities, exceptions, new Date());
+    vulnerabilities = outcome.remaining;
+    totals = tallyFromReports(outcome.remaining);
+    allowlistFailures = [...allowlistFailures, ...outcome.failures];
+
+    if (!opts.json) {
+      for (const { pkg, exception } of outcome.suppressed) {
+        console.log(
+          color(
+            `  ⚠ accepted: ${pkg} (${exception.id}) until ${exception.expires} — ${exception.owner}`,
+            COLORS.yellow,
+          ),
+        );
+      }
+      for (const exception of outcome.stale) {
+        console.log(
+          color(
+            `  · stale exception (matches no live advisory, delete it): ${exception.package} (${exception.id})`,
+            COLORS.dim,
+          ),
+        );
+      }
+    }
+  }
 
   let outdated: AuditResult["outdated"] = [];
   if (opts.includeOutdated) {
@@ -370,6 +612,17 @@ function main(): void {
     );
   } else {
     printHumanReport(result, opts);
+  }
+
+  if (allowlistFailures.length > 0) {
+    for (const failure of allowlistFailures) {
+      console.error(`  ${color("✗", COLORS.red)} ${failure}`);
+    }
+    console.error();
+    // Expired/malformed exceptions fail even when the advisory set is clean:
+    // the file itself is the defect, and leaving it to be "noticed later" is
+    // how a bounded acceptance becomes permanent.
+    process.exit(1);
   }
 
   process.exit(determineExitCode(totals, opts.minSeverity));

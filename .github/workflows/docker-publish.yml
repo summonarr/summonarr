@@ -19,6 +19,11 @@ on:
       - "[0-9]+.[0-9]+"
       - "[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      gate_only:
+        description: 'Dry-run the security gate only — do NOT build or publish'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -41,7 +46,115 @@ permissions:
   contents: read
 
 jobs:
+  # BLOCKING release gate. Nothing publishes unless this passes.
+  #
+  # Why a separate job rather than tightening the PR checks: an advisory filed
+  # overnight against a transitive dependency should not fail an unrelated PR
+  # (that churn is exactly why the PR-time audit is `continue-on-error`, and
+  # why it consequently gated nothing). A release is the right place to insist,
+  # because shipping is the moment the risk becomes other people's.
+  #
+  # This also closes the tag-push hole: ci.yml runs on `pull_request` only, so
+  # a tag placed on any commit previously published `:latest` with no security
+  # check on that exact tree. This job runs on every trigger this workflow has.
+  #
+  # Escape hatch: .github/security-exceptions.json — a named owner, a dated
+  # expiry, and a reason, enforced by the gate itself (an expired entry FAILS).
+  security-gate:
+    name: Release security gate
+    runs-on: ubuntu-latest
+    # Generous: the amd64 image build below is cold on a first release and the
+    # whole point of this job is that it must finish, not that it is fast.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Read-only gate; nothing is pushed back. (zizmor:artipacked)
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Cheap checks first so an obvious failure doesn't wait on a container
+      # build. Dependency advisories at high/critical, honouring the dated
+      # allowlist. Exits non-zero on an unexcepted finding OR an expired entry.
+      - name: Dependency vulnerability gate
+        run: npm run security:gate
+
+      # Source-tree scan: lockfile CVEs Trivy sees that npm audit may not, plus
+      # Dockerfile/compose misconfiguration and committed secrets. `exit-code: 1`
+      # is the difference from trivy.yml, which is observability-only.
+      - name: Trivy filesystem gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig,secret
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+          skip-dirs: 'node_modules,.next,src/generated'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # Build the RUNNER image so it can be scanned BEFORE anything is
+      # published. The source scan above cannot see this layer: Alpine OS
+      # packages, the pruned Prisma CLI tree and the standalone Next output
+      # only exist once the image is assembled.
+      #
+      # Single-arch on purpose. `load: true` exports into the local docker
+      # daemon so Trivy can read it, and a multi-arch manifest CANNOT be
+      # loaded — which is exactly why this used to be a post-publish scan
+      # (an alarm after the fact) rather than a gate. amd64 is the
+      # representative arch: every layer that carries a CVE here (base image,
+      # apk packages, the npm trees) is arch-independent in content, and the
+      # arm64 half of the release build shares the same Dockerfile and pins.
+      #
+      # `provenance: false` is REQUIRED with `load: true` — BuildKit cannot
+      # export attestations to the docker exporter and the build errors out.
+      #
+      # The GHA cache is shared with the publish job below (and with ci.yml's
+      # docker-build), so this is mostly a cache hit and it primes the amd64
+      # half of the multi-arch build that follows. Net cost of the gate is
+      # therefore close to zero on a warm cache.
+      - name: Build image for scanning (amd64, not pushed)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          platforms: linux/amd64
+          tags: summonarr:security-gate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # THE pre-publish image gate. A high/critical in the assembled runtime
+      # stops the release here, before any tag exists to pull.
+      - name: Trivy image gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: summonarr:security-gate
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+
   build-and-push:
+    needs: [security-gate]
     runs-on: ubuntu-latest
     # The arm64 half runs under QEMU and can hang; without a timeout a stuck
     # build holds the runner for GitHub's 360-minute default. A warm-cache
@@ -52,10 +165,17 @@ jobs:
     # publishes the same SHA with version tags + `:latest`, so the main-push
     # build would just duplicate work. Tag pushes and manual dispatches always
     # run; non-release main pushes still publish `:main` and `:sha-<short>`.
+    # `gate_only` lets the security gate be exercised on demand WITHOUT
+    # publishing — so a surprise high/critical surfaces when someone chooses
+    # to look, not when it blocks a release someone is trying to ship. On any
+    # non-dispatch event `inputs.gate_only` is empty, and `!''` is true, so
+    # this term is a no-op for push and tag triggers.
     if: |
-      startsWith(github.ref, 'refs/tags/') ||
-      github.event_name == 'workflow_dispatch' ||
-      !contains(toJSON(github.event.commits), 'chore(release):')
+      !inputs.gate_only && (
+        startsWith(github.ref, 'refs/tags/') ||
+        github.event_name == 'workflow_dispatch' ||
+        !contains(toJSON(github.event.commits), 'chore(release):')
+      )
     permissions:
       contents: read
       packages: write
@@ -125,8 +245,21 @@ jobs:
 
       # Scan the freshly published image by digest so every published tag
       # (not just `:latest` on the weekly trivy.yml schedule) gets its
-      # runtime surface checked. Findings upload to the Security tab;
-      # exit-code 0 keeps publishing non-blocking, matching trivy.yml.
+      # runtime surface checked.
+      #
+      # `exit-code: 1` — this FAILS the workflow on a high/critical finding.
+      #
+      # The blocking check now happens BEFORE publishing (the `Trivy image
+      # gate` step in security-gate, against a loadable amd64 build), so this
+      # is no longer the only image check and no longer merely an after-the-
+      # fact alarm. It stays for two things the gate cannot cover:
+      #   - the arm64 half of the manifest, which cannot be loaded and so
+      #     cannot be scanned pre-push;
+      #   - the exact published digest, which is what users actually pull.
+      # Divergence between the two is the interesting signal.
+      #
+      # The SARIF upload below is `if: always()`, so findings still reach the
+      # Security tab when this step fails.
       - name: Scan published image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -136,7 +269,7 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-publish.sarif
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Upload Trivy SARIF
         if: always()

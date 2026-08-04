@@ -14,6 +14,8 @@
     "typecheck": "node node_modules/tsgo/bin/tsc --noEmit",
     "typecheck:classic": "node node_modules/typescript/bin/tsc --noEmit",
     "audit:deps": "node scripts/audit-deps.mts",
+    "security:gate": "node scripts/audit-deps.mts --allowlist --no-outdated",
+    "security:exceptions": "node scripts/audit-deps.mts --allowlist-only",
     "audit:routes": "node scripts/audit-routes.mts",
     "audit:openapi": "node scripts/audit-openapi.mts",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
