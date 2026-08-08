@@ -24,6 +24,7 @@ const rowKey = (tmdbId: number, mt: string) => `${tmdbId}:${mt}`;
 export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
   const [items, setItems] = useState<BlacklistRow[]>(initial);
   const [query, setQuery] = useState("");
+  const [reason, setReason] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -63,13 +64,19 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
     const mediaType = r.mediaType === "movie" ? "MOVIE" : "TV";
     const k = rowKey(r.id, mediaType);
     if (blocked.has(k)) return;
+    const trimmedReason = reason.trim();
     setBusy(k);
     setError("");
     try {
       const res = await fetch(withBasePath("/api/admin/blacklist"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tmdbId: r.id, mediaType, title: r.title }),
+        body: JSON.stringify({
+          tmdbId: r.id,
+          mediaType,
+          title: r.title,
+          ...(trimmedReason ? { reason: trimmedReason } : {}),
+        }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -77,7 +84,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         return;
       }
       setItems((prev) => [
-        { tmdbId: r.id, mediaType, title: r.title, reason: null, createdAt: new Date().toISOString() },
+        { tmdbId: r.id, mediaType, title: r.title, reason: trimmedReason || null, createdAt: new Date().toISOString() },
         ...prev,
       ]);
     } catch {
@@ -152,6 +159,22 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
             Search
           </button>
         </form>
+
+        <input
+          value={reason}
+          onChange={(e) => setReason(e.target.value.slice(0, 500))}
+          placeholder="Reason (optional) — saved with the next title you block"
+          aria-label="Reason for blocking"
+          className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          style={{
+            padding: "8px 12px",
+            fontSize: 13,
+            color: "var(--ds-fg)",
+            background: "var(--ds-bg-2)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 6,
+          }}
+        />
 
         {results.length > 0 && (
           <div className="flex flex-col" style={{ gap: 4 }}>
