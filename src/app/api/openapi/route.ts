@@ -1543,6 +1543,35 @@ const spec = {
       },
     },
 
+    "/admin/play-history/backfill-playtime": {
+      post: {
+        tags: ["Admin – Debug"],
+        summary: "One-shot clamp of pre-fix PlayHistory playDuration values (ADMIN, ops-only — no UI)",
+        description:
+          "Repairs rows written before ActiveSession.playtimeMs landed, where playDuration stored the playhead position at session end (a scrub-to-credits looked like a full watch). Clamps playDuration to wall-clock (stoppedAt - startedAt) and recomputes watched/pausedDuration. Defaults to a DRY RUN returning counts and a sample; pass ?execute=true with a body echoing the dry-run's candidate-row count to apply. Idempotent — already-clamped rows are excluded. Deliberately headless (curl-only), like the /admin/debug/* endpoints.",
+        parameters: [
+          { name: "execute", in: "query", schema: { type: "string", enum: ["true"] }, description: "Omit for a dry run; \"true\" applies the clamp" },
+        ],
+        requestBody: {
+          required: false,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  confirmAffectedRows: { type: "integer", description: "Required with ?execute=true — must echo the candidate-row count from a prior dry run" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Dry run: counts + five-row sample. Execute: rows updated + watched flips" },
+          "409": { description: "confirmAffectedRows does not match the live candidate count" },
+        },
+      },
+    },
+
     "/admin/fix-match": {
       post: {
         tags: ["Admin – Fix Match"],
