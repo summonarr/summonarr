@@ -111,6 +111,9 @@ const SETTINGS_SCHEMA = [
   ["maintenanceEnabled",            false],
   ["maintenanceMessage",            false],
   ["deletionVoteThreshold",         false],
+  // Days before audit-row PII (IP/UA/userName, auth-event details) is scrubbed —
+  // read via getAuditPiiRetentionDays() by the scrub cron AND the manual scrub.
+  ["auditPiiRetentionDays",         false],
   ["disableLocalLogin",              false],
   ["playHistoryEnabled",             false],
   ["playHistoryPlexEnabled",         false],
@@ -481,6 +484,20 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
+    // Audit PII retention window. Lower bound matters: a tiny value (or "0")
+    // would scrub identity off every fresh audit row, quietly destroying the
+    // log's forensic value — same typo-proofing rationale as the rateLimit
+    // floor above. Bounds mirror the read-side clamp in getAuditPiiRetentionDays.
+    if (key === "auditPiiRetentionDays") {
+      const n = parseInt(value, 10);
+      if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 7 || n > 3650) {
+        return NextResponse.json(
+          { error: `"${key}" must be an integer between 7 and 3650 (days)` },
+          { status: 400 },
+        );
+      }
+    }
+
     // Discord application/guild IDs are snowflakes: 17–20 digit decimal integers.
     // Persist them validated so downstream consumers (command registration,
     // notifications, link/merge flows) never receive a malformed identifier.
@@ -563,6 +580,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "sonarrWebhookSecret",
     "radarr4kWebhookSecret",
     "sonarr4kWebhookSecret",
+    // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
+    // exactly what the form's helper text promises.
+    "auditPiiRetentionDays",
   ]);
 
   const entries = Object.entries(body)

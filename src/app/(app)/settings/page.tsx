@@ -8,7 +8,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton, AuditRetentionForm } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
@@ -56,6 +56,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   features: [],
   system: [
     { id: "scheduled-jobs",   label: "Scheduled Jobs",     group: "System" },
+    { id: "audit-log-settings", label: "Audit Log",        group: "System" },
     { id: "db-metrics",       label: "DB Metrics",         group: "System" },
   ],
 };
@@ -115,6 +116,7 @@ const ALL_KEYS = [
   "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
+  "auditPiiRetentionDays",
 ] as const;
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
@@ -869,6 +871,17 @@ export default async function SettingsPage({
               <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Background cron jobs and their current status. Click Run to trigger on demand.</p>
             </div>
             <CronJobTable jobs={metrics.cronJobs} />
+          </div>
+
+          <div id="audit-log-settings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div className="mb-5">
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Audit Log</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
+                How long audit rows keep IP addresses, devices, and user names before the daily scrub redacts them.
+                A manual &ldquo;Scrub PII&rdquo; button lives on the Audit Log page.
+              </p>
+            </div>
+            <AuditRetentionForm initialDays={cfg.auditPiiRetentionDays ?? ""} />
           </div>
 
           <div id="db-metrics" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>

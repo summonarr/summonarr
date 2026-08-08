@@ -34,3 +34,4 @@ export { JellyfinRestrictSignInToggle } from "./forms/jellyfin-restrict-sign-in-
 export { RatingsVisibilityForm } from "./forms/ratings-visibility-form";
 export { Request4kAllToggle } from "./forms/request-4k-all-toggle";
 export { EnableMachineSessionToggle } from "./forms/enable-machine-session-toggle";
+export { AuditRetentionForm } from "./forms/audit-retention-form";

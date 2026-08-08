@@ -55,6 +55,28 @@ export async function logAuditOrFail(params: AuditParams): Promise<void> {
   });
 }
 
+// PII retention window for audit rows, in days. Both scrub paths (the
+// scrub-audit-pii cron and the manual DELETE /api/admin/audit-log) derive their
+// cutoff from this ONE reader so the promise they enforce can't drift. The
+// bounds mirror the write-side validation in /api/settings — clamping here too
+// means a hand-edited Setting row can't silently scrub yesterday's log.
+export const AUDIT_PII_RETENTION_DEFAULT_DAYS = 90;
+export const AUDIT_PII_RETENTION_MIN_DAYS = 7;
+export const AUDIT_PII_RETENTION_MAX_DAYS = 3650;
+
+export async function getAuditPiiRetentionDays(): Promise<number> {
+  try {
+    const row = await prisma.setting.findUnique({ where: { key: "auditPiiRetentionDays" } });
+    if (!row) return AUDIT_PII_RETENTION_DEFAULT_DAYS;
+    const n = parseInt(row.value, 10);
+    if (!Number.isInteger(n)) return AUDIT_PII_RETENTION_DEFAULT_DAYS;
+    return Math.min(AUDIT_PII_RETENTION_MAX_DAYS, Math.max(AUDIT_PII_RETENTION_MIN_DAYS, n));
+  } catch {
+    // A read failure must not block the scrub — fall back to the documented default.
+    return AUDIT_PII_RETENTION_DEFAULT_DAYS;
+  }
+}
+
 // Builds the ip/userAgent/provider context for an audit entry from the request headers + session.
 export function auditContext(
   req: Request | { headers: Headers },

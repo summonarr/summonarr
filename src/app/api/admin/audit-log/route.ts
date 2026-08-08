@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit, auditContext } from "@/lib/audit";
+import { logAudit, auditContext, getAuditPiiRetentionDays } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
@@ -99,7 +99,10 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   //   - userName: redacted on every row (still keyed by userId for joinability)
   //   - details: nulled on auth events (free-form payload may contain identifiers);
   //     preserved on USER_DELETE so the deletion record stays intact for audit purposes.
-  const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  // Window comes from the shared reader (auditPiiRetentionDays Setting, default
+  // 90d) so this manual scrub and the scrub-audit-pii cron enforce one promise.
+  const retentionDays = await getAuditPiiRetentionDays();
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
   const piiResult = await prisma.auditLog.updateMany({
     where: {
@@ -140,5 +143,6 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     scrubbed: piiResult.count,
     detailsScrubbed: detailsResult.count,
     cutoff: cutoff.toISOString(),
+    retentionDays,
   });
 });
