@@ -3,6 +3,9 @@
 // getUserRecommendations). Pinned here:
 //   - cold start (zero seeds) short-circuits before any TMDB call;
 //   - only watched:true PlayHistory rows seed the engine;
+//   - history seeding is windowed to the last 180 days (an old binge cannot
+//     outrank recent watches), falling back to all-time ONLY when the window
+//     is empty — while the exclusion set stays all-time;
 //   - scoring = seedTypeWeight × recencyWeight, summed across every seed that
 //     surfaced a candidate (multi-seed corroboration), with watchlist seeds
 //     (1.5x) outweighing watch-history seeds (1.0x) at equal recency;
@@ -136,9 +139,20 @@ shadowPrismaModel(prisma, "mediaServerUser", {
 
 // ── prisma.playHistory (seed groupBy + exclusion/drift findMany) ──────────
 shadowPrismaModel(prisma, "playHistory", {
-  groupBy: async (args: { where: { mediaServerUserId: { in: string[] } }; take: number }) => {
+  groupBy: async (args: {
+    where: { mediaServerUserId: { in: string[] }; startedAt?: { gte: Date } };
+    take: number;
+  }) => {
     const ids = new Set(args.where.mediaServerUserId.in);
-    const eligible = playHistoryRows.filter((p) => ids.has(p.mediaServerUserId) && p.watched && p.tmdbId != null && p.mediaType != null);
+    const cutoff = args.where.startedAt?.gte.getTime();
+    const eligible = playHistoryRows.filter(
+      (p) =>
+        ids.has(p.mediaServerUserId) &&
+        p.watched &&
+        p.tmdbId != null &&
+        p.mediaType != null &&
+        (cutoff === undefined || p.startedAt.getTime() >= cutoff),
+    );
     const groups = new Map<string, { tmdbId: number; mediaType: MT; count: number; max: number }>();
     for (const r of eligible) {
       const key = `${r.tmdbId}:${r.mediaType}`;
@@ -333,6 +347,46 @@ test("only watched:true rows seed the engine — a merely-sampled (watched:false
   const result = await computeRecommendationsForUser("u1");
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [500]);
   assert.ok(!fetchCalls.some((p) => p.startsWith("/movie/99/")), "watched:false row must not become a seed");
+});
+
+test("seed recency window: an old episode binge outside 180 days cannot seed past a recent watch, but stays EXCLUDED", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // A three-row "binge" 400 days ago — unwindowed it would outrank the recent
+    // watch on count and take seed index 0 (the highest weight).
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(400) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(401) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(402) },
+    { mediaServerUserId: "msu1", tmdbId: 20, mediaType: "TV", watched: true, startedAt: daysAgo(2) },
+  ];
+  suggestionsFor.set("tv:10", [tvItem(111)]); // must never be fetched — 10 is outside the window
+  // The old watch itself must still be excluded (exclusion is all-time even
+  // though seeding is windowed) — 10 arriving as a suggestion must not surface.
+  suggestionsFor.set("tv:20", [tvItem(222), tvItem(10)]);
+
+  const result = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId), [222]);
+  assert.ok(!fetchCalls.some((p) => p.includes("/tv/10/")), "a beyond-window title must not become a seed");
+});
+
+test("seed recency window: ONLY-old history falls back to all-time seeding instead of clearing the shelf", async () => {
+  // A dormant household (nothing watched in 180 days, empty watchlist) must not
+  // collapse to zero seeds: that reads as a CONCLUSIVE empty and would clear an
+  // established shelf. All-time seeding is the fallback, not the default.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(400) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(390) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(333)]);
+
+  const result = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId), [333]);
+  assert.equal(result.conclusive, true);
 });
 
 // ── scoring: ranking, recency interpolation, seed-type weight, corroboration ─

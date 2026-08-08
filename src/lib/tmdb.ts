@@ -683,7 +683,9 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   if (r.recommendations || r.similar) {
     const seen = new Set<number>([id]);
     const suggestions: TmdbMedia[] = [];
-    for (const page of [r.similar, r.recommendations]) {
+    // recommendations before similar — same starvation rule (and same :v2 key)
+    // as getMovieSuggestions; the two writers must agree on ordering.
+    for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
       for (const item of page.results) {
         if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
@@ -691,7 +693,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
         suggestions.push(normalizeMovie(item));
       }
     }
-    setCache(`movie:${id}:suggestions`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
+    setCache(`movie:${id}:suggestions:v2`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
   }
 
   await setCache(key, media, TTL.DETAILS);
@@ -784,7 +786,9 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
   if (r.recommendations || r.similar) {
     const seen = new Set<number>([id]);
     const suggestions: TmdbMedia[] = [];
-    for (const page of [r.similar, r.recommendations]) {
+    // recommendations before similar — same starvation rule (and same :v2 key)
+    // as getMovieSuggestions; the two writers must agree on ordering.
+    for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
       for (const item of page.results) {
         if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
@@ -792,7 +796,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
         suggestions.push(normalizeTV(item));
       }
     }
-    setCache(`tv:${id}:suggestions`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
+    setCache(`tv:${id}:suggestions:v2`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
   }
 
   await setCache(key, media, TTL.DETAILS);
@@ -1013,7 +1017,10 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
 }
 
 export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
-  const key = `movie:${id}:suggestions`;
+  // ":v2" retires the pre-reorder cached rows in place — the old similar-first
+  // lists would otherwise keep serving for up to TTL.DETAILS after a deploy.
+  // Orphaned v1 rows age out through the expired-TmdbCache purge.
+  const key = `movie:${id}:suggestions:v2`;
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
@@ -1024,7 +1031,12 @@ export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
   ]);
   const seen = new Set<number>([id]);
   const result: TmdbMedia[] = [];
-  for (const r of [similar, recommended]) {
+  // /recommendations (TMDB's behavior-based engine) is consumed FIRST so the
+  // 18-item cap starves /similar (a crude keyword/genre matcher) rather than
+  // the reverse. These lists feed the For You engine and the detail-page "More
+  // like this" rails; similar-first filled both with genre-adjacent noise
+  // whenever /similar alone could satisfy the cap.
+  for (const r of [recommended, similar]) {
     if (r.status !== "fulfilled") continue;
     for (const item of r.value.results) {
       if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;
@@ -1042,7 +1054,8 @@ export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
 }
 
 export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
-  const key = `tv:${id}:suggestions`;
+  // Recommendations-first + ":v2" key — see getMovieSuggestions.
+  const key = `tv:${id}:suggestions:v2`;
   return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
@@ -1053,7 +1066,7 @@ export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
   ]);
   const seen = new Set<number>([id]);
   const result: TmdbMedia[] = [];
-  for (const r of [similar, recommended]) {
+  for (const r of [recommended, similar]) {
     if (r.status !== "fulfilled") continue;
     for (const item of r.value.results) {
       if (item.id == null || item.id <= 0 || seen.has(item.id) || !item.poster_path) continue;

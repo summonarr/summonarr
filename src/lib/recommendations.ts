@@ -15,6 +15,7 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 
 const MAX_WATCH_HISTORY_SEEDS = 10;
 const MAX_WATCHLIST_SEEDS = 5;
+const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 const MAX_STORED_RECOMMENDATIONS_PER_USER = 40;
 const SEED_CONCURRENCY = 5;
 const USER_CONCURRENCY = 5;
@@ -70,22 +71,35 @@ function weightSeeds(rows: { tmdbId: number; mediaType: MediaType }[], typeWeigh
 }
 
 async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
+  // History seeds track CURRENT taste, so the grouping is windowed to the last
+  // 180 days. Unwindowed, "most rows" is "most episodes ever": one PlayHistory
+  // row lands per episode watched, so a years-old 200-episode binge permanently
+  // owns the top seed slots while movies (one row each) never seed at all.
+  // When the window holds nothing (a dormant household), fall back to all-time
+  // rather than return zero seeds — seeds.length === 0 is a CONCLUSIVE empty to
+  // the caller, which would clear an established shelf. The exclusion set
+  // (buildExclusionSet) stays all-time on purpose: an old watch must still
+  // never come back as a "new" recommendation.
+  const groupHistory = (windowed: boolean) =>
+    prisma.playHistory.groupBy({
+      by: ["tmdbId", "mediaType"],
+      where: {
+        mediaServerUserId: { in: linkedServerUserIds },
+        watched: true,
+        tmdbId: { not: null },
+        mediaType: { not: null },
+        ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
+      },
+      _count: { tmdbId: true },
+      _max: { startedAt: true },
+      orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
+      take: MAX_WATCH_HISTORY_SEEDS,
+    });
+
   const [historyRows, watchlistRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : prisma.playHistory.groupBy({
-          by: ["tmdbId", "mediaType"],
-          where: {
-            mediaServerUserId: { in: linkedServerUserIds },
-            watched: true,
-            tmdbId: { not: null },
-            mediaType: { not: null },
-          },
-          _count: { tmdbId: true },
-          _max: { startedAt: true },
-          orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
-          take: MAX_WATCH_HISTORY_SEEDS,
-        }),
+      : groupHistory(true).then((rows) => (rows.length > 0 ? rows : groupHistory(false))),
     prisma.watchlistItem.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
