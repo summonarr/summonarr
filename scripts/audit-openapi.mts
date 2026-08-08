@@ -72,7 +72,6 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/admin/ip-lookup", reason: "admin IP geolocation lookup" },
   { route: "/admin/mdblist-warm", reason: "admin cache warm trigger" },
   { route: "/admin/omdb-warm", reason: "admin cache warm trigger" },
-  { route: "/admin/play-history/backfill-playtime", reason: "one-shot admin migration" },
   { route: "/admin/play-history/heatmap-cell", reason: "admin activity drill-down" },
   { route: "/admin/play-history/terminate-session", reason: "admin terminate Plex session" },
   { route: "/admin/play-history/terminate-jellyfin-session", reason: "admin terminate Jellyfin session" },
