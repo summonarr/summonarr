@@ -23,10 +23,15 @@ const SETTINGS_SCHEMA = [
   ["radarrApiKey",                  true ],
   ["radarrRootFolder",              false],
   ["radarrQualityProfileId",        false],
+  // Radarr-only: when a movie counts as "available" to search
+  // (announced/inCinemas/released). Empty = don't send, Radarr's default.
+  ["radarrMinimumAvailability",     false],
   ["sonarrUrl",                     false],
   ["sonarrApiKey",                  true ],
   ["sonarrRootFolder",              false],
   ["sonarrQualityProfileId",        false],
+  // Sonarr v3 only (v4 removed language profiles). Empty = don't send.
+  ["sonarrLanguageProfileId",       false],
   ["webhookSecret",                 true ],
   ["sonarrWebhookSecret",           true ],
   ["radarrWebhookSecret",           true ],
@@ -36,11 +41,13 @@ const SETTINGS_SCHEMA = [
   ["radarr4kApiKey",                true ],
   ["radarr4kRootFolder",            false],
   ["radarr4kQualityProfileId",      false],
+  ["radarr4kMinimumAvailability",   false],
   ["radarr4kWebhookSecret",         true ],
   ["sonarr4kUrl",                   false],
   ["sonarr4kApiKey",                true ],
   ["sonarr4kRootFolder",            false],
   ["sonarr4kQualityProfileId",      false],
+  ["sonarr4kLanguageProfileId",     false],
   ["sonarr4kWebhookSecret",         true ],
   // Server-wide 4K: when "true", any user who can request the base media type
   // can also request 4K, without the per-user REQUEST_4K permission.
@@ -484,6 +491,28 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
+    // Radarr minimum-availability is a closed enum on the movie resource — an
+    // arbitrary string would 400 every future add on that instance.
+    if (key === "radarrMinimumAvailability" || key === "radarr4kMinimumAvailability") {
+      if (value !== "announced" && value !== "inCinemas" && value !== "released") {
+        return NextResponse.json(
+          { error: `"${key}" must be announced, inCinemas, or released` },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Sonarr language-profile ids are positive integers (Sonarr v3 concept).
+    if (key === "sonarrLanguageProfileId" || key === "sonarr4kLanguageProfileId") {
+      const n = parseInt(value, 10);
+      if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 1) {
+        return NextResponse.json(
+          { error: `"${key}" must be a positive integer` },
+          { status: 400 },
+        );
+      }
+    }
+
     // Audit PII retention window. Lower bound matters: a tiny value (or "0")
     // would scrub identity off every fresh audit row, quietly destroying the
     // log's forensic value — same typo-proofing rationale as the rateLimit
@@ -580,6 +609,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "sonarrWebhookSecret",
     "radarr4kWebhookSecret",
     "sonarr4kWebhookSecret",
+    // Optional per-instance add-payload fields: clearing one means "stop
+    // sending the field" (back to the arr service's own default) — without
+    // clearability, once set they could never be unset from the form.
+    "radarrMinimumAvailability",
+    "radarr4kMinimumAvailability",
+    "sonarrLanguageProfileId",
+    "sonarr4kLanguageProfileId",
     // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
     // exactly what the form's helper text promises.
     "auditPiiRetentionDays",

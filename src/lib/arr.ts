@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import { arrRequesterTagLabel } from "./arr-tags";
-import { arrSettingKey, type ArrInstanceKey } from "./arr-instances";
+import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type RadarrMinimumAvailability } from "./arr-instances";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
@@ -119,7 +119,15 @@ export async function resolveSingleTvdbToTmdb(tvdbId: number): Promise<number | 
 
 export type ArrCfg = { url: string; apiKey: string };
 
-type ArrCfgFull = ArrCfg & { rootFolder?: string; qualityProfileId?: number };
+type ArrCfgFull = ArrCfg & {
+  rootFolder?: string;
+  qualityProfileId?: number;
+  // Radarr only — when the movie counts as "available" to search. Absent means
+  // "don't send the field", preserving whatever Radarr defaults to.
+  minimumAvailability?: RadarrMinimumAvailability;
+  // Sonarr v3 only — v4 removed language profiles. Absent means "don't send".
+  languageProfileId?: number;
+};
 
 // An instance slug: "" (the default), "4k", or any named instance from the
 // registry (arr-instance-registry.ts). Functions that target a specific instance
@@ -155,8 +163,12 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = ""): P
   const keyKey      = arrSettingKey(service, instance, "ApiKey");
   const folderKey   = arrSettingKey(service, instance, "RootFolder");
   const profileKey  = arrSettingKey(service, instance, "QualityProfileId");
+  // Service-specific optional fields — the derived key for the "wrong" service
+  // simply never has a Setting row, so reading both keeps this fn uniform.
+  const minAvailKey = arrSettingKey(service, instance, "MinimumAvailability");
+  const langKey     = arrSettingKey(service, instance, "LanguageProfileId");
   const rows = await prisma.setting.findMany({
-    where: { key: { in: [urlKey, keyKey, folderKey, profileKey] } },
+    where: { key: { in: [urlKey, keyKey, folderKey, profileKey, minAvailKey, langKey] } },
   });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   if (!map[urlKey] || !map[keyKey]) return null;
@@ -180,6 +192,14 @@ async function getCfg(service: "radarr" | "sonarr", variant: ArrVariant = ""): P
     // guards already assume.
     rootFolder: map[folderKey] || undefined,
     qualityProfileId: Number.isInteger(storedProfileId) && storedProfileId > 0 ? storedProfileId : undefined,
+    // Same normalize-to-undefined discipline as the two fields above: an
+    // unexpected stored value must read as "unset", never ship in a POST body.
+    minimumAvailability:
+      map[minAvailKey] && isRadarrMinimumAvailability(map[minAvailKey]) ? map[minAvailKey] : undefined,
+    languageProfileId:
+      map[langKey] && Number.isInteger(Number(map[langKey])) && Number(map[langKey]) > 0
+        ? Number(map[langKey])
+        : undefined,
   };
 }
 
@@ -443,6 +463,9 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
         rootFolderPath,
         ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
+        // Only when the instance configured one — omitting the field preserves
+        // Radarr's own default, byte-identical to pre-feature adds.
+        ...(cfg.minimumAvailability ? { minimumAvailability: cfg.minimumAvailability } : {}),
         ...(tagIds.length ? { tags: tagIds } : {}),
         monitored: true,
         addOptions: { searchForMovie: movieReleased },
@@ -1023,6 +1046,9 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
         rootFolderPath,
         ...(pathOverride ? { path: pathOverride } : {}),
         qualityProfileId,
+        // Sonarr v3 only (v4 removed language profiles and its settings UI never
+        // offers one) — omitted when unconfigured, byte-identical to old adds.
+        ...(cfg.languageProfileId ? { languageProfileId: cfg.languageProfileId } : {}),
         ...(tagIds.length ? { tags: tagIds } : {}),
         monitored: true,
         addOptions: { searchForMissingEpisodes: seriesReleased },

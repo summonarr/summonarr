@@ -86,11 +86,11 @@ function StatusBadge({ connected, label = "Connected" }: { connected: boolean; l
 
 
 const ALL_KEYS = [
-  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId",
-  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
+  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId", "radarrMinimumAvailability",
+  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId", "sonarrLanguageProfileId",
   "webhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
-  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kWebhookSecret",
-  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kWebhookSecret",
+  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret",
+  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret",
   "request4kAll",
   "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
@@ -619,6 +619,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.radarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
+                initialMinimumAvailability={cfg.radarrMinimumAvailability ?? ""}
               />
             </div>
 
@@ -639,6 +640,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.radarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
+                initialMinimumAvailability={cfg.radarr4kMinimumAvailability ?? ""}
               />
             </div>
 
@@ -658,6 +660,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.sonarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
+                initialLanguageProfileId={cfg.sonarrLanguageProfileId ?? ""}
               />
             </div>
 
@@ -678,6 +681,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.sonarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
+                initialLanguageProfileId={cfg.sonarr4kLanguageProfileId ?? ""}
               />
             </div>
 

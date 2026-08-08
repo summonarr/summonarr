@@ -35,7 +35,25 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       arrFetch<{ path: string }[]>(cfg, "/api/v3/rootfolder"),
       arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/qualityprofile"),
     ]);
-    return NextResponse.json({ rootFolders, qualityProfiles });
+
+    // Sonarr v3 only: language profiles for the per-instance default picker.
+    // v4 removed them — the endpoint 404s, or (on some builds) returns a single
+    // placeholder named "Deprecated" — so a failure or an empty post-filter list
+    // means "this Sonarr has no language profiles" and the field is omitted
+    // entirely rather than failing the whole options fetch. The UI hides the
+    // picker when the field is absent.
+    let languageProfiles: { id: number; name: string }[] | undefined;
+    if (service === "sonarr") {
+      try {
+        const raw = await arrFetch<{ id: number; name: string }[]>(cfg, "/api/v3/languageprofile");
+        const usable = (Array.isArray(raw) ? raw : []).filter((p) => p?.name !== "Deprecated");
+        if (usable.length > 0) languageProfiles = usable.map((p) => ({ id: p.id, name: p.name }));
+      } catch {
+        // Sonarr v4 — no language profiles to offer.
+      }
+    }
+
+    return NextResponse.json({ rootFolders, qualityProfiles, ...(languageProfiles ? { languageProfiles } : {}) });
   } catch (err) {
     console.error(`[settings/arr-options] Failed to fetch ${service} options:`, err);
     return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });

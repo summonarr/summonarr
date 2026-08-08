@@ -36,7 +36,28 @@ export const BUILTIN_ARR_INSTANCE_KEYS: readonly ArrInstanceKey[] = [
   FOURK_ARR_INSTANCE,
 ];
 
-export type ArrSettingField = "Url" | "ApiKey" | "RootFolder" | "QualityProfileId" | "WebhookSecret";
+// MinimumAvailability is meaningful only for Radarr (when a movie counts as
+// "available" to search: announced/inCinemas/released) and LanguageProfileId
+// only for Sonarr v3 (v4 removed language profiles) — the shared field union
+// keeps key derivation uniform; readers consume only their service's field.
+export type ArrSettingField =
+  | "Url"
+  | "ApiKey"
+  | "RootFolder"
+  | "QualityProfileId"
+  | "WebhookSecret"
+  | "MinimumAvailability"
+  | "LanguageProfileId";
+
+// The values Radarr's movie resource accepts for minimumAvailability. A stored
+// value outside this set reads as "unset" (getCfg drops it) so a hand-edited
+// Setting row can't make every add POST 400.
+export const RADARR_MINIMUM_AVAILABILITY_VALUES = ["announced", "inCinemas", "released"] as const;
+export type RadarrMinimumAvailability = (typeof RADARR_MINIMUM_AVAILABILITY_VALUES)[number];
+
+export function isRadarrMinimumAvailability(value: string): value is RadarrMinimumAvailability {
+  return (RADARR_MINIMUM_AVAILABILITY_VALUES as readonly string[]).includes(value);
+}
 
 // Named slugs are lowercase alnum starting with a letter, so the derived Setting
 // key is a valid camelCase identifier and can't collide with a built-in field
