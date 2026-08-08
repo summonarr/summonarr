@@ -50,6 +50,12 @@ interface InstanceView {
   // the draft: sending it back absent leaves it untouched, but sending "" would
   // clear a real selection.
   libraries?: string;
+  // Per-server Movie/Tv path-strip prefixes. "" on the wire means "no row" —
+  // the server inherits the DEFAULT instance's prefixes (Media tab → Library
+  // Path Matching). Saving "" deletes the per-server row to restore that
+  // inheritance, so blank here is always safe to round-trip.
+  moviePathStripPrefix?: string;
+  tvPathStripPrefix?: string;
 }
 
 // Per-instance library picker. Deliberately load-on-demand: the list comes from
@@ -166,6 +172,8 @@ interface Draft {
   hasToken: boolean;
   isNew: boolean;
   libraries: string;
+  moviePathStripPrefix: string;
+  tvPathStripPrefix: string;
 }
 
 function toDraft(v: InstanceView, service: MediaServerService): Draft {
@@ -189,6 +197,8 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
     restricted: v.restricted === true,
     hasToken: (service === "plex" ? v.hasAdminToken : v.hasApiKey) ?? false,
     isNew: false,
+    moviePathStripPrefix: v.moviePathStripPrefix ?? "",
+    tvPathStripPrefix: v.tvPathStripPrefix ?? "",
   };
 }
 
@@ -246,7 +256,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // `restricted` defaults to FALSE for the opposite reason: an unrestricted
       // server is the status quo, and a restricted one with no grants yet issued
       // would be invisible to every non-admin the moment it finished syncing.
-      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true, libraries: "" },
+      { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true, libraries: "", moviePathStripPrefix: "", tvPathStripPrefix: "" },
     ]);
     setConfirmRemove(null);
     setStatus("idle");
@@ -286,6 +296,8 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // field BOTH services share (restrictSignIn below is Jellyfin-only).
       restricted: d.restricted,
       libraries: d.libraries,
+      moviePathStripPrefix: d.moviePathStripPrefix,
+      tvPathStripPrefix: d.tvPathStripPrefix,
       ...(service === "plex"
         ? {
             serverUrl: d.url.trim(),
@@ -466,6 +478,44 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
               value={d.libraries}
               onChange={(v) => update(idx, { libraries: v })}
             />
+
+            {/* Per-server path-strip prefixes. Blank = inherit the DEFAULT
+                server's prefixes (Media tab → Library Path Matching) — saving
+                blank deletes the per-server Setting row, so inheritance is
+                restored rather than shadowed by an empty override. Only worth
+                setting when this server's mount layout differs from the
+                default's; stripping is a conditional startsWith, so an
+                inherited prefix that doesn't match is already a no-op. */}
+            <div className="pt-1 space-y-2">
+              <p className="text-sm text-zinc-300">Library path prefixes <span className="text-xs text-zinc-500">(optional)</span></p>
+              <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${service}-${idx}-movie-prefix`}>Movie path prefix</Label>
+                  <Input
+                    id={`${service}-${idx}-movie-prefix`}
+                    value={d.moviePathStripPrefix}
+                    onChange={(e) => update(idx, { moviePathStripPrefix: e.target.value })}
+                    placeholder="movies"
+                    className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${service}-${idx}-tv-prefix`}>TV path prefix</Label>
+                  <Input
+                    id={`${service}-${idx}-tv-prefix`}
+                    value={d.tvPathStripPrefix}
+                    onChange={(e) => update(idx, { tvPathStripPrefix: e.target.value })}
+                    placeholder="tv"
+                    className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-zinc-500">
+                Library-folder prefix stripped from this server&apos;s file paths when matching them against
+                other servers (bad-match detection, library diff). Blank inherits the main server&apos;s
+                prefixes — set these only if this server&apos;s folder layout differs.
+              </p>
+            </div>
 
             {/* Service-AGNOSTIC, unlike restrictSignIn above: a restricted
                 server's library contributes availability only for users granted

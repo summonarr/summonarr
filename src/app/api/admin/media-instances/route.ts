@@ -18,13 +18,14 @@ import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 // back-compat is preserved; PlexConnectForm/JellyfinSyncForm keep working
 // unmodified.
 //
-// Scope: the core connection fields needed for sync/sign-in (Plex:
-// ServerUrl/AdminToken/AdminEmail; Jellyfin: Url/ApiKey/RestrictSignIn).
-// Library pickers and path-strip-prefix fields need a live per-server
-// library-sections fetch and are a deliberately later UI sub-step — their
-// Setting keys already exist (media-instances.ts's field types), just not
-// written from here yet. Removal cleanup covers the WHOLE field union
-// regardless, so an unwritten field can never be orphaned either.
+// Scope: the connection fields needed for sync/sign-in (Plex:
+// ServerUrl/AdminToken/AdminEmail; Jellyfin: Url/ApiKey/RestrictSignIn), the
+// per-server library selection, and the per-server Movie/Tv path-strip
+// prefixes. The prefixes have DELETE-on-blank semantics (see setStripPrefix
+// below): an absent Setting row means "inherit the default server's prefix"
+// (the ?? fallback in bad-matches.ts / admin/library), and an upserted ""
+// row would silently shadow that fallback with "no prefix". Removal cleanup
+// covers the WHOLE field union, so no field can be orphaned.
 //
 // This route — not /api/settings — owns every per-instance key, mirroring the
 // arr multi-instance split (/api/admin/arr-instances). /api/settings validates
@@ -104,6 +105,12 @@ interface InstancePayload {
   // ingested the wrong sections from every non-default instance.
   libraries?: string;
   restricted?: boolean; // gate this server's library behind a per-user view grant
+  // Per-server Movie/Tv path-strip prefixes for bad-match/library-diff path
+  // normalization. Omit to leave untouched; "" DELETES the row so the server
+  // goes back to inheriting the default instance's prefix (an empty-string row
+  // would shadow that fallback — the resolver reads `named ?? default`).
+  moviePathStripPrefix?: string;
+  tvPathStripPrefix?: string;
 }
 
 interface SavePayload {
@@ -123,7 +130,14 @@ function readRestrictSignIn(value: string | undefined): boolean {
 // would make every save silently clear the flag.
 async function readInstanceView(service: MediaServerService, slug: string, name: string, restricted: boolean) {
   if (service === "plex") {
-    const keys = [plexSettingKey(slug, "ServerUrl"), plexSettingKey(slug, "AdminToken"), plexSettingKey(slug, "AdminEmail"), plexSettingKey(slug, "Libraries")];
+    const keys = [
+      plexSettingKey(slug, "ServerUrl"),
+      plexSettingKey(slug, "AdminToken"),
+      plexSettingKey(slug, "AdminEmail"),
+      plexSettingKey(slug, "Libraries"),
+      plexSettingKey(slug, "MoviePathStripPrefix"),
+      plexSettingKey(slug, "TvPathStripPrefix"),
+    ];
     const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
     const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     return {
@@ -134,9 +148,20 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
       adminEmail: map[plexSettingKey(slug, "AdminEmail")] ?? "",
       hasAdminToken: !!map[plexSettingKey(slug, "AdminToken")],
       libraries: map[plexSettingKey(slug, "Libraries")] ?? "",
+      // Absent row reads as "" — indistinguishable from an inherited default on
+      // the wire, which matches the write side: saving "" deletes the row.
+      moviePathStripPrefix: map[plexSettingKey(slug, "MoviePathStripPrefix")] ?? "",
+      tvPathStripPrefix: map[plexSettingKey(slug, "TvPathStripPrefix")] ?? "",
     };
   }
-  const keys = [jellyfinSettingKey(slug, "Url"), jellyfinSettingKey(slug, "ApiKey"), jellyfinSettingKey(slug, "RestrictSignIn"), jellyfinSettingKey(slug, "Libraries")];
+  const keys = [
+    jellyfinSettingKey(slug, "Url"),
+    jellyfinSettingKey(slug, "ApiKey"),
+    jellyfinSettingKey(slug, "RestrictSignIn"),
+    jellyfinSettingKey(slug, "Libraries"),
+    jellyfinSettingKey(slug, "MoviePathStripPrefix"),
+    jellyfinSettingKey(slug, "TvPathStripPrefix"),
+  ];
   const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return {
@@ -147,6 +172,8 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
     hasApiKey: !!map[jellyfinSettingKey(slug, "ApiKey")],
     restrictSignIn: readRestrictSignIn(map[jellyfinSettingKey(slug, "RestrictSignIn")]),
     libraries: map[jellyfinSettingKey(slug, "Libraries")] ?? "",
+    moviePathStripPrefix: map[jellyfinSettingKey(slug, "MoviePathStripPrefix")] ?? "",
+    tvPathStripPrefix: map[jellyfinSettingKey(slug, "TvPathStripPrefix")] ?? "",
   };
 }
 
@@ -246,17 +273,35 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       if (isSecret && value === MASKED_VALUE) return;
       await tx.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
     };
+    // Strip prefixes are the one field where "" must DELETE the row rather than
+    // store it: the read side (stripResolver in bad-matches.ts / admin/library)
+    // falls back `cfg[named] ?? cfg[default]`, so an empty-string row is not
+    // "unset" — it shadows the default server's prefix with "strip nothing".
+    // Deleting restores inheritance; a non-empty value overrides it. (An
+    // explicit no-strip override isn't expressible, and doesn't need to be:
+    // stripping is a conditional startsWith, so an inherited prefix that
+    // doesn't match this server's paths is already a no-op.)
+    const setStripPrefix = async (key: string, value: string | undefined) => {
+      if (value === undefined) return;
+      const trimmed = value.trim();
+      if (trimmed === "") await tx.setting.deleteMany({ where: { key } });
+      else await tx.setting.upsert({ where: { key }, create: { key, value: trimmed }, update: { value: trimmed } });
+    };
     for (const inst of instances) {
       if (service === "plex") {
         await set(plexSettingKey(inst.slug, "ServerUrl"), typeof inst.serverUrl === "string" ? inst.serverUrl.trim() : undefined, false);
         await set(plexSettingKey(inst.slug, "AdminToken"), inst.adminToken, true);
         await set(plexSettingKey(inst.slug, "AdminEmail"), typeof inst.adminEmail === "string" ? inst.adminEmail.trim() : undefined, false);
         await set(plexSettingKey(inst.slug, "Libraries"), typeof inst.libraries === "string" ? inst.libraries.trim() : undefined, false);
+        await setStripPrefix(plexSettingKey(inst.slug, "MoviePathStripPrefix"), typeof inst.moviePathStripPrefix === "string" ? inst.moviePathStripPrefix : undefined);
+        await setStripPrefix(plexSettingKey(inst.slug, "TvPathStripPrefix"), typeof inst.tvPathStripPrefix === "string" ? inst.tvPathStripPrefix : undefined);
       } else {
         await set(jellyfinSettingKey(inst.slug, "Url"), typeof inst.url === "string" ? inst.url.trim() : undefined, false);
         await set(jellyfinSettingKey(inst.slug, "ApiKey"), inst.apiKey, true);
         await set(jellyfinSettingKey(inst.slug, "RestrictSignIn"), typeof inst.restrictSignIn === "boolean" ? String(inst.restrictSignIn) : undefined, false);
         await set(jellyfinSettingKey(inst.slug, "Libraries"), typeof inst.libraries === "string" ? inst.libraries.trim() : undefined, false);
+        await setStripPrefix(jellyfinSettingKey(inst.slug, "MoviePathStripPrefix"), typeof inst.moviePathStripPrefix === "string" ? inst.moviePathStripPrefix : undefined);
+        await setStripPrefix(jellyfinSettingKey(inst.slug, "TvPathStripPrefix"), typeof inst.tvPathStripPrefix === "string" ? inst.tvPathStripPrefix : undefined);
       }
     }
 
