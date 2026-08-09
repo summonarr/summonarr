@@ -2,18 +2,9 @@ import "server-only";
 import { prisma } from "./prisma";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { safeFetchTrusted } from "./safe-fetch";
-import { settleLimit } from "./concurrency";
-
-// In-process request coalescing: concurrent callers for the same detail page share one upstream fetch
-// rather than hammering TMDB and writing the same cache row N times.
-const inflight = new Map<string, Promise<unknown>>();
-function coalesce<T>(key: string, factory: () => Promise<T>): Promise<T> {
-  const existing = inflight.get(key) as Promise<T> | undefined;
-  if (existing) return existing;
-  const promise = factory().finally(() => { inflight.delete(key); });
-  inflight.set(key, promise);
-  return promise;
-}
+// coalesce: concurrent callers for the same list/detail key share one upstream
+// fetch rather than hammering TMDB and writing the same cache row N times.
+import { settleLimit, coalesce } from "./concurrency";
 import { syncTmdbMediaCore, upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { fetchUnifiedRatings } from "./omdb-availability";
 import type { MdblistRatings } from "./mdblist";
@@ -647,7 +638,9 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   // brand-new release's MDBList/OMDB rows were cached with the 30-day
   // back-catalog TTL instead of the 3-day fresh-title one.
   const r = await tmdbFetch<RawMovie>(`/movie/${id}`, { append_to_response: "release_dates,videos,credits,recommendations,similar,keywords,watch/providers,external_ids" });
-  const ratings = await fetchUnifiedRatings(id, "movie", r.release_date ?? null);
+  // The appended external_ids already carry the IMDb id — hand it to the ratings
+  // chain so a cold OMDB fallback doesn't re-buy it with a second TMDB call.
+  const ratings = await fetchUnifiedRatings(id, "movie", r.release_date ?? null, r.external_ids?.imdb_id ?? null);
 
   const media = normalizeMovie(r);
   const usEntry = r.release_dates?.results.find((x) => x.iso_3166_1 === "US");
@@ -744,7 +737,9 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
   // Sequential on purpose — see getMovieDetails: the ratings caches key their
   // TTL off the release date, so it must be known before the ratings fetch.
   const r = await tmdbFetch<RawTV>(`/tv/${id}`, { append_to_response: "content_ratings,videos,credits,recommendations,similar,seasons,keywords,watch/providers,external_ids" });
-  const ratings = await fetchUnifiedRatings(id, "tv", r.first_air_date ?? null);
+  // See getMovieDetails — the appended external_ids IMDb id spares the OMDB
+  // fallback its own TMDB resolve.
+  const ratings = await fetchUnifiedRatings(id, "tv", r.first_air_date ?? null, r.external_ids?.imdb_id ?? null);
 
   const media = normalizeTV(r);
   const usEntry = r.content_ratings?.results.find((x) => x.iso_3166_1 === "US");

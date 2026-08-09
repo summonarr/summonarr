@@ -444,7 +444,7 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
 
     Rules:
     - Fixed-size fan-outs (2–3 elements, e.g. movie+tv split, similar+recommendations) stay as plain `Promise.all` — the cap is only for lists whose length scales with input/library size.
-    - Pair the cap with `coalesce(key, fn)` ([tmdb.ts](src/lib/tmdb.ts)) on shared cache-key computations (the TMDB list helpers) so simultaneous callers share one fan-out instead of multiplying it. The list helpers wrap their whole body in `coalesce` and bound the page fetch with `settleLimit`; match that shape for any new list helper.
+    - Pair the cap with `coalesce(key, fn)` (now exported from [concurrency.ts](src/lib/concurrency.ts); tmdb.ts, trakt.ts and mdblist's top-rated helper all import it) on shared cache-key computations so simultaneous callers share one fan-out instead of multiplying it. The list helpers wrap their whole body in `coalesce` (keyed on their cache key) and bound the page fetch with `settleLimit`; match that shape for any new list helper.
     - Don't add a third copy of the OMDB API key read — `getApiKey()` in [omdb.ts](src/lib/omdb.ts) is memoized + in-flight-coalesced (30s TTL) precisely so a 200-item batch doesn't issue ~400 identical `setting.findUnique` reads. Pass `{ fresh: true }` only for the admin connection test.
 
 32. **A Radarr/Sonarr instance is identified by an `arrInstance` slug string, NEVER the old `is4k` boolean.** The two-instance (HD/4K) model was generalized to N named instances (e.g. an "anime" instance).

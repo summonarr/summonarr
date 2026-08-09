@@ -2,6 +2,7 @@ import "server-only";
 import { prisma } from "./prisma";
 import { getCache, setCache, TTL } from "./tmdb-cache";
 import { safeFetchTrusted } from "./safe-fetch";
+import { coalesce } from "./concurrency";
 import type { TmdbMedia } from "./tmdb-types";
 
 const TRAKT_BASE = "https://api.trakt.tv";
@@ -115,17 +116,31 @@ function normalizeShow(s: TraktShow): TmdbMedia | null {
   };
 }
 
-async function fetchPages<T>(path: string, pages: number, limit: number): Promise<T[]> {
+// `complete` reports whether EVERY page fulfilled. The helpers below serve a
+// partial result (the page still renders) but cache only a complete one —
+// allSettled swallows per-page failures, so caching a partial would pin a
+// truncated list (or, if page 1 failed, one missing its head) for the full
+// 12h TTL, and the warm cron's cache-first read could never repair it
+// (mirrors the tmdb.ts list-helper all-fulfilled gate).
+async function fetchPages<T>(path: string, pages: number, limit: number): Promise<{ items: T[]; complete: boolean }> {
   const results = await Promise.allSettled(
     Array.from({ length: pages }, (_, i) =>
       traktFetch<T[]>(path, { page: String(i + 1), limit: String(limit) }),
     ),
   );
-  return results.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+  return {
+    items: results.flatMap((r) => (r.status === "fulfilled" ? r.value : [])),
+    complete: results.every((r) => r.status === "fulfilled"),
+  };
 }
 
+// Each helper wraps its whole cache-check-then-fan-out body in coalesce()
+// keyed on its cache key, so simultaneous cold-cache callers (the /top page
+// and /api/top-rated both call the popular pair per request) share ONE 3-5
+// page fan-out instead of multiplying it — guardrail 31's list-helper shape.
 export async function getTraktPopularMovies(pages = 5): Promise<TmdbMedia[]> {
   const key = "trakt:popular:movies";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -133,21 +148,23 @@ export async function getTraktPopularMovies(pages = 5): Promise<TmdbMedia[]> {
   if (!apiKey) return [];
 
   try {
-    const raw = await fetchPages<TraktMovie>("/movies/popular", pages, 100);
+    const { items, complete } = await fetchPages<TraktMovie>("/movies/popular", pages, 100);
     const seen = new Set<number>();
-    const result = raw
+    const result = items
       .map(normalizeMovie)
       .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
     return result;
   } catch (err) {
     console.error("[trakt] Failed to fetch popular movies:", err);
     return [];
   }
+  });
 }
 
 export async function getTraktPopularTV(pages = 5): Promise<TmdbMedia[]> {
   const key = "trakt:popular:tv";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -155,21 +172,23 @@ export async function getTraktPopularTV(pages = 5): Promise<TmdbMedia[]> {
   if (!apiKey) return [];
 
   try {
-    const raw = await fetchPages<TraktShow>("/shows/popular", pages, 100);
+    const { items, complete } = await fetchPages<TraktShow>("/shows/popular", pages, 100);
     const seen = new Set<number>();
-    const result = raw
+    const result = items
       .map(normalizeShow)
       .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
     return result;
   } catch (err) {
     console.error("[trakt] Failed to fetch popular TV:", err);
     return [];
   }
+  });
 }
 
 export async function getTraktTrendingMovies(pages = 3): Promise<TmdbMedia[]> {
   const key = "trakt:trending:movies";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -177,21 +196,23 @@ export async function getTraktTrendingMovies(pages = 3): Promise<TmdbMedia[]> {
   if (!apiKey) return [];
 
   try {
-    const raw = await fetchPages<TraktTrendingMovie>("/movies/trending", pages, 100);
+    const { items, complete } = await fetchPages<TraktTrendingMovie>("/movies/trending", pages, 100);
     const seen = new Set<number>();
-    const result = raw
+    const result = items
       .map((r) => normalizeMovie(r.movie))
       .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
     return result;
   } catch (err) {
     console.error("[trakt] Failed to fetch trending movies:", err);
     return [];
   }
+  });
 }
 
 export async function getTraktTrendingTV(pages = 3): Promise<TmdbMedia[]> {
   const key = "trakt:trending:tv";
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -199,17 +220,18 @@ export async function getTraktTrendingTV(pages = 3): Promise<TmdbMedia[]> {
   if (!apiKey) return [];
 
   try {
-    const raw = await fetchPages<TraktTrendingShow>("/shows/trending", pages, 100);
+    const { items, complete } = await fetchPages<TraktTrendingShow>("/shows/trending", pages, 100);
     const seen = new Set<number>();
-    const result = raw
+    const result = items
       .map((r) => normalizeShow(r.show))
       .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
     return result;
   } catch (err) {
     console.error("[trakt] Failed to fetch trending TV:", err);
     return [];
   }
+  });
 }
 
 export async function testTraktConnection(): Promise<string> {

@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { setCache, libraryDetailsTtl } from "./tmdb-cache";
+import { setCache, getCacheStale, libraryDetailsTtl } from "./tmdb-cache";
 import { upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { iterateLibrary, LIBRARY_PAGE_SIZE } from "./library-iterator";
@@ -15,6 +15,23 @@ const MAX_PREWARM_ITEMS = 200_000;
 const TMDB_FETCH_TIMEOUT_MS = 15_000;
 
 const TMDB_BASE = "https://api.themoviedb.org/3";
+
+// The unified-ratings fields assignUnifiedRatings (tmdb.ts) stores into the
+// :details blob from MDBList/OMDB. They are NOT TMDB data, so this file's
+// rewrite cannot re-derive them and must carry them forward from the previous
+// row — dropping them blanked the admin dashboard's ratings after every
+// boot-time warm and forced a per-title ratings refetch + full blob rewrite on
+// the next detail view (the same drop-on-rewrite class as the cert/trailerKey
+// fixes below). `imdbId` is deliberately NOT in this list (the fresh TMDB
+// response is authoritative for it), and `trailerUrl` is handled separately
+// under assignUnifiedRatings' never-displace-a-trailerKey guard. A carried
+// value persists until the row's own TTL expiry re-runs the full
+// details+ratings fetch — mildly stale ratings beat blank ones.
+const UNIFIED_RATINGS_FIELDS = [
+  "imdbRating", "imdbVotes", "rottenTomatoes", "metacritic", "rtAudienceScore",
+  "traktRating", "letterboxdRating", "mdblistScore", "malRating",
+  "rogerEbertRating", "releasedDigital",
+] as const;
 
 interface RawSeason {
   season_number: number;
@@ -210,7 +227,26 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
   const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
   const keywordObjs = pwKeywords(raw.keywords) ?? [];
+
+  // Carry-forward read (stale/expired-in-place rows still serve here; a row the
+  // purge already deleted has nothing to carry). See UNIFIED_RATINGS_FIELDS.
+  const prior = (await getCacheStale<Partial<TmdbMedia>>(`${type}:${tmdbId}:details`)).value;
+  const carriedRatings: Record<string, unknown> = {};
+  if (prior) {
+    for (const f of UNIFIED_RATINGS_FIELDS) {
+      // undefined = never ratings-fetched (keep it undefined so the details
+      // lazy-upgrade can still fire); null = authoritative "no rating" — both
+      // distinctions must survive the rewrite, so only defined values carry.
+      if (prior[f] !== undefined) carriedRatings[f] = prior[f];
+    }
+  }
+  const newTrailerKey = pwTrailerKey(raw.videos);
+  // assignUnifiedRatings' guard, preserved across the rewrite: trailerUrl only
+  // ever fills in when TMDB itself has no trailer.
+  if (!newTrailerKey && prior?.trailerUrl !== undefined) carriedRatings.trailerUrl = prior.trailerUrl;
+
   await setCache(`${type}:${tmdbId}:details`, {
+    ...carriedRatings,
     id: raw.id,
     mediaType: type,
     title,
@@ -228,7 +264,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     // trailerKey/collection mirror getMovieDetails/getTVDetails — omitting them
     // made every prewarm refresh erase the trailer button and the collection
     // row from library titles' detail pages (see the append_to_response note).
-    trailerKey: pwTrailerKey(raw.videos),
+    trailerKey: newTrailerKey,
     ...(mediaType === "MOVIE" && raw.belongs_to_collection
       ? { collectionId: raw.belongs_to_collection.id, collectionName: raw.belongs_to_collection.name }
       : {}),

@@ -3,7 +3,7 @@ import { prisma } from "./prisma";
 import { getCache, getCacheStale, setCache, libraryDetailsTtl, TTL } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
-import { mapLimit } from "./concurrency";
+import { mapLimit, coalesce } from "./concurrency";
 
 // Bounded concurrency for the per-page cache upserts. A full 200-item page used
 // to write its rows with a sequential await-in-loop (~200 serial Postgres
@@ -571,6 +571,10 @@ export async function getMdblistTopRated(
   maxLists = 5,
 ): Promise<TmdbMedia[]> {
   const key = `mdblist:top-rated:${mediaType}`;
+  // coalesce: the /top page and /api/top-rated both call this per request, so
+  // simultaneous cold-cache callers must share one list fan-out (guardrail 31
+  // — same shape as the trakt/tmdb list helpers).
+  return coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -594,4 +598,5 @@ export async function getMdblistTopRated(
 
   if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
   return result;
+  });
 }

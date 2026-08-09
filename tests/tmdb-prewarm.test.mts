@@ -119,6 +119,8 @@ shadowPrismaModel(prisma, "tmdbCache", {
       return r ? [{ ...r }] : [];
     });
   },
+  // fetchAndStore's carry-forward point read (getCacheStale → findUnique).
+  findUnique: async (args: { where: { key: string } }) => cacheRows.get(args.where.key) ?? null,
   upsert: async (args: { where: { key: string }; create: CacheRow }) => {
     cacheUpserts.push(args.create);
     cacheRows.set(args.where.key, args.create);
@@ -314,6 +316,51 @@ test("movie cold miss: exact TMDB wire shape, :details cache write with US cert 
   assert.deepEqual(coreUpserts[0].where, { tmdbId_mediaType: { tmdbId: 550, mediaType: "MOVIE" } });
   assert.equal(coreUpserts[0].create.title, "Fight Club");
   assert.equal(coreUpserts[0].create.certification, "R");
+});
+
+test("a stale row's unified-ratings fields survive the :details rewrite — carried values, authoritative nulls, and undefined-ness all preserved", async () => {
+  // The ratings fields are MDBList/OMDB data assignUnifiedRatings stored into
+  // the blob; the prewarm's TMDB fetch cannot re-derive them, so the rewrite
+  // must carry them forward (the cert/trailerKey drop-on-rewrite class).
+  tables.plex = [
+    { tmdbId: 42, mediaType: "MOVIE" },
+    { tmdbId: 43, mediaType: "MOVIE" },
+  ];
+  // 1h left of a 24h TTL ⇒ below the 25% threshold ⇒ refreshed.
+  seedCacheRow("movie:42:details", 1 * HOUR_MS, JSON.stringify({
+    id: 42, mediaType: "movie", title: "Old Title",
+    imdbRating: "8.3", mdblistScore: "77",
+    rtAudienceScore: null, // authoritative "no rating" — must survive AS null
+    trailerUrl: "https://youtube.com/watch?v=carried", // TMDB-less trailer fallback
+  }));
+  // 43's prior row has a trailerUrl but the fresh TMDB response carries a real
+  // trailer — the never-displace-a-trailerKey guard must drop the trailerUrl.
+  seedCacheRow("movie:43:details", 1 * HOUR_MS, JSON.stringify({
+    id: 43, mediaType: "movie", title: "Old 43", trailerUrl: "https://youtube.com/watch?v=stale",
+  }));
+  respond = (url) =>
+    url.pathname === "/3/movie/42"
+      ? jsonResponse({ id: 42, title: "Fresh Title", release_date: "1999-01-01" }) // no videos ⇒ no trailerKey
+      : jsonResponse({
+          id: 43, title: "Fresh 43", release_date: "1999-01-01",
+          videos: { results: [{ key: "real-key", site: "YouTube", type: "Trailer", official: true }] },
+        });
+
+  assert.deepEqual(await prewarmLibraryCache(), { total: 2, fetched: 2, backfilled: 0, skipped: 0, failed: 0 });
+
+  const blob42 = JSON.parse(cacheUpserts.find((u) => u.key === "movie:42:details")!.data) as Record<string, unknown>;
+  assert.equal(blob42.title, "Fresh Title"); // the rewrite itself still lands
+  assert.equal(blob42.imdbRating, "8.3");
+  assert.equal(blob42.mdblistScore, "77");
+  assert.equal(blob42.rtAudienceScore, null);
+  // Never ratings-fetched fields stay ABSENT (undefined), so the details-path
+  // lazy-upgrade trigger (`=== undefined`) can still fire for them.
+  assert.equal("imdbVotes" in blob42, false);
+  assert.equal(blob42.trailerUrl, "https://youtube.com/watch?v=carried"); // no TMDB trailer ⇒ carried
+
+  const blob43 = JSON.parse(cacheUpserts.find((u) => u.key === "movie:43:details")!.data) as Record<string, unknown>;
+  assert.equal(blob43.trailerKey, "real-key");
+  assert.equal("trailerUrl" in blob43, false); // a real trailerKey displaces the carried URL
 });
 
 test("tv cold miss: tv path + tv append list, zero/empty seasons filtered, content_ratings cert, TV core key", async () => {

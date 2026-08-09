@@ -15,10 +15,14 @@
 //   - a malformed entry (no `ids` object at all) throws inside the map and the
 //     whole call degrades to [] via the catch — pinned as CURRENT behavior;
 //   - fetchPages settles per-page: a failed page is dropped, fulfilled pages
-//     survive;
-//   - non-empty results are cached (TmdbCache upsert) and served from cache on
-//     the next call; empty results are NOT cached; no API key ⇒ [] with no
-//     fetch. A 429 trips the in-process lockout (tested LAST — module-global).
+//     survive — but a PARTIAL fan-out is served WITHOUT being cached (the
+//     all-pages-fulfilled gate, mirroring tmdb.ts's list helpers), so the next
+//     call re-fetches instead of serving a 12h-pinned truncation;
+//   - non-empty COMPLETE results are cached (TmdbCache upsert) and served from
+//     cache on the next call; empty results are NOT cached; no API key ⇒ []
+//     with no fetch; concurrent cold-cache callers share ONE fan-out via
+//     coalesce (guardrail 31). A 429 trips the in-process lockout (tested
+//     LAST — module-global).
 //
 // No DB or network: prisma.setting / prisma.tmdbCache are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted per URL, and
@@ -208,7 +212,7 @@ test("PINS CURRENT BEHAVIOR: one entry without an `ids` object degrades the whol
 
 // ── paging, caching, key gating ─────────────────────────────────────────────
 
-test("a failed page is dropped while fulfilled pages survive (allSettled per page)", async () => {
+test("a failed page is dropped while fulfilled pages survive (allSettled per page) — and the partial is NOT cached", async () => {
   respond = (url) =>
     url.searchParams.get("page") === "2"
       ? jsonResponse({ error: "server exploded" }, 500)
@@ -216,6 +220,27 @@ test("a failed page is dropped while fulfilled pages survive (allSettled per pag
   const result = await getTraktPopularMovies(2);
   assert.equal(fetchCalls.length, 2); // both pages were attempted
   assert.deepEqual(result.map((m) => m.id), [1]);
+  // The all-pages-fulfilled gate: a transiently truncated list must not be
+  // pinned into TmdbCache for the 12h TTL (and the warm cron could never
+  // repair it — every helper is cache-first).
+  assert.equal(cacheUpserts.length, 0);
+
+  // The next call re-fetches (no cached truncation to serve) and, with every
+  // page now healthy, caches the complete result.
+  fetchCalls.length = 0;
+  respond = () => jsonResponse([movieRow(1, "Page One")]);
+  const healed = await getTraktPopularMovies(2);
+  assert.equal(fetchCalls.length, 2);
+  assert.deepEqual(healed.map((m) => m.id), [1]);
+  assert.equal(cacheUpserts.length, 1);
+});
+
+test("concurrent cold-cache callers share ONE page fan-out and one cache write (coalesce)", async () => {
+  respond = () => jsonResponse([movieRow(550, "Fight Club", 1999)]);
+  const [a, b] = await Promise.all([getTraktPopularMovies(2), getTraktPopularMovies(2)]);
+  assert.equal(fetchCalls.length, 2, "one fan-out (2 pages), not two (4)");
+  assert.equal(cacheUpserts.length, 1, "one cache write, not a duplicate upsert");
+  assert.equal(a, b, "coalesced callers get the same array instance back");
 });
 
 test("a non-empty result is cached under the list key and served from cache on the next call", async () => {

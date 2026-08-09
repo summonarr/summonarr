@@ -10,9 +10,13 @@ const OMDB_FETCH_TIMEOUT_MS = 10_000;
 
 const OMDB_NEGATIVE_TTL = 24 * 60 * 60;
 
-// OMDB returns quota/auth failures as HTTP 200 with Response="False" and an Error
-// string rather than a 4xx/5xx. These are transient or operator-config problems, so
-// they must never be negative-cached as "title not found".
+// OMDB returns quota/auth failures with Response="False" and an Error string —
+// sometimes as HTTP 200, but its key-validation layer (which also owns the daily
+// request counter) demonstrably answers HTTP 401 with the same JSON body
+// ("Invalid API key!", "Request limit reached!"). Both transports carry the same
+// discrimination problem: these are transient or operator-config conditions, so
+// they must never be negative-cached as "title not found", and quota messages
+// must trip the lockout on WHICHEVER transport they arrive.
 function isOmdbTransientError(msg: string | undefined): boolean {
   if (!msg) return false;
   const m = msg.toLowerCase();
@@ -115,10 +119,22 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
     if (!res.ok) {
-      if (res.status === 429) tripQuotaLockout(`HTTP 429 for ${imdbId}`);
-      // Transient upstream failure (5xx/429/etc.) — throw so the caller does NOT
-      // write a 24h NOT_FOUND sentinel for it. Genuine "no OMDB entry" is only the
-      // Response!=="True" branch below.
+      if (res.status === 429) {
+        tripQuotaLockout(`HTTP 429 for ${imdbId}`);
+      } else {
+        // OMDB's key layer sends "Request limit reached!" as HTTP 401 + JSON body
+        // (see the module header) — parse the body defensively and run the SAME
+        // quota discrimination as the 200-path, or real daily exhaustion never
+        // trips the lockout and every quota defense keyed off it stays inert.
+        // Invalid-key deliberately still doesn't lock (see isOmdbQuotaErrorMessage).
+        const body = (await res.json().catch(() => null)) as { Error?: string } | null;
+        if (body && isOmdbQuotaErrorMessage(body.Error)) {
+          tripQuotaLockout(`HTTP ${res.status} "${body.Error}" for ${imdbId}`);
+        }
+      }
+      // Transient upstream failure (5xx/429/401/etc.) — throw so the caller does
+      // NOT write a 24h NOT_FOUND sentinel for it. Genuine "no OMDB entry" is only
+      // the Response!=="True" branch below.
       throw new Error(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
     }
 
@@ -197,13 +213,52 @@ export type OmdbResult =
   // `quotaExhausted` additionally flags the in-process quota lockout (mirrors MdblistResult).
   | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean };
 
+// The tmdbId→imdbId resolve, isolated so fetchAndCacheOmdbForTmdb can run it
+// zero times (a caller-supplied known id), once (the normal cold path), or a
+// second time (the remap self-heal below). Outcomes beyond a resolved id keep
+// their pre-existing semantics exactly: "noAuth" = no TMDB token (non-transient
+// miss, no negative-cache), "gone" = TMDB 404 (authoritative — the tmdbId
+// doesn't exist for this media type; left transient, a blocking ratings batch
+// of bogus ids could be replayed indefinitely on the shared read token),
+// "transient" = any other non-OK.
+type ImdbResolve =
+  | { kind: "id"; imdbId: string | null }
+  | { kind: "noAuth" }
+  | { kind: "gone" }
+  | { kind: "transient" };
+
+async function resolveImdbIdViaTmdb(tmdbId: number, mediaType: "movie" | "tv"): Promise<ImdbResolve> {
+  const auth = tmdbAuth();
+  if (!auth) return { kind: "noAuth" };
+
+  const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids`);
+  for (const [k, v] of Object.entries(auth.query)) extUrl.searchParams.set(k, v);
+  const extRes = await safeFetchTrusted(extUrl.toString(), {
+    allowedHosts: ["api.themoviedb.org"],
+    headers: auth.headers,
+    timeoutMs: OMDB_FETCH_TIMEOUT_MS,
+  });
+  if (extRes.status === 404) return { kind: "gone" };
+  if (!extRes.ok) {
+    console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
+    return { kind: "transient" };
+  }
+  const ext = await extRes.json() as { imdb_id?: string | null };
+  return { kind: "id", imdbId: ext.imdb_id ?? null };
+}
+
 // OMDB only accepts IMDb IDs, not TMDB IDs — we must resolve via TMDB's external_ids endpoint first.
 // If TMDB returns no IMDb ID the item has no OMDB entry and is negative-cached immediately.
+// `knownImdbId` skips that resolve: the tmdb→imdb mapping is effectively immutable, and
+// re-buying it on every refresh doubled the upstream call count of the steady-state path
+// (SWR revalidations and the prewarm both refresh from a stored row that already carries
+// the id; the detail pages fetch external_ids in their append_to_response anyway).
 export async function fetchAndCacheOmdbForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   cacheKey: string,
   releaseDate?: string | null,
+  knownImdbId?: string | null,
 ): Promise<OmdbResult> {
   const apiKey = await getApiKey();
   if (!apiKey) return { found: false, keyConfigured: false };
@@ -216,32 +271,38 @@ export async function fetchAndCacheOmdbForTmdb(
   }
 
   try {
-    const auth = tmdbAuth();
-    if (!auth) return { found: false, keyConfigured: true };
-
-    const extUrl = new URL(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids`);
-    for (const [k, v] of Object.entries(auth.query)) extUrl.searchParams.set(k, v);
-    const extRes = await safeFetchTrusted(extUrl.toString(), {
-      allowedHosts: ["api.themoviedb.org"],
-      headers: auth.headers,
-      timeoutMs: OMDB_FETCH_TIMEOUT_MS,
-    });
-    // A 404 is authoritative: the tmdbId doesn't exist for this media type, so it can never
-    // resolve to an IMDb id. Left in the transient branch it cached nothing, and a blocking
-    // ratings batch of bogus ids could be replayed indefinitely — 200 TMDB lookups per request,
-    // every request, on the instance's shared read token.
-    if (extRes.status === 404) {
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
-      return { found: false, keyConfigured: true };
-    }
-    if (!extRes.ok) {
-      console.warn(`[omdb] TMDB external_ids fetch failed (${sanitizeForLog(extRes.status)}) for ${sanitizeForLog(mediaType)}:${sanitizeForLog(tmdbId)}`);
+    // Maps every non-"id" resolve outcome to its (pre-existing) OmdbResult.
+    const settleResolve = async (r: Exclude<ImdbResolve, { kind: "id" }>): Promise<OmdbResult> => {
+      if (r.kind === "noAuth") return { found: false, keyConfigured: true };
+      if (r.kind === "gone") {
+        await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
+        return { found: false, keyConfigured: true };
+      }
       return { found: false, keyConfigured: true, transient: true };
+    };
+
+    let imdbId = knownImdbId ?? null;
+    const hinted = imdbId !== null;
+    if (!hinted) {
+      const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
+      if (resolved.kind !== "id") return settleResolve(resolved);
+      imdbId = resolved.imdbId;
     }
 
-    const ext = await extRes.json() as { imdb_id?: string | null };
+    let omdbRatings = imdbId ? await getOmdbRatings(imdbId, releaseDate) : null;
 
-    const omdbRatings = ext.imdb_id ? await getOmdbRatings(ext.imdb_id, releaseDate) : null;
+    if (!omdbRatings && hinted) {
+      // The hinted id is authoritatively unknown to OMDB (a transient failure
+      // would have thrown) — either a stale stored id or a rare imdb-id remap.
+      // Re-resolve live ONCE before negative-caching so the remap self-heals
+      // instead of tombstoning the title for 24h on the strength of a hint.
+      const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
+      if (resolved.kind !== "id") return settleResolve(resolved);
+      omdbRatings = resolved.imdbId && resolved.imdbId !== imdbId
+        ? await getOmdbRatings(resolved.imdbId, releaseDate)
+        : null;
+      imdbId = resolved.imdbId;
+    }
 
     if (!omdbRatings) {
       await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
@@ -249,7 +310,7 @@ export async function fetchAndCacheOmdbForTmdb(
     }
 
     const ratings: OmdbRatings = {
-      imdbId:         ext.imdb_id ?? null,
+      imdbId:         imdbId,
       imdbRating:     omdbRatings.imdbRating,
       imdbVotes:      omdbRatings.imdbVotes,
       rottenTomatoes: omdbRatings.rottenTomatoes,
@@ -277,11 +338,15 @@ export async function fetchAndCacheOmdbForTmdb(
 const inflightCold = new Map<string, Promise<OmdbResult>>();
 
 // Public entry: cache-first (stale-while-revalidate) OMDB ratings lookup keyed by TMDB id,
-// coalescing concurrent cold misses into one upstream fetch.
+// coalescing concurrent cold misses into one upstream fetch. `knownImdbId` (optional —
+// e.g. the detail pages already hold external_ids from their append_to_response) spares
+// the cold path its TMDB resolve; the SWR path prefers the STALE ROW's own stored id,
+// which is fresher than any caller hint.
 export async function getOmdbRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+  knownImdbId?: string | null,
 ): Promise<OmdbResult> {
   const cacheKey = `omdb:tmdb:${mediaType}:${tmdbId}`;
   const { value: cached, isStale } = await getCacheStale<OmdbRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
@@ -291,7 +356,11 @@ export async function getOmdbRatingsForTmdb(
       const revalKey = `omdb:tmdb:${mediaType}:${tmdbId}`;
       if (!revalidating.has(revalKey)) {
         revalidating.add(revalKey);
-        fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate).catch(() => {}).finally(() => {
+        // A found-shape stale row carries the imdbId it was fetched with — reuse
+        // it so the background refresh skips the TMDB external_ids round-trip
+        // (the remap self-heal in fetchAndCacheOmdbForTmdb covers a stale id).
+        const storedImdbId = "_notFound" in cached ? null : cached.imdbId;
+        fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, storedImdbId).catch(() => {}).finally(() => {
           revalidating.delete(revalKey);
         });
       }
@@ -305,7 +374,7 @@ export async function getOmdbRatingsForTmdb(
 
   const existing = inflightCold.get(cacheKey);
   if (existing) return existing;
-  const p = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate)
+  const p = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, knownImdbId)
     .finally(() => inflightCold.delete(cacheKey));
   inflightCold.set(cacheKey, p);
   return p;

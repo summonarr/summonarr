@@ -1,9 +1,13 @@
 // Unit tests for the OMDB quota-lockout logic (src/lib/omdb.ts). The free tier
-// is 1,000 requests/day and OMDB signals exhaustion as HTTP 200 with
-// Response="False" + an Error string (or as a plain HTTP 429), so the module
-// keeps an in-process lockout that suspends ALL OMDB calls for 1 hour once a
-// quota condition is seen. The contracts pinned here:
-//   - the lockout trips on HTTP 429 and on quota-error bodies ("limit"/"quota"),
+// is 1,000 requests/day and OMDB signals exhaustion as a Response="False" +
+// Error-string JSON body — carried on HTTP 200 in some paths but demonstrably
+// on HTTP 401 by its key-validation layer (the one that owns the daily
+// counter) — or as a plain HTTP 429. The module keeps an in-process lockout
+// that suspends ALL OMDB calls for 1 hour once a quota condition is seen.
+// The contracts pinned here:
+//   - the lockout trips on HTTP 429 and on quota-error bodies ("limit"/
+//     "quota") on BOTH transports — HTTP 200 and non-2xx (the 401 walk at the
+//     bottom of the file),
 //   - it does NOT trip on "Invalid API key" (an operator fixing their key needs
 //     immediate feedback, not a 1h suspension) or on a genuine not-found,
 //   - while locked, cold-cache lookups short-circuit WITHOUT touching the
@@ -220,5 +224,42 @@ test("the 429 lockout also expires after exactly 1h from the trip", () => {
   mock.timers.setTime(T0 + 2 * HOUR_MS - 1);
   assert.equal(isOmdbQuotaLocked(), true);
   mock.timers.setTime(T0 + 2 * HOUR_MS);
+  assert.equal(isOmdbQuotaLocked(), false);
+});
+
+// ── the HTTP-401 transport (appended to the walk: currently UNLOCKED at T0+2h) ──
+// OMDB's key-validation layer — the same layer that owns the daily request
+// counter — answers HTTP 401 with the identical JSON error body the 200-path
+// carries. Before the non-2xx body parse landed, a 401 threw before res.json(),
+// so real daily exhaustion NEVER tripped the lockout and every quota defense
+// keyed off isOmdbQuotaLocked() (prewarm aborts, blocking-path short-circuits)
+// stayed inert. These pin the 401 discrimination: quota message trips,
+// invalid-key still deliberately doesn't.
+
+test("an HTTP 401 with an invalid-key body throws but does NOT trip the lockout", async () => {
+  script(() => new Response(JSON.stringify({ Response: "False", Error: "Invalid API key!" }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  }));
+  await assert.rejects(() => getOmdbRatings("tt0000008"), /401/);
+  assert.equal(isOmdbQuotaLocked(), false, "an operator fixing their key must not be suspended for 1h");
+});
+
+test("an HTTP 401 with a quota body ('Request limit reached!') throws AND trips the lockout", async () => {
+  script(() => new Response(JSON.stringify({ Response: "False", Error: "Request limit reached!" }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  }));
+  await assert.rejects(() => getOmdbRatings("tt0000009"), /401/);
+  assert.equal(isOmdbQuotaLocked(), true);
+  assert.ok(warns.some((w) => w.includes("Request limit reached!")), "the trip warn names the quota message");
+});
+
+test("an HTTP 401 with a NON-JSON body still throws cleanly (no trip, no crash on the body parse)", async () => {
+  // Expire the 401-quota lockout first (tripped at T0+2h → holds until T0+3h).
+  mock.timers.setTime(T0 + 3 * HOUR_MS);
+  assert.equal(isOmdbQuotaLocked(), false);
+  script(() => new Response("<html>gateway error</html>", { status: 502 }));
+  await assert.rejects(() => getOmdbRatings("tt0000010"), /502/);
   assert.equal(isOmdbQuotaLocked(), false);
 });

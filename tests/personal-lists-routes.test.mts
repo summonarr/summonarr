@@ -239,6 +239,21 @@ shadowPrismaModel(prisma, "user", {
 
 shadowPrismaModel(prisma, "setting", { findUnique: async () => null, findMany: async () => [] });
 
+// resolveMediaMeta's first two tiers (TmdbMediaCore, the details TmdbCache
+// blob). Default to misses so the existing tests keep exercising the tier-3
+// live-verify wire path (scripted fetch); a test can point `metaRow` at a row to pin the
+// cached tier short-circuiting the wire.
+let metaRow: { title: string; posterPath: string | null; releaseYear: string } | null = null;
+shadowPrismaModel(prisma, "tmdbMediaCore", {
+  findUnique: async () => metaRow,
+});
+shadowPrismaModel(prisma, "tmdbCache", {
+  findUnique: async () => null,
+  upsert: async (args: { where: { key: string } }) => args,
+  deleteMany: async () => ({ count: 0 }),
+});
+
+
 // /api/health pings the DB with $queryRaw; `dbUp` steers it.
 let dbUp = true;
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => {
@@ -519,6 +534,31 @@ test("watchlist POST verifies against TMDB and stores the verified title, not a 
   assert.equal(res.status, 201);
   const data = opsOf("watchlistItem.create")[0].args as { title: string };
   assert.equal(data.title, "The Matrix");
+});
+
+test("watchlist POST serves a warm TmdbMediaCore row WITHOUT touching the TMDB wire (three-tier resolver)", async () => {
+  // The route resolves via resolveMediaMeta, not a direct live verify — a title
+  // the app already knows must not cost a TMDB call per mutation (and must
+  // still work during a TMDB outage).
+  metaRow = { title: "Core Matrix", posterPath: "/core.jpg", releaseYear: "1999" };
+  tmdbOk = false; // even a hard TMDB outage must not block a known title
+  try {
+    const me = await mintSession();
+    const before = fetchCalls.length;
+    const res = await inScope(() =>
+      watchlist.POST(
+        mk("/api/watchlist", me.token, { method: "POST", body: JSON.stringify({ tmdbId: 603, mediaType: "MOVIE" }) }),
+        undefined,
+      ),
+    );
+    assert.equal(res.status, 201);
+    assert.equal(fetchCalls.length, before, "tier 1 (TmdbMediaCore) must short-circuit the live verify");
+    const data = opsOf("watchlistItem.create").at(-1)!.args as { title: string; posterPath: string | null };
+    assert.equal(data.title, "Core Matrix");
+    assert.equal(data.posterPath, "/core.jpg");
+  } finally {
+    metaRow = null;
+  }
 });
 
 test("watchlist POST returns 422 when TMDB cannot verify the item, and writes nothing", async () => {

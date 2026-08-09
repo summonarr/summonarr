@@ -72,11 +72,14 @@ export type UnifiedRatingsResult = {
 // RT Audience, MDBList score, MAL, Roger Ebert). OMDB is consulted as a fallback
 // whenever MDBList cannot serve the item — no key configured, the item is genuinely
 // absent, or MDBList is quota-locked — so a single source being unavailable doesn't
-// leave the title with no ratings at all.
+// leave the title with no ratings at all. `knownImdbId` (optional) spares a cold
+// OMDB fallback its TMDB external_ids resolve — the detail fetchers already hold
+// the id from their own append_to_response=external_ids.
 export async function fetchUnifiedRatings(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+  knownImdbId?: string | null,
 ): Promise<UnifiedRatingsResult> {
   const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
     (): MdblistResult => ({ found: false, keyConfigured: true, transient: true }),
@@ -88,7 +91,7 @@ export async function fetchUnifiedRatings(
     return { found: true, keyConfigured: true, data: mdb.data };
   }
 
-  const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
+  const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate, knownImdbId).catch(
     () => ({ found: false, keyConfigured: true, transient: true } as const),
   );
   if (omdb.found) {

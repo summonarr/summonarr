@@ -460,12 +460,18 @@ test("a stale row is served to every concurrent reader immediately while exactly
   assert.deepEqual(r1, { found: true, data: oldData });
   assert.deepEqual(r2, r1);
 
-  // The revalidating-set dedup means ONE background chain, not two.
+  // The revalidating-set dedup means ONE background chain, not two — and the
+  // stale row's own stored imdbId spares the refresh its TMDB external_ids
+  // resolve, so the whole revalidation is a single OMDB call.
   await settleUntil(
     () => cacheRows.get("omdb:tmdb:movie:720")?.data.includes('"9.9"') === true,
     "background revalidation writes the fresh row",
   );
-  assert.equal(fetchCalls.length, 2); // one TMDB + one OMDB total
+  assert.equal(fetchCalls.length, 1); // one OMDB, zero TMDB
+  assert.ok(
+    !fetchCalls.some((c) => c.url.hostname === "api.themoviedb.org"),
+    "an SWR refresh from a found-shape row must not re-resolve the imdbId",
+  );
 
   // The refreshed row now serves fresh — still no extra fetch.
   const after = await getOmdbRatingsForTmdb(720, "movie");
@@ -473,7 +479,31 @@ test("a stale row is served to every concurrent reader immediately while exactly
     found: true,
     data: { imdbId: "tt0000500", imdbRating: "9.9", imdbVotes: null, rottenTomatoes: null, metacritic: null },
   });
-  assert.equal(fetchCalls.length, 2);
+  assert.equal(fetchCalls.length, 1);
+});
+
+test("a stale hinted imdbId that OMDB no longer knows re-resolves live ONCE and heals to the remapped id", async () => {
+  // The remap self-heal: a caller-supplied (or stored) id skips the TMDB
+  // resolve, but when OMDB answers an authoritative not-found for it, one live
+  // re-resolve runs before anything is negative-cached — otherwise a rare
+  // imdb-id remap (or a corrupt stored id) tombstones the title for 24h.
+  route({
+    tmdb: () => jsonResponse({ imdb_id: "tt0000NEW" }),
+    omdb: (url) =>
+      url.searchParams.get("i") === "tt0000NEW"
+        ? jsonResponse({ Response: "True", imdbRating: "8.1" })
+        : jsonResponse({ Response: "False", Error: "Incorrect IMDb ID." }),
+  });
+
+  const r = await fetchAndCacheOmdbForTmdb(760, "movie", "omdb:tmdb:movie:760", null, "tt0000OLD");
+  assert.equal(r.found, true);
+  assert.equal(r.found && r.data.imdbId, "tt0000NEW");
+  // Chain: OMDB(old id, miss) → TMDB re-resolve → OMDB(new id, hit) = 3 calls,
+  // exactly one of them the external_ids resolve.
+  assert.equal(fetchCalls.length, 3);
+  assert.equal(fetchCalls.filter((c) => c.url.hostname === "api.themoviedb.org").length, 1);
+  const row = JSON.parse(cacheRows.get("omdb:tmdb:movie:760")!.data) as { imdbId: string };
+  assert.equal(row.imdbId, "tt0000NEW");
 });
 
 test("no OMDB key on a cold miss: keyConfigured:false and bare getOmdbRatings degrades to null — zero fetches either way", async () => {
