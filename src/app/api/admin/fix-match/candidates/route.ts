@@ -46,6 +46,7 @@ export type CandidatesResponse = {
   targetGenres:        string[];
   arrConfirmedTmdbId:  number | null;
   arrConfirmedTitle:   string | null;
+  arrPathAgrees:       boolean | null;
   ratingKey:           string;
   plexFilePath:        string | null;
   // Display-only comparison hint. Read from `serverInstance` when that Jellyfin
@@ -322,6 +323,9 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   }
 
   let arrConfirmedTmdbId: number | null = null;
+  // Whether the arr entry's folder path agrees with the library item's — an
+  // additive diagnostic; null when no arr confirmation was possible at all.
+  let arrPathAgrees: boolean | null = null;
   const arrUrlKey  = mediaType === "MOVIE" ? "radarrUrl"    : "sonarrUrl";
   const arrKeyKey  = mediaType === "MOVIE" ? "radarrApiKey" : "sonarrApiKey";
 
@@ -340,35 +344,62 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
       const folderPath = nodePath.posix.normalize(item.filePath.replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
-      type ArrMovie = { tmdbId: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
+      type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
 
-      const [correctRes, wrongRes] = await Promise.allSettled([
-        arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
-        arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${tmdbId}`),
-      ]);
+      const pathMatches = (arrPathRaw: string | undefined): boolean => {
+        const arrPath = nodePath.posix.normalize(arrPathRaw ?? "");
+        return !!arrPath && !!folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"));
+      };
 
-      for (const result of [correctRes, wrongRes]) {
-        if (result.status === "rejected") {
-          console.error("[fix-match/candidates] Arr fetch rejected:", result.reason instanceof Error ? result.reason.message : result.reason);
-        }
-      }
-
-      if (correctRes.status === "fulfilled") {
-        const match = correctRes.value.find((m) => m.tmdbId === correctTmdbId);
-        if (match) {
-          const arrPath = nodePath.posix.normalize(match.path ?? "");
-          if (arrPath && folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"))) {
-            arrConfirmedTmdbId = correctTmdbId;
-          } else if (arrPath) {
-            arrConfirmedTmdbId = correctTmdbId;
+      // Radarr's movie list honors ?tmdbId= server-side. Sonarr's series list
+      // does NOT (its only filter is ?tvdbId=), so the two "filtered" TV
+      // probes each silently transferred the ENTIRE series table — and on
+      // Sonarr v3, whose SeriesResource carries no TmdbId at all, the
+      // client-side find never matched and the confirmation silently blanked.
+      // One unfiltered fetch feeds both TV probes; movies keep the filter.
+      let correctRows: ArrMovie[] = [];
+      let wrongRows: ArrMovie[] = [];
+      if (mediaType === "MOVIE") {
+        const [correctRes, wrongRes] = await Promise.allSettled([
+          arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${correctTmdbId}`),
+          arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}?tmdbId=${tmdbId}`),
+        ]);
+        for (const result of [correctRes, wrongRes]) {
+          if (result.status === "rejected") {
+            console.error("[fix-match/candidates] Arr fetch rejected:", result.reason instanceof Error ? result.reason.message : result.reason);
           }
         }
+        if (correctRes.status === "fulfilled") correctRows = correctRes.value;
+        if (wrongRes.status === "fulfilled") wrongRows = wrongRes.value;
+      } else {
+        try {
+          const all = await arrFetch<ArrMovie[]>(arrCfg, `/api/v3/${endpoint}`);
+          correctRows = all;
+          wrongRows = all;
+        } catch (err) {
+          console.error("[fix-match/candidates] Arr fetch rejected:", err instanceof Error ? err.message : err);
+        }
       }
 
-      if (arrConfirmedTmdbId === null && wrongRes.status === "fulfilled") {
-        const match = wrongRes.value.find((m) => m.tmdbId === tmdbId);
-        if (match?.path && folderPath && (nodePath.posix.normalize(match.path) === folderPath || folderPath.startsWith(nodePath.posix.normalize(match.path) + "/"))) {
-          arrConfirmedTmdbId = null;
+      const correctMatch = correctRows.find((m) => m.tmdbId === correctTmdbId);
+      if (correctMatch && nodePath.posix.normalize(correctMatch.path ?? "")) {
+        // Library membership confirmed. Path agreement is reported separately —
+        // gating the confirmation on it would lose the feature entirely on
+        // split-mount deployments (the arr and media-server paths legitimately
+        // differ there). The old code compared the paths and then assigned the
+        // SAME value in both branches, making the check vacuous.
+        arrConfirmedTmdbId = correctTmdbId;
+        arrPathAgrees = pathMatches(correctMatch.path);
+      }
+      if (arrConfirmedTmdbId === null) {
+        const wrongMatch = wrongRows.find((m) => m.tmdbId === tmdbId);
+        if (wrongMatch && pathMatches(wrongMatch.path)) {
+          // The arr library maps THIS folder to the current (wrong) id —
+          // surface the disagreement (the "⚠ Radarr/Sonarr has TMDB #X" UI
+          // warning was built for exactly this and was unreachable while this
+          // branch dead-stored null).
+          arrConfirmedTmdbId = tmdbId;
+          arrPathAgrees = true;
         }
       }
 
@@ -552,6 +583,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     targetGenres,
     arrConfirmedTmdbId,
     arrConfirmedTitle,
+    arrPathAgrees,
     ratingKey: item.plexRatingKey,
     plexFilePath: item.filePath ?? null,
     jellyfinFilePath: jellyfinItem?.filePath ?? null,

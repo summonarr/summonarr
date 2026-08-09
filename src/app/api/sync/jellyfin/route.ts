@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes } from "@/lib/jellyfin";
+import { getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -16,6 +17,12 @@ import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } f
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+// recentOnly episode refresh: at or below this many windowed series, fetch each
+// series' episodes directly (ParentId-scoped) instead of page-walking EVERY
+// episode in the library to client-filter down to 1-2 shows. Above it (a bulk
+// import) the single full walk is the cheaper shape again.
+const PER_SERIES_EPISODE_REFRESH_MAX = 50;
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -116,7 +123,17 @@ async function syncJellyfin(request: NextRequest) {
     );
   }
   (ownsEpisodeCache
-    ? getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, seriesItemIdToTmdbId)
+    ? (episodeRecentOnly && seriesItemIdToTmdbId.size > 0 && seriesItemIdToTmdbId.size <= PER_SERIES_EPISODE_REFRESH_MAX
+        // Bounded per-series fan-out (the fix-match pattern, concurrency matching
+        // the library walker's MAX_PARALLEL_PAGES). Output is identical to the
+        // full walk's client-side SeriesId filter for these series; the
+        // tmdbId-scoped delete + insert downstream is unchanged. size === 0
+        // falls through to getJellyfinTVEpisodes, which short-circuits to []
+        // without fetching — byte-identical to before.
+        ? mapLimit(Array.from(seriesItemIdToTmdbId.entries()), 3, ([itemId, tmdbId]) =>
+            getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId),
+          ).then((perSeries) => perSeries.flat())
+        : getJellyfinTVEpisodes(baseUrl, apiKey, selectedJellyfinIds, seriesItemIdToTmdbId))
     : Promise.resolve(null)
   )
     .then(async (episodes) => {

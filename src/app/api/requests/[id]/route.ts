@@ -278,6 +278,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     let arrError: string | null = null;
     let arrPushSucceeded = false;
     let pushedTvdbId: number | null = null;
+    let rolledBack = false;
     try {
       if (updated.mediaType === "MOVIE") {
         await addMovieToRadarr(updated.tmdbId, variant, effectiveProfileId, updated.requestedBy);
@@ -291,10 +292,17 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       // Roll status back to PENDING so the request isn't stuck APPROVED with no
       // ARR backing — admin sees the failure in the response (`arrError`) and
       // can retry. Matches the Discord interactions auto-approve rollback shape.
-      await prisma.mediaRequest.update({
+      // updateMany (not update): a concurrently moved row no-ops instead of
+      // throwing, and `count` tells us whether the rollback actually landed so
+      // the response body below can reflect it.
+      const rb = await prisma.mediaRequest.updateMany({
         where: { id, status: "APPROVED" },
         data: { status: "PENDING", pendingNotifyAt: null },
-      }).catch((rbErr) => console.error("[requests] rollback to PENDING failed:", rbErr));
+      }).catch((rbErr) => {
+        console.error("[requests] rollback to PENDING failed:", rbErr);
+        return { count: 0 };
+      });
+      rolledBack = rb.count === 1;
       // Correct the optimistic APPROVED SSE emitted before the push — without this,
       // clients show the request stuck APPROVED when it's actually back to PENDING.
       emitSSE({ type: "request:updated", requestId: id, status: "PENDING", userId: existing.requestedBy });
@@ -377,7 +385,16 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       }
     }, { name: "requests:90s-download-check" });
 
-    return NextResponse.json({ ...updated, arrError });
+    // `updated` was read before the arr push; after a rollback it is stale
+    // (APPROVED + armed pendingNotifyAt for a row that is PENDING again). A
+    // bearer/native client has no SSE stream to correct it, so the body must
+    // reflect the rolled-back state — same contract the POST auto-approve path
+    // pins ("the response must reflect the rolled-back state").
+    return NextResponse.json({
+      ...updated,
+      ...(rolledBack ? { status: "PENDING", pendingNotifyAt: null } : {}),
+      arrError,
+    });
   }
 
   if (status === "AVAILABLE" && existing.status !== "AVAILABLE") {

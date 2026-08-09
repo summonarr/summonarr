@@ -913,10 +913,36 @@ export async function applyCustomFormats(
   });
   if (specs.length === 0) return [];
 
+  // Projection for the no-op compare: exactly the fields the PUT body writes,
+  // applied to BOTH sides so extra metadata on either side (remote
+  // implementationName/infoLink/field labels, TRaSH trash_scores) can't defeat
+  // equality. STRICT on absence — a remote row that omits a field the body
+  // sets stays unequal and still PUTs (drift repair is the feature).
+  type CfSpecLike = { name?: unknown; implementation?: unknown; negate?: unknown; required?: unknown; fields?: unknown };
+  const projectCfForCompare = (cf: { name?: unknown; includeCustomFormatWhenRenaming?: unknown; specifications?: unknown }): string => {
+    const specifications = Array.isArray(cf.specifications) ? (cf.specifications as CfSpecLike[]) : [];
+    return JSON.stringify({
+      name: cf.name,
+      includeCustomFormatWhenRenaming: cf.includeCustomFormatWhenRenaming ?? false,
+      specifications: specifications.map((s) => ({
+        name: s.name,
+        implementation: s.implementation,
+        negate: s.negate,
+        required: s.required,
+        fields: Array.isArray(s.fields)
+          ? (s.fields as Array<{ name?: unknown; value?: unknown }>).map((f) => ({ name: f.name, value: f.value }))
+          : [],
+      })),
+    });
+  };
+
+  type RemoteCf = { id: number; name: string; includeCustomFormatWhenRenaming?: boolean; specifications?: unknown[] };
   let remoteByName: Map<string, number>;
+  let remoteById: Map<number, RemoteCf>;
   try {
-    const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/customformat");
+    const remote = await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
+    remoteById = new Map(remote.map((r) => [r.id, r]));
   } catch (err) {
     // Can't read existing CFs → can't tell new from existing, so a blind POST in
     // the loop below would create duplicates. Fail the whole batch instead of
@@ -941,6 +967,23 @@ export async function applyCustomFormats(
       // arrPutOrRecreate transparently recovers if the resource was deleted in the Arr UI between
       // Summonarr's last apply and now (PUT → 404 → POST).
       const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(payload.name) ?? null;
+      // No-op skip: the cron re-applies every enabled spec each run (drift
+      // repair), which used to mean N identical PUTs per run — the compare data
+      // was already downloaded above and discarded. When the remote CF's
+      // projection matches what we'd PUT, record success against the known id
+      // and skip the write; any drift (including remote rows missing fields)
+      // still PUTs exactly as before.
+      if (remoteId) {
+        const remoteRow = remoteById.get(remoteId);
+        // Only trust equality when the remote row actually CARRIES its
+        // specifications array — a row without it (truncated response) is
+        // unknown state, and treating absence as "empty" would wrongly skip
+        // the PUT for a spec-less body.
+        if (remoteRow && Array.isArray(remoteRow.specifications) && projectCfForCompare(remoteRow) === projectCfForCompare(body)) {
+          results.push(await recordApply(spec, { ok: true, remoteId }, arrInstance));
+          continue;
+        }
+      }
       let created: { id: number };
       let recreated = false;
       if (remoteId) {
@@ -1111,10 +1154,15 @@ export async function applyNaming(
       const patch = buildNamingPatch(service, payload);
       Object.assign(merged, patch);
     }
-    await arrFetch<unknown>(cfg, `/api/v3/config/naming`, {
-      method: "PUT",
-      body: JSON.stringify(merged),
-    });
+    // No-op skip: `merged` spreads `current` first, so when every patch value
+    // already matches the remote config the two serialize identically — record
+    // success without the PUT (the cron re-applies every run for drift repair).
+    if (JSON.stringify(merged) !== JSON.stringify(current)) {
+      await arrFetch<unknown>(cfg, `/api/v3/config/naming`, {
+        method: "PUT",
+        body: JSON.stringify(merged),
+      });
+    }
     const results: ApplyResult[] = [];
     for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
     return results;
@@ -1165,10 +1213,16 @@ export async function applyQualitySizes(
       };
     });
 
-    await arrFetch<unknown>(cfg, "/api/v3/qualitydefinition/update", {
-      method: "PUT",
-      body: JSON.stringify(merged),
-    });
+    // No-op skip: rows without an override are the SAME object reference, and
+    // an overridden row that changed nothing serializes identically — skip the
+    // PUT when no row actually differs (the cron re-applies every run).
+    const changed = merged.some((row, i) => row !== remote[i] && JSON.stringify(row) !== JSON.stringify(remote[i]));
+    if (changed) {
+      await arrFetch<unknown>(cfg, "/api/v3/qualitydefinition/update", {
+        method: "PUT",
+        body: JSON.stringify(merged),
+      });
+    }
 
     const results: ApplyResult[] = [];
     for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
@@ -1323,10 +1377,16 @@ async function buildProfileBody(
 
   let language: { id: number; name: string } | undefined;
   const wantLang = (profile.language ?? "").toLowerCase();
+  // Fallback ids (used only when GET /api/v3/language failed) must match
+  // Radarr's Language.cs pseudo-languages: Any = -1, Original = -2. The id is
+  // authoritative (name is display-only — Radarr stores/compares the int), so
+  // the previously swapped constants persisted the OPPOSITE language: "Any"
+  // (accept every release, language gate off) where TRaSH said Original, and
+  // vice versa.
   if (wantLang === "original" || wantLang === "") {
-    language = remoteLanguages.find((l) => l.name.toLowerCase() === "original") ?? { id: -1, name: "Original" };
+    language = remoteLanguages.find((l) => l.name.toLowerCase() === "original") ?? { id: -2, name: "Original" };
   } else if (wantLang === "any") {
-    language = remoteLanguages.find((l) => l.name.toLowerCase() === "any") ?? { id: -2, name: "Any" };
+    language = remoteLanguages.find((l) => l.name.toLowerCase() === "any") ?? { id: -1, name: "Any" };
   } else {
     const match = remoteLanguages.find((l) => l.name.toLowerCase() === wantLang);
     if (match) language = match;

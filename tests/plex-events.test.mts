@@ -253,6 +253,9 @@ const TOKEN_R = "remote token/9"; // the named instance's token
 interface StreamHandle { origin: string; push(text: string): void; end(): void; ended: boolean }
 const sseStreams: StreamHandle[] = [];
 let plexSnapshotSessions: Array<Record<string, unknown>> = [];
+// The /api/sync loopback's response body — a test can flip it to
+// { skipped: true } to exercise the lock-race re-arm.
+let syncResponseBody: Record<string, unknown> = { ok: true };
 
 type FetchRecord = { url: string; headers: Headers; init: RequestInit };
 const fetchLog: FetchRecord[] = [];
@@ -294,7 +297,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return makeSseResponse(parsed.origin);
   }
   if (parsed.hostname === "127.0.0.1" && parsed.pathname === "/api/sync") {
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(JSON.stringify(syncResponseBody), { status: 200 });
   }
   throw new Error(`unexpected fetch in test: ${url}`);
 }) as typeof fetch;
@@ -885,6 +888,52 @@ test("timeline: terminal states debounce-coalesce into ONE /api/sync loopback 30
   const call = syncFetches()[syncFetches().length - 1];
   assert.equal(call.url, "http://127.0.0.1:3000/api/sync", "the resync rides the single allowed internal loopback (guardrail 5b)");
   assert.equal(call.headers.get("authorization"), `Bearer ${process.env.CRON_SECRET}`);
+});
+
+test("timeline: a non-video (music/photo) typed entry never schedules a sync; a video-typed entry still does", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const syncBefore = syncFetches().length;
+
+  // track=10 (python-plexapi SEARCHTYPES): a music scan must not pay a full
+  // multi-source sync — nothing downstream ingests non-video data. Untyped
+  // entries still count (covered by the coalesce test above, whose frames
+  // carry no type field — the tolerant default).
+  pushFrame(timelineFrame({ itemID: 9, type: 10, metadataState: "created" }));
+  await drain(20);
+  t.mock.timers.tick(120_000);
+  await drain(20);
+  assert.equal(syncFetches().length, syncBefore, "a music-type timeline entry must never trigger a sync");
+
+  pushFrame(timelineFrame({ itemID: 10, type: 1, metadataState: "created" }));
+  await drain(20);
+  t.mock.timers.tick(30_000);
+  await waitFor(() => syncFetches().length === syncBefore + 1, "the video-typed resync");
+});
+
+test("timeline: a lock-race 'skipped' response re-arms the debounce instead of dropping the change for SYNC_INTERVAL", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const syncBefore = syncFetches().length;
+  syncResponseBody = { skipped: true, reason: "sync already running" };
+  try {
+    pushFrame(timelineFrame({ itemID: 11, metadataState: "created" }));
+    await drain(20);
+    t.mock.timers.tick(30_000);
+    await waitFor(() => syncFetches().length === syncBefore + 1, "the first (lock-busy) trigger");
+    await drain(30);
+
+    // The skip re-armed the debounce; the lock is free now → the retry runs.
+    syncResponseBody = { ok: true };
+    t.mock.timers.tick(30_000);
+    await waitFor(() => syncFetches().length === syncBefore + 2, "the re-armed retry");
+    await drain(30);
+
+    // A successful run must not chain further syncs.
+    t.mock.timers.tick(120_000);
+    await drain(30);
+    assert.equal(syncFetches().length, syncBefore + 2, "a completed retry must end the chain");
+  } finally {
+    syncResponseBody = { ok: true };
+  }
 });
 
 // ═══ Phase H — reachability persistence ═════════════════════════════════════

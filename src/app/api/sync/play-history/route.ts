@@ -98,6 +98,31 @@ async function getCachedPlexAdminId(token: string): Promise<string | null> {
   return id;
 }
 
+// resolveMediaServerUser runs a full advisory-lock transaction (~5 round trips
+// on a max:5 pool) — right for a cold session, pure waste for the same
+// (source, instance, user) resolving to the same row on every 5s tick. Memoize
+// the resolved row id keyed by identity, busted whenever the mirrored inputs
+// change (username/thumb/admin flag must still propagate promptly). A cache
+// hit writes nothing, so it structurally cannot overwrite a manualUserLink pin
+// (guardrail 34 — the pin logic still runs on every real resolve); userId
+// healing on unchanged inputs is deferred at most RESOLVE_TTL_MS, and read-time
+// attribution goes through MediaServerUser.userId anyway. Failures are not
+// cached — the next tick retries.
+const RESOLVE_TTL_MS = 5 * 60 * 1000;
+const resolveCache = new Map<string, { id: string; inputsKey: string; expiresAt: number }>();
+async function resolveMediaServerUserCached(
+  params: Parameters<typeof resolveMediaServerUser>[0],
+): Promise<string> {
+  const key = `${params.source}:${params.serverInstance}:${params.sourceUserId}`;
+  const inputsKey = JSON.stringify([params.username, params.thumbUrl ?? null, params.isServerAdmin ?? null]);
+  const now = Date.now();
+  const hit = resolveCache.get(key);
+  if (hit && hit.expiresAt > now && hit.inputsKey === inputsKey) return hit.id;
+  const id = await resolveMediaServerUser(params);
+  resolveCache.set(key, { id, inputsKey, expiresAt: now + RESOLVE_TTL_MS });
+  return id;
+}
+
 async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, token: string): Promise<SyncResult> {
   // getPlexSessions is the authoritative local-reachability probe — it runs
   // every poll. Report the result so the UI's reachability badge reflects
@@ -184,16 +209,25 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // $transaction and the pool is max:5, so an unbounded Promise.all over N sessions —
   // running concurrently with the Jellyfin pass — saturates the pool every tick. Cap
   // below the pool size.
-  const userIds = await mapLimit(valid, 4, (s) =>
-    resolveMediaServerUser({
+  const userIds = await mapLimit(valid, 4, (s) => {
+    // PMS reports the SERVER OWNER's sessions with the LOCAL account id "1",
+    // never their plex.tv global id — but User.plexUserId (what the subject-id
+    // resolver matches) and every MediaServerUser row are keyed by global ids,
+    // so the owner's watches were never auto-attributed and no Plex row ever
+    // earned isServerAdmin (Tautulli special-cases id "1" for the same
+    // reason). Rewrite it to the cached admin id; when plex.tv was unreachable
+    // this tick plexAdminId is null, behavior is unchanged, and the next tick
+    // heals.
+    const isOwner = plexAdminId !== null && s.accountId === "1";
+    return resolveMediaServerUserCached({
       source: "plex",
       serverInstance: instance,
-      sourceUserId: s.accountId,
+      sourceUserId: isOwner ? plexAdminId : s.accountId,
       username: s.accountName,
       thumbUrl: s.accountThumb || null,
-      ...(plexAdminId !== null ? { isServerAdmin: s.accountId === plexAdminId } : {}),
-    }),
-  );
+      ...(plexAdminId !== null ? { isServerAdmin: isOwner || s.accountId === plexAdminId } : {}),
+    });
+  });
 
   // Resolve TMDB ids per session (TV episodes hit DB, movies are mostly in-memory).
   const resolved = await Promise.all(
@@ -414,11 +448,26 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           posterPath,
           progressPercent,
           progressMs: BigInt(s.viewOffset),
+          // Where in the file this SESSION began — a resume starts mid-file, so
+          // finalize's playDuration fallback must subtract this from the
+          // absolute playhead or a resumed session books the pre-resume runtime
+          // as watch time.
+          startProgressMs: BigInt(s.viewOffset),
           durationMs: BigInt(s.duration),
           platform: s.platform ?? null,
           player: s.player ?? null,
           device: s.device ?? null,
-          ipAddress: s.address ?? null,
+          // Off-LAN, prefer the server-observed public address: Player.address
+          // is the client's SELF-reported value and for WAN sessions routinely
+          // a private/loopback address. Relayed sessions report 127.0.0.1 in
+          // remotePublicAddress (the local relay endpoint) — worth less than
+          // the self-report, so loopback falls back.
+          ipAddress: (s.location !== "lan" &&
+            s.remotePublicAddress &&
+            s.remotePublicAddress !== "127.0.0.1" &&
+            s.remotePublicAddress !== "::1"
+            ? s.remotePublicAddress
+            : s.address) ?? null,
           playMethod: s.playMethod ?? null,
           videoCodec: s.videoCodec ?? null,
           audioCodec: s.audioCodec ?? null,
@@ -519,7 +568,7 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   // concurrency (guardrail 31): each call holds its own $transaction against the max:5
   // pool, and this runs concurrently with the Plex pass — cap below 5.
   const userIds = await mapLimit(valid, 4, (s) =>
-    resolveMediaServerUser({
+    resolveMediaServerUserCached({
       source: "jellyfin",
       serverInstance: instance,
       sourceUserId: s.userId,
@@ -760,6 +809,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
           posterPath: jfPosterPath,
           progressPercent,
           progressMs: BigInt(positionMs),
+          // Resume offset — see the Plex create branch.
+          startProgressMs: BigInt(positionMs),
           durationMs: BigInt(durationMs),
           platform: s.client ?? null,
           player: s.client ?? null,

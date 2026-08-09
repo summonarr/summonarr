@@ -35,9 +35,20 @@ class TriggerWaitExpired extends Error {
   }
 }
 
-export async function triggerFullSync(): Promise<void> {
+/**
+ * Outcome discriminator for the caller's retry decision:
+ * - "ran": the orchestrator processed this trigger (including the
+ *   stopped-waiting case — the run continues server-side).
+ * - "skipped": the orchestrator's advisory lock was held by another run; the
+ *   trigger did nothing and the caller may re-arm its debounce.
+ * - "failed": transport/HTTP/config failure (already warned). Callers must NOT
+ *   blindly retry — a broken loopback would retry forever.
+ */
+export type TriggerFullSyncResult = "ran" | "skipped" | "failed";
+
+export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return; // no auth token available — silently skip (matches prior behaviour)
+  if (!secret) return "failed"; // no auth token available — silently skip (matches prior behaviour)
 
   const port = process.env.PORT ?? "3000";
   // On a sub-path deployment Next serves the route at `${BASE_PATH}/api/sync`;
@@ -62,8 +73,6 @@ export async function triggerFullSync(): Promise<void> {
   );
 
   try {
-    // Await so errors are visible; the body is ignored on success (the handler
-    // does the work, or returns 200 { skipped: true } when the lock is held).
     const res = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${secret}` },
@@ -76,7 +85,15 @@ export async function triggerFullSync(): Promise<void> {
       console.warn(
         `[internal-trigger] full sync trigger got non-2xx ${res.status} from /api/sync: ${body.slice(0, 200)}`
       );
+      return "failed";
     }
+    // A 200 has two meanings: the orchestrator ran, or it returned
+    // { skipped: true } because another run holds the advisory lock. The
+    // caller needs the distinction — a dropped timeline trigger used to make
+    // a library change wait up to SYNC_INTERVAL. An unparseable success body
+    // reads as "ran" (never re-arm on ambiguity).
+    const body = (await res.json().catch(() => null)) as { skipped?: boolean } | null;
+    return body?.skipped === true ? "skipped" : "ran";
   } catch (err) {
     // Do not throw — the caller (Plex timeline path) already treats this as
     // best-effort and only logs at warn level. Keep the same contract.
@@ -87,10 +104,11 @@ export async function triggerFullSync(): Promise<void> {
         `[internal-trigger] sync still running after ${TRIGGER_WAIT_MS}ms; stopped waiting ` +
           `(the run continues — see the sync:full entry under Admin → Settings → System)`,
       );
-    } else {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[internal-trigger] full sync trigger failed: ${msg}`);
+      return "ran";
     }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[internal-trigger] full sync trigger failed: ${msg}`);
+    return "failed";
   } finally {
     clearTimeout(timeout);
   }

@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
-import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
+import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl, getJellyfinConfig } from "@/lib/jellyfin-config";
 import { checkRateLimit, refundHit, getClientIp } from "@/lib/rate-limit";
@@ -846,7 +846,7 @@ export async function authorizeWithPlex(
     // a healthy one — but each instance still fails CLOSED on a plex.tv error
     // (skip it; never fall back to an unscoped list).
     for (const inst of instances) {
-      let allowed: Set<string>;
+      let allowed: PlexServerMembers;
       try {
         allowed = await getPlexFriendEmails(inst.token, inst.url);
       } catch (err) {
@@ -858,9 +858,13 @@ export async function authorizeWithPlex(
       // with stray whitespace/Unicode form can't make the two gates disagree. Added
       // unconditionally after the fetch: an admin-only server with an empty friend
       // list must still admit its admin.
-      if (inst.adminEmail) allowed.add(normalizeEmail(inst.adminEmail));
+      if (inst.adminEmail) allowed.emails.add(normalizeEmail(inst.adminEmail));
 
-      if (!allowed.has(verifiedEmail)) continue;
+      // Immutable plex.tv account id first (the same namespace sign-in pins to
+      // User.plexUserId — same identity by construction), email as the legacy
+      // fallback: an email is user-changeable on plex.tv, and a mid-window
+      // change used to bounce the member off sign-in entirely.
+      if (!allowed.ids.has(plexUserSub) && !allowed.emails.has(verifiedEmail)) continue;
 
       const plexDbUser = await findOrCreatePlexUser({
         plexUserId: plexUserSub,

@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
-import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, type PlexLegacyGuidRef } from "@/lib/plex";
+import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -76,12 +77,23 @@ async function syncPlex(request: NextRequest) {
   let sections: Awaited<ReturnType<typeof getPlexLibrarySections>>;
   let movieIds: Awaited<ReturnType<typeof getPlexTmdbIds>>;
   let tvIds:    Awaited<ReturnType<typeof getPlexTmdbIds>>;
+  // Show-walk accumulator + legacy-agent channels — same wiring as the
+  // orchestrator's Plex arm (see ../route.ts).
+  const ratingKeyToTmdb = new Map<string, number[]>();
+  const movieLegacy = new Map<string, PlexLegacyGuidRef>();
+  const tvLegacy = new Map<string, PlexLegacyGuidRef>();
   try {
     sections = await getPlexLibrarySections(serverUrl, token);
     [movieIds, tvIds] = await Promise.all([
-      getPlexTmdbIds(serverUrl, token, "MOVIE", recentOnly, selectedPlexKeys, sections),
-      getPlexTmdbIds(serverUrl, token, "TV", recentOnly, selectedPlexKeys, sections),
+      getPlexTmdbIds(serverUrl, token, "MOVIE", recentOnly, selectedPlexKeys, sections, undefined, movieLegacy),
+      getPlexTmdbIds(serverUrl, token, "TV", recentOnly, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy),
     ]);
+    const [resolvedMovies, resolvedTv] = await Promise.all([
+      resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
+      resolvePlexLegacyGuids(tvLegacy, "TV"),
+    ]);
+    mergeResolvedLegacyItems(resolvedMovies, movieIds);
+    mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[sync/plex] Failed to fetch library:", msg);
@@ -102,7 +114,10 @@ async function syncPlex(request: NextRequest) {
     );
   }
   (ownsEpisodeCache
-    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections)
+    // The precomputed show map is complete only when the walk above was FULL —
+    // on recentOnly it covers just the 2h window while this episode rewrite is
+    // a full replace, so getPlexTVEpisodes keeps its own walk there.
+    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, recentOnly ? undefined : ratingKeyToTmdb)
     : Promise.resolve(null)
   )
     .then(async (episodes) => {

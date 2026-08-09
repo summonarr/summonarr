@@ -20,7 +20,7 @@ type TvdbToTmdbCache = { tmdbId: number | null };
 // or a TMDB request threw / returned non-2xx). It lets callers that wholesale-replace a
 // cache from the result distinguish "series genuinely has no tmdb mapping" (safe to omit)
 // from "we couldn't resolve it right now" (omitting it would wrongly evict a known series).
-async function resolveTvdbToTmdb(
+export async function resolveTvdbToTmdb(
   tvdbIds: number[],
 ): Promise<{ map: Map<number, number>; hadErrors: boolean }> {
   const result = new Map<number, number>();
@@ -412,7 +412,7 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
   // configured default; only fetch the instance's profiles when neither is set.
   const needProfiles = !qualityProfileIdOverride && !cfg.qualityProfileId;
   const [movies, rootFolders, profiles] = await Promise.all([
-    arrFetch<{ title: string; tmdbId: number; year: number; images: object[]; titleSlug: string; digitalRelease?: string; physicalRelease?: string }[]>(
+    arrFetch<{ title: string; tmdbId: number; year: number; images: object[]; titleSlug: string; digitalRelease?: string; physicalRelease?: string; status?: string }[]>(
       cfg, `/api/v3/movie/lookup?term=tmdb:${tmdbId}`
     ),
     cfg.rootFolder
@@ -442,9 +442,15 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
   const releaseDates = [movie.digitalRelease, movie.physicalRelease]
     .filter(Boolean)
     .map((d) => new Date(d!));
-  const movieReleased = releaseDates.length > 0
-    ? releaseDates.some((d) => d <= now)
-    : movie.year > 0 && movie.year < now.getFullYear();
+  // Also trust Radarr's own computed `status === "released"`: upstream sets it
+  // when a home date is past OR when a title has NO home dates but left
+  // cinemas 90+ days ago — exactly the metadata state the year heuristic
+  // mishandled (a current-year release missing type-4/5 dates read as
+  // unreleased and the add-time search never fired).
+  const movieReleased =
+    releaseDates.some((d) => d <= now) ||
+    movie.status === "released" ||
+    (releaseDates.length === 0 && movie.year > 0 && movie.year < now.getFullYear());
 
   // Explicit allowlist of the Radarr POST body fields we own — previous code
   // spread the entire lookup row (~30 fields, untyped) which would silently
@@ -472,11 +478,42 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
       }),
     });
 
+  // Duplicate remediation: "already been added" used to read as pure success —
+  // but a pre-existing UNMONITORED, file-less entry is never auto-grabbed
+  // (Radarr's decision engine rejects unmonitored movies on RSS and automatic
+  // search), so the approved request sat APPROVED forever while approve
+  // reported success. Best-effort: re-monitor + search; any failure degrades
+  // to the old warn-and-skip.
+  const remediateExistingMovie = async () => {
+    try {
+      const existing = await arrFetch<Array<{ id: number; tmdbId: number; monitored: boolean; hasFile: boolean } & Record<string, unknown>>>(
+        cfg, `/api/v3/movie?tmdbId=${tmdbId}`,
+      );
+      const row = existing.find((m) => m.tmdbId === tmdbId);
+      if (!row || row.hasFile || row.monitored) return;
+      // Radarr's PUT expects the full MovieResource — round-trip the row with
+      // only the monitored flag flipped.
+      await arrFetch<unknown>(cfg, `/api/v3/movie/${row.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ ...row, monitored: true }),
+      });
+      if (movieReleased) {
+        await arrFetch<unknown>(cfg, "/api/v3/command", {
+          method: "POST",
+          body: JSON.stringify({ name: "MoviesSearch", movieIds: [row.id] }),
+        });
+      }
+    } catch (remErr) {
+      console.warn("[arr] existing-movie re-monitor failed (leaving as-is):", arrErrorMessage(remErr));
+    }
+  };
+
   try {
     await postMovie();
   } catch (err) {
     if (isDuplicate(err)) {
-      console.warn("[arr] movie already in Radarr — skipping add, request may need manual review", { tmdbId });
+      console.warn("[arr] movie already in Radarr — re-checking its monitored state", { tmdbId });
+      await remediateExistingMovie();
       return;
     }
     // A *different* movie (different tmdbId) already occupies the `Title (Year)`
@@ -491,7 +528,8 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
       // The id-tagged path can only collide if this exact tmdbId is already in
       // Radarr — a real duplicate, which surfaces as "already added".
       if (isDuplicate(retryErr)) {
-        console.warn("[arr] movie already in Radarr — skipping add, request may need manual review", { tmdbId });
+        console.warn("[arr] movie already in Radarr — re-checking its monitored state", { tmdbId });
+        await remediateExistingMovie();
         return;
       }
       throw retryErr;
@@ -517,7 +555,7 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = ""): Promise<
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return { wanted: new Set(), available: new Set() };
   try {
-    const series = await arrFetch<{ tvdbId: number; tmdbId?: number; status: string; statistics: { episodeFileCount: number; totalEpisodeCount: number } }[]>(
+    const series = await arrFetch<{ tvdbId: number; tmdbId?: number; status: string; statistics: { episodeFileCount: number; episodeCount: number } }[]>(
       cfg, "/api/v3/series"
     );
     const wanted = new Set<number>();
@@ -530,9 +568,18 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = ""): Promise<
       // it would throw here, trip the outer catch, and silently skip the entire
       // wanted/available cache update run after run — an opaque availability
       // freeze. A missing statistics block reads as zero files (wanted).
+      //
+      // Denominator is `episodeCount` — Sonarr's own 100% notion ((monitored AND
+      // aired) OR has-file; the PercentOfEpisodes denominator) — NOT
+      // `totalEpisodeCount`, which counts unmonitored and unaired episodes
+      // including season-0 specials (which addSeriesToSonarr itself adds
+      // unmonitored). Against totalEpisodeCount, an ended series with any
+      // unmonitored file-less episode could NEVER read fully-downloaded: the
+      // request stayed wanted forever and the webhook confirm below rejected
+      // its genuine Download events.
       const episodeFileCount = s.statistics?.episodeFileCount ?? 0;
-      const totalEpisodeCount = s.statistics?.totalEpisodeCount ?? 0;
-      const allDownloaded = episodeFileCount >= totalEpisodeCount;
+      const episodeCount = s.statistics?.episodeCount ?? 0;
+      const allDownloaded = episodeFileCount >= episodeCount;
       // Ongoing series with partial files are "available"; ended series only when fully downloaded
       const isAvailable = episodeFileCount > 0 &&
         (s.status !== "ended" || allDownloaded);
@@ -584,13 +631,21 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
   // write the raw snake_case TMDB body under it, poisoning the detail page
   // (mediaType/posterPath/releaseDate all undefined) for the rest of the 7-day
   // TTL — and reading a normalized blob back here found no `release_date`, so
-  // release gating silently returned null dates. Store only the field we need.
-  const cacheKey = `movie:${tmdbId}:release-info`;
+  // release gating silently returned null dates. Store only the fields we need.
+  //
+  // :v2 — the v1 rows held only the primary release_date, which is normally the
+  // THEATRICAL date; reporting it as both digitalRelease and physicalRelease
+  // made every consumer's "awaiting release" vs "download pending" split
+  // vacuous — an in-cinemas-only movie read as home-released. v2 rows carry the
+  // real per-type dates from /release_dates (type 4 = Digital, 5 = Physical);
+  // v1 rows age out via their own TTL.
+  const cacheKey = `movie:${tmdbId}:release-info:v2`;
   try {
-    type ReleaseInfo = { release_date?: string | null };
+    type ReleaseInfo = { digital: string | null; physical: string | null; primary: string | null };
     let details = await getCache<ReleaseInfo>(cacheKey);
     if (!details) {
       const url = new URL(`https://api.themoviedb.org/3/movie/${tmdbId}`);
+      url.searchParams.set("append_to_response", "release_dates");
       for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
       const res = await safeFetchTrusted(url.toString(), {
         allowedHosts: ["api.themoviedb.org"],
@@ -598,12 +653,31 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
         timeoutMs: 10_000,
       });
       if (!res.ok) return null;
-      const body = await res.json() as { release_date?: string };
-      details = { release_date: body.release_date ?? null };
+      const body = await res.json() as {
+        release_date?: string;
+        release_dates?: { results?: Array<{ release_dates?: Array<{ type?: number; release_date?: string }> }> };
+      };
+      // Earliest digital/physical date across every region (ISO strings —
+      // lexicographic min is chronological min).
+      let digital: string | null = null;
+      let physical: string | null = null;
+      for (const region of body.release_dates?.results ?? []) {
+        for (const rd of region.release_dates ?? []) {
+          if (!rd.release_date) continue;
+          if (rd.type === 4 && (digital === null || rd.release_date < digital)) digital = rd.release_date;
+          if (rd.type === 5 && (physical === null || rd.release_date < physical)) physical = rd.release_date;
+        }
+      }
+      details = { digital, physical, primary: body.release_date ?? null };
       await setCache(cacheKey, details, TTL.DETAILS);
     }
-    const releaseDate = details.release_date ?? null;
-    return { digitalRelease: releaseDate, physicalRelease: releaseDate };
+    // Only when NO home-release type exists in any region fall back to the
+    // primary date for both — a dateless back-catalog title should still gate
+    // on something rather than read as forever-unreleased.
+    if (details.digital === null && details.physical === null) {
+      return { digitalRelease: details.primary, physicalRelease: details.primary };
+    }
+    return { digitalRelease: details.digital, physicalRelease: details.physical };
   } catch { return null; }
 }
 
@@ -640,8 +714,11 @@ export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant
     );
     if (!lookup.length) return false;
     const { tvdbId } = lookup[0];
+    // Interpolated into the query — hold the never-schema-checked lookup value
+    // to the same positive-integer contract isSeriesDownloadedInSonarr applies.
+    if (!Number.isInteger(tvdbId) || tvdbId <= 0) return false;
     const library = await arrFetch<{ tvdbId: number; statistics?: { episodeFileCount: number } }[]>(
-      cfg, "/api/v3/series"
+      cfg, `/api/v3/series?tvdbId=${tvdbId}`
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
     // Guard `statistics` like getSonarrWantedTmdbIds and isSeriesDownloadedInSonarr
@@ -696,8 +773,10 @@ export async function isMovieDownloadedInRadarr(
 // back to a tmdb→tvdb lookup when only tmdbId is present. The "available"
 // threshold MUST match getSonarrWantedTmdbIds (the sync writer): a continuing
 // series is available with any episode file, an *ended* series only once fully
-// downloaded. Otherwise an ended series at 1/N flips AVAILABLE on the webhook,
-// and the next sync reverts it to APPROVED — a per-tick flip-flop.
+// downloaded — with `episodeCount` (Sonarr's own completion denominator) as the
+// target, never `totalEpisodeCount` (see the sync writer's comment). Otherwise
+// an ended series at 1/N flips AVAILABLE on the webhook, and the next sync
+// reverts it to APPROVED — a per-tick flip-flop.
 export async function isSeriesDownloadedInSonarr(
   ids: { tvdbId?: number | null; tmdbId?: number | null },
   variant: ArrVariant = "",
@@ -745,14 +824,18 @@ export async function isSeriesDownloadedInSonarr(
       }
     }
     if (tvdbId === null) return null;
-    const library = await arrFetch<{ tvdbId: number; status?: string; statistics?: { episodeFileCount: number; totalEpisodeCount: number } }[]>(
-      cfg, "/api/v3/series",
+    // ?tvdbId= — Sonarr's server-side filter (FindByTvdbId; statistics still
+    // attached on the filtered branch in both v3 and v4). This runs on EVERY
+    // Sonarr Download webhook, so an unfiltered fetch paid a full-library
+    // transfer per episode of a season-pack import.
+    const library = await arrFetch<{ tvdbId: number; status?: string; statistics?: { episodeFileCount: number; episodeCount: number } }[]>(
+      cfg, `/api/v3/series?tvdbId=${tvdbId}`,
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
     if (!match) return false;
     const episodeFileCount = match.statistics?.episodeFileCount ?? 0;
-    const totalEpisodeCount = match.statistics?.totalEpisodeCount ?? 0;
-    const allDownloaded = episodeFileCount >= totalEpisodeCount;
+    const episodeCount = match.statistics?.episodeCount ?? 0;
+    const allDownloaded = episodeFileCount >= episodeCount;
     return episodeFileCount > 0 && (match.status !== "ended" || allDownloaded);
   } catch (err) {
     console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));
@@ -934,7 +1017,7 @@ export async function getReleasesForSeries(
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
 
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
+  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new Error("Series not found in Sonarr library");
 
@@ -971,7 +1054,7 @@ export async function grabSeriesRelease(
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
 
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
+  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new Error("Series not found in Sonarr library");
 
@@ -998,7 +1081,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   // configured default; only fetch the instance's profiles when neither is set.
   const needProfiles = !qualityProfileIdOverride && !cfg.qualityProfileId;
   const [results, rootFolders, profiles] = await Promise.all([
-    arrFetch<{ title: string; tvdbId: number; tmdbId?: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string }[]>(
+    arrFetch<{ title: string; tvdbId: number; tmdbId?: number; year: number; images: object[]; titleSlug: string; seasons: { seasonNumber: number; monitored: boolean }[]; firstAired?: string; status?: string }[]>(
       cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
     ),
     cfg.rootFolder
@@ -1021,9 +1104,12 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   // one candidate (what a recognized id lookup always yields).
   const series = results.find((s) => s.tmdbId === tmdbId) ?? (results.length === 1 ? results[0] : undefined);
   if (!series) throw new Error(`Sonarr: lookup for tmdbId ${tmdbId} returned no matching series`);
+  // firstAired is authoritative; without it, Sonarr's own status ("upcoming"
+  // vs continuing/ended) beats the year heuristic, which read every
+  // current-year show as unaired and skipped the add-time search.
   const seriesReleased = series.firstAired
     ? new Date(series.firstAired) <= new Date()
-    : series.year < new Date().getFullYear();
+    : (series.status ? series.status !== "upcoming" : series.year < new Date().getFullYear());
 
   const rootFolderPath = cfg.rootFolder ?? rootFolders[0].path;
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
@@ -1055,11 +1141,42 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
       }),
     });
 
+  // Sonarr twin of the Radarr duplicate remediation above: an existing
+  // UNMONITORED entry is never auto-grabbed, so re-monitor (regular seasons
+  // only, matching the add path) + search, degrading to warn-and-skip on any
+  // failure.
+  const remediateExistingSeries = async () => {
+    try {
+      const existing = await arrFetch<Array<{ id: number; tvdbId: number; monitored: boolean; seasons?: { seasonNumber: number; monitored: boolean }[] } & Record<string, unknown>>>(
+        cfg, `/api/v3/series?tvdbId=${series.tvdbId}`,
+      );
+      const row = existing.find((s) => s.tvdbId === series.tvdbId);
+      if (!row || row.monitored) return;
+      await arrFetch<unknown>(cfg, `/api/v3/series/${row.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          ...row,
+          monitored: true,
+          seasons: (row.seasons ?? []).map((s) => ({ ...s, monitored: s.seasonNumber > 0 })),
+        }),
+      });
+      if (seriesReleased) {
+        await arrFetch<unknown>(cfg, "/api/v3/command", {
+          method: "POST",
+          body: JSON.stringify({ name: "SeriesSearch", seriesId: row.id }),
+        });
+      }
+    } catch (remErr) {
+      console.warn("[arr] existing-series re-monitor failed (leaving as-is):", arrErrorMessage(remErr));
+    }
+  };
+
   try {
     await postSeries();
   } catch (err) {
     if (isDuplicate(err)) {
-      console.warn("[arr] series already in Sonarr — skipping add, request may need manual review", { tmdbId });
+      console.warn("[arr] series already in Sonarr — re-checking its monitored state", { tmdbId });
+      await remediateExistingSeries();
     } else {
       // A *different* series (different tvdbId) already occupies the folder this
       // title would use. Retry once with a tvdbId-tagged path — mirrors Sonarr's
@@ -1070,7 +1187,8 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
         await postSeries(`${collidedPath} {tvdb-${series.tvdbId}}`);
       } catch (retryErr) {
         if (isDuplicate(retryErr)) {
-          console.warn("[arr] series already in Sonarr — skipping add, request may need manual review", { tmdbId });
+          console.warn("[arr] series already in Sonarr — re-checking its monitored state", { tmdbId });
+          await remediateExistingSeries();
         } else {
           throw retryErr;
         }
@@ -1084,7 +1202,7 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
 export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant = ""): Promise<void> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
+  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new Error("Series not found in Sonarr library");
   await arrFetch<unknown>(cfg, "/api/v3/command", {
@@ -1096,7 +1214,7 @@ export async function searchSeriesInSonarr(tvdbId: number, variant: ArrVariant =
 export async function searchSeasonInSonarr(tvdbId: number, seasonNumber: number, variant: ArrVariant = ""): Promise<void> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
+  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new Error("Series not found in Sonarr library");
   await arrFetch<unknown>(cfg, "/api/v3/command", {
@@ -1108,7 +1226,7 @@ export async function searchSeasonInSonarr(tvdbId: number, seasonNumber: number,
 export async function searchEpisodeInSonarr(tvdbId: number, seasonNumber: number, episodeNumber: number, variant: ArrVariant = ""): Promise<void> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) throw new Error("Sonarr is not configured");
-  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, "/api/v3/series");
+  const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
   if (!series) throw new Error("Series not found in Sonarr library");
   const episodes = await arrFetch<{ id: number; seasonNumber: number; episodeNumber: number }[]>(

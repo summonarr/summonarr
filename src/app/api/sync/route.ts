@@ -11,7 +11,8 @@ import {
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
+import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
@@ -741,11 +742,28 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             const token = cfg.token;
             const sections = await getPlexLibrarySections(serverUrl, token);
             const selectedPlexKeys = librarySelections.get(plexSettingKey(instance.slug, "Libraries"));
+            // ratingKeyToTmdb accumulates the show walk's ratingKey→ids mapping
+            // so the episode pass below reuses this type=2 listing instead of
+            // re-paging every show section (per-instance — ratingKeys are
+            // server-local). The legacy maps collect pre-2020-agent items
+            // (thetvdb://, imdb:// guids) for best-effort tmdb resolution.
+            const ratingKeyToTmdb = new Map<string, number[]>();
+            const movieLegacy = new Map<string, PlexLegacyGuidRef>();
+            const tvLegacy = new Map<string, PlexLegacyGuidRef>();
             const [movieIds, tvIds] = await Promise.all([
-              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
-              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
+              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections, undefined, movieLegacy),
+              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy),
             ]);
-            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds } };
+            // Resolve + merge legacy-agent items (self-catching, never throws):
+            // a resolution failure degrades those items to their previous
+            // invisibility rather than failing the instance's fetch.
+            const [resolvedMovies, resolvedTv] = await Promise.all([
+              resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
+              resolvePlexLegacyGuids(tvLegacy, "TV"),
+            ]);
+            mergeResolvedLegacyItems(resolvedMovies, movieIds);
+            mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
+            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds, ratingKeyToTmdb } };
           } catch (err) {
             console.error(`[sync] Plex check failed for instance "${instance.slug}":`, err);
             return { slug: instance.slug, result: null };
@@ -837,9 +855,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // can resolve episodes onto another server's show.
       let allEpisodesFetched = true;
       const allPlexEpisodeRows: Array<{ source: "plex" } & PlexTVEpisodeData> = [];
-      for (const { slug, serverUrl, token, sections } of writable) {
+      for (const { slug, serverUrl, token, sections, ratingKeyToTmdb } of writable) {
         try {
-          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections);
+          // The precomputed ratingKeyToTmdb map (built by this instance's own
+          // type=2 walk above) skips getPlexTVEpisodes' per-section re-walk of
+          // the identical show listing.
+          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections, ratingKeyToTmdb);
           allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
         } catch (err) {
           console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);

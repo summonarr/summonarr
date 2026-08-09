@@ -406,7 +406,19 @@ export async function recordCompletedSession(
       ? totalDurationMsRaw
       : rawProgressMs;
 
-  const cappedProgressMs = Math.min(clampedProgressMs, wallElapsedMs);
+  // Subtract the session's resume offset (startProgressMs, stamped at create)
+  // before capping: the fallback wants the playhead ADVANCE within this
+  // session, not the absolute file position — a resume at 40:00 that played
+  // 2 min is 2 min of watching, not 42. The wall cap alone couldn't see that
+  // (it bounded a 42-min position to the 10-min wall window, still inflating
+  // playDuration 5× and zeroing pausedDuration). A backward seek clamps the
+  // delta to 0 and playtimeMs governs; pre-existing rows carry the 0 default
+  // and reproduce the old start-of-file math exactly. `?? 0` guards rows from
+  // stubs/fixtures that predate the column.
+  const cappedProgressMs = Math.min(
+    Math.max(0, clampedProgressMs - Number(session.startProgressMs ?? 0)),
+    wallElapsedMs,
+  );
   const playDurationMs = Math.max(Number(session.playtimeMs), cappedProgressMs);
   const playDurationS = Math.max(0, Math.floor(playDurationMs / 1000));
 

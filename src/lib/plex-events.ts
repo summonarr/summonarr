@@ -304,18 +304,16 @@ class PlexEventStreamManager {
     const token = this.currentToken;
     if (!url || !token) throw new Error("not configured");
 
-    // Safe-start reconcile: SSE is a "from-now" feed — events that fired while
-    // we were disconnected (process restart, network blip, settings change) are
-    // gone forever. Before subscribing, snapshot /status/sessions and finalize
-    // any DB rows Plex no longer reports. Closes the post-restart window in
-    // which a ghost "PLAYING" card could linger until the 5s poller or 60s
-    // stall detector caught up. Runs once per (re)connect.
-    await this.bootstrapReconcile(url, token);
-
     // Capture the AbortController in a local const so the recycle timer can't
     // later end up aborting a *different* connection (e.g. a settings-change
     // restart that swapped `this.abortController` for a fresh one). The
     // recycle timer must only fire against the connection it was paired with.
+    //
+    // Installed BEFORE the bootstrap reconcile below — bootstrapReconcile can
+    // block up to plexFetch's 60s timeout against a hung server, and a stop()
+    // or settings-change restart landing in that window used to find a null
+    // controller (no-op abort), then have this stale loop wake up, open an SSE
+    // stream against the OLD url/token, and clobber the new loop's controller.
     const localAbort = new AbortController();
     this.abortController = localAbort;
     const recycleTimer = setTimeout(() => localAbort.abort(), PERIODIC_RECYCLE_MS);
@@ -324,6 +322,21 @@ class PlexEventStreamManager {
     let connectedAt = 0;
 
     try {
+      // Safe-start reconcile: SSE is a "from-now" feed — events that fired while
+      // we were disconnected (process restart, network blip, settings change) are
+      // gone forever. Before subscribing, snapshot /status/sessions and finalize
+      // any DB rows Plex no longer reports. Closes the post-restart window in
+      // which a ghost "PLAYING" card could linger until the 5s poller or 60s
+      // stall detector caught up. Runs once per (re)connect.
+      await this.bootstrapReconcile(url, token);
+
+      // A stop()/restart may have landed during the (up to 60s) bootstrap
+      // await. Re-check ownership before opening the stream: a stale loop that
+      // proceeded here consumed the OLD server's events for up to the 22h
+      // recycle and ledger-locked colliding session keys against the new one.
+      if (!this.running || localAbort.signal.aborted || this.currentUrl !== url || this.currentToken !== token) {
+        return;
+      }
       // Subscribe to playing + timeline event types. Playing drives the Now
       // Playing card; timeline lets us invalidate the library cache when Plex's
       // scanner adds/removes items. We deliberately do NOT subscribe to
@@ -392,6 +405,11 @@ class PlexEventStreamManager {
       }
     } finally {
       clearTimeout(recycleTimer);
+      // Tear this connection down on EVERY exit path — an early ownership
+      // return or a loop that never read (running flipped false mid-bootstrap)
+      // would otherwise leave the response socket open with no owner and no
+      // timer. Aborting an already-aborted/settled controller is a no-op.
+      localAbort.abort();
       // Earn the backoff reset via uptime, however this connection ended
       // (stream end, error, periodic recycle). A connection that never
       // established (connectedAt === 0) or died young keeps escalating.
@@ -554,6 +572,14 @@ class PlexEventStreamManager {
     ).slice(0, MAX_NOTIFICATIONS_PER_FRAME);
     let materialChange = false;
     for (const e of entries) {
+      // Nothing downstream ingests non-video data: the orchestrator this
+      // trigger fires walks configured movie/TV sections only, so a music or
+      // photo scan (artist=8..track=10, photo=13, playlist=15 — python-plexapi
+      // SEARCHTYPES) was paying full multi-source syncs for zero change. Only
+      // movie=1 / show=2 / season=3 / episode=4 count; an entry WITHOUT a type
+      // field still counts (tolerant default — an unexpected payload shape must
+      // never silently disable the resync path).
+      if (e.type != null && e.type !== 1 && e.type !== 2 && e.type !== 3 && e.type !== 4) continue;
       // Only "created" / "updated" / "deleted" terminal states change the
       // library shape we cache. "queued" and "processing" are intermediate
       // scan steps that the next terminal event supersedes — ignoring them
@@ -615,7 +641,16 @@ class PlexEventStreamManager {
     // and Claude.md guardrail 5a). This ensures the full public /api/sync path
     // (auth, advisory lock, orchestrator, audit recording) is exercised.
     try {
-      await triggerFullSync();
+      // "skipped" = the orchestrator's advisory lock was held (an in-flight
+      // cron/admin/previous-SSE run). Dropping the trigger there made the
+      // library change wait up to SYNC_INTERVAL (1h) — re-arm the debounce so
+      // it retries once the ~minutes-long run releases the lock. Bounded: each
+      // retry is one cheap loopback probe per debounce window, and stop()
+      // tears the timer down. "failed" is NOT re-armed (triggerFullSync
+      // already warned; a broken loopback would retry forever).
+      if (await triggerFullSync() === "skipped") {
+        this.requestLibraryResync();
+      }
     } catch (err) {
       // triggerFullSync already swallows and warns; this is defensive.
       const msg = err instanceof Error ? err.message : String(err);

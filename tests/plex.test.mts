@@ -52,8 +52,11 @@
 // ssrf.ts is module-global, so hostname reuse across tests would serve a cached
 // entry instead of exercising the stub.
 import { test, beforeEach } from "node:test";
+import type { TestContext } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
+// Type-only: erased at runtime, so the module graph still loads AFTER the stubs.
+import type { PlexLegacyGuidRef } from "../src/lib/plex.ts";
 
 // ── DNS stub (see tests/trakt.test.mts for the rationale) ───────────────────
 const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
@@ -99,6 +102,12 @@ beforeEach(() => {
     throw new Error(`unexpected fetch ${url} — script a responder for this test`);
   };
 });
+
+// Drain the microtask cascade behind a mocked-timer fire (retry tests). Real
+// setImmediate — never in the mocked apis list. (Same helper as jellyfin's.)
+async function flush(): Promise<void> {
+  for (let i = 0; i < 3; i++) await new Promise<void>((r) => setImmediate(r));
+}
 
 // Dynamic import so the stubs above genuinely precede the module-graph load
 // (static imports would hoist above them).
@@ -255,8 +264,11 @@ test("getPlexLibrarySections: missing Directory is an empty list; a non-2xx thro
   respond = () => okJson({ MediaContainer: {} });
   assert.deepEqual(await getPlexLibrarySections(S, "t"), []);
 
-  respond = () => okJson({ error: "boom" }, 500);
-  await assert.rejects(() => getPlexLibrarySections(S, "t"), /Plex sections: 500/);
+  // 404 fast-fails the retry wrapper (a 5xx would sleep through three real
+  // backoffs here — the retry mechanics are pinned with mocked timers in the
+  // section-page retry test).
+  respond = () => okJson({ error: "boom" }, 404);
+  await assert.rejects(() => getPlexLibrarySections(S, "t"), /Plex sections: 404/);
 });
 
 // ── getPlexSectionTmdbIds ───────────────────────────────────────────────────
@@ -386,19 +398,89 @@ test("getPlexSectionTmdbIds show sections: recentlyAdded path, allLeaves filePat
   assert.equal(items.get(300)?.filePath, null, "a thrown leaf fetch is swallowed and leaves filePath null");
 });
 
-test("getPlexSectionTmdbIds error shapes: a non-2xx page and a missing MediaContainer both throw with the page offset", async () => {
+test("getPlexSectionTmdbIds error shapes: a persistent 5xx and a missing MediaContainer throw with the page offset after retries exhaust", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const S = "http://plex-err1.test:32400";
-  respond = () => okJson({ error: "boom" }, 500);
-  await assert.rejects(
-    () => getPlexSectionTmdbIds(S, "t", "1", "movie", false),
-    /Plex paginated fetch failed: 500 at start=0/,
-  );
 
+  respond = () => okJson({ error: "boom" }, 500);
+  {
+    const done = assert.rejects(
+      getPlexSectionTmdbIds(S, "t", "1", "movie", false),
+      /Plex paginated fetch failed: 500 at start=0/,
+    );
+    for (const ms of [2_000, 4_000, 6_000]) { await flush(); t.mock.timers.tick(ms); }
+    await done;
+    assert.equal(fetchCalls.length, 4, "one attempt + three retries on a persistent 5xx");
+  }
+
+  fetchCalls.length = 0;
   respond = () => okJson({});
+  {
+    const done = assert.rejects(
+      getPlexSectionTmdbIds(S, "t", "1", "movie", false),
+      /returned no MediaContainer at start=0/,
+    );
+    for (const ms of [2_000, 4_000, 6_000]) { await flush(); t.mock.timers.tick(ms); }
+    await done;
+  }
+});
+
+test("a 5xx page retries after the backoff (with the [plex] retry warn) and the retried page's items survive; a non-429 4xx fast-fails", async (t: TestContext) => {
+  // The Jellyfin twin's per-page retry is established precedent — one transient
+  // blip must not abort an entire instance's sync arm for a full SYNC_INTERVAL.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const S = "http://plex-retry1.test:32400";
+  let calls = 0;
+  respond = () => {
+    calls++;
+    if (calls === 1) return okJson({ error: "transient" }, 500);
+    return mediaContainer([{ type: "movie", ratingKey: "9", title: "Nine", Guid: [{ id: "tmdb://9" }] }], { totalSize: 1 });
+  };
+
+  const p = getPlexSectionTmdbIds(S, "t", "1", "movie", false);
+  await flush();
+  assert.equal(fetchCalls.length, 1, "the first attempt has failed; the retry is parked behind its backoff");
+  t.mock.timers.tick(2_000); // PAGE_RETRY_DELAY_MS * attempt 1
+  const items = await p;
+  assert.equal(fetchCalls.length, 2);
+  assert.ok(warns.some((w) => w.includes("[plex] retry 1/3 for start=0")), "each retry must warn with its scope");
+  assert.deepEqual([...items.keys()], [9]);
+
+  // A revoked token can never succeed on retry — it must not hammer the server.
+  fetchCalls.length = 0;
+  respond = () => okJson({ error: "revoked" }, 401);
   await assert.rejects(
     () => getPlexSectionTmdbIds(S, "t", "1", "movie", false),
-    /returned no MediaContainer at start=0/,
+    /Plex paginated fetch failed: 401 at start=0/,
   );
+  assert.equal(fetchCalls.length, 1, "non-429 4xx fast-fails on the first attempt");
+});
+
+test("legacy-agent thetvdb://​/imdb:// items land in the legacy channel instead of vanishing; modern Guid arrays never do", async () => {
+  // Pre-2020 agents carry NO tmdb id at all (com.plexapp.agents.thetvdb://,
+  // com.plexapp.agents.imdb://) — those items used to be invisible to
+  // availability and the episode cache. The walk now collects them for the
+  // sync layer's best-effort TMDB /find resolution.
+  const S = "http://plex-legacy1.test:32400";
+  respond = () =>
+    mediaContainer([
+      { type: "movie", ratingKey: "L1", title: "Old Movie", guid: "com.plexapp.agents.imdb://tt0137523?lang=en" },
+      { type: "show", ratingKey: "L2", title: "Old Show", guid: "com.plexapp.agents.thetvdb://81189?lang=en" },
+      { type: "movie", ratingKey: "L3", title: "Legacy tmdb", guid: "com.plexapp.agents.themoviedb://550" },
+      { type: "movie", ratingKey: "L4", title: "Modern imdb-only", Guid: [{ id: "imdb://tt1375666" }] },
+    ], { totalSize: 4 });
+
+  const legacyOut = new Map<string, PlexLegacyGuidRef>();
+  const items = await getPlexSectionTmdbIds(S, "t", "1", "movie", false, undefined, legacyOut);
+  // The legacy themoviedb:// guid still resolves inline, never via the channel.
+  assert.deepEqual([...items.keys()], [550]);
+  assert.deepEqual([...legacyOut.keys()].sort(), ["L1", "L2"]);
+  assert.equal(legacyOut.get("L1")!.imdbId, "tt0137523");
+  assert.equal(legacyOut.get("L1")!.data.title, "Old Movie", "the channel carries the full item data for the post-resolution merge");
+  assert.equal(legacyOut.get("L2")!.tvdbId, 81189);
+  // A MODERN Guid array without a tmdb entry stays excluded (pinned deliberate
+  // in the guid tests above) and must NOT enter the legacy channel either.
+  assert.ok(!legacyOut.has("L4"));
 });
 
 // ── getPlexTmdbIds ──────────────────────────────────────────────────────────
@@ -515,6 +597,39 @@ test("getPlexTVEpisodes returns [] without fetching the episode page when no sho
   assert.equal(fetchCalls.length, 1, "the type=4 episode page must be skipped entirely");
 });
 
+test("the type=2 walk accumulates ratingKey→tmdb ids, and a precomputed map skips getPlexTVEpisodes' show re-walk", async () => {
+  // The full sync used to page every show section TWICE — once for the library
+  // map, once inside getPlexTVEpisodes for the identical ratingKey→tmdb table.
+  const S = "http://plex-pre1.test:32400";
+  respond = (url) => {
+    if (url.pathname === "/library/sections/3/all") {
+      return mediaContainer([{ type: "show", ratingKey: "70", title: "Severance", Guid: [{ id: "tmdb://95396" }] }], { totalSize: 1 });
+    }
+    if (url.pathname === "/library/metadata/70/allLeaves") {
+      return mediaContainer([{ Media: [{ Part: [{ file: "/tv/severance/e1.mkv" }] }] }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const out = new Map<string, number[]>();
+  await getPlexSectionTmdbIds(S, "t", "3", "show", false, out);
+  assert.deepEqual([...out.entries()], [["70", [95396]]]);
+
+  fetchCalls.length = 0;
+  respond = (url) => {
+    if (url.pathname === "/library/sections/3/all" && url.searchParams.get("type") === "4") {
+      return mediaContainer([{ grandparentRatingKey: "70", parentIndex: 1, index: 2 }], { totalSize: 1 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const sections = [{ key: "3", title: "Shows", type: "show" as const }];
+  const eps = await getPlexTVEpisodes(S, "t", undefined, sections, out);
+  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 2 }]);
+  assert.ok(
+    fetchCalls.every((c) => c.url.searchParams.get("type") !== "2"),
+    "the precomputed map must skip the duplicate type=2 show walk",
+  );
+});
+
 test("getPlexEpisodesForShow pages the show's allLeaves and stamps the caller's tmdbId onto valid episodes", async () => {
   const S = "http://plex-leaf1.test:32400";
   respond = (url) => {
@@ -607,6 +722,7 @@ test("getPlexSessions maps a DirectPlay movie session to the exact shape the pla
     player: "Living Room",
     device: "Apple TV", // "Plex for " prefix stripped from Player.product
     address: "192.168.1.50",
+    remotePublicAddress: undefined, // LAN fixture carries none — mapped through when PMS sends it
     playMethod: "DirectPlay", // no TranscodeSession at all
     videoCodec: "hevc",
     audioCodec: "eac3",
@@ -621,6 +737,46 @@ test("getPlexSessions maps a DirectPlay movie session to the exact shape the pla
     secure: true, // "1" → true
     relayed: false, // "0" → false
   }]);
+});
+
+test("getPlexSessions prefers the `selected` Media/Part/Stream over [0]/first-of-type on multi-version items", async () => {
+  // /status/sessions lists EVERY Media version of a multi-version item and
+  // every stream of the playing part, with the actually-playing ones marked
+  // selected ("1" string or boolean). [0]/first-of-type is routinely the wrong
+  // one; fixtures without the attribute keep the old first-entry fallback.
+  const S = "http://plex-sess4.test:32400";
+  respond = () =>
+    mediaContainer([{
+      sessionKey: "9",
+      Media: [
+        {
+          container: "mkv", bitrate: 30_000, videoResolution: "4k",
+          Part: [{ Stream: [{ streamType: 1, codec: "hevc" }, { streamType: 2, codec: "truehd" }] }],
+        },
+        {
+          container: "mp4", bitrate: 4_000, videoResolution: "1080", selected: "1",
+          Part: [
+            { Stream: [{ streamType: 1, codec: "h264-wrong-part" }] },
+            {
+              selected: "1",
+              Stream: [
+                { streamType: 1, codec: "h264-other" },
+                { streamType: 1, codec: "h264-sel", selected: "1" },
+                { streamType: 2, codec: "aac" },
+                { streamType: 2, codec: "eac3", selected: true },
+              ],
+            },
+          ],
+        },
+      ],
+    }]);
+
+  const [s] = await getPlexSessions(S, "t");
+  assert.equal(s.resolution, "1080", "the selected Media version wins over Media[0]");
+  assert.equal(s.bitrate, 4_000);
+  assert.equal(s.container, "mp4");
+  assert.equal(s.videoCodec, "h264-sel", "the selected stream of the selected Part wins over first-of-type");
+  assert.equal(s.audioCodec, "eac3", "boolean selected normalizes like secure/relayed");
 });
 
 test("getPlexSessions: episode title composition and the Transcode/DirectStream decision with humanized reasons", async () => {
@@ -795,8 +951,10 @@ test("hasPlexItemByTmdbId counts totalSize, falls back to size, and reads absent
 test("hasPlexItemByTmdbId never throws: a failed section listing reads as false; broken sections are skipped until one answers", async () => {
   const S = "http://plex-has3.test:32400";
 
-  // Section listing itself fails → no sections → false, no throw.
-  respond = () => okJson({ error: "down" }, 500);
+  // Section listing itself fails → no sections → false, no throw. (A 404
+  // fast-fails the listing's retry wrapper; a 5xx would retry first — the
+  // retry mechanics are pinned in the retry test above.)
+  respond = () => okJson({ error: "gone" }, 404);
   assert.equal(await hasPlexItemByTmdbId(S, "t", 1, "movie"), false);
   assert.equal(fetchCalls.length, 1);
 
@@ -906,8 +1064,8 @@ test("getPlexMachineId reads /identity and returns null on non-2xx, on a missing
 // ── getPlexFriendEmails (direct-call contracts; caller behavior lives in
 //    tests/plex-membership.test.mts) ──────────────────────────────────────────
 
-test("getPlexFriendEmails without a serverUrl refuses with an empty set and a [plex] warn — zero upstream traffic", async () => {
-  assert.deepEqual(await getPlexFriendEmails("admin-tok"), new Set());
+test("getPlexFriendEmails without a serverUrl refuses with empty sets and a [plex] warn — zero upstream traffic", async () => {
+  assert.deepEqual(await getPlexFriendEmails("admin-tok"), { ids: new Set(), emails: new Set() });
   assert.ok(warns.some((w) => w.includes("[plex]") && w.includes("without serverUrl")));
   assert.equal(fetchCalls.length, 0, "the over-broad all-servers enumeration must never be attempted");
 });
@@ -938,9 +1096,14 @@ test("getPlexFriendEmails direct contract: a non-2xx /api/users THROWS; valid em
   await assert.rejects(() => getPlexFriendEmails("admin-tok", S), /Failed to fetch Plex users: 502/);
 
   usersFail = false;
-  const emails = await getPlexFriendEmails("admin-tok", S);
-  // Only the friend shared on OUR machineIdentifier with a valid email
-  // survives, lowercased. Other-server friends, invalid emails, and
-  // email-less blocks are all dropped.
-  assert.deepEqual(emails, new Set(["friend@example.com"]));
+  const members = await getPlexFriendEmails("admin-tok", S);
+  // Ids are captured for EVERY machine-scoped block — the immutable plex.tv
+  // account id is the id-first join key for the sign-in and session-refresh
+  // membership gates — even when the email is invalid or absent. The email
+  // set keeps only valid addresses, lowercased. Other-server friends
+  // contribute to neither set.
+  assert.deepEqual(members, {
+    ids: new Set(["1", "3", "4"]),
+    emails: new Set(["friend@example.com"]),
+  });
 });

@@ -45,13 +45,18 @@ export async function getEnrichedPerson(
   const [plexRows, jfRows, requestRows, mineRows, radarrRows, sonarrRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.plex } }, select: { tmdbId: true, mediaType: true } }),
     prisma.jellyfinLibraryItem.findMany({ where: { OR: orClause, serverInstance: { in: visible.jellyfin } }, select: { tmdbId: true, mediaType: true } }),
+    // arrInstance: "" — the default-instance scope every discovery grid uses
+    // (attachRequestedStatus, pinned in tests/request-availability.test.mts).
+    // Unscoped, a request living only on a 4K/named instance flagged the
+    // person-page card "requested"/blocked its Request button while the same
+    // title's grid card showed neither — matching the wanted-item scopes below.
     prisma.mediaRequest.findMany({
-      where: { status: { not: "DECLINED" }, OR: orClause },
+      where: { status: { not: "DECLINED" }, arrInstance: "", OR: orClause },
       select: { tmdbId: true, mediaType: true },
       distinct: ["tmdbId", "mediaType"],
     }),
     prisma.mediaRequest.findMany({
-      where: { status: { not: "DECLINED" }, requestedBy: session.user.id, OR: orClause },
+      where: { status: { not: "DECLINED" }, arrInstance: "", requestedBy: session.user.id, OR: orClause },
       select: { tmdbId: true, mediaType: true },
       distinct: ["tmdbId", "mediaType"],
     }),

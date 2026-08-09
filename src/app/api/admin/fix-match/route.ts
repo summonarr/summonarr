@@ -8,7 +8,7 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
-import { getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { getJellyfinEpisodesForShow, jellyfinAdminHeaders } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
@@ -382,11 +382,12 @@ async function fixJellyfinMatch(
   const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
 
   const apiKey  = jellyfinConfig.apiKey;
-  const headers = {
-    "X-MediaBrowser-Token": apiKey,
-    "Content-Type": "application/json",
-    "User-Agent": "Summonarr/1.0 (Node.js)",
-  };
+  // Dual-send auth (Authorization: MediaBrowser + legacy X-MediaBrowser-Token):
+  // RemoteSearch/Apply and /Items/{id}/Refresh are RequiresElevation endpoints,
+  // and Jellyfin 10.12 stops reading the bare legacy header entirely (see
+  // JELLYFIN_IDENTITY in jellyfin.ts) — a bare-token call would 401 here while
+  // the admin-surface calls kept working.
+  const headers = jellyfinAdminHeaders(apiKey);
   const searchType = mediaType === "MOVIE" ? "Movie" : "Series";
   const searchRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/${searchType}`, {
     method: "POST",

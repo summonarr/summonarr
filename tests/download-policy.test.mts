@@ -168,7 +168,7 @@ const okJson = (data: unknown) =>
 
 // Dynamic import so the prisma-shadow/fetch stubs above precede the module
 // graph (the established pattern — see jellyfin.test.mts).
-const { syncDownloadPolicies } = await import("../src/lib/download-policy.ts");
+const { syncDownloadPolicies, RECONCILE_CONFIRM_RUNS } = await import("../src/lib/download-policy.ts");
 
 test("guardrail 28: a user existing ONLY on a second Jellyfin instance survives the FIRST instance's prune untouched, while a genuine same-instance departure is still pruned", async () => {
   settings.clear();
@@ -211,4 +211,39 @@ test("guardrail 28: a user existing ONLY on a second Jellyfin instance survives 
     true,
     "guardrail 28: a user that exists ONLY on the OTHER instance must survive this instance's prune — it was never absent from ITS OWN server",
   );
+});
+
+test("reconcile wedge escape: an over-tolerance shrink refuses, then the SAME fetched set on the Nth identical run is accepted and pruned", async () => {
+  settings.clear();
+  msuStore.clear();
+  settings.set("jellyfinUrl", DEFAULT_URL);
+  settings.set("jellyfinApiKey", "key-default");
+
+  // 5 active users, then a real mass departure leaves 1 — beyond
+  // PRUNE_MAX_SHRINK, so the guard refuses. That refusal used to be PERMANENT:
+  // it skips the only writer of active=false, so priorActiveCount never shrank
+  // and the warn fired every run forever with no remediation path. The
+  // confirmation counter accepts the shrink once the IDENTICAL fetched set has
+  // been observed RECONCILE_CONFIRM_RUNS consecutive runs.
+  for (let i = 1; i <= 5; i++) {
+    seedMsu({ id: `w-${i}`, source: "jellyfin", serverInstance: "", sourceUserId: `w${i}`, username: `w${i}`, email: null, isServerAdmin: false, downloadsEnabled: null, active: true, manualUserLink: false });
+  }
+  respond = (url) => {
+    if (url === `${DEFAULT_URL}/Users`) {
+      return okJson([{ Id: "w1", Name: "w1", Policy: { IsAdministrator: false, EnableContentDownloading: true } }]);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  for (let run = 1; run < RECONCILE_CONFIRM_RUNS; run++) {
+    await syncDownloadPolicies();
+    assert.equal(
+      [...msuStore.values()].filter((r) => r.active).length,
+      5,
+      `run ${run}: an unconfirmed shrink must not prune (first-observation refusal preserved)`,
+    );
+  }
+  await syncDownloadPolicies(); // the Nth identical observation — accepted
+  const active = [...msuStore.values()].filter((r) => r.active).map((r) => r.sourceUserId);
+  assert.deepEqual(active, ["w1"], "the persistent identical set is finally accepted and the departures pruned");
 });

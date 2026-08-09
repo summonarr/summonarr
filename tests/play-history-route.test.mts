@@ -139,6 +139,7 @@ interface ActiveRow {
   posterPath: string | null;
   progressPercent: number;
   progressMs: bigint;
+  startProgressMs?: bigint;
   progressUpdatedAt: Date;
   playtimeMs: bigint;
   durationMs: bigint;
@@ -378,9 +379,10 @@ const fakePrisma = {
         user: { findUnique: async () => null },
         mediaServerUser: {
           findUnique: async () => null,
-          upsert: async (a: { create: { source: string; sourceUserId: string } }) => ({
-            id: `msu:${a.create.source}:${a.create.sourceUserId}`,
-          }),
+          upsert: async (a: { create: { source: string; sourceUserId: string } }) => {
+            rec("mediaServerUser", "upsert", a);
+            return { id: `msu:${a.create.source}:${a.create.sourceUserId}` };
+          },
         },
       };
       return (arg as (t: typeof tx) => Promise<unknown>)(tx);
@@ -951,6 +953,39 @@ test("a brand-new session (no existing row, non-DLNA) is created via createMany(
   );
   assert.equal((createCall!.args as CreateManyArgs).skipDuplicates, true, "overlapping poll ticks must not reject each other on a duplicate insert");
   assert.equal(historyRows().length, 0, "a fresh session writes no PlayHistory row");
+});
+
+test("the server OWNER's local account id \"1\" is rewritten to the plex.tv admin id and flagged isServerAdmin", async () => {
+  // PMS reports owner sessions with the LOCAL id "1" while User.plexUserId and
+  // every MediaServerUser row carry plex.tv GLOBAL ids — unrewritten, the
+  // owner's history never auto-attributes and no Plex row earns isServerAdmin
+  // (Tautulli special-cases id "1" for the same reason). The plex.tv stub
+  // above answers /api/v2/user with id 9.
+  const snap = plexSnap("own-1", { viewOffset: 60_000 });
+  (snap.User as { id: string }).id = "1";
+  plexSnapshot = [snap];
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 1, updated: 0, ended: 0 });
+  await settle();
+
+  const created = activeCreatesFor("plex:own-1");
+  assert.equal(created.length, 1);
+  assert.equal(
+    created[0].mediaServerUserId,
+    "msu:plex:9",
+    'the "1" session must resolve under the plex.tv admin id, not the unmatchable local id',
+  );
+  const upsert = dbCalls.find(
+    (c) => c.model === "mediaServerUser" && c.op === "upsert" &&
+      (c.args as { create: { sourceUserId: string } }).create.sourceUserId === "9",
+  );
+  assert.ok(upsert, "the resolve upsert must carry the rewritten global id");
+  assert.equal(
+    (upsert!.args as { create: { isServerAdmin?: boolean } }).create.isServerAdmin,
+    true,
+    "an owner session must mark the row isServerAdmin",
+  );
 });
 
 test("a continuing playing session accrues a playtimeMs increment and takes the CAS updateMany on (id, lastSeenAt)", async () => {

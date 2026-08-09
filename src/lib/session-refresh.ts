@@ -102,6 +102,7 @@ export async function verifyAndRefreshSession(
         deactivatedAt: true,
         email: true,
         notificationEmail: true,
+        plexUserId: true,
       },
     }),
   ]);
@@ -148,7 +149,13 @@ export async function verifyAndRefreshSession(
       const candidateEmails = [dbUser.notificationEmail, dbUser.email, claims.email]
         .filter((e): e is string => typeof e === "string" && e.length > 0)
         .map((e) => e.toLowerCase().trim());
-      const stillMember = candidateEmails.some((e) => allowlist.has(e));
+      // Immutable plex.tv account id first — every email candidate goes stale
+      // the moment the user changes their plex.tv address, and an email-only
+      // match used to revoke every device of a still-shared member. Legacy rows
+      // with a null plexUserId keep the email-only behavior via the fallback.
+      const stillMember =
+        (dbUser.plexUserId != null && allowlist.ids.has(dbUser.plexUserId)) ||
+        candidateEmails.some((e) => allowlist.emails.has(e));
       if (candidateEmails.length > 0 && !stillMember) {
         // No longer shared on the Plex server — revoke ALL of this user's
         // sessions (every device) by advancing sessionsRevokedAt past their

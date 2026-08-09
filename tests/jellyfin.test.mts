@@ -6,8 +6,9 @@
 //
 //   authenticateWithJellyfin / QuickConnect trio:
 //   - the EXACT wire shape login depends on: POST /Users/AuthenticateByName
-//     with the X-Emby-Authorization MediaBrowser identity header and a
-//     {Username, Pw} JSON body (Jellyfin rejects password auth without both);
+//     with the MediaBrowser identity dual-sent under BOTH Authorization (the
+//     only form Jellyfin 10.12+ reads once legacy auth is off) and the legacy
+//     X-Emby-Authorization, plus a {Username, Pw} JSON body;
 //     QuickConnect's initiate/poll/exchange endpoints, the Secret's
 //     encodeURIComponent transport, and the {secret, code}/Authenticated
 //     mappings;
@@ -17,10 +18,13 @@
 //
 //   Library surface (hasJellyfinItemByTmdbId, getJellyfinTmdbIds,
 //   getJellyfinMediaFolders, refreshJellyfinLibrary):
-//   - the exact /Items queries: AnyProviderIdEquals=Tmdb.<id> for the
-//     availability probe, and the paged library query (IncludeItemTypes,
-//     ExcludeItemTypes=BoxSet, the full Fields list, StartIndex/Limit=5000)
-//     whose drift would silently empty the library sync;
+//   - the exact /Items queries: the availability probe's recent-additions
+//     fetch with CLIENT-side ProviderIds matching (Jellyfin never implemented
+//     the Emby-style AnyProviderIdEquals filter — jellyfin/jellyfin#1990 — so
+//     a server-side id filter is impossible), and the paged library query
+//     (IncludeItemTypes, ExcludeItemTypes=BoxSet, the full Fields list,
+//     EnableImages=false, StartIndex/Limit=5000) whose drift would silently
+//     empty the library sync;
 //   - MinDateLastSaved is appended ONLY when a date is passed — the recentOnly
 //     window the sync orchestrator rides on;
 //   - ProviderIds parsing: Tmdb with lowercase tmdb fallback, non-numeric
@@ -53,8 +57,9 @@
 //
 //   Admin surface (terminateJellyfinSession, getJellyfinAllUsers,
 //   setJellyfinDownloadPolicy, getJellyfinUserCount):
-//   - the elevated Authorization: MediaBrowser …, Token="…" header (newer
-//     Jellyfin refuses X-MediaBrowser-Token alone for these);
+//   - the Authorization: MediaBrowser …, Token="…" header (now sent by EVERY
+//     token-authenticated call, not just the admin surface — Jellyfin 10.12
+//     stops reading X-MediaBrowser-Token entirely once legacy auth is off);
 //   - terminate: POST /Sessions/{id}/Playing/Stop returns {ok, status} without
 //     throwing; a reason adds a best-effort DisplayMessage command (text capped
 //     at 500 chars) whose failure must NOT affect the Stop;
@@ -165,6 +170,11 @@ test("password auth POSTs /Users/AuthenticateByName with the MediaBrowser identi
   assert.equal(req.url, `${B}/Users/AuthenticateByName`, "the doubled-slash trap: trailing base slash must be stripped");
   assert.equal(req.method, "POST");
   assert.equal(req.headers.get("x-emby-authorization"), IDENTITY_HEADER);
+  assert.equal(
+    req.headers.get("authorization"),
+    IDENTITY_HEADER,
+    "the identity must dual-send under Authorization — the only header Jellyfin 10.12+ reads once legacy auth is off",
+  );
   assert.equal(req.headers.get("content-type"), "application/json");
   assert.deepEqual(JSON.parse(req.body!), { Username: "alice", Pw: "hunter2" });
 });
@@ -208,6 +218,7 @@ test("QuickConnect initiate POSTs /QuickConnect/Initiate with the identity heade
   assert.equal(sent[0].url, `${B}/QuickConnect/Initiate`);
   assert.equal(sent[0].method, "POST");
   assert.equal(sent[0].headers.get("x-emby-authorization"), IDENTITY_HEADER);
+  assert.equal(sent[0].headers.get("authorization"), IDENTITY_HEADER);
 
   respond = () => okJson({}, 500);
   await assert.rejects(() => initiateJellyfinQuickConnect(B), /Jellyfin QuickConnect initiate: 500/);
@@ -222,6 +233,7 @@ test("QuickConnect poll GETs /QuickConnect/Connect with the encodeURIComponent'd
   assert.equal(req.url, `${B}/QuickConnect/Connect?Secret=a%20b%2Bc%2F%3D`, "the secret must ride encodeURIComponent'd in the query");
   assert.equal(req.method, "GET");
   assert.equal(req.headers.get("x-emby-authorization"), IDENTITY_HEADER);
+  assert.equal(req.headers.get("authorization"), IDENTITY_HEADER);
 
   respond = () => okJson({ Authenticated: true });
   assert.equal(await pollJellyfinQuickConnect(B, "s"), true);
@@ -240,6 +252,7 @@ test("QuickConnect exchange POSTs /Users/AuthenticateWithQuickConnect with a {Se
   assert.equal(req.url, `${B}/Users/AuthenticateWithQuickConnect`);
   assert.equal(req.method, "POST");
   assert.equal(req.headers.get("x-emby-authorization"), IDENTITY_HEADER);
+  assert.equal(req.headers.get("authorization"), IDENTITY_HEADER);
   assert.deepEqual(JSON.parse(req.body!), { Secret: "qc-secret-2" });
 
   respond = () => okJson({}); // authenticated but no User payload
@@ -260,6 +273,11 @@ test("user email GETs /Users/{id} (encoded) with X-MediaBrowser-Token and return
   assert.equal(req.url, `${B}/Users/u%201`, "the userId must be encodeURIComponent'd into the path");
   assert.equal(req.method, "GET");
   assert.equal(req.headers.get("x-mediabrowser-token"), "key-1");
+  assert.equal(
+    req.headers.get("authorization"),
+    adminAuthHeader("key-1"),
+    "the token must dual-send under Authorization: MediaBrowser — the only form 10.12+ reads",
+  );
 
   // The @-gate: a non-address string and an absent field both read as "no email".
   respond = () => okJson({ Email: "not-an-address" });
@@ -279,31 +297,48 @@ test("user email degrades to null on non-2xx and on a network failure (never thr
 
 // ── hasJellyfinItemByTmdbId ─────────────────────────────────────────────────
 
-test("availability probe queries /Items with AnyProviderIdEquals=Tmdb.<id>, the mapped item type, and Limit=1", async () => {
+test("availability probe fetches recent additions of the mapped type and matches ProviderIds CLIENT-side", async () => {
+  // Jellyfin never implemented the Emby-style AnyProviderIdEquals filter this
+  // probe used to send (jellyfin/jellyfin#1990; ASP.NET drops the unknown
+  // param) — that query degenerated to "is the library non-empty" and the
+  // post-webhook notify poll fired ~30s after the webhook regardless of
+  // whether the import had been scanned. The replacement pulls the newest
+  // items and matches the tmdb id in the response.
   const B = nextBase();
-  respond = () => okJson({ Items: [{ Id: "m1" }], TotalRecordCount: 1 });
+  respond = () => okJson({
+    Items: [
+      { Id: "other", ProviderIds: { Tmdb: "999" } }, // an unrelated recent item must NOT read as available
+      { Id: "m1", ProviderIds: { Tmdb: "550" } },
+    ],
+    TotalRecordCount: 2,
+  });
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 550, "movie"), true);
   assert.equal(
     sent[0].url,
-    `${B}/Items?AnyProviderIdEquals=Tmdb.550&IncludeItemTypes=Movie&Recursive=true&Limit=1`,
+    `${B}/Items?IncludeItemTypes=Movie&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
   );
   assert.equal(sent[0].headers.get("x-mediabrowser-token"), "key-2");
 
-  respond = () => okJson({ Items: [], TotalRecordCount: 0 });
+  // A non-empty library WITHOUT the target id reads as not-available — the
+  // exact false-positive the old server-side filter produced.
+  respond = () => okJson({ Items: [{ Id: "other", ProviderIds: { Tmdb: "999" } }], TotalRecordCount: 500 });
   assert.equal(await hasJellyfinItemByTmdbId(B, "key-2", 1399, "tv"), false);
   assert.equal(
     sent[1].url,
-    `${B}/Items?AnyProviderIdEquals=Tmdb.1399&IncludeItemTypes=Series&Recursive=true&Limit=1`,
+    `${B}/Items?IncludeItemTypes=Series&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=200&EnableImages=false`,
     "tv must map to the Series item type",
   );
 });
 
-test("availability probe falls back to Items.length without TotalRecordCount and degrades to false on any failure", async () => {
+test("availability probe honors the lowercase tmdb fallback and degrades to false on any failure", async () => {
   const B = nextBase();
-  respond = () => okJson({ Items: [{ Id: "m1" }] }); // no TotalRecordCount
+  respond = () => okJson({ Items: [{ Id: "m1", ProviderIds: { tmdb: "1" } }] }); // lowercase key, no TotalRecordCount
   assert.equal(await hasJellyfinItemByTmdbId(B, "k", 1, "movie"), true);
 
-  respond = () => okJson({}); // neither field
+  respond = () => okJson({ Items: [{ Id: "m1" }] }); // recent item with no ProviderIds
+  assert.equal(await hasJellyfinItemByTmdbId(B, "k", 1, "movie"), false);
+
+  respond = () => okJson({}); // no Items at all
   assert.equal(await hasJellyfinItemByTmdbId(B, "k", 1, "movie"), false);
 
   respond = () => okJson({}, 500);
@@ -374,7 +409,7 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&StartIndex=0&Limit=5000`,
+    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=5000`,
     "the library sync's exact query — a drift here silently empties the sync",
   );
   assert.deepEqual(items.get(550), {
@@ -553,7 +588,7 @@ test("episodes with a provided series map: exact fields query, SeriesId→tmdbId
   const episodes = await getJellyfinTVEpisodes(B, "k", undefined, seriesMap);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&StartIndex=0&Limit=1000`,
+    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(
     episodes.sort((a, b) => a.tmdbId - b.tmdbId),
@@ -717,7 +752,7 @@ test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbI
   const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-77", 4242);
   assert.equal(
     sent[0].url,
-    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&StartIndex=0&Limit=1000`,
+    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(episodes, [
     { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1 },
