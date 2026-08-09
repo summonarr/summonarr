@@ -10,8 +10,6 @@
 //     enrich from the TMDB cache), and duplicate tmdb ids dedup first-wins;
 //   - missing optional fields degrade (year null/absent → releaseYear null,
 //     absent title → "");
-//   - trending rows are wrapped ({ watchers, movie|show }) and are unwrapped
-//     before normalization;
 //   - a malformed entry (no `ids` object at all) throws inside the map and the
 //     whole call degrades to [] via the catch — pinned as CURRENT behavior;
 //   - fetchPages settles per-page: a failed page is dropped, fulfilled pages
@@ -54,8 +52,6 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const {
   getTraktPopularMovies,
   getTraktPopularTV,
-  getTraktTrendingMovies,
-  getTraktTrendingTV,
   testTraktConnection,
 } = await import("../src/lib/trakt.ts");
 
@@ -183,20 +179,6 @@ test("duplicate tmdb ids dedup first-wins", async () => {
   assert.deepEqual(result.map((m) => [m.id, m.title]), [[7, "First"], [8, "Other"]]);
 });
 
-test("trending movies unwrap the { watchers, movie } envelope", async () => {
-  respond = () => jsonResponse([{ watchers: 4321, movie: movieRow(27205, "Inception", 2010) }]);
-  const result = await getTraktTrendingMovies(1);
-  assert.equal(fetchCalls[0].url.pathname, "/movies/trending");
-  assert.deepEqual(result.map((m) => [m.id, m.title, m.mediaType]), [[27205, "Inception", "movie"]]);
-});
-
-test("trending shows unwrap the { watchers, show } envelope", async () => {
-  respond = () => jsonResponse([{ watchers: 99, show: showRow(66732, "Stranger Things", 2016) }]);
-  const result = await getTraktTrendingTV(1);
-  assert.equal(fetchCalls[0].url.pathname, "/shows/trending");
-  assert.deepEqual(result.map((m) => [m.id, m.title, m.mediaType]), [[66732, "Stranger Things", "tv"]]);
-});
-
 test("PINS CURRENT BEHAVIOR: one entry without an `ids` object degrades the whole call to []", async () => {
   // normalizeMovie reads m.ids.tmdb unguarded — a row with no ids throws
   // inside the map, the function's catch eats it, and the caller gets [].
@@ -284,4 +266,14 @@ test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the
   fetchCalls.length = 0;
   assert.deepEqual(await getTraktPopularMovies(1), []); // lockout error → caught → []
   assert.equal(fetchCalls.length, 0);
+});
+
+test("testTraktConnection bypasses the lockout: the admin test reaches the wire while list helpers stay suspended", async () => {
+  // The lockout tripped in the test above (module-global). An admin actively
+  // fixing their client id needs immediate feedback, not a 1h suspension —
+  // mirrors testOmdbConnection's deliberate exemption.
+  respond = () => jsonResponse([movieRow(603, "The Matrix", 1999)]);
+  fetchCalls.length = 0;
+  assert.equal(await testTraktConnection(), "The Matrix");
+  assert.equal(fetchCalls.length, 1, "the connection test must not be short-circuited by the lockout");
 });

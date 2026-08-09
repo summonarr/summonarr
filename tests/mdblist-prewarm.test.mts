@@ -7,7 +7,8 @@
 //     while a completed run always carries it (undefined when no quota hit);
 //   - the { force?: boolean } purge semantics: the default run deleteMany's
 //     ONLY rows whose data is exactly the NOT_FOUND sentinel serialization
-//     (second chance for sentinels), force:true drops the data filter and
+//     (second chance for sentinels) — under force too, which instead bypasses
+//     the freshness triage so valid rows keep serving until overwritten, and
 //     purges valid rows too, forcing a full refetch;
 //   - batch usage: cold items go out as ONE chunked POST per media type via
 //     fetchMdblistBatch — never per-item — with the details-blob releaseDate
@@ -278,7 +279,11 @@ test("default run: ONLY NOT_FOUND sentinels are purged (data-filtered deleteMany
   assert.ok(cacheRows.get("mdblist:tmdb:movie:2")?.data.includes("7.2"), "the fresh row must survive untouched");
 });
 
-test("force:true purges valid rows too (no data filter) and forces a full refetch", async () => {
+test("force:true refetches EVERYTHING but never deletes valid rows — they keep serving until overwritten", async () => {
+  // force used to delete valid rows up front; a quota trip mid-refetch then
+  // left every not-yet-refetched title with no ratings row at all (a blackout
+  // until the next full run). Force now bypasses the freshness triage instead:
+  // the purge stays sentinel-only and fresh rows are simply refetched in place.
   tables.plex = [
     { tmdbId: 1, mediaType: "MOVIE" },
     { tmdbId: 2, mediaType: "MOVIE" },
@@ -288,11 +293,14 @@ test("force:true purges valid rows too (no data filter) and forces a full refetc
   respond = (_url, call) => echo(call);
 
   assert.deepEqual(await prewarmMdblistCache({ force: true }), {
-    total: 2, fetched: 2, skipped: 0, failed: 0, purged: 2, quotaExhausted: undefined,
+    total: 2, fetched: 2, skipped: 0, failed: 0, purged: 0, quotaExhausted: undefined,
   });
   assert.equal(deleteManyCalls.length, 1);
-  assert.equal("data" in deleteManyCalls[0], false); // force drops the sentinel filter
-  assert.deepEqual(bodyIds(fetchCalls[0]), [1, 2]); // nothing is fresh any more
+  assert.equal(deleteManyCalls[0].data, '{"_notFound":true}', "the purge must stay sentinel-only under force");
+  assert.deepEqual(bodyIds(fetchCalls[0]), [1, 2], "the freshness triage is bypassed — everything refetches");
+  // The pre-existing valid rows were never deleted (overwritten by the refetch).
+  assert.ok(cacheRows.get("mdblist:tmdb:movie:1"), "row 1 must survive");
+  assert.ok(cacheRows.get("mdblist:tmdb:movie:2"), "row 2 must survive");
 });
 
 // ── batch usage ─────────────────────────────────────────────────────────────

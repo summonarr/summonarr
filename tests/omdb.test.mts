@@ -9,16 +9,16 @@
 //     metacritic comes solely from the top-level Metascore), every "N/A" and
 //     every absent optional field maps to null, and the result's imdbId is the
 //     CALLER's id (the body's imdbID is ignored). The wire URL is pinned
-//     exactly, and the positive cache write uses the age-scaled TTL
-//     (libraryDetailsTtl) — an all-null Response=True row is still a positive
-//     cache entry, never the not-found sentinel.
+//     exactly, and the lookup is CACHE-FREE — the tmdb-keyed rows written by
+//     fetchAndCacheOmdbForTmdb are the app's one OMDB cache layer; an all-null
+//     Response=True body is still a found answer, never a not-found.
 //   - getApiKey memoization: many calls inside the 30s window issue exactly one
 //     Setting read; the window expiring re-reads; testOmdbConnection's
 //     { fresh: true } bypasses the memo so a rotated key is visible immediately.
 //   - fetchAndCacheOmdbForTmdb: resolves the IMDb id via TMDB external_ids
-//     (bearer-authed, wire pinned) and writes BOTH cache rows (omdb:<imdbId>
-//     inside getOmdbRatings + the caller's tmdb-keyed row); a missing imdb_id
-//     negative-caches ONLY the tmdb key (24h) without ever calling OMDB; a
+//     (bearer-authed, wire pinned) and writes ONE tmdb-keyed cache row; a
+//     missing imdb_id negative-caches the tmdb key with the AGE-SCALED
+//     negative TTL (24h fresh releases, 7d back-catalog) without calling OMDB; a
 //     failed external_ids fetch and an OMDB transient error both map to
 //     { transient: true } with NOTHING cached; a missing TMDB read token is the
 //     odd one out — keyConfigured:true with NO transient flag and no cache write.
@@ -179,7 +179,7 @@ beforeEach(() => {
 
 // ── getOmdbRatings parsing ──────────────────────────────────────────────────
 
-test("happy body: exact field mapping (caller's imdbId wins over the body's), exact wire URL, age-scaled positive cache write, warm second call", async () => {
+test("happy body: exact field mapping (caller's imdbId wins over the body's), exact wire URL, and NO cache writes (cache-free lookup)", async () => {
   route({
     omdb: () => jsonResponse({
       Response: "True",
@@ -207,19 +207,15 @@ test("happy body: exact field mapping (caller's imdbId wins over the body's), ex
   assert.equal(fetchCalls[0].url.toString(), "https://www.omdbapi.com/?apikey=test-omdb-key&i=tt0133093");
   assert.equal(fetchCalls[0].method, "GET");
 
-  // Positive cache write under omdb:<imdbId>, TTL from libraryDetailsTtl:
-  // a 1999 release is deep back-catalog → the 30-day bucket.
-  assert.equal(cacheUpserts.length, 1);
-  assert.equal(cacheUpserts[0].key, "omdb:tt0133093");
-  assert.deepEqual(JSON.parse(cacheUpserts[0].data), result);
-  assert.equal(cacheUpserts[0].expiresAt.getTime(), Date.now() + 30 * DAY_MS);
-
-  // Cache-first: the very next call for the same id issues no fetch.
+  // getOmdbRatings is deliberately CACHE-FREE: the tmdb-keyed rows written by
+  // fetchAndCacheOmdbForTmdb are the app's one OMDB cache layer, so the raw
+  // lookup writes nothing and a repeat call re-fetches.
+  assert.equal(cacheUpserts.length, 0);
   assert.deepEqual(await getOmdbRatings("tt0133093"), result);
-  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls.length, 2);
 });
 
-test('"N/A" and absent optional fields both map to null — and the all-null row is a POSITIVE cache entry with the fresh-release TTL', async () => {
+test('"N/A" and absent optional fields both map to null — an all-null result is still a FOUND answer, not a not-found', async () => {
   route({
     omdb: () => jsonResponse({
       Response: "True",
@@ -238,12 +234,9 @@ test('"N/A" and absent optional fields both map to null — and the all-null row
     rottenTomatoes: null,
     metacritic: null,
   });
-  // Cached as a positive row (NOT the not-found sentinel) — "OMDB knows the
-  // title but has no scores" is authoritative data, not absence.
-  const row = cacheRows.get("omdb:tt0000100");
-  assert.ok(row, "the all-N/A response must still be cached");
-  assert.equal("_notFound" in (JSON.parse(row.data) as Record<string, unknown>), false);
-  assert.equal(row.expiresAt.getTime(), Date.now() + 3 * DAY_MS); // released this year → freshest bucket
+  // "OMDB knows the title but has no scores" is an authoritative non-null
+  // return — the caller (fetchAndCacheOmdbForTmdb) caches it as a positive
+  // tmdb-keyed row rather than a not-found sentinel.
 
   // Fields absent entirely (not "N/A") degrade identically.
   route({ omdb: () => jsonResponse({ Response: "True" }) });
@@ -309,7 +302,7 @@ test("getApiKey is memoized: three lookups in the 30s window issue exactly ONE S
 
 // ── fetchAndCacheOmdbForTmdb ────────────────────────────────────────────────
 
-test("fetchAndCacheOmdbForTmdb: bearer-authed TMDB external_ids resolve (wire pinned), OMDB by the resolved id, and BOTH cache rows written", async () => {
+test("fetchAndCacheOmdbForTmdb: bearer-authed TMDB external_ids resolve (wire pinned), OMDB by the resolved id, ONE tmdb-keyed cache row", async () => {
   route({
     tmdb: () => jsonResponse({ imdb_id: "tt7777777" }),
     omdb: () => jsonResponse({
@@ -337,15 +330,15 @@ test("fetchAndCacheOmdbForTmdb: bearer-authed TMDB external_ids resolve (wire pi
   assert.equal(fetchCalls[1].url.hostname, "www.omdbapi.com");
   assert.equal(fetchCalls[1].url.searchParams.get("i"), "tt7777777");
 
-  // Two writes: the imdb-keyed row (inside getOmdbRatings) then the caller's
-  // tmdb-keyed row — identical ratings, identical age-scaled TTL.
-  assert.deepEqual(cacheUpserts.map((u) => u.key), ["omdb:tt7777777", "omdb:tmdb:movie:550"]);
-  assert.deepEqual(JSON.parse(cacheUpserts[1].data), expected);
+  // ONE write — the tmdb-keyed row. The imdb-keyed layer was removed: it was
+  // written on every fetch but essentially never read (both layers always
+  // expired together), doubling every OMDB cache write for no serving value.
+  assert.deepEqual(cacheUpserts.map((u) => u.key), ["omdb:tmdb:movie:550"]);
+  assert.deepEqual(JSON.parse(cacheUpserts[0].data), expected);
   assert.equal(cacheUpserts[0].expiresAt.getTime(), Date.now() + 30 * DAY_MS);
-  assert.equal(cacheUpserts[1].expiresAt.getTime(), Date.now() + 30 * DAY_MS);
 });
 
-test("TMDB reports no imdb_id: the tmdb key gets the 24h not-found sentinel and OMDB is never called", async () => {
+test("TMDB reports no imdb_id: the tmdb key gets an age-scaled not-found sentinel and OMDB is never called", async () => {
   route({ tmdb: () => jsonResponse({ imdb_id: null }) });
   const result = await fetchAndCacheOmdbForTmdb(603, "movie", "omdb:tmdb:movie:603", "2003-05-15");
   assert.deepEqual(result, { found: false, keyConfigured: true }); // authoritative absence — no transient flag
@@ -354,7 +347,18 @@ test("TMDB reports no imdb_id: the tmdb key gets the 24h not-found sentinel and 
   const row = cacheRows.get("omdb:tmdb:movie:603");
   assert.ok(row, "no-imdb-id must be negative-cached at the tmdb key");
   assert.deepEqual(JSON.parse(row.data), { _notFound: true });
-  // Negative TTL is the fixed 24h, NOT the age-scaled positive TTL.
+  // Negative TTL scales with title age: a 2003 back-catalog title absent from
+  // OMDB is essentially permanent, so it re-verifies weekly, not daily — the
+  // daily prewarm otherwise burned one call per absent library item per day.
+  assert.equal(row.expiresAt.getTime(), Date.now() + 7 * DAY_MS);
+});
+
+test("a FRESH release absent from OMDB keeps the fast 24h negative TTL (late indexing heals within a day)", async () => {
+  const currentYear = new Date().getFullYear(); // mocked — 2026
+  route({ tmdb: () => jsonResponse({ imdb_id: null }) });
+  await fetchAndCacheOmdbForTmdb(605, "movie", "omdb:tmdb:movie:605", `${currentYear}-01-01`);
+  const row = cacheRows.get("omdb:tmdb:movie:605");
+  assert.ok(row);
   assert.equal(row.expiresAt.getTime(), Date.now() + DAY_MS);
 });
 

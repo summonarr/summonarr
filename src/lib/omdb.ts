@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "./prisma";
-import { getCache, getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
+import { getCacheStale, setCache, libraryDetailsTtl } from "./tmdb-cache";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { tmdbAuth } from "./tmdb-auth";
@@ -8,7 +8,23 @@ import { tmdbAuth } from "./tmdb-auth";
 const OMDB_BASE = "https://www.omdbapi.com";
 const OMDB_FETCH_TIMEOUT_MS = 10_000;
 
-const OMDB_NEGATIVE_TTL = 24 * 60 * 60;
+// Negative-cache TTL scales with title age. A fresh release may simply not be
+// indexed by OMDB YET, so its absence re-verifies daily; a back-catalog title
+// (or one with no parseable date) absent from OMDB is essentially permanent —
+// re-verifying it every daily prewarm run burned one OMDB call per absent
+// library item per day, forever. 7 days keeps those to ~4 calls/month while
+// still self-healing if OMDB ever gains the title.
+const OMDB_NEGATIVE_TTL_FRESH = 24 * 60 * 60;
+const OMDB_NEGATIVE_TTL_BACK_CATALOG = 7 * 24 * 60 * 60;
+const FRESH_RELEASE_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+
+function omdbNegativeTtl(releaseDate?: string | null): number {
+  if (releaseDate) {
+    const t = Date.parse(releaseDate);
+    if (Number.isFinite(t) && Date.now() - t < FRESH_RELEASE_WINDOW_MS) return OMDB_NEGATIVE_TTL_FRESH;
+  }
+  return OMDB_NEGATIVE_TTL_BACK_CATALOG;
+}
 
 // OMDB returns quota/auth failures with Response="False" and an Error string —
 // sometimes as HTTP 200, but its key-validation layer (which also owns the daily
@@ -94,15 +110,14 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
   return p;
 }
 
-// Cache-first OMDB ratings lookup by IMDb ID; negative-caches genuine not-found, throws on transient failures.
-export async function getOmdbRatings(imdbId: string, releaseDate?: string | null): Promise<OmdbRatings | null> {
-  const cacheKey = `omdb:${imdbId}`;
-  const cached = await getCache<OmdbRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
-  if (cached !== null) {
-    if ("_notFound" in cached) return null;
-    return cached;
-  }
-
+// Direct OMDB lookup by IMDb ID: null = authoritative not-found, throws on
+// transient failures. Deliberately CACHE-FREE — the tmdb-keyed rows written by
+// fetchAndCacheOmdbForTmdb (this function's only caller) are the app's one
+// OMDB cache layer. The old imdb-keyed `omdb:<imdbId>` rows were written on
+// every fetch but essentially never read (both layers were always written and
+// expired together, so the imdb read only ever hit when the tmdb row had
+// already served), doubling every OMDB cache write for no serving value.
+export async function getOmdbRatings(imdbId: string, _releaseDate?: string | null): Promise<OmdbRatings | null> {
   // Quota lockout: skip the network entirely. Throw — the function's existing transient
   // semantics — so callers never negative-cache a lockout as "title not found".
   if (isOmdbQuotaLocked()) {
@@ -160,23 +175,19 @@ export async function getOmdbRatings(imdbId: string, releaseDate?: string | null
       if (isOmdbTransientError(data.Error)) {
         throw new Error(`OMDB transient error for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(data.Error ?? "")}`);
       }
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
       return null;
     }
 
     const rt = data.Ratings?.find((r) => r.Source === "Rotten Tomatoes")?.Value ?? null;
     const mc = data.Metascore && data.Metascore !== "N/A" ? `${data.Metascore}/100` : null;
 
-    const result: OmdbRatings = {
+    return {
       imdbId:         imdbId,
       imdbRating:     data.imdbRating && data.imdbRating !== "N/A" ? data.imdbRating : null,
       imdbVotes:      data.imdbVotes && data.imdbVotes !== "N/A" ? data.imdbVotes : null,
       rottenTomatoes: rt && rt !== "N/A" ? rt : null,
       metacritic:     mc,
-        };
-
-    await setCache(cacheKey, result, libraryDetailsTtl(releaseDate));
-    return result;
+    };
   } catch (err) {
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
@@ -275,7 +286,7 @@ export async function fetchAndCacheOmdbForTmdb(
     const settleResolve = async (r: Exclude<ImdbResolve, { kind: "id" }>): Promise<OmdbResult> => {
       if (r.kind === "noAuth") return { found: false, keyConfigured: true };
       if (r.kind === "gone") {
-        await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
+        await setCache(cacheKey, NOT_FOUND_SENTINEL, omdbNegativeTtl(releaseDate));
         return { found: false, keyConfigured: true };
       }
       return { found: false, keyConfigured: true, transient: true };
@@ -305,7 +316,7 @@ export async function fetchAndCacheOmdbForTmdb(
     }
 
     if (!omdbRatings) {
-      await setCache(cacheKey, NOT_FOUND_SENTINEL, OMDB_NEGATIVE_TTL);
+      await setCache(cacheKey, NOT_FOUND_SENTINEL, omdbNegativeTtl(releaseDate));
       return { found: false, keyConfigured: true };
     }
 

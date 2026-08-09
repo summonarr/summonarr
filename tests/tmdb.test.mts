@@ -84,6 +84,7 @@ const {
   getTrending,
   getTopRatedMovies,
   getUpcomingTV,
+  getUpcomingMovies,
   searchMulti,
   getMovieDetails,
   getTVDetails,
@@ -477,6 +478,47 @@ test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are f
   assert.ok(gte === before || gte === after, "first_air_date.gte must be today's date");
   assert.deepEqual(result.map((m) => m.id), [301]);
   assert.equal(cacheUpserts[0]?.key, "tv:upcoming");
+});
+
+test("upcoming movies: region-pinned pages; already-released and dateless rows are filtered like the TV sibling", async () => {
+  const before = new Date().toISOString().slice(0, 10);
+  respond = (url) =>
+    url.searchParams.get("page") === "1"
+      ? jsonResponse(pageOf([
+          rawMovie(311, "Future Release", { release_date: "2999-06-01" }),
+          rawMovie(312, "Already Out", { release_date: "2001-01-01" }), // /movie/upcoming returns these; we drop them
+          rawMovie(313, "No Date", { release_date: undefined }),
+        ], 10))
+      : jsonResponse(pageOf([], 10));
+  const result = await getUpcomingMovies();
+
+  assert.equal(fetchCalls.length, 10);
+  const call = fetchCalls[0];
+  assert.equal(call.url.pathname, "/3/movie/upcoming");
+  // The window is region-relative — pin it to the app-wide US convention so
+  // the endpoint's dates line up with the client-side today filter.
+  assert.equal(call.url.searchParams.get("region"), "US");
+  assert.deepEqual(result.map((m) => m.id), [311], `past/dateless rows must be dropped (today=${before})`);
+  assert.equal(cacheUpserts[0]?.key, "movies:upcoming");
+});
+
+test("a 429 is retried (Retry-After honored) instead of failing the fetch outright", async () => {
+  // One throttled page used to reject the whole helper call — and the
+  // all-fulfilled cache gates then converted that into a full re-fan-out on
+  // every subsequent cold caller until a clean pass.
+  respond = (_url, callIndex) =>
+    callIndex === 0
+      ? new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } })
+      : jsonResponse(pageOf([{ ...rawMovie(101, "Recovered"), media_type: "movie" }]));
+  const result = await searchMulti("retry me");
+  assert.deepEqual(result.map((m) => m.id), [101]);
+  assert.equal(fetchCalls.length, 2, "the 429 attempt plus one retry");
+
+  // Exhaustion still surfaces: three straight 429s reject after the final attempt.
+  fetchCalls.length = 0;
+  respond = () => new Response("slow down", { status: 429 });
+  await assert.rejects(() => searchMulti("always throttled"), /429/);
+  assert.equal(fetchCalls.length, 3);
 });
 
 // ── details paths ───────────────────────────────────────────────────────────

@@ -614,7 +614,7 @@ test("Bearer CRON_SECRET authorizes and drives the full pipeline (library writes
   // The run reached the library-replace stage for both sources and the tail purge.
   assert.equal(txTouching("plexLibraryItem").length, 1, "authorized run must replace the Plex library");
   assert.equal(txTouching("jellyfinLibraryItem").length, 1, "authorized run must replace the Jellyfin library");
-  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "the tail purge is two passes: everything else now, ratings on a grace");
+  assert.equal(tmdbCacheDeleteManyCalls.length, 3, "the tail purge is three passes: everything else now, ratings and :details each on their own grace");
   // A CRON_SECRET run has no session to attribute — no LIBRARY_SYNC audit row.
   assert.equal(auditRows.length, 0);
 });
@@ -1678,26 +1678,40 @@ test("the expired-TmdbCache purge fires near the end (deleteMany where expiresAt
       OR?: Array<{ key?: { startsWith?: string } }>;
     };
   };
-  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "two purge passes per run");
-  const [general, ratings] = tmdbCacheDeleteManyCalls as PurgeArg[];
+  assert.equal(tmdbCacheDeleteManyCalls.length, 3, "three purge passes per run");
+  const [general, ratings, details] = tmdbCacheDeleteManyCalls as PurgeArg[];
   assert.ok(general.where?.expiresAt?.lt instanceof Date, "the purge must scope to expiresAt < now, not wipe the whole cache");
 
-  // The ratings namespaces are a serve-stale surface: getCacheStale/getCacheStaleMany
-  // never delete an expired row because it is still a HIT. This purge was the only thing
-  // deleting them, one SYNC_INTERVAL after expiry — so a provider outage lost the badges
-  // entirely instead of falling back to the previous values. They are excluded from the
-  // immediate pass and reaped on a long grace instead.
-  // Nested under OR deliberately: the two prefixes are mutually exclusive, so a bare
+  // The ratings namespaces AND the :details blobs are serve-stale surfaces:
+  // getCacheStale/getCacheStaleMany never delete an expired row because it is
+  // still a HIT. This purge was the only thing deleting them, one SYNC_INTERVAL
+  // after expiry — so a provider outage lost the badges (and the dashboard/
+  // carry-forward readers lost their blobs) entirely. Each namespace is excluded
+  // from the immediate pass and reaped on its own grace instead.
+  // Nested under OR deliberately: the shapes are mutually exclusive, so a bare
   // `NOT: [a, b]` would be a silent no-op if a list-NOT compiles to NOT(a AND b).
   assert.deepEqual(
     general.where?.NOT,
-    { OR: [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }] },
-    "the immediate purge must spare the two serve-stale ratings namespaces",
+    { OR: [
+      { key: { startsWith: "mdblist:tmdb:" } },
+      { key: { startsWith: "omdb:tmdb:" } },
+      { key: { startsWith: "movie:", endsWith: ":details" } },
+      { key: { startsWith: "tv:", endsWith: ":details" } },
+    ] },
+    "the immediate purge must spare every serve-stale namespace",
+  );
+  assert.deepEqual(
+    details.where?.OR,
+    [
+      { key: { startsWith: "movie:", endsWith: ":details" } },
+      { key: { startsWith: "tv:", endsWith: ":details" } },
+    ],
+    "the :details grace pass targets exactly the details blobs — endsWith-pinned, so credits/suggestions/seasons and the :missing tombstones still expire immediately",
   );
   assert.deepEqual(
     ratings.where?.OR,
     [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }],
-    "the grace purge targets exactly those namespaces — `:tmdb:` scoped, so the list caches and omdb:<imdbId> still expire immediately",
+    "the ratings grace purge targets exactly those namespaces — `:tmdb:` scoped, so the list caches still expire immediately",
   );
   const graceCutoff = ratings.where?.expiresAt?.lt as Date;
   assert.ok(graceCutoff instanceof Date, "the grace purge is still expiry-scoped, never a blanket delete");

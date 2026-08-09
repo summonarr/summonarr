@@ -505,7 +505,7 @@ test("stale fetches are bounded at CONCURRENCY=5 — the sixth is issued only af
   assert.equal(fetchCalls.length, 6);
 });
 
-test("PINS CURRENT BEHAVIOR: 404, non-2xx, and unparseable bodies count as fetched (not failed) and write nothing", async () => {
+test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEXT run; non-2xx/unparseable write nothing and retry", async () => {
   tables.plex = [
     { tmdbId: 40, mediaType: "MOVIE" },
     { tmdbId: 41, mediaType: "MOVIE" },
@@ -523,11 +523,23 @@ test("PINS CURRENT BEHAVIOR: 404, non-2xx, and unparseable bodies count as fetch
   // that hit only errors still reports fetched=3. Flip these pins if
   // failed-counting is ever wanted for HTTP-level misses.
   assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 3, backfilled: 0, skipped: 0, failed: 0 });
-  assert.equal(cacheUpserts.length, 0);
+  // The 404 (a dead library match) writes the negative tombstone — without it
+  // every run re-fetched the same dead ids forever. 500/unparseable still
+  // write nothing (transient — they must retry next run).
+  assert.deepEqual(cacheUpserts.map((u) => u.key), ["movie:40:details:missing"]);
+  assert.deepEqual(JSON.parse(cacheUpserts[0].data), { _notFound: true });
   assert.equal(coreUpserts.length, 0);
   assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:41 → HTTP 500")));
   assert.ok(warns.some((w) => w.includes("JSON.parse failed")));
   assert.ok(!warns.some((w) => w.includes("movie:40")), "a 404 is silent — the title simply isn't on TMDB");
+
+  // Second run: the tombstoned id skips without a fetch; the transient pair retries.
+  fetchCalls.length = 0;
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 2, backfilled: 0, skipped: 1, failed: 0 });
+  assert.ok(
+    !fetchCalls.some((c) => c.url.pathname.endsWith("/movie/40")),
+    "a live tombstone must spare the dead id its fetch",
+  );
 });
 
 // ── dedup + page buffering ──────────────────────────────────────────────────
@@ -553,10 +565,13 @@ test("cross-source dedup on tmdbId:mediaType and the 500-item page buffer: a 521
   assert.equal(fetchCalls.length, 0);
 
   // The page buffer flushed once at LIBRARY_PAGE_SIZE and once for the tail:
-  // freshness queries of 500 keys, then 21 (20 new jellyfin movies + the TV
-  // row). The freshness read is the one selecting cachedAt.
+  // freshness queries of 500 items, then 21 (20 new jellyfin movies + the TV
+  // row) — each item contributes its :details key AND its :missing tombstone
+  // key, so the key lists are 2× the item counts. The freshness read is the
+  // one selecting cachedAt.
   const freshnessCalls = cacheFindManyCalls.filter((c) => "cachedAt" in c.select);
-  assert.deepEqual(freshnessCalls.map((c) => c.keys.length), [LIBRARY_PAGE_SIZE, 21]);
+  assert.deepEqual(freshnessCalls.map((c) => c.keys.length), [LIBRARY_PAGE_SIZE * 2, 42]);
   assert.equal(freshnessCalls[0].keys[0], "movie:1:details");
   assert.ok(freshnessCalls[1].keys.includes("tv:5:details"));
+  assert.ok(freshnessCalls[1].keys.includes("tv:5:details:missing"));
 });

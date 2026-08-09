@@ -539,21 +539,24 @@ test("getMdblistListItems: TmdbMedia skeleton with tmdb_id guards, show→tv map
       releaseYear: null, voteAverage: 0,
     },
   ]);
-  assert.ok(cacheRows.has("mdblist:list:77:tv"), "the filtered result is cached under the :tv key");
+  // ONE unfiltered row per list (no type suffix): the movie view of the same
+  // list must be served from that row with no second upstream fetch — the old
+  // per-type keys fetched the identical list once per requested type.
+  assert.ok(cacheRows.has("mdblist:list:77"), "the UNFILTERED projection is cached under the bare list key");
+  const fetchesBefore = fetchCalls.length;
+  const movieView = await getMdblistListItems(77, "movie");
+  assert.deepEqual(movieView.map((i) => [i.id, i.mediaType]), [[200, "movie"]]);
+  assert.equal(fetchCalls.length, fetchesBefore, "the movie view must come from the cached row");
 
-  // No media-type filter → the :all key, movie AND show rows both kept.
-  respond = () => jsonResponse([
-    { id: 1, rank: 1, title: "Show", year: 2020, mediatype: "show", imdb_id: null, tmdb_id: 100, score: 90 },
-    { id: 2, rank: 2, title: "Movie", year: 2019, mediatype: "movie", imdb_id: null, tmdb_id: 200, score: 80 },
-  ]);
-  const all = await getMdblistListItems(78);
-  assert.deepEqual(all.map((i) => [i.id, i.mediaType]), [[100, "tv"], [200, "movie"]]);
-  assert.ok(cacheRows.has("mdblist:list:78:all"));
+  // No media-type filter → every kept row, both types, same single row.
+  const all = await getMdblistListItems(77);
+  assert.deepEqual(all.map((i) => [i.id, i.mediaType]), [[100, "tv"], [200, "movie"], [300, "tv"]]);
+  assert.equal(fetchCalls.length, fetchesBefore);
 
   // A non-array body degrades to [] without caching.
   respond = () => jsonResponse({ error: "no such list" });
   assert.deepEqual(await getMdblistListItems(79), []);
-  assert.equal(cacheRows.has("mdblist:list:79:all"), false);
+  assert.equal(cacheRows.has("mdblist:list:79"), false);
 });
 
 test("getMdblistTopRated: fans out over the top lists, dedups across lists in order, caches the merged set, and is cache-first", async () => {

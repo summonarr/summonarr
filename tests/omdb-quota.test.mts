@@ -61,7 +61,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { fetchAndCacheOmdbForTmdb, getOmdbRatings, isOmdbQuotaLocked } =
+const { fetchAndCacheOmdbForTmdb, getOmdbRatings, getOmdbRatingsForTmdb, isOmdbQuotaLocked } =
   await import("../src/lib/omdb.ts");
 type OmdbRatings = import("../src/lib/omdb.ts").OmdbRatings;
 
@@ -125,18 +125,14 @@ test("'Invalid API key' is transient (throws) but does NOT trip the lockout or c
   assert.equal(cacheRows.has("omdb:tt0000001"), false); // never negative-cached as not-found
 });
 
-test("a genuine not-found returns null, caches the sentinel, and does not lock", async () => {
+test("a genuine not-found returns null, does not lock, and writes NOTHING (getOmdbRatings is cache-free)", async () => {
+  // The imdb-keyed cache layer was removed: fetchAndCacheOmdbForTmdb's
+  // tmdb-keyed rows are the app's one OMDB cache; this function is the raw
+  // lookup underneath it.
   script(omdbBody({ Response: "False", Error: "Incorrect IMDb ID." }));
   assert.equal(await getOmdbRatings("tt0000002"), null);
   assert.equal(isOmdbQuotaLocked(), false);
-  const row = cacheRows.get("omdb:tt0000002");
-  assert.ok(row, "not-found sentinel must be cached");
-  assert.deepEqual(JSON.parse(row.data), { _notFound: true });
-
-  // The sentinel short-circuits the next lookup entirely — no second fetch.
-  script(null);
-  assert.equal(await getOmdbRatings("tt0000002"), null);
-  assert.equal(fetchCalls.length, 0);
+  assert.equal(cacheRows.has("omdb:tt0000002"), false, "no imdb-keyed sentinel may be written");
 });
 
 test("a Response=False quota body ('Request limit reached!') throws AND trips the lockout", async () => {
@@ -156,7 +152,9 @@ test("while locked, a cold-cache getOmdbRatings throws WITHOUT touching the netw
   assert.equal(fetchCalls.length, 0);
 });
 
-test("while locked, a cached value is still served (cache read precedes the lockout check)", async () => {
+test("while locked, a cached tmdb-keyed value is still served (cache read precedes the lockout check)", async () => {
+  // The serve-while-locked contract lives at the tmdb-keyed layer now
+  // (getOmdbRatingsForTmdb) — getOmdbRatings itself is cache-free.
   const cached: OmdbRatings = {
     imdbId: "tt0000005",
     imdbRating: "8.1",
@@ -164,14 +162,14 @@ test("while locked, a cached value is still served (cache read precedes the lock
     rottenTomatoes: "92%",
     metacritic: "78/100",
   };
-  cacheRows.set("omdb:tt0000005", {
-    key: "omdb:tt0000005",
+  cacheRows.set("omdb:tmdb:movie:505", {
+    key: "omdb:tmdb:movie:505",
     data: JSON.stringify(cached),
     cachedAt: new Date(),
     expiresAt: new Date(Date.now() + 60_000),
   });
   script(null);
-  assert.deepEqual(await getOmdbRatings("tt0000005"), cached);
+  assert.deepEqual(await getOmdbRatingsForTmdb(505, "movie"), { found: true, data: cached });
   assert.equal(fetchCalls.length, 0);
 });
 

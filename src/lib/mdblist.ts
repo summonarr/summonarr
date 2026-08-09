@@ -157,7 +157,12 @@ export async function fetchAndCacheMdblistForTmdb(
 
     const ratings = parseBatchItem(data as MdblistBatchRaw);
 
-    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate));
+    // TTL bucket: prefer the caller's releaseDate, but fall back to the
+    // response's own year — a dateless caller (the prewarm's detail-less
+    // items) otherwise pins a brand-new release into the 30-day back-catalog
+    // bucket instead of the fresh-title one.
+    const respYear = (data as MdblistBatchRaw).year;
+    await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? (respYear ? `${respYear}-01-01` : null)));
     return { found: true, data: ratings };
   } catch (err) {
 
@@ -257,7 +262,16 @@ export async function fetchMdblistBatch(
   const url = new URL(`${MDBLIST_REST_BASE}tmdb/${mdbType}/`);
   url.searchParams.set("apikey", apiKey);
 
+  // Breaker state: a wall of consecutive failed pages (upstream incident, an
+  // invalid key answering 200-with-error on every page) must stop the walk
+  // instead of burning one request per remaining page. Reset on any success.
+  let consecutiveFailures = 0;
+  const MAX_CONSECUTIVE_FAILURES = 3;
+
   for (let offset = 0; offset < items.length; offset += MDBLIST_BATCH_SIZE) {
+    // A lockout tripped mid-run (this loop's own 429 breaks directly; a
+    // CONCURRENT caller's trip is only visible here) must stop later pages.
+    if (isMdblistQuotaLocked()) break;
     const page = items.slice(offset, offset + MDBLIST_BATCH_SIZE);
     const ids  = page.map((item) => item.id);
 
@@ -287,7 +301,10 @@ export async function fetchMdblistBatch(
 
       if (!res.ok) {
         console.warn(`[mdblist] batch ${mediaType} returned ${res.status}`);
-
+        if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
+          break;
+        }
         continue;
       }
 
@@ -300,6 +317,21 @@ export async function fetchMdblistBatch(
           tripQuotaLockout(`${errMsg} on batch ${mediaType}`);
           break;
         }
+        if (errMsg) {
+          // A 200-with-error body (bad key, malformed request) previously fell
+          // through to arr=[] and masqueraded as "returned empty array" — name
+          // the real error (mirrors the single-item warn) and count it toward
+          // the breaker; nothing about this page is a ratings answer.
+          console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
+          if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
+            break;
+          }
+          continue;
+        }
+        consecutiveFailures = 0;
+      } else {
+        consecutiveFailures = 0;
       }
 
       const arr = Array.isArray(data) ? (data as MdblistBatchRaw[]) : [];
@@ -349,7 +381,9 @@ export async function fetchMdblistBatch(
         result.set(tmdbId, ratings);
 
         const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
-        const ttl = libraryDetailsTtl(pageItem.releaseDate);
+        // Prefer the requested item's date; fall back to the response row's
+        // year so dateless prewarm items land in the right TTL bucket.
+        const ttl = libraryDetailsTtl(pageItem.releaseDate ?? (raw.year ? `${raw.year}-01-01` : null));
         cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
       }
 
@@ -384,6 +418,10 @@ export async function fetchMdblistBatch(
     } catch (err) {
       const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
       console.error(`[mdblist] batch error for ${mediaType}: ${reason}`);
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
+        break;
+      }
     }
   }
 
@@ -474,6 +512,7 @@ interface MdblistListItem {
 
 export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]> {
   const key = "mdblist:top-lists";
+  return coalesce(key, async () => {
   const cached = await getCache<MdblistListMeta[]>(key);
   if (cached?.length) return cached;
 
@@ -511,13 +550,21 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
     console.error("[mdblist] Failed to fetch top lists:", err);
     return [];
   }
+  });
 }
 
 export async function getMdblistListItems(
   listId: number,
   mediaType?: "movie" | "tv",
 ): Promise<TmdbMedia[]> {
-  const key = `mdblist:list:${listId}:${mediaType ?? "all"}`;
+  // ONE cache row per list, holding the unfiltered projection. The old
+  // type-suffixed keys (`:movie`/`:tv`/`:all`) cached disjoint post-filter
+  // copies, so the same upstream list was fetched once per requested type;
+  // filtering in memory serves every variant from one row, and coalesce
+  // dedups the concurrent movie+tv cold fan-out the /top page fires. Old
+  // type-suffixed rows simply expire out.
+  const key = `mdblist:list:${listId}`;
+  const all = await coalesce(key, async (): Promise<TmdbMedia[]> => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached?.length) return cached;
 
@@ -536,14 +583,17 @@ export async function getMdblistListItems(
     const data = await res.json() as MdblistListItem[];
     if (!Array.isArray(data)) return [];
 
-    const seen = new Set<number>();
+    // Dedup on type+id: movie and TV ids are independent TMDB namespaces, and
+    // this projection is unfiltered, so a bare-id set would drop a legitimate
+    // cross-type pair.
+    const seen = new Set<string>();
     const result: TmdbMedia[] = [];
     for (const item of data) {
       if (!item.tmdb_id || item.tmdb_id <= 0) continue;
       const itemType = item.mediatype === "show" ? "tv" : "movie";
-      if (mediaType && itemType !== mediaType) continue;
-      if (seen.has(item.tmdb_id)) continue;
-      seen.add(item.tmdb_id);
+      const dedupKey = `${itemType}:${item.tmdb_id}`;
+      if (seen.has(dedupKey)) continue;
+      seen.add(dedupKey);
 
       result.push({
         id: item.tmdb_id,
@@ -564,6 +614,8 @@ export async function getMdblistListItems(
     console.error("[mdblist] Failed to fetch list items:", err);
     return [];
   }
+  });
+  return mediaType ? all.filter((m) => m.mediaType === mediaType) : all;
 }
 
 export async function getMdblistTopRated(

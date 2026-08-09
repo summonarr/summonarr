@@ -46,16 +46,6 @@ interface TraktShow {
   ids: TraktIds;
 }
 
-interface TraktTrendingMovie {
-  watchers: number;
-  movie: TraktMovie;
-}
-
-interface TraktTrendingShow {
-  watchers: number;
-  show: TraktShow;
-}
-
 async function traktFetch<T>(path: string, params?: Record<string, string>): Promise<T> {
   const apiKey = await getApiKey();
   if (!apiKey) throw new Error("Trakt client ID not configured");
@@ -186,56 +176,28 @@ export async function getTraktPopularTV(pages = 5): Promise<TmdbMedia[]> {
   });
 }
 
-export async function getTraktTrendingMovies(pages = 3): Promise<TmdbMedia[]> {
-  const key = "trakt:trending:movies";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const apiKey = await getApiKey();
-  if (!apiKey) return [];
-
-  try {
-    const { items, complete } = await fetchPages<TraktTrendingMovie>("/movies/trending", pages, 100);
-    const seen = new Set<number>();
-    const result = items
-      .map((r) => normalizeMovie(r.movie))
-      .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-    return result;
-  } catch (err) {
-    console.error("[trakt] Failed to fetch trending movies:", err);
-    return [];
-  }
-  });
-}
-
-export async function getTraktTrendingTV(pages = 3): Promise<TmdbMedia[]> {
-  const key = "trakt:trending:tv";
-  return coalesce(key, async () => {
-  const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
-
-  const apiKey = await getApiKey();
-  if (!apiKey) return [];
-
-  try {
-    const { items, complete } = await fetchPages<TraktTrendingShow>("/shows/trending", pages, 100);
-    const seen = new Set<number>();
-    const result = items
-      .map((r) => normalizeShow(r.show))
-      .filter((m): m is TmdbMedia => m !== null && !seen.has(m.id) && (seen.add(m.id), true));
-    if (complete && result.length > 0) await setCache(key, result, TTL.DISCOVER);
-    return result;
-  } catch (err) {
-    console.error("[trakt] Failed to fetch trending TV:", err);
-    return [];
-  }
-  });
-}
-
+// Admin connection test. Intentionally bypasses the quota lockout (inline
+// traktFetch minus the isTraktQuotaLocked check) so a recovered or replaced
+// client id can be verified immediately instead of waiting out the remainder
+// of the 1h suspension — mirrors testOmdbConnection / the MDBList test.
 export async function testTraktConnection(): Promise<string> {
-  const movies = await traktFetch<TraktMovie[]>("/movies/popular", { limit: "1" });
-  if (!movies.length) throw new Error("Empty response from Trakt");
+  const apiKey = await getApiKey();
+  if (!apiKey) throw new Error("Trakt client ID not configured");
+
+  const url = new URL("/movies/popular", TRAKT_BASE);
+  url.searchParams.set("limit", "1");
+  const res = await safeFetchTrusted(url.toString(), {
+    allowedHosts: ["api.trakt.tv"],
+    headers: {
+      "Content-Type": "application/json",
+      "trakt-api-version": "2",
+      "trakt-api-key": apiKey,
+    },
+    timeoutMs: TRAKT_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(`Trakt ${res.status}: ${res.statusText}`);
+
+  const movies = await res.json() as TraktMovie[];
+  if (!Array.isArray(movies) || !movies.length) throw new Error("Empty response from Trakt");
   return movies[0].title;
 }

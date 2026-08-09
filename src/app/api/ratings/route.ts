@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { prisma } from "@/lib/prisma";
 import { fetchUnifiedRatings } from "@/lib/omdb-availability";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
@@ -28,7 +29,19 @@ export const GET = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "id must be a positive integer" }, { status: 400 });
   }
 
-  const result = await fetchUnifiedRatings(numericId, type);
+  // TTL bucketing: fetchUnifiedRatings keys its ratings-cache TTLs off the
+  // release date — passing none pinned every title this route warmed into the
+  // 30-day back-catalog bucket, fresh releases included. The core row's
+  // releaseYear (one cheap PK read) is precise enough for the age buckets.
+  const core = await prisma.tmdbMediaCore
+    .findUnique({
+      where: { tmdbId_mediaType: { tmdbId: numericId, mediaType: type === "movie" ? "MOVIE" : "TV" } },
+      select: { releaseYear: true },
+    })
+    .catch(() => null);
+  const releaseDate = core?.releaseYear ? `${core.releaseYear}-01-01` : null;
+
+  const result = await fetchUnifiedRatings(numericId, type, releaseDate);
   if (result.found && result.data) return NextResponse.json(result.data);
 
   return NextResponse.json(null);

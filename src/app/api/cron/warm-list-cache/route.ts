@@ -10,7 +10,7 @@ import {
   getPopularMoviesPage, getPopularTVPage,
   getMovieGenres, getTVGenres, getWatchProviders,
 } from "@/lib/tmdb";
-import { getTraktPopularMovies, getTraktPopularTV, getTraktTrendingMovies, getTraktTrendingTV } from "@/lib/trakt";
+import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
 
 async function getAuthContext(request: NextRequest): Promise<{ userId: string; userName: string; trigger: "admin" | "cron" } | null> {
@@ -49,7 +49,7 @@ export async function POST(request: NextRequest) {
       topMovies, topTV,
       popMoviesP1, popTVP1,
       movieGenres, tvGenres, providers,
-      traktPopMovies, traktPopTV, traktTrendMovies, traktTrendTV,
+      traktPopMovies, traktPopTV,
       mdbMovies, mdbTV,
     ] = await Promise.allSettled([
 
@@ -71,8 +71,6 @@ export async function POST(request: NextRequest) {
 
       warm(getTraktPopularMovies),
       warm(getTraktPopularTV),
-      warm(getTraktTrendingMovies),
-      warm(getTraktTrendingTV),
 
       warm(() => getMdblistTopRated("movie")),
       warm(() => getMdblistTopRated("tv")),
@@ -96,8 +94,6 @@ export async function POST(request: NextRequest) {
       watchProviders: extract(providers),
       traktPopularMovies: extract(traktPopMovies),
       traktPopularTV: extract(traktPopTV),
-      traktTrendingMovies: extract(traktTrendMovies),
-      traktTrendingTV: extract(traktTrendTV),
       mdblistMovies: extract(mdbMovies),
       mdblistTV: extract(mdbTV),
     };
@@ -106,7 +102,7 @@ export async function POST(request: NextRequest) {
       trending, popMovies, popTV, upMovies, upTV, onAirTV,
       topMovies, topTV, popMoviesP1, popTVP1,
       movieGenres, tvGenres, providers,
-      traktPopMovies, traktPopTV, traktTrendMovies, traktTrendTV,
+      traktPopMovies, traktPopTV,
       mdbMovies, mdbTV,
     ];
     const errorCount = allResults.filter((r) => r.status === "rejected").length;

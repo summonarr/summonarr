@@ -14,6 +14,13 @@ const BATCH_DELAY_MS = 250;
 const MAX_PREWARM_ITEMS = 200_000;
 const TMDB_FETCH_TIMEOUT_MS = 15_000;
 
+// Negative cache for TMDB 404s — a dead library match (bad id, delisted title)
+// otherwise re-fetches on every prewarm run, forever. 14 days: long enough to
+// stop the churn, short enough that a fix-match or a TMDB reinstatement heals
+// within two weeks. The purge reaps expired tombstones immediately (the
+// :details serve-stale grace deliberately excludes the :missing suffix).
+const MISSING_TOMBSTONE_TTL = 14 * 24 * 60 * 60;
+
 const TMDB_BASE = "https://api.themoviedb.org/3";
 
 // The unified-ratings fields assignUnifiedRatings (tmdb.ts) stores into the
@@ -169,7 +176,11 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     throw err;
   }
   if (!res.ok) {
-    if (res.status !== 404) {
+    if (res.status === 404) {
+      // Tombstone the dead id so the triage skips it on later runs. Silent —
+      // the title simply isn't on TMDB; noise here would flood every run.
+      await setCache(`${type}:${tmdbId}:details:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
+    } else {
       console.warn(`[prewarm] TMDB ${type}:${tmdbId} → HTTP ${res.status}`);
     }
     return;
@@ -317,20 +328,32 @@ async function processPrewarmPage(
     `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`;
 
   const keys = page.map(cacheKey);
+  const missingKey = (i: LibraryItem) => `${cacheKey(i)}:missing`;
   const cacheRows = await prisma.tmdbCache.findMany({
-    where: { key: { in: keys } },
+    where: { key: { in: [...keys, ...page.map(missingKey)] } },
     select: { key: true, cachedAt: true, expiresAt: true },
   });
   const freshKeySet = new Set<string>();
+  const tombstoned = new Set<string>();
   // "Fresh" means the row still has more than 25% of its original TTL remaining — below that threshold
   // it's cheaper to re-fetch now than risk a cache miss in production during peak traffic.
   for (const r of cacheRows) {
+    if (r.key.endsWith(":details:missing")) {
+      // A LIVE tombstone (fetchAndStore hit a TMDB 404 on a prior run) — the
+      // raw findMany returns expired rows too, so gate on expiry ourselves.
+      if (r.expiresAt.getTime() > Date.now()) tombstoned.add(r.key);
+      continue;
+    }
     const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
     if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeySet.add(r.key);
   }
 
   const freshItems = page.filter((i) => freshKeySet.has(cacheKey(i)));
-  const staleItems = page.filter((i) => !freshKeySet.has(cacheKey(i)));
+  // Tombstoned ids are known-dead — skip the fetch entirely (a fresh row wins
+  // over a tombstone: a later fix-match that repopulated the blob serves).
+  const deadItems = page.filter((i) => !freshKeySet.has(cacheKey(i)) && tombstoned.has(missingKey(i)));
+  stats.skipped += deadItems.length;
+  const staleItems = page.filter((i) => !freshKeySet.has(cacheKey(i)) && !tombstoned.has(missingKey(i)));
 
   if (freshItems.length > 0) {
     const coreRows = await prisma.tmdbMediaCore.findMany({

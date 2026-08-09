@@ -50,12 +50,26 @@ const ARR_REPUSH_BACKOFF_MS = 24 * 60 * 60 * 1000;
 // The tail purge below reaps every expired TmdbCache row, but the two ratings namespaces
 // are a deliberate serve-stale surface: an expired row is still a hit. Give them a long
 // grace so a provider outage falls back to the previous values instead of no badges at
-// all. `:tmdb:` is load-bearing — bare `mdblist:`/`omdb:` also match the list caches and
-// `omdb:<imdbId>`, which are read through getCache and should still expire immediately.
+// all. `:tmdb:` is load-bearing — bare `mdblist:`/`omdb:` also match the list caches
+// (and the legacy `omdb:<imdbId>` rows, whose writer was removed — they should simply
+// expire out).
 const STALE_RATINGS_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
 const STALE_RATINGS_KEY_PREFIXES = [
   { key: { startsWith: "mdblist:tmdb:" } },
   { key: { startsWith: "omdb:tmdb:" } },
+];
+
+// The `:details` blobs are a serve-stale surface too: the admin dashboard reads
+// them via getCacheStaleMany and the library prewarm's carry-forward reads the
+// previous row at rewrite time — an immediate purge collapses both to cold
+// misses within one SYNC_INTERVAL of expiry. A shorter grace than the ratings
+// namespaces keeps table growth modest. The endsWith pin keeps every sibling
+// namespace (credits, suggestions, seasons, the `:details:missing` prewarm
+// tombstones) expiring immediately.
+const STALE_DETAILS_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_DETAILS_KEY_SHAPES = [
+  { key: { startsWith: "movie:", endsWith: ":details" } },
+  { key: { startsWith: "tv:", endsWith: ":details" } },
 ];
 
 async function runConcurrent<T>(
@@ -1514,26 +1528,34 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   }
 
   try {
-    // The two ratings namespaces are read through getCacheStale/getCacheStaleMany, which
-    // deliberately never delete an expired row — an expired ratings row is still a HIT,
-    // served immediately and revalidated after the response. This purge was the only
-    // thing deleting them, within one SYNC_INTERVAL of expiry, collapsing that
-    // serve-stale window to under an hour and turning a stale hit into a cold miss for
-    // the rest of the row's life (no badges at all while a provider is down or quota-
-    // locked — precisely the outage serve-stale exists for). Reap them on a long grace
-    // instead. The prefixes must carry `:tmdb:`: bare `mdblist:`/`omdb:` also match the
-    // list caches and `omdb:<imdbId>`, which ARE read via getCache and should still be
-    // purged at expiry.
+    // The ratings namespaces AND the :details blobs are read through
+    // getCacheStale/getCacheStaleMany, which deliberately never delete an expired
+    // row — an expired row is still a HIT, served immediately and revalidated
+    // after the response. This purge was the only thing deleting them, within one
+    // SYNC_INTERVAL of expiry, collapsing those serve-stale windows to under an
+    // hour and turning a stale hit into a cold miss for the rest of the row's
+    // life. Reap each namespace on its own grace instead. The ratings prefixes
+    // must carry `:tmdb:`: bare `mdblist:`/`omdb:` also match the list caches,
+    // which should still expire immediately.
     await prisma.tmdbCache.deleteMany({
-      // `NOT: { OR: [...] }`, not a bare `NOT: [...]`: the two prefixes are mutually
-      // exclusive, so if a list-NOT compiled to NOT(a AND b) the exclusion would be a
-      // silent no-op. The nested form is unambiguously "neither prefix".
-      where: { expiresAt: { lt: new Date() }, NOT: { OR: STALE_RATINGS_KEY_PREFIXES } },
+      // `NOT: { OR: [...] }`, not a bare `NOT: [...]`: the shapes are mutually
+      // exclusive, so if a list-NOT compiled to NOT(a AND b) the exclusion would be
+      // a silent no-op. The nested form is unambiguously "none of these shapes".
+      where: {
+        expiresAt: { lt: new Date() },
+        NOT: { OR: [...STALE_RATINGS_KEY_PREFIXES, ...STALE_DETAILS_KEY_SHAPES] },
+      },
     });
     await prisma.tmdbCache.deleteMany({
       where: {
         expiresAt: { lt: new Date(Date.now() - STALE_RATINGS_GRACE_MS) },
         OR: STALE_RATINGS_KEY_PREFIXES,
+      },
+    });
+    await prisma.tmdbCache.deleteMany({
+      where: {
+        expiresAt: { lt: new Date(Date.now() - STALE_DETAILS_GRACE_MS) },
+        OR: STALE_DETAILS_KEY_SHAPES,
       },
     });
   } catch (err) {
