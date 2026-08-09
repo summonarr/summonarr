@@ -1873,6 +1873,14 @@ const spec = {
         responses: { "200": { description: "Warm result" } },
       },
     },
+    "/cron/warm-library": {
+      post: {
+        tags: ["Cron"],
+        summary: "Incrementally re-warm the library :details/TmdbMediaCore caches",
+        security: [{ cronSecret: [] }],
+        responses: { "200": { description: "Warm result" } },
+      },
+    },
     "/cron/warm-mdblist": {
       post: {
         tags: ["Cron"],

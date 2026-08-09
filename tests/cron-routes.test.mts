@@ -1,8 +1,7 @@
-// Route-level unit tests for all ten POST /api/cron/* handlers, none of which
-// had any coverage:
+// Route-level unit tests for all eleven POST /api/cron/* handlers:
 //   purge-auth-sessions, scrub-audit-pii, sync-download-policies,
-//   trash-diagnostic, trash-sync, warm-activity, warm-list-cache,
-//   warm-mdblist, warm-omdb, warm-recommendations
+//   trash-diagnostic, trash-sync, warm-activity, warm-library,
+//   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
 // These are the internet-facing entry points the container's own cron loop
 // POSTs to with `Bearer ${CRON_SECRET}`, and they do the destructive
@@ -52,6 +51,7 @@ process.env.TRUST_PROXY = "true";
 process.env.DATABASE_URL = "postgres://u:p@127.0.0.1:5432/db"; // Client.prototype is stubbed; never dialed
 const CRON_SECRET = "cron-routes-cron-secret-0123456789abcdef"; // >=32 chars, boot-shaped
 process.env.CRON_SECRET = CRON_SECRET;
+process.env.TMDB_READ_TOKEN = "cron-routes-tmdb-token"; // warm-library's tmdbAuth() gate
 (process.env as Record<string, string | undefined>).NODE_ENV = "test";
 
 const warns: string[] = [];
@@ -209,6 +209,7 @@ const ROUTES: CronRoute[] = [
   await load("trash-diagnostic", null),
   await load("trash-sync", AL.TRASH_SYNC_LOCK_ID),
   await load("warm-activity", null),
+  await load("warm-library", AL.WARM_LIBRARY_LOCK_ID),
   await load("warm-list-cache", null),
   await load("warm-mdblist", AL.WARM_MDBLIST_LOCK_ID),
   await load("warm-omdb", AL.WARM_OMDB_LOCK_ID),
@@ -240,8 +241,8 @@ beforeEach(() => {
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all ten cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 10);
+test("all eleven cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 11);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -478,6 +479,22 @@ test("purge-auth-sessions: a failing leg is logged for the operator (guardrail 7
 });
 
 // ── warm jobs: the unconfigured-provider short circuit ───────────────────────
+
+test("warm-library skips cleanly, and BEFORE taking its lock, when TMDB credentials are absent", async () => {
+  // Its gate is the TMDB_READ_TOKEN env (tmdbAuth), not a Setting — same
+  // pre-lock short-circuit contract as the provider-keyed warm jobs.
+  const saved = process.env.TMDB_READ_TOKEN;
+  delete process.env.TMDB_READ_TOKEN;
+  try {
+    const route = ROUTES.find((r) => r.name === "warm-library")!;
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { skipped: true, reason: "no TMDB credentials configured" });
+    assert.deepEqual(pgLockCalls, []);
+  } finally {
+    process.env.TMDB_READ_TOKEN = saved;
+  }
+});
 
 for (const [name, key, reason] of [
   ["warm-omdb", "omdbApiKey", "no OMDB API key configured"],
