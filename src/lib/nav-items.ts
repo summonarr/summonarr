@@ -45,6 +45,7 @@ export interface NavItem {
 // both server and client components and we want the nav definition to stay a
 // plain data module with no cross-file coupling beyond href strings.
 export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
+  "/for-you":            "feature.page.forYou",
   "/top":                "feature.page.top",
   "/popular":            "feature.page.popular",
   "/upcoming":           "feature.page.upcoming",
@@ -82,6 +83,7 @@ export function filterNavByFeatures<T extends { href: string }>(
 
 export const userNavItems: NavItem[] = [
   { href: "/", label: "Discover", icon: LayoutDashboard, exact: true, mobileBottomBar: true, section: "browse" },
+  { href: "/for-you", label: "For You", icon: Sparkles, section: "browse" },
   { href: "/movies", label: "Movies", icon: Film, mobileBottomBar: true, section: "browse" },
   { href: "/tv", label: "TV Shows", icon: Tv2, mobileBottomBar: true, section: "browse" },
   { href: "/top", label: "Top Rated", icon: Trophy, section: "browse" },
