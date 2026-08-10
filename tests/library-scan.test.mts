@@ -316,14 +316,20 @@ test("variant routing: a '4k' hint gates on the radarr4k instance's queue, not t
   assert.equal(refreshCalls("/Library/Refresh").length, 1);
 });
 
-test("per-service failure isolation: a Plex 500 is logged while Jellyfin still refreshes, and the promise resolves", async (t) => {
+test("per-service failure isolation: a Plex failure is logged while Jellyfin still refreshes, and the promise resolves", async (t) => {
   arm(t);
   settings.set("plexServerUrl", "http://plex.t7.example:32400");
   settings.set("plexAdminToken", "plex-token-7");
   settings.set("jellyfinUrl", "http://jf.t7.example:8096");
   settings.set("jellyfinApiKey", "jf-key-7");
   respond = (url) => {
-    if (url.endsWith("/library/sections")) return new Response("boom", { status: 500 });
+    // 404, NOT 500: getPlexLibrarySections retries 5xx with real-setTimeout
+    // backoff (pinned in tests/plex.test.mts), and under this file's MOCKED
+    // timers a 500 parks that retry on a 2s timer nothing ever ticks — the
+    // test (and, with --test-timeout=0, the whole npm-test child) hangs
+    // forever. A non-429 4xx fast-fails on the first attempt, which is all
+    // this test needs: the isolation contract, not the retry mechanics.
+    if (url.endsWith("/library/sections")) return new Response("gone", { status: 404 });
     if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
     throw new Error(`unexpected fetch ${url}`);
   };
@@ -332,7 +338,7 @@ test("per-service failure isolation: a Plex 500 is logged while Jellyfin still r
   t.mock.timers.tick(DEBOUNCE);
   await p; // must resolve despite the Plex failure
 
-  assert.ok(errors.some((e) => e.includes("[library-scan] plex movie:") && e.includes("500")),
+  assert.ok(errors.some((e) => e.includes("[library-scan] plex movie:") && e.includes("404")),
     "the Plex failure is logged with its scope");
   assert.equal(refreshCalls("/Library/Refresh").length, 1, "Jellyfin is unaffected by the Plex failure");
 });
