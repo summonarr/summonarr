@@ -185,6 +185,13 @@ for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "tmdbCache", "tmdbMed
     groupBy: async () => [],
   });
 }
+// The removal cleanup deletes the de-registered slug's wanted/available cache
+// rows — record the scoped where so the pin below can assert it.
+for (const m of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", "sonarrAvailableItem"]) {
+  shadowPrismaModel(prisma, m, {
+    deleteMany: async (args: { where?: unknown }) => { rec(`${m}.deleteMany`, args?.where); return { count: 0 }; },
+  });
+}
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => { rec("$queryRaw"); return []; });
 
@@ -347,7 +354,7 @@ test("a 4k entry in the POST is excluded from the registry so it can't shadow th
   assert.ok(!stored.some((e: { slug: string }) => e.slug === "4k"), "4k must never be registry-backed");
 });
 
-test("removing a NAMED instance DOES clean up its setting rows", async () => {
+test("removing a NAMED instance DOES clean up its setting rows AND its slug-scoped wanted/available cache rows", async () => {
   const t = await mintSession();
   registry("radarr", [{ slug: "anime", name: "Anime" }]);
   settings.set(arrSettingKey("radarr", "anime", "Url"), "http://10.0.0.8:7878");
@@ -356,6 +363,16 @@ test("removing a NAMED instance DOES clean up its setting rows", async () => {
   await saveInstances(t, { service: "radarr", instances: [] });
   assert.equal(settings.get(arrSettingKey("radarr", "anime", "ApiKey")), undefined);
   assert.equal(settings.get(arrSettingKey("radarr", "anime", "Url")), undefined);
+
+  // The de-registered slug's cache rows are unreachable by every writer after
+  // removal (no sync path targets a removed slug) while the availability
+  // attach reads them unscoped — the cleanup must delete them, slug-scoped,
+  // for THIS service only.
+  const wantedDeletes = ops.filter((c) => c.op === "radarrWantedItem.deleteMany").map((c) => c.args);
+  const availDeletes = ops.filter((c) => c.op === "radarrAvailableItem.deleteMany").map((c) => c.args);
+  assert.deepEqual(wantedDeletes, [{ arrInstance: "anime" }]);
+  assert.deepEqual(availDeletes, [{ arrInstance: "anime" }]);
+  assert.equal(ops.filter((c) => c.op === "sonarrWantedItem.deleteMany").length, 0, "a radarr save must not touch sonarr caches");
 });
 
 test("a kept named instance is not cleaned up", async () => {

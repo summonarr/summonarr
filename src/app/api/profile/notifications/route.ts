@@ -3,9 +3,6 @@ import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
 import { isNotificationEmailEnabled } from "@/lib/email";
-import { getJellyfinUserEmail } from "@/lib/jellyfin";
-import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { getMediaInstances } from "@/lib/media-instance-registry";
 import { prisma } from "@/lib/prisma";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
@@ -82,22 +79,17 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       // notification system into an email-bombing / harassment vector with the
       // server's own SMTP/Resend reputation behind it.
       //
-      // Mitigation: bind the value to the address THIS Jellyfin server reports for
-      // the account (fetched live below). An attacker cannot point notifications at
-      // a mailbox they don't already control on the upstream Jellyfin server, so the
-      // upstream server's own account ownership becomes the verification boundary.
-      //
-      // There IS now a self-service verification flow — POST /api/profile/
-      // notification-email + /confirm mails a one-time token and binds the address
-      // only after the user proves possession. It is the way to set a NEW address;
-      // this branch stays server-authoritative for anything it hasn't already
-      // verified.
+      // The self-service verification flow — POST /api/profile/notification-email
+      // + /confirm — mails a one-time token and binds the address only after the
+      // user proves possession. It is the ONLY way to set a NEW address: Jellyfin's
+      // API exposes no user email field (UserDto carries none in any version), so
+      // the old "match the address your Jellyfin server reports" probe always came
+      // back empty and every new-address PATCH landed here regardless.
       const candidate = normalizeEmail(raw);
       const me = await prisma.user.findUnique({
         where: { id: session.user.id },
-        select: { jellyfinUserId: true, notificationEmail: true },
+        select: { notificationEmail: true },
       });
-      const jellyfinUserId = me?.jellyfinUserId ?? null;
 
       // An unchanged write-back of the CURRENTLY STORED address is a no-op, and
       // that value is already verified — either it matched Jellyfin when it was
@@ -108,59 +100,14 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       if (me?.notificationEmail && candidate === normalizeEmail(me.notificationEmail)) {
         data.notificationEmail = candidate;
       } else {
-        let reportedEmail: string | null = null;
-        if (jellyfinUserId) {
-          // Multi-server (guardrail 35): the session carries no instance slug, and
-          // User.jellyfinUserId holds whichever server's GUID the user actually
-          // authenticated against — so asking the DEFAULT server about it returns
-          // nothing and 403s every named-instance user. MediaServerUser records the
-          // instance the identity was seen on; when that row is missing (sign-in
-          // restriction off and the library never synced) probe each registered
-          // instance instead. A Jellyfin GUID is per-server unique, so a hit can
-          // only be this user's own account.
-          const serverUser = await prisma.mediaServerUser.findFirst({
-            where: { source: "jellyfin", sourceUserId: jellyfinUserId },
-            select: { serverInstance: true },
-          });
-          const slugs = serverUser
-            ? [serverUser.serverInstance]
-            : (await getMediaInstances("jellyfin")).map((i) => i.slug);
-          for (const slug of slugs) {
-            const { url, apiKey } = await getJellyfinConfig(slug);
-            if (!url || !apiKey) continue;
-            // getJellyfinUserEmail routes through safeFetchAdminConfigured and only
-            // reads Settings (no encryptToken at the call site — guardrail 7a holds).
-            const fromJellyfin = await getJellyfinUserEmail(url, apiKey, jellyfinUserId);
-            if (fromJellyfin) {
-              reportedEmail = normalizeEmail(fromJellyfin);
-              break;
-            }
-          }
-        }
-
         // Nothing server-authoritative to bind a NEW address to. Accepting a
         // free-form one here would reopen the notification-redirect / harassment
-        // vector, so point the caller at the verification flow instead — that
-        // path mails a one-time token and binds only on proven possession.
-        if (!reportedEmail) {
-          return NextResponse.json(
-            {
-              error:
-                "Verify this address first (POST /api/profile/notification-email), or set an email on your Jellyfin account.",
-            },
-            { status: 403 },
-          );
-        }
-        if (candidate !== reportedEmail) {
-          return NextResponse.json(
-            {
-              error:
-                "notificationEmail must match the email on your Jellyfin account, or be verified first via POST /api/profile/notification-email.",
-            },
-            { status: 403 },
-          );
-        }
-        data.notificationEmail = candidate;
+        // vector, so point the caller at the verification flow — it mails a
+        // one-time token and binds only on proven possession.
+        return NextResponse.json(
+          { error: "Verify this address first via POST /api/profile/notification-email." },
+          { status: 403 },
+        );
       }
     } else {
       return NextResponse.json({ error: "Invalid notificationEmail" }, { status: 400 });

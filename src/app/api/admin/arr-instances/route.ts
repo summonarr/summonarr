@@ -191,12 +191,25 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     await set("WebhookSecret", inst.webhookSecret, true);
   }
 
-  // Clean up rows for removed named instances.
+  // Clean up rows for removed named instances — the Setting keys AND the
+  // slug's wanted/available cache rows. Without the latter, a de-registered
+  // instance's rows were unreachable by every writer (no sync path targets a
+  // removed slug — its scoped deleteMany never fires again) while the
+  // availability attach reads them unscoped, so its titles read "in arr"
+  // forever. Mirrors the media-instances route's removal cleanup (guardrail
+  // 35); like it, this is not retroactive for slugs removed before the fix.
   for (const slug of beforeNamed) {
     if (!nextNamed.has(slug)) {
       await prisma.setting.deleteMany({
         where: { key: { in: FIELDS.map((f) => arrSettingKey(service, slug, f)) } },
       });
+      if (service === "radarr") {
+        await prisma.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await prisma.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+      } else {
+        await prisma.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await prisma.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+      }
     }
   }
 

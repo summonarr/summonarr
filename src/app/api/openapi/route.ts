@@ -205,6 +205,19 @@ const spec = {
         responses: { "200": { description: "Grouped discovery rails with availability enrichment" } },
       },
     },
+    "/recommendations": {
+      get: {
+        tags: ["Discovery"],
+        summary: "Full personalized For You set with availability enrichment",
+        parameters: [
+          { name: "filter", in: "query", schema: { type: "string", enum: ["available", "missing"] }, description: "Restrict to titles on (or not on) the user's media servers" },
+        ],
+        responses: {
+          "200": { description: "Ranked recommendation items ({ items, total })" },
+          "404": { description: "feature.page.forYou is disabled" },
+        },
+      },
+    },
     "/popular": {
       get: {
         tags: ["Discovery"],

@@ -359,6 +359,33 @@ test("getPlexSectionTmdbIds with NO totalSize keeps paging until an empty page �
   assert.equal(fetchCalls.length, 2, "must fetch a second page rather than trust container.size as the total");
 });
 
+test("recentOnly early stop: paging ends once an ENTIRE addedAt-desc page predates the window; unknown addedAt keeps paging", async () => {
+  // /recentlyAdded is addedAt-desc, so the "incremental" sync used to page the
+  // whole section every run. A page mixing new+old (or carrying unknown ages)
+  // must keep paging; a page that is entirely known-old ends the walk.
+  const S = "http://plex-recent1.test:32400";
+  const NOW_SEC = 1_700_000_000;
+  const cutoff = NOW_SEC - 2 * 60 * 60; // 2h window
+  const mv = (id: number, addedAt?: number) => ({
+    type: "movie", ratingKey: `rk${id}`, title: `M${id}`, Guid: [{ id: `tmdb://${id}` }],
+    ...(addedAt !== undefined ? { addedAt } : {}),
+  });
+  respond = (url) => {
+    const start = url.searchParams.get("X-Plex-Container-Start");
+    // Page 0: one in-window + one unknown-age → keep paging.
+    if (start === "0") return mediaContainer([mv(1, NOW_SEC - 60), mv(2)], { totalSize: 3001 });
+    // Page 1: entirely known-old → stop; page 2 must never be fetched.
+    if (start === "2") return mediaContainer([mv(3, cutoff - 9_000), mv(4, cutoff - 10_000)], { totalSize: 3001 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const items = await getPlexSectionTmdbIds(S, "t", "1", "movie", true, undefined, undefined, undefined, cutoff);
+  assert.equal(fetchCalls.length, 2, "the walk must stop after the all-old page — no third fetch");
+  // Items from fetched pages (including the old page's) still land in the map;
+  // the recentOnly write path is insert-only, so extras are harmless.
+  assert.deepEqual([...items.keys()].sort((a, b) => a - b), [1, 2, 3, 4]);
+});
+
 test("getPlexSectionTmdbIds show sections: recentlyAdded path, allLeaves filePath enrichment, and per-show leaf-failure degradation", async () => {
   const S = "http://plex-shows1.test:32400";
   respond = (url) => {
@@ -627,6 +654,47 @@ test("the type=2 walk accumulates ratingKey→tmdb ids, and a precomputed map sk
   assert.ok(
     fetchCalls.every((c) => c.url.searchParams.get("type") !== "2"),
     "the precomputed map must skip the duplicate type=2 show walk",
+  );
+});
+
+test("skipShowFilePaths: the full show walk skips the per-show allLeaves probe; the type=4 walk captures the paths instead", async () => {
+  // The full sync used to fire ONE allLeaves request per show, every run, just
+  // to learn a file path the type=4 episode listing already carries.
+  const S = "http://plex-skip1.test:32400";
+  respond = (url) => {
+    if (url.pathname === "/library/sections/3/all" && url.searchParams.get("type") === "2") {
+      return mediaContainer([{ type: "show", ratingKey: "70", title: "Severance", Guid: [{ id: "tmdb://95396" }] }], { totalSize: 1 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const out = new Map<string, number[]>();
+  const items = await getPlexSectionTmdbIds(S, "t", "3", "show", false, out, undefined, true);
+  assert.equal(items.get(95396)!.filePath, null, "no allLeaves probe ⇒ no path from the show walk");
+  assert.ok(
+    fetchCalls.every((c) => !c.url.pathname.includes("/allLeaves")),
+    "the per-show allLeaves fan-out must not fire when skipped",
+  );
+
+  fetchCalls.length = 0;
+  respond = (url) => {
+    if (url.pathname === "/library/sections/3/all" && url.searchParams.get("type") === "4") {
+      return mediaContainer([
+        // Specials are index-filtered out of the episode rows but still carry
+        // a real on-disk path — the capture must not skip them.
+        { grandparentRatingKey: "70", parentIndex: 0, index: 2, Media: [{ Part: [{ file: "/tv/severance/special.mkv" }] }] },
+        { grandparentRatingKey: "70", parentIndex: 1, index: 1, Media: [{ Part: [{ file: "/tv/severance/e1.mkv" }] }] },
+      ], { totalSize: 2 });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const sections = [{ key: "3", title: "Shows", type: "show" as const }];
+  const files = new Map<string, string>();
+  const eps = await getPlexTVEpisodes(S, "t", undefined, sections, out, files);
+  assert.deepEqual(eps, [{ tmdbId: 95396, seasonNumber: 1, episodeNumber: 1 }]);
+  assert.deepEqual(
+    [...files.entries()],
+    [["70", "/tv/severance/special.mkv"]],
+    "first-wins path capture per show, including index-filtered specials",
   );
 });
 

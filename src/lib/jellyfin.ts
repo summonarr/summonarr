@@ -59,7 +59,7 @@ export async function initiateJellyfinQuickConnect(baseUrl: string): Promise<Jel
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY, "Content-Type": "application/json" },
   });
-  if (!res.ok) throw new Error(`Jellyfin QuickConnect initiate: ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect initiate: ${res.status}`), { status: res.status });
   const data = (await res.json()) as { Secret: string; Code: string };
   return { secret: data.Secret, code: data.Code };
 }
@@ -70,7 +70,7 @@ export async function pollJellyfinQuickConnect(baseUrl: string, secret: string):
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY },
   });
-  if (!res.ok) throw new Error(`Jellyfin QuickConnect poll: ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect poll: ${res.status}`), { status: res.status });
   const data = (await res.json()) as { Authenticated: boolean };
   return data.Authenticated;
 }
@@ -92,25 +92,12 @@ export async function authenticateWithJellyfinQuickConnect(baseUrl: string, secr
   return { id: user.Id, name: user.Name };
 }
 
-export async function getJellyfinUserEmail(
-  baseUrl: string,
-  apiKey: string,
-  userId: string,
-): Promise<string | null> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Users/${encodeURIComponent(userId)}`;
-  try {
-    const res = await safeFetchAdminConfigured(url, {
-      headers: jellyfinHeaders(apiKey),
-      timeoutMs: FETCH_TIMEOUT_MS,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as Record<string, unknown>;
-    const email = typeof data.Email === "string" && data.Email.includes("@") ? data.Email : null;
-    return email;
-  } catch {
-    return null;
-  }
-}
+// NOTE: there is deliberately no getJellyfinUserEmail here. Jellyfin's API
+// exposes no user email field on UserDto (no version carries one), so a
+// /Users/{id} probe for `Email` always came back empty — the two callers that
+// depended on it (Jellyfin sign-in's real-email guard and the notifications
+// route's match-the-server check) were removed with it. getJellyfinAllUsers
+// below keeps its tolerated-absent Email read for the download-policy sync.
 
 // Token-authenticated calls dual-send the API key: `Authorization: MediaBrowser
 // ..., Token="..."` for 10.12+ (legacy transports disabled — see
@@ -440,7 +427,7 @@ async function getJellyfinItemsByType(
             // EnableImages=false + ImageTypeLimit=0: nothing here consumes
             // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
             // (enableImages defaults true) — they were the bulk of >10 MB pages.
-            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0${dateFilter}`,
+            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
             apiKey,
             processItems,
           )
@@ -449,7 +436,7 @@ async function getJellyfinItemsByType(
     }
   } else {
     await fetchJellyfinPages(
-      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0${dateFilter}`,
+      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
       apiKey,
       processItems,
     );
@@ -516,14 +503,14 @@ export async function getJellyfinTVEpisodes(
   if (libraryIds?.size) {
     for (const parentId of Array.from(libraryIds)) {
       await fetchJellyfinPagesSequential(
-        `${base}/Items?ParentId=${parentId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0`,
+        `${base}/Items?ParentId=${parentId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
         apiKey,
         processEpisodes,
       );
     }
   } else {
     await fetchJellyfinPagesSequential(
-      `${base}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0`,
+      `${base}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
       apiKey,
       processEpisodes,
     );
@@ -542,7 +529,7 @@ export async function getJellyfinEpisodesForShow(
   const episodes: JellyfinTVEpisodeData[] = [];
   const fields = "ParentIndexNumber,IndexNumber";
   await fetchJellyfinPagesSequential(
-    `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0`,
+    `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
     apiKey,
     (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number }>) => {
       for (const ep of batch) {
@@ -638,8 +625,15 @@ interface JellyfinSessionRaw {
   };
 }
 
+// Server-side /Sessions filter for the 5s poller. Jellyfin's idle reaper
+// clears NowPlayingItem within ~5-10 min of a client going silent, so 960s can
+// never hide a session the NowPlayingItem filter below would have kept — it
+// only stops the server serializing every idle device the poller was
+// discarding client-side anyway (same value jellyfin-web's dashboard uses).
+const SESSIONS_ACTIVE_WITHIN_SECONDS = 960;
+
 export async function getJellyfinSessions(baseUrl: string, apiKey: string): Promise<JellyfinSessionData[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Sessions`;
+  const url = `${baseUrl.replace(/\/$/, "")}/Sessions?activeWithinSeconds=${SESSIONS_ACTIVE_WITHIN_SECONDS}`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,

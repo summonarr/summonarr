@@ -18,6 +18,8 @@
 //
 //   Library surface (hasJellyfinItemByTmdbId, getJellyfinTmdbIds,
 //   getJellyfinMediaFolders, refreshJellyfinLibrary):
+//   (getJellyfinUserEmail is GONE — UserDto carries no Email field in any
+//   Jellyfin version, so the probe was dead code; its callers were removed.)
 //   - the exact /Items queries: the availability probe's recent-additions
 //     fetch with CLIENT-side ProviderIds matching (Jellyfin never implemented
 //     the Emby-style AnyProviderIdEquals filter — jellyfin/jellyfin#1990 — so
@@ -114,7 +116,6 @@ const {
   initiateJellyfinQuickConnect,
   pollJellyfinQuickConnect,
   authenticateWithJellyfinQuickConnect,
-  getJellyfinUserEmail,
   hasJellyfinItemByTmdbId,
   getJellyfinMediaFolders,
   refreshJellyfinLibrary,
@@ -262,39 +263,6 @@ test("QuickConnect exchange POSTs /Users/AuthenticateWithQuickConnect with a {Se
   );
 });
 
-// ── getJellyfinUserEmail ────────────────────────────────────────────────────
-
-test("user email GETs /Users/{id} (encoded) with X-MediaBrowser-Token and returns Email only when it contains '@'", async () => {
-  const B = nextBase();
-  respond = () => okJson({ Id: "u 1", Email: "alice@example.com" });
-  assert.equal(await getJellyfinUserEmail(B, "key-1", "u 1"), "alice@example.com");
-
-  const req = sent[0];
-  assert.equal(req.url, `${B}/Users/u%201`, "the userId must be encodeURIComponent'd into the path");
-  assert.equal(req.method, "GET");
-  assert.equal(req.headers.get("x-mediabrowser-token"), "key-1");
-  assert.equal(
-    req.headers.get("authorization"),
-    adminAuthHeader("key-1"),
-    "the token must dual-send under Authorization: MediaBrowser — the only form 10.12+ reads",
-  );
-
-  // The @-gate: a non-address string and an absent field both read as "no email".
-  respond = () => okJson({ Email: "not-an-address" });
-  assert.equal(await getJellyfinUserEmail(B, "key-1", "u1"), null);
-  respond = () => okJson({});
-  assert.equal(await getJellyfinUserEmail(B, "key-1", "u1"), null);
-});
-
-test("user email degrades to null on non-2xx and on a network failure (never throws)", async () => {
-  const B = nextBase();
-  respond = () => okJson({}, 404);
-  assert.equal(await getJellyfinUserEmail(B, "key-1", "gone"), null);
-
-  respond = () => { throw new Error("ECONNREFUSED"); };
-  assert.equal(await getJellyfinUserEmail(B, "key-1", "u1"), null);
-});
-
 // ── hasJellyfinItemByTmdbId ─────────────────────────────────────────────────
 
 test("availability probe fetches recent additions of the mapped type and matches ProviderIds CLIENT-side", async () => {
@@ -409,7 +377,7 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
   assert.equal(sent.length, 1);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=5000`,
+    `${B}/Items?IncludeItemTypes=Movie&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=5000`,
     "the library sync's exact query — a drift here silently empties the sync",
   );
   assert.deepEqual(items.get(550), {
@@ -588,7 +556,7 @@ test("episodes with a provided series map: exact fields query, SeriesId→tmdbId
   const episodes = await getJellyfinTVEpisodes(B, "k", undefined, seriesMap);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=1000`,
+    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(
     episodes.sort((a, b) => a.tmdbId - b.tmdbId),
@@ -752,7 +720,7 @@ test("episodes-for-show scopes to ParentId=<seriesId>, stamps the caller's tmdbI
   const episodes = await getJellyfinEpisodesForShow(B, "k", "ser-77", 4242);
   assert.equal(
     sent[0].url,
-    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&StartIndex=0&Limit=1000`,
+    `${B}/Items?ParentId=ser-77&IncludeItemTypes=Episode&Recursive=true&Fields=ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(episodes, [
     { tmdbId: 4242, seasonNumber: 1, episodeNumber: 1 },
@@ -797,7 +765,7 @@ test("sessions: idle sessions (no NowPlayingItem) are dropped and a transcoding 
   ]);
 
   const sessions = await getJellyfinSessions(B, "key-6");
-  assert.equal(sent[0].url, `${B}/Sessions`);
+  assert.equal(sent[0].url, `${B}/Sessions?activeWithinSeconds=960`);
   assert.equal(sessions.length, 1, "idle sessions must be filtered out");
   assert.deepEqual(sessions[0], {
     sessionId: "sess-1",

@@ -323,6 +323,8 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   }
   if (r.production_countries?.length) {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
+    // ISO codes alongside the display names — the anime auto-route matches "JP".
+    media.originCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
   }
   if (r.homepage) media.homepage = r.homepage;
   if (r.budget) media.budget = r.budget;
@@ -366,6 +368,14 @@ function normalizeTV(r: RawTV): TmdbMedia {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
   } else if (r.origin_country?.length) {
     media.productionCountries = r.origin_country.map(displayRegion);
+  }
+  // ISO codes alongside the display names — origin_country IS codes; the anime
+  // auto-route matches "JP" against these (the display-name mapping above lost
+  // them, leaving the routing predicate's JP branch unreachable).
+  if (r.origin_country?.length) {
+    media.originCountryCodes = r.origin_country;
+  } else if (r.production_countries?.length) {
+    media.originCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
   }
   if (r.homepage) media.homepage = r.homepage;
   if (r.last_air_date) media.lastAirDate = r.last_air_date;

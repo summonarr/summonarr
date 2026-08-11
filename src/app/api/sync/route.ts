@@ -752,7 +752,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             const tvLegacy = new Map<string, PlexLegacyGuidRef>();
             const [movieIds, tvIds] = await Promise.all([
               getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections, undefined, movieLegacy),
-              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy),
+              // skipShowFilePaths: the episode walk below always follows on
+              // this path and captures the same file paths from the type=4
+              // listing — the per-show allLeaves probe (one HTTP request per
+              // show, every run) is redundant here. The paths are patched onto
+              // the rows post-write.
+              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy, true),
             ]);
             // Resolve + merge legacy-agent items (self-catching, never throws):
             // a resolution failure degrades those items to their previous
@@ -860,8 +865,30 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           // The precomputed ratingKeyToTmdb map (built by this instance's own
           // type=2 walk above) skips getPlexTVEpisodes' per-section re-walk of
           // the identical show listing.
-          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections, ratingKeyToTmdb);
+          const episodeFilePaths = new Map<string, string>();
+          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections, ratingKeyToTmdb, episodeFilePaths);
           allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
+          // Patch the show file paths the TV fetch skipped (skipShowFilePaths)
+          // onto the just-written rows. Runs AFTER this instance's library
+          // write by construction (the write completed above), is
+          // instance-scoped, and touches only rows still missing a path —
+          // idempotent and harmless if a concurrent writer replaced the rows.
+          // Best-effort: a failure leaves paths null until the next run, the
+          // same degradation a failed allLeaves probe had.
+          if (episodeFilePaths.size > 0) {
+            try {
+              await prisma.$transaction(async (tx) => {
+                for (const [ratingKey, file] of episodeFilePaths) {
+                  await tx.plexLibraryItem.updateMany({
+                    where: { serverInstance: slug, mediaType: "TV", plexRatingKey: ratingKey, filePath: null },
+                    data: { filePath: file },
+                  });
+                }
+              }, { timeout: BATCH_TX_TIMEOUT });
+            } catch (err) {
+              console.warn(`[sync] Plex show file-path patch failed for instance "${slug}":`, err instanceof Error ? err.message : err);
+            }
+          }
         } catch (err) {
           console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);
           allEpisodesFetched = false;

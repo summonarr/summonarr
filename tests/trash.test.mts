@@ -159,15 +159,24 @@ const specUpserts: Array<{
   update: Record<string, unknown>;
   create: Record<string, unknown>;
 }> = [];
+// Per-service failure knob: makes trashSpec.findMany throw for ONE service —
+// the per-service containment tests' way of failing a single refresh/apply
+// pass now that the GitHub tree fetch is shared across services.
+let failSpecFindManyForService: string | null = null;
+
 shadowPrismaModel(prisma, "trashSpec", {
-  findMany: async (args: SpecFindManyArgs = {}) =>
-    specRows
+  findMany: async (args: SpecFindManyArgs = {}) => {
+    if (failSpecFindManyForService !== null && (args.where as { service?: string } | undefined)?.service === failSpecFindManyForService) {
+      throw new Error(`trashSpec store exploded for ${failSpecFindManyForService} (unit test)`);
+    }
+    return specRows
       .filter((r) => specMatches(r, args.where))
       .map((r) =>
         args.include?.applications
           ? { ...r, applications: appsFor(r.id, args.include.applications.where) }
           : { ...r },
-      ),
+      );
+  },
   findUnique: async (args: { where: { id: string }; include?: { applications?: { where?: { arrInstance?: string } } } }) => {
     const row = specRows.find((r) => r.id === args.where.id);
     if (!row) return null;
@@ -450,6 +459,7 @@ beforeEach(() => {
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
+  failSpecFindManyForService = null;
   specSeq = 0;
   appSeq = 0;
   appCreateConflictOnce = false;
@@ -1338,12 +1348,14 @@ test("the hourly cadence gate skips GitHub when the last refresh is fresh, and r
   assert.equal(fetchCalls.length, 0);
   assert.equal(settings.get("trashLastRefreshAt"), fresh); // not restamped on a gated run
 
-  // Stale timestamp: both services refresh (one tree call each) and the stamp updates.
+  // Stale timestamp: both services refresh off ONE shared tree fetch (the
+  // ~573 KB recursive listing is identical per service — fetching it per
+  // service doubled the GitHub transfer every cycle) and the stamp updates.
   settings.set("trashLastRefreshAt", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
   respond = router(ghRoutes([], {}));
   const refreshedRun = await runTrashSync();
   assert.deepEqual(refreshedRun.refreshed.map((r) => r.service), ["RADARR", "SONARR"]);
-  assert.equal(fetchCalls.filter((c) => c.url.hostname === "api.github.com").length, 2);
+  assert.equal(fetchCalls.filter((c) => c.url.hostname === "api.github.com").length, 1, "one tree fetch shared by both services");
   // An empty tree still surfaces the per-service missing-naming errors, namespaced.
   assert.deepEqual(refreshedRun.errors, [
     "RADARR: naming: upstream file missing (docs/json/radarr/naming/radarr-naming.json)",
@@ -1417,26 +1429,42 @@ test("runTrashSync fans out per service and per configured instance, honors kind
 });
 
 test("a per-service refresh throw is contained: the other service still refreshes and partial success stamps the gate", async () => {
+  // The tree fetch is shared now, so a per-service failure comes from the
+  // service's own work after it — here the RADARR spec-store read throws.
   settings.set("trashGuidesEnabled", "true"); // no trashLastRefreshAt → refresh due
-  let treeCalls = 0;
+  failSpecFindManyForService = "RADARR";
   respond = (call) => {
-    if (call.url.hostname === "api.github.com") {
-      treeCalls++;
-      return treeCalls === 1
-        ? new Response("boom", { status: 500 }) // RADARR pass fails
-        : json({ tree: [] });                   // SONARR pass succeeds
-    }
+    if (call.url.hostname === "api.github.com") return json({ tree: [] });
     throw new Error(`unexpected fetch: ${callKey(call)}`);
   };
 
   const result = await runTrashSync();
   assert.deepEqual(result.refreshed.map((r) => r.service), ["SONARR"]);
   assert.ok(
-    result.errors.some((e) => /^RADARR refresh: GitHub tree fetch failed .* 500 boom/.test(e)),
+    result.errors.some((e) => /^RADARR refresh: trashSpec store exploded for RADARR/.test(e)),
     `expected a namespaced RADARR refresh error, got: ${JSON.stringify(result.errors)}`,
   );
   // Partial success is deliberate: the gate records "we recently tried".
   assert.ok(settings.has("trashLastRefreshAt"));
+});
+
+test("a shared-tree fetch failure fails BOTH services' refresh with namespaced errors and skips the last-refresh stamp", async () => {
+  settings.set("trashGuidesEnabled", "true"); // no trashLastRefreshAt → refresh due
+  respond = (call) => {
+    if (call.url.hostname === "api.github.com") return new Response("boom", { status: 500 });
+    throw new Error(`unexpected fetch: ${callKey(call)}`);
+  };
+
+  const result = await runTrashSync();
+  assert.deepEqual(result.refreshed, []);
+  assert.ok(
+    result.errors.some((e) => /^RADARR refresh: GitHub tree fetch failed/.test(e)) &&
+      result.errors.some((e) => /^SONARR refresh: GitHub tree fetch failed/.test(e)),
+    `expected namespaced errors for both services, got: ${JSON.stringify(result.errors)}`,
+  );
+  // No stamp — the next cron tick must retry the refresh, not sit out the
+  // cadence window on a run that fetched nothing.
+  assert.equal(settings.has("trashLastRefreshAt"), false);
 });
 
 // ── listSpecs / getSpecDetail ───────────────────────────────────────────────

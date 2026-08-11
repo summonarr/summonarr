@@ -94,7 +94,13 @@ async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[
   if (!row?.value) return [];
   try {
     const parsed = JSON.parse(row.value);
-    if (!Array.isArray(parsed)) return [];
+    if (!Array.isArray(parsed)) {
+      // Warn rather than silently coerce: an empty list here invisibly disables
+      // every named instance (webhook secret discrimination 401s, auto-routing
+      // stops, sync fan-out skips) with nothing in the logs to explain it.
+      console.warn(`[arr] instance registry ${REGISTRY_KEY[service]} is corrupted (not a JSON array); treating as no named instances`);
+      return [];
+    }
     const out: ArrInstanceConfig[] = [];
     const seen = new Set<string>([DEFAULT_ARR_INSTANCE]);
     for (const entry of parsed) {
@@ -106,6 +112,7 @@ async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[
     }
     return out;
   } catch {
+    console.warn(`[arr] instance registry ${REGISTRY_KEY[service]} is corrupted (unparseable JSON); treating as no named instances`);
     return [];
   }
 }

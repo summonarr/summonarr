@@ -867,7 +867,7 @@ test("an unreachable source → 502, the library untouched (zero transactions), 
   configurePlex();
   configureJellyfin();
   respond = (url) => {
-    if (url.origin === PLEX_BASE) return new Response("boom", { status: 500 });
+    if (url.origin === PLEX_BASE) return new Response("gone", { status: 404 }); // 404 not 500 — 5xx pays the real retry backoff
     // 401 fast-fails jellyfin's fetchPage on the first attempt (no retry loop).
     return new Response("unauthorized", { status: 401 });
   };

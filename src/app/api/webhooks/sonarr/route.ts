@@ -39,7 +39,10 @@ export async function POST(req: NextRequest) {
   if (tooLarge) return tooLarge;
 
   const clientIp = getClientIp(req.headers);
-  if (!checkRateLimit(`webhook:sonarr:${clientIp}`, 120, 60_000)) {
+  // 600/min (~10/s): a legitimate season-pack import fires one Download event
+  // per episode, and 120/min rejected the tail of a large burst. Still bounds
+  // the pre-auth cost (two Setting reads + a hash compare) per IP.
+  if (!checkRateLimit(`webhook:sonarr:${clientIp}`, 600, 60_000)) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
@@ -350,6 +353,18 @@ export async function POST(req: NextRequest) {
         })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
       }
     }
+  }
+
+  // A completed import ends the "stuck" episode the ManualInteractionRequired
+  // marker one-shots — clear it so a future re-park of the same series can
+  // alert again. The marker's stable key prefers tvdbId and falls back to
+  // tmdbId, so clear both candidates. Post-commit fire-and-forget, idempotent;
+  // the not-confirmed/skipped paths return before reaching here.
+  const manualMarkerKeys = [safeVdbId, safeMdbId]
+    .filter((id): id is number => id !== null)
+    .map((id) => `manualInteractionNotified:sonarr:${arrInstance}:${id}`);
+  if (manualMarkerKeys.length > 0) {
+    void prisma.setting.deleteMany({ where: { key: { in: manualMarkerKeys } } }).catch(() => {});
   }
 
   // Deferred work runs after the response is sent; library scan and notification can be slow

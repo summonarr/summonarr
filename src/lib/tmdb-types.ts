@@ -68,6 +68,9 @@ export interface TmdbMedia {
   originalLanguage?: string | null;
   spokenLanguages?: string[];
   productionCountries?: string[];
+  // ISO 3166-1 codes for the same origin data (productionCountries holds
+  // DISPLAY names) — the anime auto-route predicate matches "JP" against these.
+  originCountryCodes?: string[];
   homepage?: string | null;
   budget?: number | null;
   revenue?: number | null;

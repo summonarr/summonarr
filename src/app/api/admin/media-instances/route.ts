@@ -3,7 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
-import { pingPlexToken, getPlexMachineId, PLEX_IDENTITY_TIMEOUT_MS } from "@/lib/plex";
+import { pingPlexToken, getPlexMachineId, checkPlexServerAccess, PLEX_IDENTITY_TIMEOUT_MS } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { type MediaServerService, type PlexSettingField, type JellyfinSettingField, DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { settleLimit } from "@/lib/concurrency";
@@ -364,7 +364,20 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         // to report "Connected". Probe the server itself. getPlexMachineId
         // swallows every error and returns null, so null IS the failure signal.
         const machineId = await getPlexMachineId(serverUrl, token, PLEX_IDENTITY_TIMEOUT_MS);
-        testResults[inst.slug] = machineId ? { ok: true } : { error: "Plex server unreachable" };
+        if (!machineId) {
+          testResults[inst.slug] = { error: "Plex server unreachable" };
+          return;
+        }
+        // /identity answers UNAUTHENTICATED on PMS, so a reachable server with
+        // a token that has no access to it still read "Connected". One
+        // authorized probe discriminates token-vs-server problems.
+        const access = await checkPlexServerAccess(serverUrl, token);
+        testResults[inst.slug] =
+          access === "ok"
+            ? { ok: true }
+            : access === "unauthorized"
+              ? { error: "Plex token not authorized on this server" }
+              : { error: "Plex server unreachable" };
       } catch {
         testResults[inst.slug] = { error: "Plex connection failed" };
       }

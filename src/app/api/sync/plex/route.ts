@@ -82,11 +82,26 @@ async function syncPlex(request: NextRequest) {
   const ratingKeyToTmdb = new Map<string, number[]>();
   const movieLegacy = new Map<string, PlexLegacyGuidRef>();
   const tvLegacy = new Map<string, PlexLegacyGuidRef>();
+  // Decided BEFORE the fetch, like ownsEpisodeCache itself: the per-show
+  // allLeaves probe is skipped only when THIS flow's episode walk supplies
+  // the file paths instead — the single-server FULL path. Multi-server
+  // resyncs skip the episode walk entirely, and on recentOnly the windowed
+  // shows are few (allLeaves is cheap there) while the patch's filePath:null
+  // scope couldn't distinguish a fresh row from a pre-existing pathless one —
+  // both keep the probe.
+  const ownsEpisodeCache = plexInstances.length <= 1;
+  const skipShowFilePaths = !recentOnly && ownsEpisodeCache;
+  // Bounds the recentOnly /recentlyAdded walk (addedAt-desc, early-stop once a
+  // whole page predates the window) — mirrors the Jellyfin route's 2h
+  // MinDateLastSaved: wider than the 1h sync interval so one missed run is
+  // survivable. Without it the "incremental" path paged the ENTIRE section.
+  const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
+  const recentSinceEpochSec = recentOnly ? Math.floor((Date.now() - RECENT_WINDOW_MS) / 1000) : undefined;
   try {
     sections = await getPlexLibrarySections(serverUrl, token);
     [movieIds, tvIds] = await Promise.all([
-      getPlexTmdbIds(serverUrl, token, "MOVIE", recentOnly, selectedPlexKeys, sections, undefined, movieLegacy),
-      getPlexTmdbIds(serverUrl, token, "TV", recentOnly, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy),
+      getPlexTmdbIds(serverUrl, token, "MOVIE", recentOnly, selectedPlexKeys, sections, undefined, movieLegacy, undefined, recentSinceEpochSec),
+      getPlexTmdbIds(serverUrl, token, "TV", recentOnly, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy, skipShowFilePaths, recentSinceEpochSec),
     ]);
     const [resolvedMovies, resolvedTv] = await Promise.all([
       resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
@@ -107,19 +122,19 @@ async function syncPlex(request: NextRequest) {
   // Full replace: clear unconditionally then insert. getPlexTVEpisodes throws on a fetch
   // failure (rejects → .catch, no clear), so an empty result is a genuinely empty library
   // and the stale episode ownership must be cleared rather than left behind.
-  const ownsEpisodeCache = plexInstances.length <= 1;
   if (!ownsEpisodeCache) {
     console.warn(
       `[sync/plex] ${plexInstances.length} Plex servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
     );
   }
-  (ownsEpisodeCache
+  const episodeFilePaths = new Map<string, string>();
+  const episodesPromise = ownsEpisodeCache
     // The precomputed show map is complete only when the walk above was FULL —
     // on recentOnly it covers just the 2h window while this episode rewrite is
     // a full replace, so getPlexTVEpisodes keeps its own walk there.
-    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, recentOnly ? undefined : ratingKeyToTmdb)
-    : Promise.resolve(null)
-  )
+    ? getPlexTVEpisodes(serverUrl, token, selectedPlexKeys, sections, recentOnly ? undefined : ratingKeyToTmdb, skipShowFilePaths ? episodeFilePaths : undefined)
+    : Promise.resolve(null);
+  episodesPromise
     .then(async (episodes) => {
       if (episodes === null) return;
       await prisma.$transaction(async (tx) => {
@@ -262,6 +277,29 @@ async function syncPlex(request: NextRequest) {
       if (finalMovieRows.length > 0) await batchCreateMany(tx.plexLibraryItem, finalMovieRows);
       if (finalTvRows.length    > 0) await batchCreateMany(tx.plexLibraryItem, finalTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
+  }
+
+  // Patch the show file paths the TV fetch skipped (skipShowFilePaths) onto the
+  // just-written rows once the episode walk lands. Scheduled AFTER the awaited
+  // library replace above — chaining off episodesPromise here (not inside its
+  // .then) is what guarantees the full-replace can't delete the patched rows.
+  // Fire-and-forget like the episode cache itself; filePath:null-scoped so a
+  // concurrent writer makes it a no-op, and a failure leaves paths null until
+  // the next run — the same degradation a failed allLeaves probe had.
+  if (skipShowFilePaths) {
+    void episodesPromise
+      .then(async () => {
+        if (episodeFilePaths.size === 0) return;
+        await prisma.$transaction(async (tx) => {
+          for (const [ratingKey, file] of episodeFilePaths) {
+            await tx.plexLibraryItem.updateMany({
+              where: { serverInstance: instance, mediaType: "TV", plexRatingKey: ratingKey, filePath: null },
+              data: { filePath: file },
+            });
+          }
+        }, { timeout: BATCH_TX_TIMEOUT });
+      })
+      .catch((err) => console.warn("[sync/plex] show file-path patch failed:", err instanceof Error ? err.message : err));
   }
 
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts

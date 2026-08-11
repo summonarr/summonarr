@@ -1003,7 +1003,14 @@ export async function countSonarrQueue(variant: ArrVariant = ""): Promise<number
 
 export async function testRadarrConnection(url: string, apiKey: string): Promise<string> {
   const cfg = { url: url.replace(/\/$/, ""), apiKey };
-  const status = await arrFetch<{ version: string }>(cfg, "/api/v3/system/status");
+  const status = await arrFetch<{ version: string; appName?: string }>(cfg, "/api/v3/system/status");
+  // /system/status reports the service's own identity — a Sonarr URL pasted
+  // into the Radarr field used to pass this test (both answer with a version)
+  // and persist a cross-wired config. Missing appName (older builds) is
+  // tolerated; a PRESENT mismatched one fails so the save rolls back.
+  if (status.appName && status.appName.toLowerCase() !== "radarr") {
+    throw new Error(`URL points at ${status.appName}, not Radarr`);
+  }
   return status.version;
 }
 
@@ -1258,6 +1265,10 @@ export async function resolveTvdbIdFromTmdbId(tmdbId: number, variant: ArrVarian
 
 export async function testSonarrConnection(url: string, apiKey: string): Promise<string> {
   const cfg = { url: url.replace(/\/$/, ""), apiKey };
-  const status = await arrFetch<{ version: string }>(cfg, "/api/v3/system/status");
+  const status = await arrFetch<{ version: string; appName?: string }>(cfg, "/api/v3/system/status");
+  // Identity check — see testRadarrConnection.
+  if (status.appName && status.appName.toLowerCase() !== "sonarr") {
+    throw new Error(`URL points at ${status.appName}, not Sonarr`);
+  }
   return status.version;
 }

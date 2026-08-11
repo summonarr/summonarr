@@ -1500,7 +1500,9 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
   // The named instance is down; the default is healthy. Every safeguard must
   // treat this run's union as an INCOMPLETE picture.
   const defaultResponder = plexResponder([300]);
-  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("boom", { status: 500 }) : defaultResponder(url));
+  // 404 not 500 — a 5xx sleeps through the Plex page walk's real retry backoff
+  // (see the isolation test above).
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("gone", { status: 404 }) : defaultResponder(url));
 
   const res = await POST(syncReq({ headers: AS_CRON }));
   assert.equal(res.status, 200);
@@ -1601,8 +1603,12 @@ test("the sweep spares a REGISTERED but unconfigured instance — an admin mid-e
 
 test("a Plex fetch failure does NOT sink the Jellyfin pass (Promise.allSettled isolation)", async () => {
   configureBothServers();
+  // 404, not 500: the Plex page walk retries 5xx with ~12s of REAL backoff
+  // (pinned with mocked timers in tests/plex.test.mts) — a persistent 500 here
+  // still passes but sleeps through every retry on each run. A non-429 4xx
+  // fast-fails, which is all this isolation pin needs.
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([200])(url);
+    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([200])(url);
   seedRequest({ id: "req-jf", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-jf", status: "PENDING" });
 
   const res = await POST(syncReq({ headers: AS_CRON }));
@@ -1906,7 +1912,7 @@ test("a configured source that has NEVER synced clean gets a create-only stalene
   // that source is starved permanently — the exact failure the fallback exists to prevent.
   configureBothServers();
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url) // 404 not 500 — 5xx pays the real retry backoff;
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));
@@ -1935,7 +1941,7 @@ test("the staleness baseline never overwrites a real success stamp, and is not s
   const realSuccess = String(Date.now() - 6 * 60 * 60 * 1000);
   settings.set("lastPlexSyncSucceededAt", realSuccess);
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url) // 404 not 500 — 5xx pays the real retry backoff;
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));

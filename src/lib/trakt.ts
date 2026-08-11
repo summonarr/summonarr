@@ -8,17 +8,30 @@ import type { TmdbMedia } from "./tmdb-types";
 const TRAKT_BASE = "https://api.trakt.tv";
 const TRAKT_TIMEOUT_MS = 15_000;
 
-// In-process lockout prevents hammering Trakt after a 429 — suspended for 1 hour on any rate-limit response
+// In-process lockout prevents hammering Trakt after a 429.
 let quotaLockoutUntil = 0;
+// Ceiling for the lockout, and the fallback when Trakt sends no Retry-After.
+// Deliberately different from the OMDB/MDBList 60-min constants: those guard a
+// DAILY quota, whereas Trakt's limits are short rolling windows (its
+// UNAUTHED_API_GET_LIMIT is a 5-minute window) and it documents Retry-After on
+// 429 — so we honor that header, clamped to [30s, 1h].
 const QUOTA_LOCKOUT_MS = 60 * 60 * 1000;
+const QUOTA_LOCKOUT_MIN_MS = 30 * 1000;
 
 function isTraktQuotaLocked(): boolean {
   return Date.now() < quotaLockoutUntil;
 }
 
-function tripQuotaLockout(reason: string) {
-  quotaLockoutUntil = Date.now() + QUOTA_LOCKOUT_MS;
-  console.warn(`[trakt] Quota lockout tripped (${reason}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
+// Pure clamp (exported for tests): a Retry-After (ms) is honored within
+// [30s, 1h]; absent falls back to the 1h ceiling.
+export function clampTraktLockoutMs(retryAfterMs?: number): number {
+  return Math.min(Math.max(retryAfterMs ?? QUOTA_LOCKOUT_MS, QUOTA_LOCKOUT_MIN_MS), QUOTA_LOCKOUT_MS);
+}
+
+function tripQuotaLockout(reason: string, retryAfterMs?: number) {
+  const ms = clampTraktLockoutMs(retryAfterMs);
+  quotaLockoutUntil = Date.now() + ms;
+  console.warn(`[trakt] Quota lockout tripped (${reason}) — suspending calls for ${(ms / 60000).toFixed(1)} min`);
 }
 
 async function getApiKey(): Promise<string | null> {
@@ -67,7 +80,10 @@ async function traktFetch<T>(path: string, params?: Record<string, string>): Pro
   });
 
   if (res.status === 429) {
-    tripQuotaLockout("HTTP 429");
+    // Honor Trakt's Retry-After (seconds) when present — its rate windows are
+    // short, so a fixed 1h lockout over-suspends a transient burst.
+    const ra = Number(res.headers.get("retry-after"));
+    tripQuotaLockout("HTTP 429", Number.isFinite(ra) && ra > 0 ? ra * 1000 : undefined);
     throw new Error("Trakt rate limited");
   }
 

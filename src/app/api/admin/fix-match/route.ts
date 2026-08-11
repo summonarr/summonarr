@@ -210,11 +210,14 @@ async function fixPlexMatch(
     }
   }
 
+  // Best-effort, like the Jellyfin path's refresh: the match was already
+  // APPLIED above, and pollForConfirmation below is the sole success arbiter —
+  // a transient refresh failure must not report the whole fix-match as failed.
   await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
-  });
+  }).catch((e: unknown) => { console.warn("[fix-match]", tag, "refresh call failed (non-fatal):", e); return null; });
 
   const pollForConfirmation = async (
     maxAttempts: number,
@@ -296,7 +299,7 @@ async function fixPlexMatch(
         if (!res.ok) return false;
         await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/refresh?force=1`, {
           method: "PUT", headers, timeoutMs: 30_000,
-        });
+        }).catch((e: unknown) => { console.warn("[fix-match]", tag, "refresh call failed (non-fatal):", e); return null; });
         const poll = await pollForConfirmation(6, 5_000);
         plexTmdbId = poll.plexTmdbId;
         plexImdbId = poll.plexImdbId;

@@ -40,7 +40,10 @@ export async function POST(req: NextRequest) {
   if (tooLarge) return tooLarge;
 
   const clientIp = getClientIp(req.headers);
-  if (!checkRateLimit(`webhook:radarr:${clientIp}`, 120, 60_000)) {
+  // 600/min (~10/s): a legitimate season-pack import fires one Download event
+  // per episode, and 120/min rejected the tail of a large burst. Still bounds
+  // the pre-auth cost (two Setting reads + a hash compare) per IP.
+  if (!checkRateLimit(`webhook:radarr:${clientIp}`, 600, 60_000)) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
@@ -269,6 +272,15 @@ export async function POST(req: NextRequest) {
   if (updated.count > 0) {
     void clearDeletionVotesForTmdbs([{ tmdbId, mediaType: "MOVIE" }]);
   }
+
+  // A completed import ends the "stuck" episode the ManualInteractionRequired
+  // marker one-shots — clear it so a FUTURE re-park of the same title can alert
+  // again (the marker otherwise only ages out via the 30-day prune).
+  // Post-commit fire-and-forget, idempotent; placed after the
+  // downloaded===false early return so a refuted forgery never clears it.
+  void prisma.setting.deleteMany({
+    where: { key: { in: [`manualInteractionNotified:radarr:${arrInstance}:${tmdbId}`] } },
+  }).catch(() => {});
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {

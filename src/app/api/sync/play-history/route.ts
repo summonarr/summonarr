@@ -391,8 +391,17 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
               ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
               playMethod: s.playMethod,
               resolution: s.resolution,
+              // Mid-stream transcode switches (client falls back / recovers)
+              // must reach finalize — undefined leaves the stored value alone
+              // (matching playMethod's semantics on a stream-less payload).
+              videoDecision: s.videoDecision,
+              audioDecision: s.audioDecision,
               transcodeReason: s.transcodeReason ?? null,
               ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+              // One-shot backfill: durationMs is write-once at create, but a
+              // first tick that raced Plex's metadata can stamp 0 — fill it
+              // once real duration appears so completion math isn't off forever.
+              ...(existing.durationMs === BigInt(0) && s.duration > 0 ? { durationMs: BigInt(s.duration) } : {}),
               ...(tmdbId != null ? { tmdbId, mediaType } : {}),
               ...(posterPath ? { posterPath } : {}),
               location: s.location ?? null,
@@ -657,7 +666,10 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
     .map((s) => s.itemId);
   const libRows = itemIdsNeedingLookup.length > 0
     ? await prisma.jellyfinLibraryItem.findMany({
-        where: { jellyfinItemId: { in: itemIdsNeedingLookup } },
+        // serverInstance-scoped like the Plex prefetch: Jellyfin item ids are
+        // server-local GUIDs, so a collision is unlikely but the scope keeps
+        // this instance's watch from resolving against another server's row.
+        where: { jellyfinItemId: { in: itemIdsNeedingLookup }, serverInstance: instance },
         select: { jellyfinItemId: true, tmdbId: true, mediaType: true },
       })
     : [];
@@ -739,7 +751,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         // Auto-play next episode: a Jellyfin client advancing to the next item can
         // reuse the same PlaySessionId while swapping the itemId. The update path below
         // never rewrites title/sourceItemId/episode metadata/durationMs (write-once at
-        // create), so without finalizing here the prior item's watch silently merges
+        // create; a 0 placeholder is backfilled once), so without finalizing here the
+        // prior item's watch silently merges
         // into the next episode's PlayHistory row. Mirror the Plex ratingKey-change
         // branch (line 223): force-finalize the previous item, then fall through to
         // create a fresh row for the new one.
@@ -776,6 +789,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
               resolution: s.resolution ?? null,
               transcodeReason: s.transcodeReason ?? null,
               ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
+              // One-shot backfill — see the Plex branch's durationMs note.
+              ...(existing.durationMs === BigInt(0) && durationMs > 0 ? { durationMs: BigInt(durationMs) } : {}),
               ...(resolvedTmdbId ? { tmdbId: resolvedTmdbId, mediaType } : {}),
               ...(jfPosterPath ? { posterPath: jfPosterPath } : {}),
             },

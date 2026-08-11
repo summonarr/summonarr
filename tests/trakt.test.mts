@@ -53,6 +53,7 @@ const {
   getTraktPopularMovies,
   getTraktPopularTV,
   testTraktConnection,
+  clampTraktLockoutMs,
 } = await import("../src/lib/trakt.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -255,17 +256,43 @@ test("testTraktConnection returns the first title and throws on an empty respons
 
 // LAST on purpose: the lockout is module-global for the process lifetime and
 // would short-circuit every traktFetch in tests that run after it.
-test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the network", async () => {
-  respond = () => jsonResponse({ error: "slow down" }, 429);
+test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the network; Retry-After tunes the window", async () => {
+  // First a 429 carrying Retry-After: Trakt's rate windows are short and it
+  // sends the header, so a fixed 1h lockout over-suspends a transient burst. A
+  // 5s value clamps up to the 30s floor (0.5 min) — far enough below the 1h
+  // fallback that the warn text discriminates the two paths. The lockout is
+  // module-global, so this one 429 also satisfies the "next call skips the
+  // network" contract and leaves the lockout tripped for the bypass pin below.
+  respond = () =>
+    new Response(JSON.stringify({ error: "slow down" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": "5" },
+    });
   assert.deepEqual(await getTraktPopularMovies(1), []);
   assert.ok(
-    warns.some((w) => w.includes("[trakt] Quota lockout tripped")),
-    "lockout trip must warn with the [trakt] scope",
+    warns.some((w) => /\[trakt\] Quota lockout tripped .* suspending calls for 0\.5 min/.test(w)),
+    `the honored Retry-After (5s → 30s floor = 0.5 min) must show in the warn, got: ${JSON.stringify(warns)}`,
+  );
+  assert.ok(
+    !warns.some((w) => w.includes("suspending calls for 60.0 min")),
+    "a present Retry-After must NOT fall back to the 1h ceiling",
   );
 
+  // Inside the honored window a call still short-circuits with zero egress.
   fetchCalls.length = 0;
   assert.deepEqual(await getTraktPopularMovies(1), []); // lockout error → caught → []
   assert.equal(fetchCalls.length, 0);
+});
+
+test("HTTP 429 with NO Retry-After falls back to the 1h ceiling (pure-fn check, no shared lockout state)", () => {
+  // A direct unit check of the clamp so the module-global lockout ordering
+  // (the test above leaves it tripped for the bypass pin) can't mask a
+  // regression: undefined → the 1h fallback, a present value → clamp to
+  // [30s, 1h].
+  assert.equal(clampTraktLockoutMs(undefined), 60 * 60 * 1000, "no Retry-After ⇒ 1h fallback");
+  assert.equal(clampTraktLockoutMs(5_000), 30 * 1000, "below the floor clamps up to 30s");
+  assert.equal(clampTraktLockoutMs(10 * 60 * 1000), 10 * 60 * 1000, "in-range value is honored");
+  assert.equal(clampTraktLockoutMs(3 * 60 * 60 * 1000), 60 * 60 * 1000, "above the ceiling clamps to 1h");
 });
 
 test("testTraktConnection bypasses the lockout: the admin test reaches the wire while list helpers stay suspended", async () => {
