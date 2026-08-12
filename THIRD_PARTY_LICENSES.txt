@@ -1003,7 +1003,7 @@ License: MIT
 
 ------------------------------------------------------------------------------
 
-@prisma/adapter-pg@7.9.0
+@prisma/adapter-pg@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -1210,7 +1210,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/client@7.9.0
+@prisma/client@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -1417,7 +1417,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/client-runtime-utils@7.9.0
+@prisma/client-runtime-utils@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -1624,7 +1624,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/config@7.9.0
+@prisma/config@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -1831,7 +1831,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/debug@7.9.0
+@prisma/debug@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -2245,14 +2245,14 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/dev@0.24.14
+@prisma/dev@0.24.17
 License: ISC
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@prisma/driver-adapter-utils@7.9.0
+@prisma/driver-adapter-utils@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -2459,7 +2459,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/engines@7.9.0
+@prisma/engines@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -2873,7 +2873,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/fetch-engine@7.9.0
+@prisma/fetch-engine@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -3080,7 +3080,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@prisma/get-platform@7.9.0
+@prisma/get-platform@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -4688,7 +4688,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/node@26.1.1
+@types/node@26.1.2
 License: MIT
 
 MIT License
@@ -4715,7 +4715,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/pg@8.20.0
+@types/pg@8.20.4
 License: MIT
 
 MIT License
@@ -4742,7 +4742,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/react@19.2.17
+@types/react@19.2.18
 License: MIT
 
 MIT License
@@ -6795,7 +6795,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ------------------------------------------------------------------------------
 
-exsolve@1.1.0
+exsolve@1.1.1
 License: MIT
 
 MIT License
@@ -7549,7 +7549,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-jose@6.2.3
+jose@6.2.8
 License: MIT
 
 The MIT License (MIT)
@@ -8581,7 +8581,7 @@ THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-prisma@7.9.0
+prisma@7.9.1
 License: Apache-2.0
 
 Apache License
@@ -8887,7 +8887,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ------------------------------------------------------------------------------
 
-react@19.2.7
+react@19.2.8
 License: MIT
 
 MIT License
@@ -8914,7 +8914,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-react-dom@19.2.7
+react-dom@19.2.8
 License: MIT
 
 MIT License
@@ -8941,7 +8941,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-readdirp@5.0.0
+readdirp@5.1.1
 License: MIT
 
 MIT License
