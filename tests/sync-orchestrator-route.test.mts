@@ -614,7 +614,7 @@ test("Bearer CRON_SECRET authorizes and drives the full pipeline (library writes
   // The run reached the library-replace stage for both sources and the tail purge.
   assert.equal(txTouching("plexLibraryItem").length, 1, "authorized run must replace the Plex library");
   assert.equal(txTouching("jellyfinLibraryItem").length, 1, "authorized run must replace the Jellyfin library");
-  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "the tail purge is two passes: everything else now, ratings on a grace");
+  assert.equal(tmdbCacheDeleteManyCalls.length, 3, "the tail purge is three passes: everything else now, ratings and :details each on their own grace");
   // A CRON_SECRET run has no session to attribute — no LIBRARY_SYNC audit row.
   assert.equal(auditRows.length, 0);
 });
@@ -1500,7 +1500,9 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
   // The named instance is down; the default is healthy. Every safeguard must
   // treat this run's union as an INCOMPLETE picture.
   const defaultResponder = plexResponder([300]);
-  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("boom", { status: 500 }) : defaultResponder(url));
+  // 404 not 500 — a 5xx sleeps through the Plex page walk's real retry backoff
+  // (see the isolation test above).
+  respond = (url) => (url.origin === PLEX_REMOTE_ORIGIN ? new Response("gone", { status: 404 }) : defaultResponder(url));
 
   const res = await POST(syncReq({ headers: AS_CRON }));
   assert.equal(res.status, 200);
@@ -1601,8 +1603,12 @@ test("the sweep spares a REGISTERED but unconfigured instance — an admin mid-e
 
 test("a Plex fetch failure does NOT sink the Jellyfin pass (Promise.allSettled isolation)", async () => {
   configureBothServers();
+  // 404, not 500: the Plex page walk retries 5xx with ~12s of REAL backoff
+  // (pinned with mocked timers in tests/plex.test.mts) — a persistent 500 here
+  // still passes but sleeps through every retry on each run. A non-429 4xx
+  // fast-fails, which is all this isolation pin needs.
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([200])(url);
+    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([200])(url);
   seedRequest({ id: "req-jf", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-jf", status: "PENDING" });
 
   const res = await POST(syncReq({ headers: AS_CRON }));
@@ -1678,26 +1684,40 @@ test("the expired-TmdbCache purge fires near the end (deleteMany where expiresAt
       OR?: Array<{ key?: { startsWith?: string } }>;
     };
   };
-  assert.equal(tmdbCacheDeleteManyCalls.length, 2, "two purge passes per run");
-  const [general, ratings] = tmdbCacheDeleteManyCalls as PurgeArg[];
+  assert.equal(tmdbCacheDeleteManyCalls.length, 3, "three purge passes per run");
+  const [general, ratings, details] = tmdbCacheDeleteManyCalls as PurgeArg[];
   assert.ok(general.where?.expiresAt?.lt instanceof Date, "the purge must scope to expiresAt < now, not wipe the whole cache");
 
-  // The ratings namespaces are a serve-stale surface: getCacheStale/getCacheStaleMany
-  // never delete an expired row because it is still a HIT. This purge was the only thing
-  // deleting them, one SYNC_INTERVAL after expiry — so a provider outage lost the badges
-  // entirely instead of falling back to the previous values. They are excluded from the
-  // immediate pass and reaped on a long grace instead.
-  // Nested under OR deliberately: the two prefixes are mutually exclusive, so a bare
+  // The ratings namespaces AND the :details blobs are serve-stale surfaces:
+  // getCacheStale/getCacheStaleMany never delete an expired row because it is
+  // still a HIT. This purge was the only thing deleting them, one SYNC_INTERVAL
+  // after expiry — so a provider outage lost the badges (and the dashboard/
+  // carry-forward readers lost their blobs) entirely. Each namespace is excluded
+  // from the immediate pass and reaped on its own grace instead.
+  // Nested under OR deliberately: the shapes are mutually exclusive, so a bare
   // `NOT: [a, b]` would be a silent no-op if a list-NOT compiles to NOT(a AND b).
   assert.deepEqual(
     general.where?.NOT,
-    { OR: [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }] },
-    "the immediate purge must spare the two serve-stale ratings namespaces",
+    { OR: [
+      { key: { startsWith: "mdblist:tmdb:" } },
+      { key: { startsWith: "omdb:tmdb:" } },
+      { key: { startsWith: "movie:", endsWith: ":details" } },
+      { key: { startsWith: "tv:", endsWith: ":details" } },
+    ] },
+    "the immediate purge must spare every serve-stale namespace",
+  );
+  assert.deepEqual(
+    details.where?.OR,
+    [
+      { key: { startsWith: "movie:", endsWith: ":details" } },
+      { key: { startsWith: "tv:", endsWith: ":details" } },
+    ],
+    "the :details grace pass targets exactly the details blobs — endsWith-pinned, so credits/suggestions/seasons and the :missing tombstones still expire immediately",
   );
   assert.deepEqual(
     ratings.where?.OR,
     [{ key: { startsWith: "mdblist:tmdb:" } }, { key: { startsWith: "omdb:tmdb:" } }],
-    "the grace purge targets exactly those namespaces — `:tmdb:` scoped, so the list caches and omdb:<imdbId> still expire immediately",
+    "the ratings grace purge targets exactly those namespaces — `:tmdb:` scoped, so the list caches still expire immediately",
   );
   const graceCutoff = ratings.where?.expiresAt?.lt as Date;
   assert.ok(graceCutoff instanceof Date, "the grace purge is still expiry-scoped, never a blanket delete");
@@ -1891,8 +1911,9 @@ test("a configured source that has NEVER synced clean gets a create-only stalene
   // all, so the window has no origin, *Stale is false forever, and every user pinned to
   // that source is starved permanently — the exact failure the fallback exists to prevent.
   configureBothServers();
+  // 404 not 500 — a 5xx pays the Plex page walk's real retry backoff (see the isolation test above).
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+    (url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url));
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));
@@ -1920,8 +1941,9 @@ test("the staleness baseline never overwrites a real success stamp, and is not s
   configureBothServers();
   const realSuccess = String(Date.now() - 6 * 60 * 60 * 1000);
   settings.set("lastPlexSyncSucceededAt", realSuccess);
+  // 404 not 500 — a 5xx pays the Plex page walk's real retry backoff (see the isolation test above).
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("boom", { status: 500 }) : jellyfinResponder([550])(url);
+    (url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url));
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));

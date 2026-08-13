@@ -146,7 +146,7 @@ export default async function DiscoverPage({
   );
   const rails: { title: string; subtitle: string; href?: string; items: TmdbMedia[] }[] = [
     ...(forYouEnabled
-      ? [{ title: "For You", subtitle: "Picked based on what you watch", items: project(forYou, emap, hideAvailable, RAIL_SIZE) }]
+      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", items: project(forYou, emap, hideAvailable, RAIL_SIZE) }]
       : []),
     { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
     { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },

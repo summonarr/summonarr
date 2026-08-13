@@ -289,6 +289,21 @@ shadowPrismaModel(prisma, "auditLog", {
 // The winner path's notify fan-out reads push subscriptions; keep it empty so
 // the channel short-circuits before any network (channel internals are owned by
 // tests/push.test.mts / tests/email.test.mts / tests/discord-notify.test.mts).
+
+// resolveMediaMeta's first two tiers (TmdbMediaCore, the details TmdbCache
+// blob). Default to misses so the existing tests keep exercising the tier-3
+// live-verify wire path; a test can point `metaRow` at a row to pin the
+// cached tier short-circuiting the wire.
+let metaRow: { title: string; posterPath: string | null; releaseYear: string } | null = null;
+shadowPrismaModel(prisma, "tmdbMediaCore", {
+  findUnique: async () => metaRow,
+});
+shadowPrismaModel(prisma, "tmdbCache", {
+  findUnique: async () => null,
+  upsert: async (args: { where: { key: string } }) => args,
+  deleteMany: async () => ({ count: 0 }),
+});
+
 shadowPrismaModel(prisma, "pushSubscription", {
   findMany: async () => [],
 });
@@ -551,6 +566,25 @@ test("the title must be in SOME library: neither → 422; a Jellyfin-only hit su
   const b = await mintSession();
   const jellyfinOnly = await post(b.token, voteBody(b.userId));
   assert.equal(jellyfinOnly.status, 201);
+});
+
+test("a warm TmdbMediaCore row serves the vote's metadata WITHOUT touching the TMDB wire (three-tier resolver)", async () => {
+  // The route resolves via resolveMediaMeta, not a direct live verify — a vote
+  // targets a title the voter just viewed, so the metadata is almost always
+  // already local, and a TMDB outage must not 422 votes for known titles.
+  metaRow = { title: "Core Matrix", posterPath: "/core.jpg", releaseYear: "1999" };
+  respond = () => { throw new Error("the wire must not be touched when tier 1 serves"); };
+  try {
+    const { userId, token } = await mintSession();
+    const res = await post(token, voteBody(userId));
+    assert.equal(res.status, 201);
+    assert.equal(fetchCalls.length, 0, "tier 1 (TmdbMediaCore) must short-circuit the live verify");
+    const body = (await res.json()) as { title: string; posterPath: string | null };
+    assert.equal(body.title, "Core Matrix");
+    assert.equal(body.posterPath, "/core.jpg");
+  } finally {
+    metaRow = null;
+  }
 });
 
 test("a user who ever requested the title cannot vote to delete it (403)", async () => {

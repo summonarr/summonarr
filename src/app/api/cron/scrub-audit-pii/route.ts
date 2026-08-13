@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, getAuditPiiRetentionDays } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 
 export async function POST(request: NextRequest) {
@@ -12,7 +12,8 @@ export async function POST(request: NextRequest) {
   return withCronRunRecording("audit-log:pii-scrub", () => withAdvisoryLock(
     2002,
     async () => {
-      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const retentionDays = await getAuditPiiRetentionDays();
+      const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
       // Match the admin DELETE /api/admin/audit-log handler so the cron actually
       // fulfills the documented 90-day PII promise (previously this only nulled
@@ -48,6 +49,7 @@ export async function POST(request: NextRequest) {
           scrubbed: piiResult.count,
           authDetailsCleared: detailsResult.count,
           cutoff: cutoff.toISOString(),
+          retentionDays,
         },
       });
 

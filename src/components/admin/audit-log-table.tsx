@@ -265,6 +265,8 @@ function AuditLogFilters({
             currentTarget={currentTarget}
             currentHideCron={currentHideCron}
           />
+
+          <ScrubPiiButton />
         </div>
       </div>
 
@@ -378,35 +380,253 @@ function ExportButton({
   );
 }
 
+// Manual counterpart of the scrub-audit-pii cron: DELETE /api/admin/audit-log
+// nulls IP/UA, redacts userName, and clears auth-event details on every row
+// older than the configured retention window. Same handler the cron mirrors, so
+// running it early is always safe — it can only do what the cron would do later.
+function ScrubPiiButton() {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  async function runScrub() {
+    setConfirming(false);
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await fetch(withBasePath("/api/admin/audit-log"), { method: "DELETE" });
+      const data = (await res.json().catch(() => ({}))) as {
+        scrubbed?: number; detailsScrubbed?: number; retentionDays?: number; error?: string;
+      };
+      if (res.ok) {
+        setResult({
+          kind: "ok",
+          text: `Scrubbed ${data.scrubbed ?? 0} row(s) older than ${data.retentionDays ?? 90} days`,
+        });
+      } else {
+        setResult({ kind: "err", text: data.error ?? "Scrub failed" });
+      }
+    } catch {
+      setResult({ kind: "err", text: "Scrub failed" });
+    }
+    setBusy(false);
+    setTimeout(() => setResult(null), 8000);
+  }
+
+  if (confirming) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs text-zinc-300">Redact IP, device & names on old rows?</span>
+        <button
+          onClick={runScrub}
+          className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors"
+        >
+          Scrub
+        </button>
+        <button
+          onClick={() => setConfirming(false)}
+          className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => setConfirming(true)}
+        disabled={busy}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+        title="Immediately redact IP addresses, devices, and user names from rows past the retention window (normally done by the daily cron)"
+      >
+        <Shield size={14} /> {busy ? "Scrubbing…" : "Scrub PII"}
+      </button>
+      {result && (
+        <span
+          role={result.kind === "err" ? "alert" : "status"}
+          aria-live={result.kind === "err" ? "assertive" : "polite"}
+          className={`text-xs ${result.kind === "err" ? "text-red-400" : "text-green-400"}`}
+        >
+          {result.text}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function formatSummary(action: string, d: Record<string, unknown>): string | null {
   switch (action) {
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
     case "REQUEST_DELETE":
+      // The batch route logs REQUEST_APPROVE/BATCH_REQUEST_DECLINE with a
+      // {batch, count, ids} shape instead of a single title.
+      if (d.batch) {
+        return [
+          `Batch: ${d.count ?? "?"} request(s)`,
+          d.permanent && "permanent",
+          d.adminNote && `note: ${String(d.adminNote).slice(0, 80)}`,
+        ].filter(Boolean).join(" · ") || null;
+      }
       return [
         d.title && `"${d.title}"`,
         d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
         d.year && `[${d.year}]`,
         d.requestedBy && `requested by ${d.requestedBy}`,
       ].filter(Boolean).join(" ") || null;
+    case "BATCH_REQUEST_DECLINE":
+      return [
+        `Batch: ${d.count ?? "?"} request(s) declined`,
+        d.permanent && "permanent",
+        d.adminNote && `note: ${String(d.adminNote).slice(0, 80)}`,
+      ].filter(Boolean).join(" · ") || null;
+    case "REQUEST_ON_BEHALF":
+      return [
+        d.created != null && `${d.created} request(s) created`,
+        d.targetUser && `for ${d.targetUser}`,
+      ].filter(Boolean).join(" ") || null;
     case "USER_ROLE_CHANGE":
+    case "USER_PERMISSIONS_CHANGE":
       return [
         d.targetUser && `User: ${d.targetUser}`,
         d.targetEmail && `(${d.targetEmail})`,
+      ].filter(Boolean).join(" ") || null;
+    case "USER_CREATE":
+      return [
+        d.targetUser && `Created ${d.targetUser}`,
+        d.targetEmail && `(${d.targetEmail})`,
+        d.role && `· ${d.role}`,
       ].filter(Boolean).join(" ") || null;
     case "USER_DELETE":
       return [
         d.targetUser && `Deleted user: ${d.targetUser}`,
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
+    case "USER_DEACTIVATE":
+      return [
+        d.targetUser ? `Disabled ${d.targetUser}` : null,
+        d.targetEmail && `(${d.targetEmail})`,
+        d.kind === "self-delete" && "closed by the user",
+      ].filter(Boolean).join(" ") || null;
+    case "USER_REACTIVATE":
+      return [
+        d.targetUser && `Re-enabled ${d.targetUser}`,
+        d.targetEmail && `(${d.targetEmail})`,
+      ].filter(Boolean).join(" ") || null;
+    case "USER_PURGE": {
+      const kept = d.historyPreserved as Record<string, unknown> | undefined;
+      return [
+        d.targetUser && `Purged ${d.targetUser}`,
+        kept && `kept ${kept.mediaRequests ?? 0} requests, ${kept.issues ?? 0} issues, ${kept.deletionVotes ?? 0} votes`,
+      ].filter(Boolean).join(" · ") || null;
+    }
     case "SETTINGS_CHANGE":
     case "MAINTENANCE_TOGGLE": {
       const keys = d.keys as string[] | undefined;
-      if (!keys?.length) return null;
-      return `Changed: ${keys.join(", ")}`;
+      if (keys?.length) return `Changed: ${keys.join(", ")}`;
+      // Instance-manager saves ({service, instances[]}) and the PII scrub
+      // ({scrubbed}) log under SETTINGS_CHANGE with their own shapes.
+      if (d.service && Array.isArray(d.instances)) {
+        const removed = Array.isArray(d.removed) && d.removed.length > 0 ? ` · removed: ${(d.removed as unknown[]).join(", ")}` : "";
+        return `${d.service}: ${(d.instances as unknown[]).length} instance(s)${removed}`;
+      }
+      if (d.scrubbed != null) return `Scrubbed PII from ${d.scrubbed} row(s)`;
+      return null;
     }
     case "ISSUE_STATUS_CHANGE":
+    case "ISSUE_CLAIM":
+    case "ISSUE_UNCLAIM":
       return d.title ? `"${d.title}"` : null;
+    case "ISSUE_DELETE":
+      return [
+        d.title && `"${d.title}"`,
+        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+      ].filter(Boolean).join(" ") || null;
+    case "CONTENT_REPORT":
+      return [
+        d.contentType && d.contentId && `${d.contentType} #${d.contentId}`,
+        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+      ].filter(Boolean).join(" ") || null;
+    case "VOTE_DISMISS_ALL":
+      return [
+        d.dismissedCount != null && `Dismissed ${d.dismissedCount} vote(s)`,
+        d.tmdbId && `tmdb:${d.tmdbId}`,
+        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+      ].filter(Boolean).join(" ") || null;
+    case "FIX_MATCH":
+      return [
+        d.source && `${d.source}:`,
+        d.fromTmdbId && d.toTmdbId && `tmdb ${d.fromTmdbId} → ${d.toTmdbId}`,
+        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+        d.serverInstance && `on ${d.serverInstance}`,
+      ].filter(Boolean).join(" ") || null;
+    case "SERVER_USERS_BULK":
+      return [
+        d.downloadsEnabled != null && `Downloads ${d.downloadsEnabled ? "enabled" : "disabled"}`,
+        d.targetCount != null && `for ${d.targetCount} user(s)`,
+        d.pushed != null && `(${d.pushed} pushed)`,
+      ].filter(Boolean).join(" ") || null;
+    case "SERVER_USER_LINK": {
+      const mode = d.mode === "auto" ? "back to automatic" : d.mode === "manual-unlink" ? "manually unlinked" : "manually linked";
+      return [
+        d.serverUser && `${d.serverUser}`,
+        d.source && `(${d.source})`,
+        `— ${mode}`,
+      ].filter(Boolean).join(" ") || null;
+    }
+    case "PLEX_SESSION_TERMINATE":
+    case "JELLYFIN_SESSION_TERMINATE":
+      return [
+        (d.mediaTitle ?? d.title) && `"${d.mediaTitle ?? d.title}"`,
+        (d.accountName ?? d.userName) && `· ${d.accountName ?? d.userName}`,
+        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+      ].filter(Boolean).join(" ") || null;
+    case "LIBRARY_SYNC":
+      return [
+        d.movies != null && `${d.movies} movies`,
+        d.tv != null && `${d.tv} TV`,
+        d.marked != null && `${d.marked} marked available`,
+        d.full === true && "full resync",
+        d.durationMs != null && `in ${Math.round(Number(d.durationMs) / 1000)}s`,
+      ].filter(Boolean).join(" · ") || null;
+    case "CACHE_WARM":
+      return [
+        d.warmed != null && `${d.warmed} warmed`,
+        d.fetched != null && `${d.fetched} fetched`,
+        d.skipped != null && `${d.skipped} skipped`,
+        d.trigger && `(${d.trigger})`,
+      ].filter(Boolean).join(" · ") || null;
+    case "RATINGS_CACHE_CLEAR":
+      return [
+        d.cleared != null && `Cleared ${d.cleared} entries`,
+        d.source && `(${d.source})`,
+      ].filter(Boolean).join(" ") || null;
+    case "PLAY_HISTORY_BACKFILL":
+      return [
+        d.updated != null && `Clamped ${d.updated} row(s)`,
+        d.watchedFlippedToFalse != null && `${d.watchedFlippedToFalse} watched-flag(s) flipped`,
+      ].filter(Boolean).join(" · ") || null;
+    case "PLAY_HISTORY_DELETE":
+      return [
+        d.title && `"${d.title}"`,
+        d.source && `(${d.source})`,
+      ].filter(Boolean).join(" ") || null;
+    case "PLAY_HISTORY_EXPORT":
+    case "AUDIT_LOG_EXPORT":
+      return [
+        d.format && `Format: ${String(d.format).toUpperCase()}`,
+        d.rowCount != null && Number(d.rowCount) > 0 && `${d.rowCount} rows`,
+        d.truncated === true && "truncated",
+        d.status && `(${d.status})`,
+      ].filter(Boolean).join(" · ") || null;
+    case "BLACKLIST_CHANGE":
+      return [
+        d.op === "remove" ? "Unblocked" : "Blocked",
+        d.title && `"${d.title}"`,
+        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+      ].filter(Boolean).join(" ") || null;
     case "BACKUP_EXPORT":
       return [
         d.format && `Format: ${String(d.format).toUpperCase()}`,

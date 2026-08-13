@@ -40,17 +40,31 @@ export async function prewarmOmdbCache(): Promise<{
   }
 
   const freshKeys = new Set<string>();
+  // Stored imdbIds from the rows this pass is about to refresh: the tmdb→imdb
+  // mapping is effectively immutable, so re-buying it from TMDB for a row that
+  // already carries the id doubled the run's upstream call count. `data` rides
+  // along in the existing freshness read (omdb rows are a handful of bytes).
+  const imdbIdByKey = new Map<string, string>();
   const omdbKeys = items.map((i) => `omdb:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
   for (let i = 0; i < omdbKeys.length; i += LIBRARY_PAGE_SIZE) {
     const slice = omdbKeys.slice(i, i + LIBRARY_PAGE_SIZE);
     const existingRows = await prisma.tmdbCache.findMany({
       where: { key: { in: slice } },
-      select: { key: true, cachedAt: true, expiresAt: true },
+      select: { key: true, cachedAt: true, expiresAt: true, data: true },
     });
     for (const r of existingRows) {
       // Same 25% remaining-TTL threshold used by tmdb-prewarm to decide whether a row is "fresh enough"
       const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeys.add(r.key);
+      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) {
+        freshKeys.add(r.key);
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(r.data) as { imdbId?: unknown };
+        if (typeof parsed?.imdbId === "string" && parsed.imdbId) imdbIdByKey.set(r.key, parsed.imdbId);
+      } catch {
+        // Unparseable row — the refresh below resolves the id live as before.
+      }
     }
   }
 
@@ -93,13 +107,15 @@ export async function prewarmOmdbCache(): Promise<{
     const results = await Promise.allSettled(
       batch.map((item) => {
         const type = item.mediaType === "MOVIE" ? "movie" : "tv";
+        const key = `omdb:tmdb:${type}:${item.tmdbId}`;
         const releaseDate = releaseDateByKey.get(`${type}:${item.tmdbId}:details`) ?? null;
         // Force-fetch rather than getOmdbRatingsForTmdb: that getter is cache-first and
         // serves any UNEXPIRED row warm, so every row in the 0-25%-remaining band this
         // pass exists to renew would be "refreshed" with no upstream call at all (and
         // still counted as fetched below). Mirrors mdblist-prewarm/tmdb-prewarm, which
-        // both call their fetch-and-store entry point directly.
-        return fetchAndCacheOmdbForTmdb(item.tmdbId, type, `omdb:tmdb:${type}:${item.tmdbId}`, releaseDate);
+        // both call their fetch-and-store entry point directly. The stored imdbId (when
+        // the prior row had one) skips the TMDB external_ids resolve per item.
+        return fetchAndCacheOmdbForTmdb(item.tmdbId, type, key, releaseDate, imdbIdByKey.get(key) ?? null);
       })
     );
     for (const r of results) {

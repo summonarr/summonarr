@@ -69,6 +69,7 @@ let arrFailHost: string | null = null; // fail ONE instance by host
 let plexOk = true;             // Plex sections + episodes
 let jellyfinOk = true;         // Jellyfin episodes
 let tmdbOk = true;             // TMDB list endpoints
+let tmdbTrendingResults: unknown[] = []; // /trending/ rows (ratings pre-warm pin)
 
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
@@ -77,7 +78,17 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     if (!tmdbOk) return json({ status_message: "TMDB DOWN" }, 500);
+    // Trending only — lets the ratings batch-pre-warm pin pool a known item
+    // set without touching what the other list endpoints return.
+    if (url.pathname.includes("/trending/")) return json({ page: 1, total_pages: 1, results: tmdbTrendingResults });
     return json({ page: 1, total_pages: 1, results: [] });
+  }
+  if (url.hostname === "api.mdblist.com") {
+    // Batch POST endpoints have no id in the path (/tmdb/movie/ vs /tmdb/movie/603/).
+    // Echo one row per requested-set id so the batch parser writes FOUND rows.
+    if (url.pathname === "/tmdb/movie/") return json([{ tmdb_id: 603 }]);
+    if (url.pathname === "/tmdb/show/") return json([{ tmdb_id: 1399 }]);
+    return json({});
   }
   if (url.pathname.includes("/library/sections")) {
     return plexOk ? json({ MediaContainer: { Directory: [] } }) : json({ error: "PLEX DOWN" }, 500);
@@ -151,6 +162,30 @@ for (const m of [
 ]) {
   shadowPrismaModel(prisma, m, cacheModel(m));
 }
+
+// tmdbCache gets a STORING override (replacing the black-hole cacheModel): the
+// ratings route's MDBList batch pre-warm writes mdblist:tmdb:* rows that the
+// per-item pass must then read back as WARM — the no-single-GETs pin below is
+// exactly that round trip. deleteMany keeps rec()ing so the "never deletes"
+// pin still sees every delete. Other routes are unaffected: the list helpers
+// never cache empty results, so nothing else in this file ever stores.
+const tmdbCacheRows = new Map<string, { key: string; data: string; cachedAt: Date; expiresAt: Date }>();
+shadowPrismaModel(prisma, "tmdbCache", {
+  deleteMany: async (args: { where?: Record<string, unknown> } = {}) => {
+    rec("tmdbCache.deleteMany", args.where);
+    return { count: 0 };
+  },
+  findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) =>
+    (args.where?.key?.in ?? []).flatMap((k) => {
+      const r = tmdbCacheRows.get(k);
+      return r ? [{ ...r }] : [];
+    }),
+  findUnique: async (args: { where: { key: string } }) => tmdbCacheRows.get(args.where.key) ?? null,
+  upsert: async (args: { where: { key: string }; create: { key: string; data: string; cachedAt: Date; expiresAt: Date } }) => {
+    tmdbCacheRows.set(args.where.key, args.create);
+    return args.create;
+  },
+});
 
 // sync/upcoming AWAITS a logAudit before returning. Leaving auditLog unstubbed
 // sends it to the real client, which then blocks on a DB connection that does
@@ -252,6 +287,8 @@ beforeEach(() => {
   plexOk = true;
   jellyfinOk = true;
   tmdbOk = true;
+  tmdbTrendingResults = [];
+  tmdbCacheRows.clear();
   lockAcquire = () => true;
 });
 
@@ -689,6 +726,38 @@ test("ratings tolerates every TMDB list failing and still reports a result", asy
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.total, 0, "every list caught its own failure and degraded to empty");
+});
+
+test("ratings pre-warms MDBList through the batch endpoint — one POST per type, ZERO single-item GETs, no OMDB drain", async () => {
+  // The quota shape this pins: pooled titles reach MDBList as ~200-id batch
+  // POSTs (/tmdb/movie/ and /tmdb/show/, no id in the path) BEFORE the
+  // per-item unified pass runs, which then finds every row warm — so the old
+  // cold-single-GET-per-item behavior (~1,500 calls on an expiry wave) and the
+  // unpaced stale-SWR background GETs can never fire.
+  settings.set("mdblistApiKey", "a-key");
+  tmdbTrendingResults = [
+    { id: 603, media_type: "movie", title: "The Matrix", poster_path: "/m.jpg", release_date: "1999-03-31", vote_average: 8, vote_count: 1000 },
+    { id: 1399, media_type: "tv", name: "Game of Thrones", poster_path: "/g.jpg", first_air_date: "2011-04-17", vote_average: 9, vote_count: 1000 },
+  ];
+
+  const res = await call(ratings);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.total, 2);
+
+  const mdblistCalls = fetchCalls.filter((u) => u.hostname === "api.mdblist.com");
+  assert.deepEqual(
+    mdblistCalls.map((u) => u.pathname).sort(),
+    ["/tmdb/movie/", "/tmdb/show/"],
+    "exactly one batch POST per media type, and not a single per-id GET",
+  );
+  // The batch wrote FOUND rows (all-null ratings), so the unified pass falls
+  // through toward OMDB — which, unconfigured, must contribute zero calls.
+  assert.ok(!fetchCalls.some((u) => u.hostname === "www.omdbapi.com"), "no OMDB calls without an OMDB key");
+  assert.ok(
+    !fetchCalls.some((u) => u.hostname === "api.themoviedb.org" && u.pathname.includes("/external_ids")),
+    "no external_ids resolves may fire from the warm pass",
+  );
 });
 
 test("ratings uses a DISTINCT advisory lock from upcoming", async () => {

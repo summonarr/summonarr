@@ -8,6 +8,7 @@ export const WARM_OMDB_LOCK_ID = 2004;
 export const WARM_MDBLIST_LOCK_ID = 2005;
 export const TRASH_SYNC_LOCK_ID = 2010;
 export const WARM_RECOMMENDATIONS_LOCK_ID = 2011;
+export const WARM_LIBRARY_LOCK_ID = 2012;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

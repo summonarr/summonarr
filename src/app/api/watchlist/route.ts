@@ -4,7 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { verifyTmdbMedia } from "@/lib/tmdb";
+import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 const PAGE_SIZE = 60;
@@ -64,7 +64,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
   }
 
-  const verified = await verifyTmdbMedia(tmdbId, mediaType === "MOVIE" ? "movie" : "tv");
+  // Three-tier cached resolver — see votes/route.ts for the rationale.
+  const verified = await resolveMediaMeta(tmdbId, mediaType);
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }

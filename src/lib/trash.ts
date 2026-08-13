@@ -256,12 +256,17 @@ export interface RefreshResult {
 interface ValidationCounter { count: number }
 
 // Pulls the TRaSH-Guides tree from GitHub and upserts every spec kind (CFs, CF-groups, naming, profiles, sizes) for one service into TrashSpec.
-export async function refreshCatalog(service: TrashService): Promise<RefreshResult> {
+// `prefetchedTree` lets a caller refreshing BOTH services share one ~573 KB
+// recursive tree fetch instead of pulling the identical tree back-to-back.
+export async function refreshCatalog(
+  service: TrashService,
+  prefetchedTree?: { entries: GhTreeEntry[]; truncated: boolean },
+): Promise<RefreshResult> {
   const errors: string[] = [];
   const validationCounter: ValidationCounter = { count: 0 };
   const now = new Date();
 
-  const { entries: trashTree, truncated } = await ghTree(TRASH_REPO, TRASH_BRANCH);
+  const { entries: trashTree, truncated } = prefetchedTree ?? await ghTree(TRASH_REPO, TRASH_BRANCH);
   // Persist truncation state so the admin UI / diagnostic can surface it. Failure to persist must
   // not block the refresh itself — the warn log is still emitted in ghTree.
   await setRefreshTruncated(truncated).catch((err) => {
@@ -913,10 +918,36 @@ export async function applyCustomFormats(
   });
   if (specs.length === 0) return [];
 
+  // Projection for the no-op compare: exactly the fields the PUT body writes,
+  // applied to BOTH sides so extra metadata on either side (remote
+  // implementationName/infoLink/field labels, TRaSH trash_scores) can't defeat
+  // equality. STRICT on absence — a remote row that omits a field the body
+  // sets stays unequal and still PUTs (drift repair is the feature).
+  type CfSpecLike = { name?: unknown; implementation?: unknown; negate?: unknown; required?: unknown; fields?: unknown };
+  const projectCfForCompare = (cf: { name?: unknown; includeCustomFormatWhenRenaming?: unknown; specifications?: unknown }): string => {
+    const specifications = Array.isArray(cf.specifications) ? (cf.specifications as CfSpecLike[]) : [];
+    return JSON.stringify({
+      name: cf.name,
+      includeCustomFormatWhenRenaming: cf.includeCustomFormatWhenRenaming ?? false,
+      specifications: specifications.map((s) => ({
+        name: s.name,
+        implementation: s.implementation,
+        negate: s.negate,
+        required: s.required,
+        fields: Array.isArray(s.fields)
+          ? (s.fields as Array<{ name?: unknown; value?: unknown }>).map((f) => ({ name: f.name, value: f.value }))
+          : [],
+      })),
+    });
+  };
+
+  type RemoteCf = { id: number; name: string; includeCustomFormatWhenRenaming?: boolean; specifications?: unknown[] };
   let remoteByName: Map<string, number>;
+  let remoteById: Map<number, RemoteCf>;
   try {
-    const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/customformat");
+    const remote = await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
+    remoteById = new Map(remote.map((r) => [r.id, r]));
   } catch (err) {
     // Can't read existing CFs → can't tell new from existing, so a blind POST in
     // the loop below would create duplicates. Fail the whole batch instead of
@@ -941,6 +972,23 @@ export async function applyCustomFormats(
       // arrPutOrRecreate transparently recovers if the resource was deleted in the Arr UI between
       // Summonarr's last apply and now (PUT → 404 → POST).
       const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(payload.name) ?? null;
+      // No-op skip: the cron re-applies every enabled spec each run (drift
+      // repair), which used to mean N identical PUTs per run — the compare data
+      // was already downloaded above and discarded. When the remote CF's
+      // projection matches what we'd PUT, record success against the known id
+      // and skip the write; any drift (including remote rows missing fields)
+      // still PUTs exactly as before.
+      if (remoteId) {
+        const remoteRow = remoteById.get(remoteId);
+        // Only trust equality when the remote row actually CARRIES its
+        // specifications array — a row without it (truncated response) is
+        // unknown state, and treating absence as "empty" would wrongly skip
+        // the PUT for a spec-less body.
+        if (remoteRow && Array.isArray(remoteRow.specifications) && projectCfForCompare(remoteRow) === projectCfForCompare(body)) {
+          results.push(await recordApply(spec, { ok: true, remoteId }, arrInstance));
+          continue;
+        }
+      }
       let created: { id: number };
       let recreated = false;
       if (remoteId) {
@@ -1111,10 +1159,15 @@ export async function applyNaming(
       const patch = buildNamingPatch(service, payload);
       Object.assign(merged, patch);
     }
-    await arrFetch<unknown>(cfg, `/api/v3/config/naming`, {
-      method: "PUT",
-      body: JSON.stringify(merged),
-    });
+    // No-op skip: `merged` spreads `current` first, so when every patch value
+    // already matches the remote config the two serialize identically — record
+    // success without the PUT (the cron re-applies every run for drift repair).
+    if (JSON.stringify(merged) !== JSON.stringify(current)) {
+      await arrFetch<unknown>(cfg, `/api/v3/config/naming`, {
+        method: "PUT",
+        body: JSON.stringify(merged),
+      });
+    }
     const results: ApplyResult[] = [];
     for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
     return results;
@@ -1165,10 +1218,16 @@ export async function applyQualitySizes(
       };
     });
 
-    await arrFetch<unknown>(cfg, "/api/v3/qualitydefinition/update", {
-      method: "PUT",
-      body: JSON.stringify(merged),
-    });
+    // No-op skip: rows without an override are the SAME object reference, and
+    // an overridden row that changed nothing serializes identically — skip the
+    // PUT when no row actually differs (the cron re-applies every run).
+    const changed = merged.some((row, i) => row !== remote[i] && JSON.stringify(row) !== JSON.stringify(remote[i]));
+    if (changed) {
+      await arrFetch<unknown>(cfg, "/api/v3/qualitydefinition/update", {
+        method: "PUT",
+        body: JSON.stringify(merged),
+      });
+    }
 
     const results: ApplyResult[] = [];
     for (const spec of specs) results.push(await recordApply(spec, { ok: true }, arrInstance));
@@ -1195,18 +1254,29 @@ interface RemoteFormatItem {
   score: number;
 }
 
+// One-per-batch remote state for buildProfileBody — applyQualityProfiles used
+// to refetch all three per profile spec inside one batch.
+interface ProfileBuildRemotes {
+  schema: Record<string, unknown>;
+  remoteLanguages: Array<{ id: number; name: string }>;
+  remoteCfs: Array<{ id: number; name: string; specifications?: Array<{ fields?: Array<{ name?: string; value?: unknown }> }> }>;
+}
+
 async function buildProfileBody(
   cfg: ArrCfg,
   service: TrashService,
   profile: TrashQualityProfile,
   variant: ArrVariant = "hd",
+  shared?: ProfileBuildRemotes,
 ): Promise<Record<string, unknown>> {
   type RemoteCf = { id: number; name: string; specifications?: Array<{ fields?: Array<{ name?: string; value?: unknown }> }> };
 
-  const [schema, remoteLanguages] = await Promise.all([
-    arrFetch<Record<string, unknown>>(cfg, "/api/v3/qualityprofile/schema"),
-    arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/language").catch(() => [] as Array<{ id: number; name: string }>),
-  ]);
+  const [schema, remoteLanguages] = shared
+    ? [shared.schema, shared.remoteLanguages]
+    : await Promise.all([
+        arrFetch<Record<string, unknown>>(cfg, "/api/v3/qualityprofile/schema"),
+        arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/language").catch(() => [] as Array<{ id: number; name: string }>),
+      ]);
 
   const schemaItems = (schema.items as RemoteQualityItem[] | undefined) ?? [];
 
@@ -1235,6 +1305,7 @@ async function buildProfileBody(
       trashId: { in: [...referencedTrashIds].filter((id) => !appliedByTrashId.has(id)) },
     },
   });
+  let cascadeApplied = false;
   if (specsMissingApplication.length > 0) {
     const depResults = await applyCustomFormats(
       service,
@@ -1242,11 +1313,19 @@ async function buildProfileBody(
       variant,
     );
     for (const r of depResults) {
-      if (r.ok && r.remoteId != null) appliedByTrashId.set(r.trashId, r.remoteId);
+      if (r.ok && r.remoteId != null) {
+        appliedByTrashId.set(r.trashId, r.remoteId);
+        cascadeApplied = true;
+      }
     }
   }
 
-  const remoteCfs = await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
+  // The shared prefetched CF list is valid only while the dependency cascade
+  // created nothing — a cascade-created CF must land in formatItems, so refetch
+  // in that case.
+  const remoteCfs = shared && !cascadeApplied
+    ? shared.remoteCfs
+    : await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
 
   // Some CFs in Arr embed a trash_id field in their spec metadata — use it to map remote CFs we didn't apply ourselves
   for (const cf of remoteCfs) {
@@ -1323,10 +1402,16 @@ async function buildProfileBody(
 
   let language: { id: number; name: string } | undefined;
   const wantLang = (profile.language ?? "").toLowerCase();
+  // Fallback ids (used only when GET /api/v3/language failed) must match
+  // Radarr's Language.cs pseudo-languages: Any = -1, Original = -2. The id is
+  // authoritative (name is display-only — Radarr stores/compares the int), so
+  // the previously swapped constants persisted the OPPOSITE language: "Any"
+  // (accept every release, language gate off) where TRaSH said Original, and
+  // vice versa.
   if (wantLang === "original" || wantLang === "") {
-    language = remoteLanguages.find((l) => l.name.toLowerCase() === "original") ?? { id: -1, name: "Original" };
+    language = remoteLanguages.find((l) => l.name.toLowerCase() === "original") ?? { id: -2, name: "Original" };
   } else if (wantLang === "any") {
-    language = remoteLanguages.find((l) => l.name.toLowerCase() === "any") ?? { id: -2, name: "Any" };
+    language = remoteLanguages.find((l) => l.name.toLowerCase() === "any") ?? { id: -1, name: "Any" };
   } else {
     const match = remoteLanguages.find((l) => l.name.toLowerCase() === wantLang);
     if (match) language = match;
@@ -1372,11 +1457,28 @@ export async function applyQualityProfiles(
     );
   }
 
+  // Hoisted once per batch (AFTER the prefetch guard above, so the
+  // prefetch-failure early return never pays these): schema, languages and the
+  // CF list are instance-level state identical for every profile spec.
+  // Best-effort — on failure each spec falls back to its own per-spec fetches,
+  // whose errors are recorded individually as before.
+  let sharedRemotes: ProfileBuildRemotes | undefined;
+  try {
+    const [schema, remoteLanguages, remoteCfs] = await Promise.all([
+      arrFetch<Record<string, unknown>>(cfg, "/api/v3/qualityprofile/schema"),
+      arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/language").catch(() => [] as Array<{ id: number; name: string }>),
+      arrFetch<ProfileBuildRemotes["remoteCfs"]>(cfg, "/api/v3/customformat"),
+    ]);
+    sharedRemotes = { schema, remoteLanguages, remoteCfs };
+  } catch {
+    sharedRemotes = undefined;
+  }
+
   const results: ApplyResult[] = [];
   for (const spec of specs) {
     try {
       const profile = spec.payload as unknown as TrashQualityProfile;
-      const body = await buildProfileBody(cfg, service, profile, variant);
+      const body = await buildProfileBody(cfg, service, profile, variant, sharedRemotes);
       const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(profile.name) ?? null;
       let created: { id: number };
       let recreated = false;
@@ -1517,13 +1619,27 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
   const services: TrashService[] = ["RADARR", "SONARR"];
   const refreshed: RefreshResult[] = [];
   if (shouldRefresh) {
-    for (const service of services) {
-      try {
-        const r = await refreshCatalog(service);
-        refreshed.push(r);
-        errors.push(...r.errors.map((e) => `${service}: ${e}`));
-      } catch (err) {
-        errors.push(`${service} refresh: ${err instanceof Error ? err.message : String(err)}`);
+    // ONE tree fetch shared by both services — the ~573 KB recursive listing is
+    // identical for RADARR and SONARR, so fetching it per service doubled the
+    // GitHub transfer every cycle. A tree-fetch failure fails both services'
+    // refresh (errors pushed per service, refreshed stays empty), so the
+    // last-refresh stamp below is skipped and the next tick retries.
+    let sharedTree: { entries: GhTreeEntry[]; truncated: boolean } | null = null;
+    try {
+      sharedTree = await ghTree(TRASH_REPO, TRASH_BRANCH);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      for (const service of services) errors.push(`${service} refresh: ${msg}`);
+    }
+    if (sharedTree !== null) {
+      for (const service of services) {
+        try {
+          const r = await refreshCatalog(service, sharedTree);
+          refreshed.push(r);
+          errors.push(...r.errors.map((e) => `${service}: ${e}`));
+        } catch (err) {
+          errors.push(`${service} refresh: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
     // Only stamp success if at least one service refreshed without throwing — partial-success here
@@ -1556,16 +1672,23 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
     const arrService = service === "RADARR" ? "radarr" : "sonarr";
     const instances = await getSyncableArrInstances(arrService);
     for (const inst of instances) {
-      const applications = await prisma.trashApplication.findMany({
-        where: {
-          enabled: true,
-          arrInstance: inst.slug,
-          trashSpec: { service, kind: { in: enabledKinds } },
-        },
-        select: { trashSpecId: true },
-      });
-      if (applications.length === 0) continue;
-      applied.push(...(await applySpecs(applications.map((a) => a.trashSpecId), inst.slug)));
+      // Per-instance containment, mirroring the refresh loop above: one
+      // instance's thrown apply (its arr down mid-batch, a DB blip) must not
+      // abort every remaining instance's — and the other service's — applies.
+      try {
+        const applications = await prisma.trashApplication.findMany({
+          where: {
+            enabled: true,
+            arrInstance: inst.slug,
+            trashSpec: { service, kind: { in: enabledKinds } },
+          },
+          select: { trashSpecId: true },
+        });
+        if (applications.length === 0) continue;
+        applied.push(...(await applySpecs(applications.map((a) => a.trashSpecId), inst.slug)));
+      } catch (err) {
+        errors.push(`${service}${inst.slug ? ` (${inst.slug})` : ""} apply: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 

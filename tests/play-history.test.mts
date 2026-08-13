@@ -299,6 +299,7 @@ function makeSession(overrides: Partial<ActiveSession> = {}): ActiveSession {
     posterPath: null,
     progressPercent: 83,
     progressMs: 2_000_000n,
+    startProgressMs: 0n, // start-of-file default — resume-offset math pinned in its own test
     progressUpdatedAt: BASE_STARTED_AT,
     playtimeMs: 2_000_000n,
     durationMs: 2_400_000n,
@@ -1002,6 +1003,39 @@ test("recordCompletedSession: a seek-to-credits quit is completed (playhead) but
   assert.equal(row.pausedDuration, 0);
   assert.equal(row.watched, false); // 300s / 7200s ≪ 80%
   assert.equal(row.completed, true); // playhead reached the end (clamped ratio 1.0 ≥ 0.95)
+});
+
+test("recordCompletedSession: a RESUMED session's fallback counts playhead ADVANCE (progress − startProgressMs), not the absolute position", async () => {
+  setSettings({});
+  // Resume a 60-min file at 40:00, play 2 min, pause 8 min, quit. The absolute
+  // playhead (42:00) capped only by the 10-min wall window used to book 10 min
+  // of playDuration and ZERO pause — inflating watch time 5× and feeding the
+  // inflated value into watched. The resume offset stamped at create makes the
+  // fallback see the 2-min advance, so the accumulated playtimeMs governs.
+  const session = makeSession({
+    durationMs: 3_600_000n,
+    startProgressMs: 2_400_000n, // resumed at 40:00
+    progressMs: 2_520_000n, // quit at 42:00
+    playtimeMs: 120_000n, // 2 min genuinely playing
+    lastSeenAt: new Date(BASE_STARTED_AT.getTime() + 600_000), // 10 min of wall time
+  });
+  await recordCompletedSession(session, { skipSSE: true });
+  const row = historyCreates[0].data[0];
+  assert.equal(row.playDuration, 120, "play time is the 2-min advance, not the wall-capped absolute position");
+  assert.equal(row.pausedDuration, 480, "the 8 paused minutes must not be erased by an inflated playDuration");
+  assert.equal(row.watched, false);
+
+  // Backward seek below the resume point: the delta clamps to 0 and playtimeMs
+  // governs — never a negative contribution.
+  const backward = makeSession({
+    durationMs: 3_600_000n,
+    startProgressMs: 2_400_000n,
+    progressMs: 600_000n, // sought back to 10:00
+    playtimeMs: 120_000n,
+    lastSeenAt: new Date(BASE_STARTED_AT.getTime() + 600_000),
+  });
+  await recordCompletedSession(backward, { skipSSE: true });
+  assert.equal(historyCreates[1].data[0].playDuration, 120);
 });
 
 test("recordCompletedSession: the 10s end-of-file clamp boundary — duration−10s snaps to a full watch, one ms further out does not", async () => {

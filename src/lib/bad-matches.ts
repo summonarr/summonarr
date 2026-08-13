@@ -98,30 +98,49 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
 
   const map = new Map<string, number>();
   try {
-    const [urlRow, keyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: mediaType === "MOVIE" ? "radarrUrl" : "sonarrUrl" } }),
-      prisma.setting.findUnique({ where: { key: mediaType === "MOVIE" ? "radarrApiKey" : "sonarrApiKey" } }),
+    // Fan out over EVERY syncable instance — the web library page this module's
+    // header declares itself a MIRROR of merges all instances (a mismatched
+    // folder managed only by a 4K/anime instance still gets a verdict there),
+    // while this used to read only the default instance's settings and silently
+    // blank the native surface's arr verdicts on multi-instance deployments.
+    // First-wins merge (default instance is listed first by the registry) and
+    // skip-cache-on-partial-failure both match the page's buildArrPathMap.
+    const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+    const [{ getSyncableArrInstances }, { arrFetch, getArrCfg }] = await Promise.all([
+      import("@/lib/arr-instance-registry"),
+      import("@/lib/arr"),
     ]);
-    if (!urlRow?.value || !keyRow?.value) return map;
+    const instances = await getSyncableArrInstances(service);
+    if (instances.length === 0) return map;
 
-    const { arrFetch } = await import("@/lib/arr");
     const endpoint = mediaType === "MOVIE" ? "movie" : "series";
-    const cfg = { url: urlRow.value.replace(/\/$/, ""), apiKey: keyRow.value };
     type ArrItem = { tmdbId?: number; path?: string };
-    // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB body
-    // cap. The default 10 MB silently truncated large libraries (guardrail 5 /
-    // commit c7902db), leaving every arrVerdict past the cut null with no log.
-    // arrFetch throws ArrResponseError on non-2xx, handled by the catch below.
-    const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
-    for (const item of items) {
-      if (!item.tmdbId || !item.path) continue;
-      // Key by the folder BASENAME, not the absolute path — Plex and Radarr/Sonarr
-      // usually have different bind-mount roots (/plexmedia vs /data), so absolute
-      // paths never match. Basenames ("Movie (2020)") line up across mounts.
-      const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
-      if (folderName) map.set(folderName, item.tmdbId);
+    let anyInstanceFailed = false;
+    for (const inst of instances) {
+      try {
+        const cfg = await getArrCfg(service, inst.slug);
+        if (!cfg) continue;
+        // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB body
+        // cap. The default 10 MB silently truncated large libraries (guardrail 5 /
+        // commit c7902db), leaving every arrVerdict past the cut null with no log.
+        // arrFetch throws ArrResponseError on non-2xx, handled by the catch below.
+        const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
+        for (const item of items) {
+          if (!item.tmdbId || !item.path) continue;
+          // Key by the folder BASENAME, not the absolute path — Plex and Radarr/Sonarr
+          // usually have different bind-mount roots (/plexmedia vs /data), so absolute
+          // paths never match. Basenames ("Movie (2020)") line up across mounts.
+          const folderName = item.path.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop();
+          if (folderName && !map.has(folderName)) map.set(folderName, item.tmdbId);
+        }
+      } catch (err) {
+        anyInstanceFailed = true;
+        console.warn(`[bad-matches] ARR path map fetch failed for instance "${inst.slug}":`, err instanceof Error ? err.message : err);
+      }
     }
-    if (map.size > 0) await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
+    // Never cache a partial map — a down instance's titles would read as
+    // "not in arr" for the whole TTL window.
+    if (!anyInstanceFailed && map.size > 0) await setCache(cacheKey, [...map.entries()], TTL.ARR_PATHS);
   } catch (err) {
     // Don't swallow silently — a missing arr map makes every bad-match verdict
     // null, which previously looked like "no problems found".

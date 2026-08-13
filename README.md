@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.21.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.22.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,42 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.22.0
+
+**Added**
+
+- **A personalized "For You" page.** A dedicated browse page (and a home-screen rail) of recommendations built from your own watch history and watchlist, with a filter to show only titles already on your server — or only the ones that aren't yet. It's **off by default**: turn it on in Admin → Settings → Features, and the picks fill in over the first day as the background job builds them. Native apps get the same set through the API.
+- **Per-instance Radarr minimum availability and Sonarr v3 language profiles.** Each named Radarr/Sonarr instance can now carry its own minimum-availability setting, and named Sonarr v3 instances their own language profile.
+- **Per-server path-strip prefixes for named media instances.** Each named Plex/Jellyfin server can define its own movie/TV path-strip prefix from the media-instances manager.
+- **Audit-log privacy controls.** A one-click scrub button, a configurable PII-retention window, and fuller human-readable detail summaries on each entry.
+- **An optional reason field when blacklisting a title.**
+- **A recurring library-cache warm.** A daily background job keeps the browse/library cache warm on long-uptime servers instead of letting it decay between restarts (tunable via `WARM_LIBRARY_INTERVAL`).
+
+**Changed**
+
+- **"For You" recommendations are sharper.** Suggestions come from TMDB's behavioral recommendations engine rather than keyword-similar titles, seeded from a wider slice of your recent watching plus your watchlist — so even a few-watches-a-month viewer gets a full, relevant set.
+
+**Fixed**
+
+A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations, including:
+
+- **Ended TV series with unmonitored episodes or specials now flip to Available correctly** (they could previously stay stuck "requested" forever).
+- **The Jellyfin "is this on the server yet?" check works again** — it was effectively always answering "yes", so Jellyfin-only setups notified before an import had actually landed.
+- **Jellyfin sign-in and sync keep working on Jellyfin 10.12**, which disables the legacy auth headers Summonarr had been using.
+- **The Plex server owner's watch history is attributed to their account** instead of going unlinked.
+- **Resumed, pause-heavy playback records accurate watch and pause time** instead of over-counting.
+- **Movie "awaiting release" vs "download pending" messaging uses the real digital/physical release dates** rather than the theatrical date.
+- **Approving a title already present in Radarr/Sonarr re-monitors and searches it** instead of leaving the request stuck.
+- **Radarr/Sonarr delete webhooks clear stale availability immediately** instead of waiting for the next full sync.
+- **The Jellyfin "Sync Library" button in settings runs a full resync.**
+- **Metadata ratings**: closed an OMDB rate-limit lockout gap and cut a large amount of redundant upstream traffic (TMDB / OMDB / MDBList / Trakt).
+- **The Discord `/link` command self-heals.** Slash commands now re-register automatically on the first boot after an upgrade that changed them (hash-guarded, so an unchanged schema makes no Discord call) — so a fix like the `/link` token's 20→32 character limit takes effect without a manual "Register commands" click. If your server still shows the old 20-char limit after upgrading, set a **Server (Guild) ID** in Discord settings for instant per-server registration, or restart the Discord client to clear its cached command list.
+- Plus many more correctness and efficiency fixes across library sync, the play-history poller, webhooks, TRaSH-Guides sync, connection tests, and fix-match.
+
+**Dependencies**
+
+- Bumped the Node base image, several GitHub Actions (CodeQL, zizmor, docker/login), and a group of patch-level app dependencies (Prisma, React, jose, and type definitions).
 
 ### v0.21.0
 
@@ -438,7 +474,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Beta testing
 
-Summonarr v0.21.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.22.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

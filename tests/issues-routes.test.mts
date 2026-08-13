@@ -302,6 +302,21 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", {
   },
 });
 // The push notify fan-out reads subscriptions; empty ⇒ it short-circuits.
+
+// resolveMediaMeta's first two tiers (TmdbMediaCore, the details TmdbCache
+// blob). Default to misses so the existing tests keep exercising the tier-3
+// live-verify wire path; a test can point `metaRow` at a row to pin the
+// cached tier short-circuiting the wire.
+let metaRow: { title: string; posterPath: string | null; releaseYear: string } | null = null;
+shadowPrismaModel(prisma, "tmdbMediaCore", {
+  findUnique: async () => metaRow,
+});
+shadowPrismaModel(prisma, "tmdbCache", {
+  findUnique: async () => null,
+  upsert: async (args: { where: { key: string } }) => args,
+  deleteMany: async () => ({ count: 0 }),
+});
+
 shadowPrismaModel(prisma, "pushSubscription", {
   findMany: async () => [],
 });
@@ -509,6 +524,26 @@ test("POST create (movie): the Issue row is shaped from the verify, tvdbId stays
 
   assert.deepEqual(sseEvents.map((e) => e.type), ["issue:new"]);
   assert.equal(fetchCalls.length, 1, "only the TMDB verify hit the wire");
+});
+
+test("POST create: a warm TmdbMediaCore row serves the metadata WITHOUT touching the TMDB wire (three-tier resolver)", async () => {
+  // The route resolves via resolveMediaMeta — issues are filed from a detail
+  // page the reporter just viewed, so the metadata is almost always local and
+  // a TMDB outage must not 422 issue filing for known titles.
+  metaRow = { title: "Core Matrix", posterPath: "/core.jpg", releaseYear: "1999" };
+  fetchImpl = () => { throw new Error("the wire must not be touched when tier 1 serves"); };
+  plexHas = true;
+  const { token } = await mintSession();
+  try {
+    const res = await postIssue(token, createBody({ issueType: "WRONG_AUDIO" }));
+    assert.equal(res.status, 201);
+    assert.equal(fetchCalls.length, 0, "tier 1 (TmdbMediaCore) must short-circuit the live verify");
+    const data = createdIssueData();
+    assert.equal(data.title, "Core Matrix");
+    assert.equal(data.posterPath, "/core.jpg");
+  } finally {
+    metaRow = null;
+  }
 });
 
 test("POST create (TV, unconfigured Sonarr): tvdbId resolves to null server-side and EPISODE scope carries season+episode", async () => {

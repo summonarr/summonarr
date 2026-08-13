@@ -38,7 +38,12 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
           posterPath:    m.posterPath    ?? null,
           releaseYear:   m.releaseYear   || null,
           voteAverage:   m.voteAverage   ?? 0,
-          certification: m.certification ?? null,
+          // undefined (skip), NOT null — same rule as upsertTmdbMediaCore below:
+          // list-shaped TmdbMedia never carries certification, so null here
+          // erased the cert a full details fetch or the library prewarm stored
+          // on every list warm (~4x/day via warm-list-cache), blanking the
+          // grid badges that read TmdbMediaCore.certification.
+          certification: m.certification ?? undefined,
           expiresAt,
           lastSyncedAt:  new Date(),
         },

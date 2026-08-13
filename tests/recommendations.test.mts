@@ -3,6 +3,9 @@
 // getUserRecommendations). Pinned here:
 //   - cold start (zero seeds) short-circuits before any TMDB call;
 //   - only watched:true PlayHistory rows seed the engine;
+//   - history seeding is windowed to the last 180 days (an old binge cannot
+//     outrank recent watches), falling back to all-time ONLY when the window
+//     is empty — while the exclusion set stays all-time;
 //   - scoring = seedTypeWeight × recencyWeight, summed across every seed that
 //     surfaced a candidate (multi-seed corroboration), with watchlist seeds
 //     (1.5x) outweighing watch-history seeds (1.0x) at equal recency;
@@ -136,9 +139,20 @@ shadowPrismaModel(prisma, "mediaServerUser", {
 
 // ── prisma.playHistory (seed groupBy + exclusion/drift findMany) ──────────
 shadowPrismaModel(prisma, "playHistory", {
-  groupBy: async (args: { where: { mediaServerUserId: { in: string[] } }; take: number }) => {
+  groupBy: async (args: {
+    where: { mediaServerUserId: { in: string[] }; startedAt?: { gte: Date } };
+    take: number;
+  }) => {
     const ids = new Set(args.where.mediaServerUserId.in);
-    const eligible = playHistoryRows.filter((p) => ids.has(p.mediaServerUserId) && p.watched && p.tmdbId != null && p.mediaType != null);
+    const cutoff = args.where.startedAt?.gte.getTime();
+    const eligible = playHistoryRows.filter(
+      (p) =>
+        ids.has(p.mediaServerUserId) &&
+        p.watched &&
+        p.tmdbId != null &&
+        p.mediaType != null &&
+        (cutoff === undefined || p.startedAt.getTime() >= cutoff),
+    );
     const groups = new Map<string, { tmdbId: number; mediaType: MT; count: number; max: number }>();
     for (const r of eligible) {
       const key = `${r.tmdbId}:${r.mediaType}`;
@@ -333,6 +347,86 @@ test("only watched:true rows seed the engine — a merely-sampled (watched:false
   const result = await computeRecommendationsForUser("u1");
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [500]);
   assert.ok(!fetchCalls.some((p) => p.startsWith("/movie/99/")), "watched:false row must not become a seed");
+});
+
+test("seed recency window: an old episode binge outside 180 days seeds BEHIND the recent watch (top-up), never past it, and stays EXCLUDED", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // A three-row "binge" 400 days ago — unwindowed it would outrank the recent
+    // watch on count and take seed index 0 (the highest weight). With the
+    // windowed-first + all-time top-up, it still seeds (busy users with sparse
+    // recent history must not lose their pool) but only in a TAIL slot: the
+    // recent watch keeps index 0 and the higher weight.
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(400) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(401) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "TV", watched: true, startedAt: daysAgo(402) },
+    { mediaServerUserId: "msu1", tmdbId: 20, mediaType: "TV", watched: true, startedAt: daysAgo(2) },
+  ];
+  // Distinct suggestions per seed prove the ordering: 222 (from the recent
+  // watch's higher-weight slot) must rank ahead of 111 (from the binge's tail
+  // slot). The old watch itself must still be excluded (exclusion is all-time)
+  // — 10 arriving as a suggestion must not surface.
+  suggestionsFor.set("tv:10", [tvItem(111)]);
+  suggestionsFor.set("tv:20", [tvItem(222), tvItem(10)]);
+
+  const result = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(
+    result.candidates.map((c) => c.tmdbId),
+    [222, 111],
+    "the recent watch's suggestion must outrank the topped-up binge's",
+  );
+  assert.ok(fetchCalls.some((p) => p.includes("/tv/10/")), "the beyond-window title tops up the unused seed slots");
+});
+
+test("windowed-first top-up: a busy user's few recent watches keep the TOP slots while old favorites fill the tail", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // Old favorite watched 3× (all-time count winner) vs one recent watch.
+    { mediaServerUserId: "msu1", tmdbId: 50, mediaType: "MOVIE", watched: true, startedAt: daysAgo(300) },
+    { mediaServerUserId: "msu1", tmdbId: 50, mediaType: "MOVIE", watched: true, startedAt: daysAgo(301) },
+    { mediaServerUserId: "msu1", tmdbId: 50, mediaType: "MOVIE", watched: true, startedAt: daysAgo(302) },
+    { mediaServerUserId: "msu1", tmdbId: 60, mediaType: "MOVIE", watched: true, startedAt: daysAgo(3) },
+  ];
+  suggestionsFor.set("movie:50", [movieItem(555)]);
+  suggestionsFor.set("movie:60", [movieItem(666)]);
+
+  const result = await computeRecommendationsForUser("u1");
+
+  // Both seed — but the recent watch owns index 0, so its suggestion carries
+  // the higher weight. The all-time count winner must NOT reclaim the top slot.
+  assert.deepEqual(
+    result.candidates.map((c) => c.tmdbId),
+    [666, 555],
+    "recent taste ranks first; the topped-up old favorite trails",
+  );
+  // Seed dedup across the two groupings: 60 sits in BOTH the windowed and the
+  // all-time result, so a missing dedup would seed it twice and double 666's
+  // score past the sum of both weights. Index 0 of 2 weighs 1.0, index 1
+  // weighs 0.5 (the taper) — pin the exact single-contribution scores.
+  const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
+  assert.equal(byId.get(666)!.score, 1.0, "one contribution at the index-0 weight — a duplicated seed would double this");
+  assert.equal(byId.get(555)!.score, 0.5, "the topped-up seed contributes at the tail weight");
+});
+
+test("seed recency window: ONLY-old history falls back to all-time seeding instead of clearing the shelf", async () => {
+  // A dormant household (nothing watched in 180 days, empty watchlist) must not
+  // collapse to zero seeds: that reads as a CONCLUSIVE empty and would clear an
+  // established shelf. All-time seeding is the fallback, not the default.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(400) },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(390) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(333)]);
+
+  const result = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(result.candidates.map((c) => c.tmdbId), [333]);
+  assert.equal(result.conclusive, true);
 });
 
 // ── scoring: ranking, recency interpolation, seed-type weight, corroboration ─

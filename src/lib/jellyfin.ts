@@ -7,6 +7,16 @@ export interface JellyfinUser {
 
 const FETCH_TIMEOUT_MS = 30_000;
 
+// Jellyfin is removing its legacy auth transports: PR jellyfin/jellyfin#13306
+// (10.11) deprecates X-Emby-Authorization / X-Emby-Token / X-MediaBrowser-Token /
+// api_key behind an EnableLegacyAuthorization flag, and 10.12 turns that flag
+// off by default — including for UPGRADED installs, via a startup migration.
+// With legacy off, only `Authorization: MediaBrowser ...` (and the ApiKey query
+// param) is read, so every identity/token below is sent under BOTH the standard
+// Authorization header and its legacy twin: old servers keep finding the form
+// they honor, 10.12+ finds the only one it still reads.
+const JELLYFIN_IDENTITY = 'MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0"';
+
 export async function authenticateWithJellyfin(
   baseUrl: string,
   username: string,
@@ -17,8 +27,8 @@ export async function authenticateWithJellyfin(
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
     headers: {
-      "X-Emby-Authorization":
-        'MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0"',
+      "Authorization": JELLYFIN_IDENTITY,
+      "X-Emby-Authorization": JELLYFIN_IDENTITY,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ Username: username, Pw: password }),
@@ -42,16 +52,14 @@ export interface JellyfinQuickConnectResult {
   code: string;
 }
 
-const QC_AUTH_HEADER = 'MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0"';
-
 export async function initiateJellyfinQuickConnect(baseUrl: string): Promise<JellyfinQuickConnectResult> {
   const url = baseUrl.replace(/\/$/, "");
   const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Initiate`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
-    headers: { "X-Emby-Authorization": QC_AUTH_HEADER, "Content-Type": "application/json" },
+    headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY, "Content-Type": "application/json" },
   });
-  if (!res.ok) throw new Error(`Jellyfin QuickConnect initiate: ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect initiate: ${res.status}`), { status: res.status });
   const data = (await res.json()) as { Secret: string; Code: string };
   return { secret: data.Secret, code: data.Code };
 }
@@ -60,9 +68,9 @@ export async function pollJellyfinQuickConnect(baseUrl: string, secret: string):
   const url = baseUrl.replace(/\/$/, "");
   const res = await safeFetchAdminConfigured(`${url}/QuickConnect/Connect?Secret=${encodeURIComponent(secret)}`, {
     timeoutMs: FETCH_TIMEOUT_MS,
-    headers: { "X-Emby-Authorization": QC_AUTH_HEADER },
+    headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY },
   });
-  if (!res.ok) throw new Error(`Jellyfin QuickConnect poll: ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(`Jellyfin QuickConnect poll: ${res.status}`), { status: res.status });
   const data = (await res.json()) as { Authenticated: boolean };
   return data.Authenticated;
 }
@@ -72,7 +80,7 @@ export async function authenticateWithJellyfinQuickConnect(baseUrl: string, secr
   const res = await safeFetchAdminConfigured(`${url}/Users/AuthenticateWithQuickConnect`, {
     method: "POST",
     timeoutMs: FETCH_TIMEOUT_MS,
-    headers: { "X-Emby-Authorization": QC_AUTH_HEADER, "Content-Type": "application/json" },
+    headers: { "Authorization": JELLYFIN_IDENTITY, "X-Emby-Authorization": JELLYFIN_IDENTITY, "Content-Type": "application/json" },
     body: JSON.stringify({ Secret: secret }),
   });
   if (!res.ok) throw new Error(`Jellyfin QuickConnect auth: ${res.status}`);
@@ -84,49 +92,31 @@ export async function authenticateWithJellyfinQuickConnect(baseUrl: string, secr
   return { id: user.Id, name: user.Name };
 }
 
-export async function getJellyfinUserEmail(
-  baseUrl: string,
-  apiKey: string,
-  userId: string,
-): Promise<string | null> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Users/${encodeURIComponent(userId)}`;
-  try {
-    const res = await safeFetchAdminConfigured(url, {
-      headers: {
-        "X-MediaBrowser-Token": apiKey,
-        "Content-Type": "application/json",
-        "User-Agent": "Summonarr/1.0 (Node.js)",
-      },
-      timeoutMs: FETCH_TIMEOUT_MS,
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as Record<string, unknown>;
-    const email = typeof data.Email === "string" && data.Email.includes("@") ? data.Email : null;
-    return email;
-  } catch {
-    return null;
-  }
-}
+// NOTE: there is deliberately no getJellyfinUserEmail here. Jellyfin's API
+// exposes no user email field on UserDto (no version carries one), so a
+// /Users/{id} probe for `Email` always came back empty — the two callers that
+// depended on it (Jellyfin sign-in's real-email guard and the notifications
+// route's match-the-server check) were removed with it. getJellyfinAllUsers
+// below keeps its tolerated-absent Email read for the download-policy sync.
 
+// Token-authenticated calls dual-send the API key: `Authorization: MediaBrowser
+// ..., Token="..."` for 10.12+ (legacy transports disabled — see
+// JELLYFIN_IDENTITY) plus the legacy X-MediaBrowser-Token for older servers.
 function jellyfinHeaders(apiKey: string): Record<string, string> {
   return {
+    "Authorization": `${JELLYFIN_IDENTITY}, Token="${apiKey}"`,
     "X-MediaBrowser-Token": apiKey,
     "Content-Type": "application/json",
     "User-Agent": "Summonarr/1.0 (Node.js)",
   };
 }
 
-// GET /Users and POST /Users/{id}/Policy require RequiresElevation in Jellyfin.
-// X-MediaBrowser-Token alone does not satisfy the elevation check in newer versions;
-// the full Authorization: MediaBrowser ... header is required to establish admin context.
-function jellyfinAdminHeaders(apiKey: string): Record<string, string> {
-  return {
-    "Authorization": `MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0", Token="${apiKey}"`,
-    "X-MediaBrowser-Token": apiKey,
-    "Content-Type": "application/json",
-    "User-Agent": "Summonarr/1.0 (Node.js)",
-  };
-}
+// Alias kept for call sites hitting RequiresElevation endpoints (GET /Users,
+// POST /Users/{id}/Policy, session commands, RemoteSearch/Apply, item Refresh).
+// The header shape is now identical to jellyfinHeaders — upstream's elevation
+// check keys on the API key's admin role, never on which header carried it —
+// but the distinct name documents which surfaces assume an admin-scoped key.
+export const jellyfinAdminHeaders = jellyfinHeaders;
 
 interface JellyfinItem {
   Id?:              string;
@@ -151,6 +141,19 @@ export interface JellyfinMediaFolder {
   collectionType: string;
 }
 
+// "Is this title on Jellyfin yet?" — the post-webhook notify poll uses this to
+// wait out library-scan propagation. Jellyfin has NO server-side provider-id
+// equality filter: the Emby-style `AnyProviderIdEquals` param this used to send
+// was never implemented (jellyfin/jellyfin#1990; ASP.NET model binding silently
+// drops the unknown key), so that query degenerated to "is the library
+// non-empty" and the poll notified ~30s after the webhook regardless of whether
+// Jellyfin had scanned the import. Instead pull the most recently added items
+// of the right type and match ProviderIds client-side — a fresh import is by
+// definition among the newest additions. A miss (the import buried past the
+// window by a huge simultaneous import) degrades safely: the poll exhausts
+// un-notified and the sync orchestrator's library-backed pass notifies later.
+const PROBE_RECENT_LIMIT = 200;
+
 export async function hasJellyfinItemByTmdbId(
   baseUrl: string,
   apiKey: string,
@@ -158,7 +161,7 @@ export async function hasJellyfinItemByTmdbId(
   mediaType: "movie" | "tv",
 ): Promise<boolean> {
   const itemType = mediaType === "movie" ? "Movie" : "Series";
-  const url = `${baseUrl.replace(/\/$/, "")}/Items?AnyProviderIdEquals=Tmdb.${tmdbId}&IncludeItemTypes=${itemType}&Recursive=true&Limit=1`;
+  const url = `${baseUrl.replace(/\/$/, "")}/Items?IncludeItemTypes=${itemType}&Recursive=true&Fields=ProviderIds&SortBy=DateCreated&SortOrder=Descending&Limit=${PROBE_RECENT_LIMIT}&EnableImages=false`;
   try {
     const res = await safeFetchAdminConfigured(url, {
       headers: jellyfinHeaders(apiKey),
@@ -166,7 +169,10 @@ export async function hasJellyfinItemByTmdbId(
     });
     if (!res.ok) return false;
     const data = (await res.json()) as JellyfinItemsResponse;
-    return (data.TotalRecordCount ?? data.Items?.length ?? 0) > 0;
+    return (data.Items ?? []).some((item) => {
+      const tmdb = item.ProviderIds?.Tmdb ?? item.ProviderIds?.tmdb;
+      return tmdb != null && parseInt(tmdb, 10) === tmdbId;
+    });
   } catch {
     return false;
   }
@@ -418,7 +424,10 @@ async function getJellyfinItemsByType(
       await Promise.all(
         ids.slice(i, i + LIBRARY_CONCURRENCY).map((parentId) =>
           fetchJellyfinPages(
-            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated${dateFilter}`,
+            // EnableImages=false + ImageTypeLimit=0: nothing here consumes
+            // ImageTags/ImageBlurHashes, and Jellyfin enriches them by default
+            // (enableImages defaults true) — they were the bulk of >10 MB pages.
+            `${base}/Items?ParentId=${parentId}&IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
             apiKey,
             processItems,
           )
@@ -427,7 +436,7 @@ async function getJellyfinItemsByType(
     }
   } else {
     await fetchJellyfinPages(
-      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated${dateFilter}`,
+      `${base}/Items?IncludeItemTypes=${itemType}&ExcludeItemTypes=BoxSet&Recursive=true&Fields=ProviderIds,Path,Name,ProductionYear,Overview,OfficialRating,CommunityRating,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending${dateFilter}`,
       apiKey,
       processItems,
     );
@@ -494,14 +503,14 @@ export async function getJellyfinTVEpisodes(
   if (libraryIds?.size) {
     for (const parentId of Array.from(libraryIds)) {
       await fetchJellyfinPagesSequential(
-        `${base}/Items?ParentId=${parentId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}`,
+        `${base}/Items?ParentId=${parentId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
         apiKey,
         processEpisodes,
       );
     }
   } else {
     await fetchJellyfinPagesSequential(
-      `${base}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=${fields}`,
+      `${base}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
       apiKey,
       processEpisodes,
     );
@@ -520,7 +529,7 @@ export async function getJellyfinEpisodesForShow(
   const episodes: JellyfinTVEpisodeData[] = [];
   const fields = "ParentIndexNumber,IndexNumber";
   await fetchJellyfinPagesSequential(
-    `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}`,
+    `${base}/Items?ParentId=${seriesId}&IncludeItemTypes=Episode&Recursive=true&Fields=${fields}&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending`,
     apiKey,
     (batch: Array<{ ParentIndexNumber?: number; IndexNumber?: number }>) => {
       for (const ep of batch) {
@@ -616,8 +625,15 @@ interface JellyfinSessionRaw {
   };
 }
 
+// Server-side /Sessions filter for the 5s poller. Jellyfin's idle reaper
+// clears NowPlayingItem within ~5-10 min of a client going silent, so 960s can
+// never hide a session the NowPlayingItem filter below would have kept — it
+// only stops the server serializing every idle device the poller was
+// discarding client-side anyway (same value jellyfin-web's dashboard uses).
+const SESSIONS_ACTIVE_WITHIN_SECONDS = 960;
+
 export async function getJellyfinSessions(baseUrl: string, apiKey: string): Promise<JellyfinSessionData[]> {
-  const url = `${baseUrl.replace(/\/$/, "")}/Sessions`;
+  const url = `${baseUrl.replace(/\/$/, "")}/Sessions?activeWithinSeconds=${SESSIONS_ACTIVE_WITHIN_SECONDS}`;
   const res = await safeFetchAdminConfigured(url, {
     headers: jellyfinHeaders(apiKey),
     timeoutMs: FETCH_TIMEOUT_MS,

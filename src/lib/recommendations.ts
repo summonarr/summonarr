@@ -13,9 +13,13 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 // by the warm-recommendations cron. getUserRecommendations is the only
 // live-request-path read — it never calls TMDB.
 
-const MAX_WATCH_HISTORY_SEEDS = 10;
-const MAX_WATCHLIST_SEEDS = 5;
-const MAX_STORED_RECOMMENDATIONS_PER_USER = 40;
+const MAX_WATCH_HISTORY_SEEDS = 20;
+const MAX_WATCHLIST_SEEDS = 8;
+const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
+// Sized for the dedicated /for-you page (a full grid), not just the 20-item
+// home rail. Costs no extra TMDB calls: the 15-seed fan-out already produces
+// a 100-250 candidate pool — this only keeps more of what was computed.
+const MAX_STORED_RECOMMENDATIONS_PER_USER = 100;
 const SEED_CONCURRENCY = 5;
 const USER_CONCURRENCY = 5;
 const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -70,22 +74,41 @@ function weightSeeds(rows: { tmdbId: number; mediaType: MediaType }[], typeWeigh
 }
 
 async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
-  const [historyRows, watchlistRows] = await Promise.all([
+  // History seeds track CURRENT taste, so the grouping is windowed to the last
+  // 180 days. Unwindowed, "most rows" is "most episodes ever": one PlayHistory
+  // row lands per episode watched, so a years-old 200-episode binge permanently
+  // owns the top seed slots while movies (one row each) never seed at all.
+  //
+  // Windowed rows come FIRST, then the remaining slots TOP UP from all-time
+  // history. A busy user with only 2-3 recent watches used to seed from just
+  // those (all-time fired only at exactly zero windowed rows), so their pool
+  // was thin; old favorites now fill the tail slots — at the taper's lower
+  // weights, so they can never outrank recent taste. A fully dormant household
+  // (zero windowed rows) degenerates to pure all-time seeding, the same
+  // fallback as before: seeds.length === 0 is a CONCLUSIVE empty to the
+  // caller, which would clear an established shelf. The exclusion set
+  // (buildExclusionSet) stays all-time on purpose: an old watch must still
+  // never come back as a "new" recommendation.
+  const groupHistory = (windowed: boolean, take: number) =>
+    prisma.playHistory.groupBy({
+      by: ["tmdbId", "mediaType"],
+      where: {
+        mediaServerUserId: { in: linkedServerUserIds },
+        watched: true,
+        tmdbId: { not: null },
+        mediaType: { not: null },
+        ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
+      },
+      _count: { tmdbId: true },
+      _max: { startedAt: true },
+      orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
+      take,
+    });
+
+  const [windowedRows, watchlistRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : prisma.playHistory.groupBy({
-          by: ["tmdbId", "mediaType"],
-          where: {
-            mediaServerUserId: { in: linkedServerUserIds },
-            watched: true,
-            tmdbId: { not: null },
-            mediaType: { not: null },
-          },
-          _count: { tmdbId: true },
-          _max: { startedAt: true },
-          orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
-          take: MAX_WATCH_HISTORY_SEEDS,
-        }),
+      : groupHistory(true, MAX_WATCH_HISTORY_SEEDS),
     prisma.watchlistItem.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
@@ -93,6 +116,19 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       select: { tmdbId: true, mediaType: true },
     }),
   ]);
+
+  let historyRows = windowedRows;
+  if (linkedServerUserIds.length > 0 && windowedRows.length < MAX_WATCH_HISTORY_SEEDS) {
+    // Overfetch by the windowed count: every windowed title also sits in the
+    // all-time grouping, so the worst case needs that many extras to still
+    // fill the remaining slots after dedup.
+    const seen = new Set(windowedRows.map((r) => `${r.tmdbId}:${r.mediaType}`));
+    const allTime = await groupHistory(false, MAX_WATCH_HISTORY_SEEDS + seen.size);
+    historyRows = [
+      ...windowedRows,
+      ...allTime.filter((r) => !seen.has(`${r.tmdbId}:${r.mediaType}`)),
+    ].slice(0, MAX_WATCH_HISTORY_SEEDS);
+  }
 
   // groupBy's TS types don't narrow tmdbId/mediaType past their nullable
   // column types even though the where clause already excludes nulls.

@@ -26,7 +26,12 @@ import { getArrInstances, saveArrInstances } from "@/lib/arr-instance-registry";
 // and sends the sentinel MASKED_VALUE back unchanged for a field it didn't edit.
 
 const MASKED_VALUE = "••••••••";
-const FIELDS = ["Url", "ApiKey", "RootFolder", "QualityProfileId", "WebhookSecret"] as const;
+// The full per-instance Setting field set — readInstanceView reads it, the save
+// loop writes it, and removal cleanup deletes it, so a field added here is
+// covered everywhere at once. MinimumAvailability is Radarr-meaningful and
+// LanguageProfileId Sonarr-meaningful only; the unused service's key simply
+// never gets a row (the UI never offers it and getCfg ignores it).
+const FIELDS = ["Url", "ApiKey", "RootFolder", "QualityProfileId", "WebhookSecret", "MinimumAvailability", "LanguageProfileId"] as const;
 
 interface InstancePayload {
   slug: string;
@@ -40,6 +45,10 @@ interface InstancePayload {
   rootFolder?: string;
   qualityProfileId?: number | string | null;
   webhookSecret?: string;
+  // Radarr: announced | inCinemas | released; null clears (use Radarr's default).
+  minimumAvailability?: string | null;
+  // Sonarr v3: a language-profile id; null clears (don't send on adds).
+  languageProfileId?: number | string | null;
 }
 
 interface SavePayload {
@@ -61,6 +70,8 @@ async function readInstanceView(service: ArrService, instance: ArrInstanceConfig
     url: map[arrSettingKey(service, instance.slug, "Url")] ?? "",
     rootFolder: map[arrSettingKey(service, instance.slug, "RootFolder")] ?? "",
     qualityProfileId: map[arrSettingKey(service, instance.slug, "QualityProfileId")] ?? "",
+    minimumAvailability: map[arrSettingKey(service, instance.slug, "MinimumAvailability")] ?? "",
+    languageProfileId: map[arrSettingKey(service, instance.slug, "LanguageProfileId")] ?? "",
     hasApiKey: !!map[arrSettingKey(service, instance.slug, "ApiKey")],
     hasWebhookSecret: !!map[arrSettingKey(service, instance.slug, "WebhookSecret")],
   };
@@ -101,6 +112,22 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidInstanceSlug(inst.slug)) {
       return NextResponse.json({ error: `invalid instance slug: ${inst?.slug}` }, { status: 400 });
+    }
+    // Validate BEFORE any write: the save loop below is not transactional, so a
+    // mid-loop rejection would leave earlier instances' rows already applied.
+    // Radarr's minimumAvailability is a closed enum — a bad stored value would
+    // 400 every future add on the instance.
+    if (inst.minimumAvailability !== undefined && inst.minimumAvailability !== null) {
+      const v = String(inst.minimumAvailability);
+      if (v !== "" && v !== "announced" && v !== "inCinemas" && v !== "released") {
+        return NextResponse.json({ error: `invalid minimumAvailability for ${inst.slug}: ${v}` }, { status: 400 });
+      }
+    }
+    if (inst.languageProfileId !== undefined && inst.languageProfileId !== null && inst.languageProfileId !== "") {
+      const n = Number(inst.languageProfileId);
+      if (!Number.isInteger(n) || n < 1) {
+        return NextResponse.json({ error: `invalid languageProfileId for ${inst.slug}` }, { status: 400 });
+      }
     }
   }
 
@@ -149,15 +176,40 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       inst.qualityProfileId === undefined ? undefined : inst.qualityProfileId === null ? "" : String(inst.qualityProfileId),
       false,
     );
+    // Same null-clears semantics; values were validated up front with the slugs
+    // (and getCfg drops invalid stored values on read, as defense in depth).
+    await set(
+      "MinimumAvailability",
+      inst.minimumAvailability === undefined ? undefined : inst.minimumAvailability === null ? "" : String(inst.minimumAvailability),
+      false,
+    );
+    await set(
+      "LanguageProfileId",
+      inst.languageProfileId === undefined ? undefined : inst.languageProfileId === null ? "" : String(inst.languageProfileId),
+      false,
+    );
     await set("WebhookSecret", inst.webhookSecret, true);
   }
 
-  // Clean up rows for removed named instances.
+  // Clean up rows for removed named instances — the Setting keys AND the
+  // slug's wanted/available cache rows. Without the latter, a de-registered
+  // instance's rows were unreachable by every writer (no sync path targets a
+  // removed slug — its scoped deleteMany never fires again) while the
+  // availability attach reads them unscoped, so its titles read "in arr"
+  // forever. Mirrors the media-instances route's removal cleanup (guardrail
+  // 35); like it, this is not retroactive for slugs removed before the fix.
   for (const slug of beforeNamed) {
     if (!nextNamed.has(slug)) {
       await prisma.setting.deleteMany({
         where: { key: { in: FIELDS.map((f) => arrSettingKey(service, slug, f)) } },
       });
+      if (service === "radarr") {
+        await prisma.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await prisma.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+      } else {
+        await prisma.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await prisma.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+      }
     }
   }
 

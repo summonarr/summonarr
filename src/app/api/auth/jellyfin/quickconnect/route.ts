@@ -103,6 +103,11 @@ export async function POST(req: NextRequest) {
     return response;
   } catch (err) {
     console.error("[jellyfin quickconnect] initiate error:", err);
+    // 401 from /QuickConnect/Initiate is Jellyfin's "the feature is disabled"
+    // answer — surface it as such instead of the generic reachability message.
+    if ((err as { status?: number }).status === 401) {
+      return NextResponse.json({ error: "QuickConnect is disabled on the Jellyfin server" }, { status: 502 });
+    }
     return NextResponse.json({ error: "Failed to initiate QuickConnect" }, { status: 502 });
   }
 }
@@ -206,6 +211,18 @@ export async function GET(req: NextRequest) {
     }
   } catch (err) {
     console.error("[jellyfin quickconnect] poll error:", err);
+    // Terminal upstream states, distinguished from transient failures so
+    // clients stop polling a dead secret: 404 = the secret expired server-side
+    // (same 410 semantics as the MAX_POLLS cap above), 401 = QuickConnect is
+    // disabled on the server.
+    const status = (err as { status?: number }).status;
+    if (status === 404) {
+      pollCounts.delete(countKey);
+      return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
+    }
+    if (status === 401) {
+      return NextResponse.json({ error: "QuickConnect is disabled on the Jellyfin server" }, { status: 502 });
+    }
     return NextResponse.json({ error: "Failed to poll QuickConnect" }, { status: 502 });
   }
 }

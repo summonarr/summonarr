@@ -10,15 +10,17 @@
 //     enrich from the TMDB cache), and duplicate tmdb ids dedup first-wins;
 //   - missing optional fields degrade (year null/absent → releaseYear null,
 //     absent title → "");
-//   - trending rows are wrapped ({ watchers, movie|show }) and are unwrapped
-//     before normalization;
 //   - a malformed entry (no `ids` object at all) throws inside the map and the
 //     whole call degrades to [] via the catch — pinned as CURRENT behavior;
 //   - fetchPages settles per-page: a failed page is dropped, fulfilled pages
-//     survive;
-//   - non-empty results are cached (TmdbCache upsert) and served from cache on
-//     the next call; empty results are NOT cached; no API key ⇒ [] with no
-//     fetch. A 429 trips the in-process lockout (tested LAST — module-global).
+//     survive — but a PARTIAL fan-out is served WITHOUT being cached (the
+//     all-pages-fulfilled gate, mirroring tmdb.ts's list helpers), so the next
+//     call re-fetches instead of serving a 12h-pinned truncation;
+//   - non-empty COMPLETE results are cached (TmdbCache upsert) and served from
+//     cache on the next call; empty results are NOT cached; no API key ⇒ []
+//     with no fetch; concurrent cold-cache callers share ONE fan-out via
+//     coalesce (guardrail 31). A 429 trips the in-process lockout (tested
+//     LAST — module-global).
 //
 // No DB or network: prisma.setting / prisma.tmdbCache are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted per URL, and
@@ -50,9 +52,8 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const {
   getTraktPopularMovies,
   getTraktPopularTV,
-  getTraktTrendingMovies,
-  getTraktTrendingTV,
   testTraktConnection,
+  clampTraktLockoutMs,
 } = await import("../src/lib/trakt.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -179,20 +180,6 @@ test("duplicate tmdb ids dedup first-wins", async () => {
   assert.deepEqual(result.map((m) => [m.id, m.title]), [[7, "First"], [8, "Other"]]);
 });
 
-test("trending movies unwrap the { watchers, movie } envelope", async () => {
-  respond = () => jsonResponse([{ watchers: 4321, movie: movieRow(27205, "Inception", 2010) }]);
-  const result = await getTraktTrendingMovies(1);
-  assert.equal(fetchCalls[0].url.pathname, "/movies/trending");
-  assert.deepEqual(result.map((m) => [m.id, m.title, m.mediaType]), [[27205, "Inception", "movie"]]);
-});
-
-test("trending shows unwrap the { watchers, show } envelope", async () => {
-  respond = () => jsonResponse([{ watchers: 99, show: showRow(66732, "Stranger Things", 2016) }]);
-  const result = await getTraktTrendingTV(1);
-  assert.equal(fetchCalls[0].url.pathname, "/shows/trending");
-  assert.deepEqual(result.map((m) => [m.id, m.title, m.mediaType]), [[66732, "Stranger Things", "tv"]]);
-});
-
 test("PINS CURRENT BEHAVIOR: one entry without an `ids` object degrades the whole call to []", async () => {
   // normalizeMovie reads m.ids.tmdb unguarded — a row with no ids throws
   // inside the map, the function's catch eats it, and the caller gets [].
@@ -208,7 +195,7 @@ test("PINS CURRENT BEHAVIOR: one entry without an `ids` object degrades the whol
 
 // ── paging, caching, key gating ─────────────────────────────────────────────
 
-test("a failed page is dropped while fulfilled pages survive (allSettled per page)", async () => {
+test("a failed page is dropped while fulfilled pages survive (allSettled per page) — and the partial is NOT cached", async () => {
   respond = (url) =>
     url.searchParams.get("page") === "2"
       ? jsonResponse({ error: "server exploded" }, 500)
@@ -216,6 +203,27 @@ test("a failed page is dropped while fulfilled pages survive (allSettled per pag
   const result = await getTraktPopularMovies(2);
   assert.equal(fetchCalls.length, 2); // both pages were attempted
   assert.deepEqual(result.map((m) => m.id), [1]);
+  // The all-pages-fulfilled gate: a transiently truncated list must not be
+  // pinned into TmdbCache for the 12h TTL (and the warm cron could never
+  // repair it — every helper is cache-first).
+  assert.equal(cacheUpserts.length, 0);
+
+  // The next call re-fetches (no cached truncation to serve) and, with every
+  // page now healthy, caches the complete result.
+  fetchCalls.length = 0;
+  respond = () => jsonResponse([movieRow(1, "Page One")]);
+  const healed = await getTraktPopularMovies(2);
+  assert.equal(fetchCalls.length, 2);
+  assert.deepEqual(healed.map((m) => m.id), [1]);
+  assert.equal(cacheUpserts.length, 1);
+});
+
+test("concurrent cold-cache callers share ONE page fan-out and one cache write (coalesce)", async () => {
+  respond = () => jsonResponse([movieRow(550, "Fight Club", 1999)]);
+  const [a, b] = await Promise.all([getTraktPopularMovies(2), getTraktPopularMovies(2)]);
+  assert.equal(fetchCalls.length, 2, "one fan-out (2 pages), not two (4)");
+  assert.equal(cacheUpserts.length, 1, "one cache write, not a duplicate upsert");
+  assert.equal(a, b, "coalesced callers get the same array instance back");
 });
 
 test("a non-empty result is cached under the list key and served from cache on the next call", async () => {
@@ -248,15 +256,51 @@ test("testTraktConnection returns the first title and throws on an empty respons
 
 // LAST on purpose: the lockout is module-global for the process lifetime and
 // would short-circuit every traktFetch in tests that run after it.
-test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the network", async () => {
-  respond = () => jsonResponse({ error: "slow down" }, 429);
+test("HTTP 429 trips the in-process lockout: [] now, and the next call skips the network; Retry-After tunes the window", async () => {
+  // First a 429 carrying Retry-After: Trakt's rate windows are short and it
+  // sends the header, so a fixed 1h lockout over-suspends a transient burst. A
+  // 5s value clamps up to the 30s floor (0.5 min) — far enough below the 1h
+  // fallback that the warn text discriminates the two paths. The lockout is
+  // module-global, so this one 429 also satisfies the "next call skips the
+  // network" contract and leaves the lockout tripped for the bypass pin below.
+  respond = () =>
+    new Response(JSON.stringify({ error: "slow down" }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": "5" },
+    });
   assert.deepEqual(await getTraktPopularMovies(1), []);
   assert.ok(
-    warns.some((w) => w.includes("[trakt] Quota lockout tripped")),
-    "lockout trip must warn with the [trakt] scope",
+    warns.some((w) => /\[trakt\] Quota lockout tripped .* suspending calls for 0\.5 min/.test(w)),
+    `the honored Retry-After (5s → 30s floor = 0.5 min) must show in the warn, got: ${JSON.stringify(warns)}`,
+  );
+  assert.ok(
+    !warns.some((w) => w.includes("suspending calls for 60.0 min")),
+    "a present Retry-After must NOT fall back to the 1h ceiling",
   );
 
+  // Inside the honored window a call still short-circuits with zero egress.
   fetchCalls.length = 0;
   assert.deepEqual(await getTraktPopularMovies(1), []); // lockout error → caught → []
   assert.equal(fetchCalls.length, 0);
+});
+
+test("HTTP 429 with NO Retry-After falls back to the 1h ceiling (pure-fn check, no shared lockout state)", () => {
+  // A direct unit check of the clamp so the module-global lockout ordering
+  // (the test above leaves it tripped for the bypass pin) can't mask a
+  // regression: undefined → the 1h fallback, a present value → clamp to
+  // [30s, 1h].
+  assert.equal(clampTraktLockoutMs(undefined), 60 * 60 * 1000, "no Retry-After ⇒ 1h fallback");
+  assert.equal(clampTraktLockoutMs(5_000), 30 * 1000, "below the floor clamps up to 30s");
+  assert.equal(clampTraktLockoutMs(10 * 60 * 1000), 10 * 60 * 1000, "in-range value is honored");
+  assert.equal(clampTraktLockoutMs(3 * 60 * 60 * 1000), 60 * 60 * 1000, "above the ceiling clamps to 1h");
+});
+
+test("testTraktConnection bypasses the lockout: the admin test reaches the wire while list helpers stay suspended", async () => {
+  // The lockout tripped in the test above (module-global). An admin actively
+  // fixing their client id needs immediate feedback, not a 1h suspension —
+  // mirrors testOmdbConnection's deliberate exemption.
+  respond = () => jsonResponse([movieRow(603, "The Matrix", 1999)]);
+  fetchCalls.length = 0;
+  assert.equal(await testTraktConnection(), "The Matrix");
+  assert.equal(fetchCalls.length, 1, "the connection test must not be short-circuited by the lockout");
 });

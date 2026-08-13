@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { getPlexFriendEmails } from "@/lib/plex";
+import { getPlexFriendEmails, type PlexServerMembers } from "@/lib/plex";
 import { normalizeEmail } from "@/lib/email-normalize";
 import { getMediaInstances, type MediaInstanceConfig } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -45,7 +45,9 @@ import { plexSettingKey, mediaInstanceLabel, type MediaInstanceKey } from "@/lib
 const ALLOWLIST_TTL_MS = 30 * 60 * 1000; // re-fetch at most every 30 minutes (per instance)
 const RETRY_BACKOFF_MS = 5 * 60 * 1000; // after a failed/empty fetch, wait before retrying (per instance)
 
-type CacheEntry = { emails: Set<string>; fetchedAt: number };
+// Both member key spaces are cached: plex.tv account ids (immutable — matched
+// first) and emails (mutable — the legacy fallback key).
+type CacheEntry = { ids: Set<string>; emails: Set<string>; fetchedAt: number };
 
 // "ok" — a non-empty scoped set was cached. "unconfigured" — no url/token for
 // the slug; contributes nothing, never poisons. "indeterminate" — configured
@@ -70,8 +72,8 @@ const slugStates = new Map<MediaInstanceKey, SlugState>();
 
 // Memoized composition of the last returned union, keyed on the contributing
 // (slug, fetchedAt) pairs — so repeat calls inside a stable window hand back
-// the SAME Set instance (the pre-multi-server zero-allocation hot path).
-let composed: { key: string; emails: Set<string> } | null = null;
+// the SAME object (the pre-multi-server zero-allocation hot path).
+let composed: { key: string; members: PlexServerMembers } | null = null;
 
 async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: AttemptOutcome; entry?: CacheEntry }> {
   const [{ url, token }, adminEmailRow] = await Promise.all([
@@ -83,17 +85,17 @@ async function fetchSlugAllowlist(slug: MediaInstanceKey): Promise<{ outcome: At
   // Unconfigured — this instance cannot be verified and doesn't need to be.
   if (!adminToken || !serverUrl) return { outcome: "unconfigured" };
 
-  // getPlexFriendEmails throws on a non-2xx plex.tv response and returns an
-  // empty set when it can't resolve the server's machineId. An empty set would
-  // lock out EVERY user of this instance, so treat empty as "couldn't
+  // getPlexFriendEmails throws on a non-2xx plex.tv response and returns empty
+  // sets when it can't resolve the server's machineId. An empty result would
+  // lock out EVERY user of this instance, so treat both-sets-empty as "couldn't
   // determine". (The admin email is added only after this guard so an
   // admin-only server isn't mistaken for a successful-but-empty fetch.)
-  const emails = await getPlexFriendEmails(adminToken, serverUrl);
-  if (emails.size === 0) return { outcome: "indeterminate" };
+  const members = await getPlexFriendEmails(adminToken, serverUrl);
+  if (members.ids.size === 0 && members.emails.size === 0) return { outcome: "indeterminate" };
   // normalizeEmail matches the sign-in gate in auth.ts (authorizeWithPlex) so
   // both membership checks share one normalization of the admin-email Setting.
-  if (adminEmailRow?.value) emails.add(normalizeEmail(adminEmailRow.value));
-  return { outcome: "ok", entry: { emails, fetchedAt: Date.now() } };
+  if (adminEmailRow?.value) members.emails.add(normalizeEmail(adminEmailRow.value));
+  return { outcome: "ok", entry: { ids: members.ids, emails: members.emails, fetchedAt: Date.now() } };
 }
 
 // De-dupe concurrent refreshes of one slug within a replica and back off after
@@ -130,18 +132,19 @@ function startSlugRefresh(slug: MediaInstanceKey, state: SlugState, now: number)
 }
 
 /**
- * Returns the union of the emails currently shared on every configured Plex
- * instance, or null when membership cannot be determined — nothing configured,
- * the registry unreadable, or ANY configured instance cold with a failing/empty
- * fetch — a partial union would mass-revoke that server's users. A null return
- * means callers MUST fail open — do not lock anyone out.
+ * Returns the union of the members (plex.tv account ids + emails) currently
+ * shared on every configured Plex instance, or null when membership cannot be
+ * determined — nothing configured, the registry unreadable, or ANY configured
+ * instance cold with a failing/empty fetch — a partial union would mass-revoke
+ * that server's users. A null return means callers MUST fail open — do not lock
+ * anyone out.
  *
  * Each instance caches per-replica for ALLOWLIST_TTL_MS. On a cold instance the
  * first caller blocks on its plex.tv fetch so enforcement starts immediately;
  * once a set is cached, an expired entry is served stale into the union while a
  * single background refresh runs, so the hot path never blocks on plex.tv again.
  */
-export async function getCachedPlexAllowlist(): Promise<Set<string> | null> {
+export async function getCachedPlexAllowlist(): Promise<PlexServerMembers | null> {
   const now = Date.now();
 
   // Which instances exist is re-read per call (one findUnique) — an instance
@@ -189,7 +192,7 @@ export async function getCachedPlexAllowlist(): Promise<Set<string> | null> {
     if (!registered.has(slug)) slugStates.delete(slug);
   }
 
-  const parts: Array<{ slug: MediaInstanceKey; emails: Set<string>; fetchedAt: number }> = [];
+  const parts: Array<{ slug: MediaInstanceKey; ids: Set<string>; emails: Set<string>; fetchedAt: number }> = [];
   for (const { slug, state } of consulted) {
     // Block only on a COLD instance, so enforcement begins on the first Plex
     // request after boot. With a stale set in hand, serve it and let the
@@ -202,7 +205,7 @@ export async function getCachedPlexAllowlist(): Promise<Set<string> | null> {
       // whose settings were later blanked: same retain-the-prior-set rule the
       // single-server version had. Removing the instance from the registry is
       // what stops it contributing.)
-      parts.push({ slug, emails: state.cache.emails, fetchedAt: state.cache.fetchedAt });
+      parts.push({ slug, ids: state.cache.ids, emails: state.cache.emails, fetchedAt: state.cache.fetchedAt });
       continue;
     }
     if (state.lastOutcome === "unconfigured") continue;
@@ -216,11 +219,14 @@ export async function getCachedPlexAllowlist(): Promise<Set<string> | null> {
   if (parts.length === 0) return null; // zero configured instances
   // Slugs are lowercase-alnum (registry-validated), so ":"/"|" are unambiguous.
   const key = parts.map((p) => `${p.slug}:${p.fetchedAt}`).join("|");
-  if (composed && composed.key === key) return composed.emails;
-  const emails =
+  if (composed && composed.key === key) return composed.members;
+  const members: PlexServerMembers =
     parts.length === 1
-      ? parts[0].emails // single instance: hand back the cached Set itself, as before
-      : new Set(parts.flatMap((p) => [...p.emails]));
-  composed = { key, emails };
-  return emails;
+      ? { ids: parts[0].ids, emails: parts[0].emails } // single instance: hand back the cached Sets themselves, as before
+      : {
+          ids: new Set(parts.flatMap((p) => [...p.ids])),
+          emails: new Set(parts.flatMap((p) => [...p.emails])),
+        };
+  composed = { key, members };
+  return members;
 }

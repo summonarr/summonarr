@@ -47,30 +47,35 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
   const mdblistKeys = items.map((i) => `mdblist:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
   for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
     const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-      // By default only delete NOT_FOUND sentinels so they get a fresh chance on the next batch;
-    // force=true also clears valid cached entries to trigger a full re-fetch.
-    const where = force
-      ? { key: { in: slice } }
-      : { key: { in: slice }, data: NOT_FOUND_DATA };
+    // Only NOT_FOUND sentinels are ever deleted (so they get a fresh chance on
+    // the next batch). force=true used to delete VALID rows here too — but the
+    // refetch below can stop at any moment (quota trip, upstream incident), and
+    // a delete-first force run then left every not-yet-refetched title with NO
+    // ratings row at all: a site-wide ratings blackout until the next full run.
+    // Force now bypasses the freshness triage instead, so existing rows keep
+    // serving until each one is overwritten in place.
+    const where = { key: { in: slice }, data: NOT_FOUND_DATA };
     const { count } = await prisma.tmdbCache.deleteMany({ where });
     purged += count;
   }
 
   const freshKeys = new Set<string>();
-  for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
-    const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    const existingRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: slice } },
-      select: { key: true, cachedAt: true, expiresAt: true },
-    });
-    // Same 25% remaining-TTL threshold used across all prewarm passes
-    for (const r of existingRows) {
-      const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
-      if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeys.add(r.key);
+  if (!force) {
+    for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
+      const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
+      const existingRows = await prisma.tmdbCache.findMany({
+        where: { key: { in: slice } },
+        select: { key: true, cachedAt: true, expiresAt: true },
+      });
+      // Same 25% remaining-TTL threshold used across all prewarm passes
+      for (const r of existingRows) {
+        const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
+        if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshKeys.add(r.key);
+      }
     }
   }
 
-  const toFetch = items.filter((i) => {
+  const toFetch = force ? items : items.filter((i) => {
     const key = `mdblist:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`;
     return !freshKeys.has(key);
   });

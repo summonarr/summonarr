@@ -14,8 +14,10 @@
 //   - best-effort error contract: non-2xx responses and network/abort failures
 //     are logged via console.warn with the [internal-trigger] scope and NEVER
 //     thrown — a stuck orchestrator must not take down the timeline handler;
-//   - the response body is ignored on success but surfaced (capped at 200
-//     chars) on failure;
+//   - the success body's { skipped } flag is the "ran"/"skipped" return
+//     discriminator (the SSE caller re-arms its debounce on "skipped" — a
+//     dropped lock-race trigger used to defer a library change by up to
+//     SYNC_INTERVAL); failure bodies are surfaced (capped at 200 chars);
 //   - the 30s AbortController timeout caps the wait on a hung orchestrator.
 //
 // The module reads all env at call time and has zero imports, so the tests
@@ -46,17 +48,20 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // A minimal Response-shaped object: triggerFullSync touches only ok/status/
-// text(). Using a hand-rolled object lets a test make text() throw (unreadable
-// body) or make it blow up if the success path ever starts reading the body.
+// text()/json(). A hand-rolled object lets a test make text() throw
+// (unreadable body) or script the success json() the ran/skipped
+// discriminator reads.
 function fakeResponse(opts: {
   ok: boolean;
   status: number;
   text?: () => Promise<string>;
+  json?: () => Promise<unknown>;
 }): Response {
   return {
     ok: opts.ok,
     status: opts.status,
     text: opts.text ?? (async () => ""),
+    json: opts.json ?? (async () => ({})),
   } as unknown as Response;
 }
 
@@ -86,9 +91,9 @@ beforeEach(() => {
 
 // ── the silent-skip gate ────────────────────────────────────────────────────
 
-test("no CRON_SECRET ⇒ silent no-op: no request, no warning, resolves undefined", async () => {
+test("no CRON_SECRET ⇒ silent no-op: no request, no warning, reads as 'failed' (callers must not retry it)", async () => {
   setEnv({});
-  assert.equal(await triggerFullSync(), undefined);
+  assert.equal(await triggerFullSync(), "failed");
   assert.equal(fetchCalls.length, 0);
   assert.deepEqual(warns, []);
   assert.deepEqual(errors, []);
@@ -102,18 +107,14 @@ test("empty-string CRON_SECRET is falsy and also skips (never sends 'Bearer ')",
 
 // ── the exact wire shape ────────────────────────────────────────────────────
 
-test("default wire shape: POST http://127.0.0.1:3000/api/sync with Bearer CRON_SECRET", async () => {
+test("default wire shape: POST http://127.0.0.1:3000/api/sync with Bearer CRON_SECRET; a real run returns 'ran'", async () => {
   respond = () =>
     fakeResponse({
       ok: true,
       status: 200,
-      // The success path must never read the body — the handler's JSON
-      // ({ skipped: true } when the lock is held) is deliberately ignored.
-      text: async () => {
-        throw new Error("body must not be read on success");
-      },
+      json: async () => ({ synced: true }),
     });
-  await triggerFullSync();
+  assert.equal(await triggerFullSync(), "ran");
 
   assert.equal(fetchCalls.length, 1);
   const call = fetchCalls[0];
@@ -123,6 +124,19 @@ test("default wire shape: POST http://127.0.0.1:3000/api/sync with Bearer CRON_S
   assert.ok(call.init.signal instanceof AbortSignal, "the 30s timeout signal must ride the request");
   assert.equal(call.init.signal.aborted, false);
   assert.deepEqual(warns, []); // silent success (guardrail 7)
+});
+
+test("a 200 { skipped: true } (advisory lock held) reads as 'skipped'; an unparseable success body reads as 'ran'", async () => {
+  // "skipped" is what lets the SSE caller re-arm its debounce instead of
+  // dropping the library change for up to SYNC_INTERVAL.
+  respond = () => fakeResponse({ ok: true, status: 200, json: async () => ({ skipped: true, reason: "sync already running" }) });
+  assert.equal(await triggerFullSync(), "skipped");
+  assert.deepEqual(warns, []);
+
+  // Ambiguity must never re-arm: json() failing reads as a completed run.
+  respond = () => fakeResponse({ ok: true, status: 200, json: async () => { throw new Error("not json"); } });
+  assert.equal(await triggerFullSync(), "ran");
+  assert.deepEqual(warns, []);
 });
 
 test("PORT env moves the loopback port", async () => {

@@ -1472,22 +1472,20 @@ test("jellyfin multi-instance: the returning-bound-user bypass is GLOBAL, unscop
   assert.equal(result.id, "u-jf-global");
 });
 
-test("findOrCreateJellyfinUser: the best-effort real-email lookup resolves config for the GIVEN instance, not the default", async () => {
-  // Only "remote" has BOTH url+apiKey configured (the lookup needs both) — the
-  // default instance is left unconfigured, so a wrong-instance read would
-  // silently skip the lookup instead of hitting the wrong server.
+test("findOrCreateJellyfinUser: a new user anchors on the SYNTHETIC email with zero upstream probes", async () => {
+  // The old "real email" probe here was dead code — Jellyfin's UserDto carries
+  // no Email field in any version, so it always came back empty and every
+  // Jellyfin account anchored on the synthetic address anyway. The probe (and
+  // its per-instance config read) is gone; creation must be probe-free.
   settings.set("jellyfinRemoteUrl", "http://10.77.10.8:8096");
   settings.set("jellyfinRemoteApiKey", "remote-api-key");
   respond = (url) => {
-    if (url.pathname === "/Users/jf-email-remote") {
-      return jsonResponse({ Id: "jf-email-remote", Email: "remote-user@example.com" });
-    }
-    throw new Error(`unexpected fetch to ${url}`);
+    throw new Error(`unexpected fetch to ${url} — user creation must not probe the Jellyfin server`);
   };
 
   const created = asUser(await findOrCreateJellyfinUser("jf-email-remote", "Remote Email", "remote"));
-  assert.equal(created.email, "remote-user@example.com", "the real email must come from the instance's own Jellyfin server");
-  assert.equal(fetchCalls[0]?.url.origin, "http://10.77.10.8:8096");
+  assert.equal(created.email, "jellyfin-jf-email-remote@jellyfin.local", "new accounts anchor on the synthetic address");
+  assert.equal(fetchCalls.length, 0, "no upstream call during user creation");
 });
 
 test("jellyfin QuickConnect: instance selects which server's URL is used, and its own membership gate applies", async () => {

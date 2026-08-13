@@ -12,7 +12,10 @@
 //       update stamps lastSyncedAt, create leaves it to the column default;
 //     · field normalisation: "movie"/"tv" → "MOVIE"/"TV" in the composite key,
 //       posterPath??null, releaseYear ""→null (`||`, not `??`), voteAverage??0,
-//       and certification??NULL on BOTH branches (the batch writer overwrites);
+//       and certification??NULL on create but ??UNDEFINED (skip) on update —
+//       list items never carry a cert, so a null update erased the cert a
+//       details fetch/prewarm stored on every list warm (same rule as the
+//       single writer below);
 //     · the transaction runs with { timeout: BATCH_TX_TIMEOUT } (guardrail 4)
 //       and a failure is logged with the [tmdb-core-sync] scope AND re-thrown;
 //  - upsertTmdbMediaCore (single, detail pages):
@@ -164,10 +167,14 @@ test("batch: field normalisation — enum mapping, poster??null, releaseYear ''�
     assert.equal(branch.posterPath, null);
     assert.equal(branch.releaseYear, null); // "" || null
     assert.equal(branch.voteAverage, 0);
-    // The BATCH writer overwrites certification with null when absent — the
-    // deliberate contrast with upsertTmdbMediaCore's skip (tested below).
-    assert.equal(branch.certification, null);
   }
+  // certification: null on create (column default for a truly new row), but
+  // SKIPPED on update — list-shaped items never carry a cert, so overwriting
+  // with null blanked the cert a details fetch or the library prewarm stored,
+  // ~4x/day via warm-list-cache (the same regression class upsertTmdbMediaCore
+  // already guards, tested below).
+  assert.equal(c.create.certification, null);
+  assert.equal(c.update.certification, undefined);
   assert.equal(c.create.tmdbId, 7);
   assert.equal(c.create.mediaType, "TV");
 });

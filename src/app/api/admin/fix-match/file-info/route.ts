@@ -3,6 +3,7 @@ import { withIssueAdmin } from "@/lib/api-auth";
 import path from "node:path";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
+import { getCache } from "@/lib/tmdb-cache";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 // One configured server that holds this title, with the path it holds it at.
@@ -94,21 +95,39 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
       const folderPath = path.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
+      // Cache-first: bad-matches already builds a folder-basename → tmdbId map
+      // for the whole arr library (arr:<service>:paths:name, 6h TTL). A fix-
+      // match dialog open used to always pull the ENTIRE library live; try the
+      // warm map's basename match first and only fetch on a miss. Read-only —
+      // never write the key from this default-instance-only path.
       try {
-        type ArrItem = { tmdbId?: number; path?: string };
-        const items = await arrFetch<ArrItem[]>(
-          { url: arrBaseUrl, apiKey: arrKeyRow.value },
-          `/api/v3/${endpoint}`,
-        );
-        for (const item of items) {
-          if (!item.tmdbId || !item.path) continue;
-          const normPath = path.posix.normalize(item.path.replace(/\\/g, "/").replace(/\/$/, ""));
-          if (normPath === folderPath || folderPath.startsWith(normPath + "/")) {
-            arrTmdbId = item.tmdbId;
-            break;
-          }
+        const folderName = folderPath.split("/").pop();
+        const cached = folderName
+          ? await getCache<[string, number][]>(`arr:${endpoint === "movie" ? "radarr" : "sonarr"}:paths:name`)
+          : null;
+        if (cached?.length) {
+          const hit = new Map(cached).get(folderName!);
+          if (hit != null) arrTmdbId = hit;
         }
       } catch { }
+
+      if (arrTmdbId === null) {
+        try {
+          type ArrItem = { tmdbId?: number; path?: string };
+          const items = await arrFetch<ArrItem[]>(
+            { url: arrBaseUrl, apiKey: arrKeyRow.value },
+            `/api/v3/${endpoint}`,
+          );
+          for (const item of items) {
+            if (!item.tmdbId || !item.path) continue;
+            const normPath = path.posix.normalize(item.path.replace(/\\/g, "/").replace(/\/$/, ""));
+            if (normPath === folderPath || folderPath.startsWith(normPath + "/")) {
+              arrTmdbId = item.tmdbId;
+              break;
+            }
+          }
+        } catch { }
+      }
     }
   }
 

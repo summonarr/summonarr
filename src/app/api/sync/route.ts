@@ -11,7 +11,8 @@ import {
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
-import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData } from "@/lib/plex";
+import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
+import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
@@ -50,12 +51,26 @@ const ARR_REPUSH_BACKOFF_MS = 24 * 60 * 60 * 1000;
 // The tail purge below reaps every expired TmdbCache row, but the two ratings namespaces
 // are a deliberate serve-stale surface: an expired row is still a hit. Give them a long
 // grace so a provider outage falls back to the previous values instead of no badges at
-// all. `:tmdb:` is load-bearing — bare `mdblist:`/`omdb:` also match the list caches and
-// `omdb:<imdbId>`, which are read through getCache and should still expire immediately.
+// all. `:tmdb:` is load-bearing — bare `mdblist:`/`omdb:` also match the list caches
+// (and the legacy `omdb:<imdbId>` rows, whose writer was removed — they should simply
+// expire out).
 const STALE_RATINGS_GRACE_MS = 30 * 24 * 60 * 60 * 1000;
 const STALE_RATINGS_KEY_PREFIXES = [
   { key: { startsWith: "mdblist:tmdb:" } },
   { key: { startsWith: "omdb:tmdb:" } },
+];
+
+// The `:details` blobs are a serve-stale surface too: the admin dashboard reads
+// them via getCacheStaleMany and the library prewarm's carry-forward reads the
+// previous row at rewrite time — an immediate purge collapses both to cold
+// misses within one SYNC_INTERVAL of expiry. A shorter grace than the ratings
+// namespaces keeps table growth modest. The endsWith pin keeps every sibling
+// namespace (credits, suggestions, seasons, the `:details:missing` prewarm
+// tombstones) expiring immediately.
+const STALE_DETAILS_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_DETAILS_KEY_SHAPES = [
+  { key: { startsWith: "movie:", endsWith: ":details" } },
+  { key: { startsWith: "tv:", endsWith: ":details" } },
 ];
 
 async function runConcurrent<T>(
@@ -727,11 +742,33 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             const token = cfg.token;
             const sections = await getPlexLibrarySections(serverUrl, token);
             const selectedPlexKeys = librarySelections.get(plexSettingKey(instance.slug, "Libraries"));
+            // ratingKeyToTmdb accumulates the show walk's ratingKey→ids mapping
+            // so the episode pass below reuses this type=2 listing instead of
+            // re-paging every show section (per-instance — ratingKeys are
+            // server-local). The legacy maps collect pre-2020-agent items
+            // (thetvdb://, imdb:// guids) for best-effort tmdb resolution.
+            const ratingKeyToTmdb = new Map<string, number[]>();
+            const movieLegacy = new Map<string, PlexLegacyGuidRef>();
+            const tvLegacy = new Map<string, PlexLegacyGuidRef>();
             const [movieIds, tvIds] = await Promise.all([
-              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections),
-              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections),
+              getPlexTmdbIds(serverUrl, token, "MOVIE", false, selectedPlexKeys, sections, undefined, movieLegacy),
+              // skipShowFilePaths: the episode walk below always follows on
+              // this path and captures the same file paths from the type=4
+              // listing — the per-show allLeaves probe (one HTTP request per
+              // show, every run) is redundant here. The paths are patched onto
+              // the rows post-write.
+              getPlexTmdbIds(serverUrl, token, "TV", false, selectedPlexKeys, sections, ratingKeyToTmdb, tvLegacy, true),
             ]);
-            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds } };
+            // Resolve + merge legacy-agent items (self-catching, never throws):
+            // a resolution failure degrades those items to their previous
+            // invisibility rather than failing the instance's fetch.
+            const [resolvedMovies, resolvedTv] = await Promise.all([
+              resolvePlexLegacyGuids(movieLegacy, "MOVIE"),
+              resolvePlexLegacyGuids(tvLegacy, "TV"),
+            ]);
+            mergeResolvedLegacyItems(resolvedMovies, movieIds);
+            mergeResolvedLegacyItems(resolvedTv, tvIds, ratingKeyToTmdb);
+            return { slug: instance.slug, result: { serverUrl, token, sections, movieIds, tvIds, ratingKeyToTmdb } };
           } catch (err) {
             console.error(`[sync] Plex check failed for instance "${instance.slug}":`, err);
             return { slug: instance.slug, result: null };
@@ -823,10 +860,35 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // can resolve episodes onto another server's show.
       let allEpisodesFetched = true;
       const allPlexEpisodeRows: Array<{ source: "plex" } & PlexTVEpisodeData> = [];
-      for (const { slug, serverUrl, token, sections } of writable) {
+      for (const { slug, serverUrl, token, sections, ratingKeyToTmdb } of writable) {
         try {
-          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections);
+          // The precomputed ratingKeyToTmdb map (built by this instance's own
+          // type=2 walk above) skips getPlexTVEpisodes' per-section re-walk of
+          // the identical show listing.
+          const episodeFilePaths = new Map<string, string>();
+          const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections, ratingKeyToTmdb, episodeFilePaths);
           allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
+          // Patch the show file paths the TV fetch skipped (skipShowFilePaths)
+          // onto the just-written rows. Runs AFTER this instance's library
+          // write by construction (the write completed above), is
+          // instance-scoped, and touches only rows still missing a path —
+          // idempotent and harmless if a concurrent writer replaced the rows.
+          // Best-effort: a failure leaves paths null until the next run, the
+          // same degradation a failed allLeaves probe had.
+          if (episodeFilePaths.size > 0) {
+            try {
+              await prisma.$transaction(async (tx) => {
+                for (const [ratingKey, file] of episodeFilePaths) {
+                  await tx.plexLibraryItem.updateMany({
+                    where: { serverInstance: slug, mediaType: "TV", plexRatingKey: ratingKey, filePath: null },
+                    data: { filePath: file },
+                  });
+                }
+              }, { timeout: BATCH_TX_TIMEOUT });
+            } catch (err) {
+              console.warn(`[sync] Plex show file-path patch failed for instance "${slug}":`, err instanceof Error ? err.message : err);
+            }
+          }
         } catch (err) {
           console.error(`[sync] Plex TV episode fetch failed for instance "${slug}":`, err);
           allEpisodesFetched = false;
@@ -1514,26 +1576,34 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   }
 
   try {
-    // The two ratings namespaces are read through getCacheStale/getCacheStaleMany, which
-    // deliberately never delete an expired row — an expired ratings row is still a HIT,
-    // served immediately and revalidated after the response. This purge was the only
-    // thing deleting them, within one SYNC_INTERVAL of expiry, collapsing that
-    // serve-stale window to under an hour and turning a stale hit into a cold miss for
-    // the rest of the row's life (no badges at all while a provider is down or quota-
-    // locked — precisely the outage serve-stale exists for). Reap them on a long grace
-    // instead. The prefixes must carry `:tmdb:`: bare `mdblist:`/`omdb:` also match the
-    // list caches and `omdb:<imdbId>`, which ARE read via getCache and should still be
-    // purged at expiry.
+    // The ratings namespaces AND the :details blobs are read through
+    // getCacheStale/getCacheStaleMany, which deliberately never delete an expired
+    // row — an expired row is still a HIT, served immediately and revalidated
+    // after the response. This purge was the only thing deleting them, within one
+    // SYNC_INTERVAL of expiry, collapsing those serve-stale windows to under an
+    // hour and turning a stale hit into a cold miss for the rest of the row's
+    // life. Reap each namespace on its own grace instead. The ratings prefixes
+    // must carry `:tmdb:`: bare `mdblist:`/`omdb:` also match the list caches,
+    // which should still expire immediately.
     await prisma.tmdbCache.deleteMany({
-      // `NOT: { OR: [...] }`, not a bare `NOT: [...]`: the two prefixes are mutually
-      // exclusive, so if a list-NOT compiled to NOT(a AND b) the exclusion would be a
-      // silent no-op. The nested form is unambiguously "neither prefix".
-      where: { expiresAt: { lt: new Date() }, NOT: { OR: STALE_RATINGS_KEY_PREFIXES } },
+      // `NOT: { OR: [...] }`, not a bare `NOT: [...]`: the shapes are mutually
+      // exclusive, so if a list-NOT compiled to NOT(a AND b) the exclusion would be
+      // a silent no-op. The nested form is unambiguously "none of these shapes".
+      where: {
+        expiresAt: { lt: new Date() },
+        NOT: { OR: [...STALE_RATINGS_KEY_PREFIXES, ...STALE_DETAILS_KEY_SHAPES] },
+      },
     });
     await prisma.tmdbCache.deleteMany({
       where: {
         expiresAt: { lt: new Date(Date.now() - STALE_RATINGS_GRACE_MS) },
         OR: STALE_RATINGS_KEY_PREFIXES,
+      },
+    });
+    await prisma.tmdbCache.deleteMany({
+      where: {
+        expiresAt: { lt: new Date(Date.now() - STALE_DETAILS_GRACE_MS) },
+        OR: STALE_DETAILS_KEY_SHAPES,
       },
     });
   } catch (err) {

@@ -37,17 +37,28 @@ interface InstanceView {
   url: string;
   rootFolder: string;
   qualityProfileId: string;
+  minimumAvailability: string;
+  languageProfileId: string;
   hasApiKey: boolean;
   hasWebhookSecret: boolean;
 }
 
 // Root folders + quality profiles fetched live from a configured instance (same
 // shape as /api/settings/arr-options), so they render as dropdowns like the base
-// Radarr/Sonarr config instead of a typed id.
+// Radarr/Sonarr config instead of a typed id. languageProfiles is present only
+// when a Sonarr v3 upstream serves them (v4 removed language profiles).
 interface ArrOptions {
   rootFolders: { path: string }[];
   qualityProfiles: { id: number; name: string }[];
+  languageProfiles?: { id: number; name: string }[];
 }
+
+// Radarr's closed enum for when a movie counts as "available" to search.
+const MINIMUM_AVAILABILITY_OPTIONS = [
+  { value: "announced", label: "Announced" },
+  { value: "inCinemas", label: "In Cinemas" },
+  { value: "released", label: "Released" },
+] as const;
 
 interface Draft {
   slug: string;
@@ -56,6 +67,8 @@ interface Draft {
   apiKey: string;
   rootFolder: string;
   qualityProfileId: string;
+  minimumAvailability: string; // radarr only
+  languageProfileId: string; // sonarr v3 only
   webhookSecret: string;
   restricted: boolean;
   serverAll: boolean;
@@ -74,6 +87,8 @@ function toDraft(v: InstanceView): Draft {
     apiKey: "",
     rootFolder: v.rootFolder,
     qualityProfileId: v.qualityProfileId,
+    minimumAvailability: v.minimumAvailability ?? "",
+    languageProfileId: v.languageProfileId ?? "",
     webhookSecret: "",
     restricted: v.restricted,
     serverAll: v.serverAll,
@@ -168,7 +183,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
       {
         // Auto-generate the webhook secret so the admin never has to invent one —
         // they just copy the resulting webhook URL into Radarr/Sonarr.
-        slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "", webhookSecret: generateSecret(),
+        slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "",
+        minimumAvailability: "", languageProfileId: "", webhookSecret: generateSecret(),
         restricted: false, serverAll: false, skipLibraryCheck: false, animeOnly: false,
         hasApiKey: false, hasWebhookSecret: false, isNew: true,
       },
@@ -209,6 +225,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
       apiKey: d.apiKey ? d.apiKey : d.hasApiKey ? MASKED_VALUE : undefined,
       rootFolder: d.rootFolder,
       qualityProfileId: d.qualityProfileId || null,
+      // null clears the row so an emptied select means "use the service's default".
+      ...(service === "radarr" ? { minimumAvailability: d.minimumAvailability || null } : {}),
+      ...(service === "sonarr" ? { languageProfileId: d.languageProfileId || null } : {}),
       webhookSecret: d.webhookSecret ? d.webhookSecret : d.hasWebhookSecret ? MASKED_VALUE : undefined,
       restricted: d.restricted,
       serverAll: d.serverAll,
@@ -373,6 +392,49 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 )}
               </div>
             </div>
+
+            {/* Static enum — needs no live options fetch, so it renders as soon
+                as the card exists. Sonarr's language profile below DOES need the
+                fetch (only a v3 upstream serves the list). */}
+            {service === "radarr" && (
+              <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${service}-${idx}-min-availability`}>Minimum Availability <span className="text-zinc-500">(optional)</span></Label>
+                  <select
+                    id={`${service}-${idx}-min-availability`}
+                    value={d.minimumAvailability}
+                    onChange={(e) => update(idx, { minimumAvailability: e.target.value })}
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">— {label}&apos;s default —</option>
+                    {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-zinc-500">When added movies count as available to search.</p>
+                </div>
+              </div>
+            )}
+
+            {service === "sonarr" && optsReady && ((opts as ArrOptions).languageProfiles?.length ?? 0) > 0 && (
+              <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
+                <div className="space-y-1.5">
+                  <Label htmlFor={`${service}-${idx}-language-profile`}>Language Profile <span className="text-zinc-500">(optional)</span></Label>
+                  <select
+                    id={`${service}-${idx}-language-profile`}
+                    value={d.languageProfileId}
+                    onChange={(e) => update(idx, { languageProfileId: e.target.value })}
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">— {label}&apos;s default —</option>
+                    {(opts as ArrOptions).languageProfiles!.map((p) => (
+                      <option key={p.id} value={String(p.id)}>{p.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-zinc-500">Sonarr v3 only — v4 handles language via custom formats.</p>
+                </div>
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-500">(auto-generated — paste the URL below into {label})</span></Label>

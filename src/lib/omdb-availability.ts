@@ -1,6 +1,6 @@
 import "server-only";
 import { after } from "next/server";
-import { getCacheStaleMany } from "@/lib/tmdb-cache";
+import { getCacheStale, getCacheStaleMany } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { OmdbRatings } from "@/lib/omdb";
 import { getOmdbRatingsForTmdb } from "@/lib/omdb";
@@ -72,11 +72,14 @@ export type UnifiedRatingsResult = {
 // RT Audience, MDBList score, MAL, Roger Ebert). OMDB is consulted as a fallback
 // whenever MDBList cannot serve the item — no key configured, the item is genuinely
 // absent, or MDBList is quota-locked — so a single source being unavailable doesn't
-// leave the title with no ratings at all.
+// leave the title with no ratings at all. `knownImdbId` (optional) spares a cold
+// OMDB fallback its TMDB external_ids resolve — the detail fetchers already hold
+// the id from their own append_to_response=external_ids.
 export async function fetchUnifiedRatings(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+  knownImdbId?: string | null,
 ): Promise<UnifiedRatingsResult> {
   const mdb = await getMdblistRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
     (): MdblistResult => ({ found: false, keyConfigured: true, transient: true }),
@@ -85,13 +88,31 @@ export async function fetchUnifiedRatings(
   // field null must not shadow OMDB, which may carry the rating. Fall through to
   // OMDB when MDBList has no usable data.
   if (mdb.found && hasAnyMdblistRating(mdb.data)) {
+    // Per-FIELD parity with the warm batch path (overlayOmdb in mergeWarm): an
+    // MDBList row carrying only Trakt/Letterboxd-style fields must not blank
+    // the IMDb/RT/Metacritic badges a warm OMDB row already holds. Cache-only
+    // (serve-stale) — this branch never pays an OMDB fetch for the overlay.
+    const d = mdb.data;
+    if (d.imdbId == null || d.imdbRating == null || d.imdbVotes == null || d.rottenTomatoes == null || d.metacritic == null) {
+      const { value } = await getCacheStale<OmdbRatings | { _notFound: true }>(`omdb:tmdb:${mediaType}:${tmdbId}`);
+      if (value && !("_notFound" in value)) {
+        return { found: true, keyConfigured: true, data: overlayOmdb(d, value) };
+      }
+    }
     return { found: true, keyConfigured: true, data: mdb.data };
   }
 
-  const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate).catch(
+  const omdb = await getOmdbRatingsForTmdb(tmdbId, mediaType, releaseDate, knownImdbId).catch(
     () => ({ found: false, keyConfigured: true, transient: true } as const),
   );
   if (omdb.found) {
+    // A found-but-unscored MDBList row still carries authoritative per-field
+    // nulls plus possible trailer/digital-release metadata — overlay OMDB's
+    // fields onto it (per-field, the warm path's overlayOmdb) instead of
+    // discarding it for a null-filled literal.
+    if (mdb.found) {
+      return { found: true, keyConfigured: true, data: overlayOmdb(mdb.data, omdb.data) };
+    }
     return {
       found: true,
       keyConfigured: true,
@@ -158,10 +179,11 @@ export async function attachRatingsUnified(
     && !warm.byMdblist.has(mdblistKey(item)));
 
   if (!blocking) {
-    // Only the MDBList side of the sentinel gate applies here — see the blocking path's
-    // note below: an OMDB _notFound must not exclude the item from the MDBList batch.
+    // Only MDBLIST state gates admission here — see the blocking path's note
+    // below: neither an OMDB _notFound NOR an OMDB value row may exclude the
+    // item from the MDBList batch.
     const uncached = items.filter((item) =>
-      !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item))
+      !warm.byMdblist.has(mdblistKey(item))
       && !warm.negativeKeys.has(mdblistKey(item)));
     if (uncached.length > 0 || staleMdblist.length > 0 || staleOmdb.length > 0) {
       // Non-blocking path: fire background fetches after the response is sent so the user isn't
@@ -232,14 +254,17 @@ export async function attachRatingsUnified(
     // re-fetching it every call would burn MDBList/OMDB quota on titles known to be absent.
     // Stale value rows likewise serve from the warm maps rather than re-entering the miss
     // fan-out; they revalidate post-response below. Mirrors the non-blocking path's exclusion.
-    // Only the MDBList sentinel gates the miss: misses feed the MDBList batch — the primary
-    // source — so an OMDB sentinel written while MDBList was unconfigured or quota-locked
-    // would otherwise exclude the title from that batch permanently (nothing re-admits it:
-    // staleMdblist needs an MDBList row that never existed, while the stale OMDB sentinel is
-    // re-pinned for another 24h on every revalidation). Re-admitting costs one extra id in a
-    // batch POST; the OMDB fallback still serves that sentinel from cache, without a fetch.
+    // Only MDBLIST state gates the miss: misses feed the MDBList batch — the primary
+    // source — so no OMDB row of ANY shape may exclude a title from it. An OMDB
+    // sentinel written while MDBList was unconfigured/quota-locked would otherwise
+    // exclude the title permanently, and an OMDB VALUE row (the same origin story)
+    // was just as permanent: nothing ever re-admitted the title to the richer
+    // source, so it could never gain the Trakt/Letterboxd/RT-Audience/MDBList
+    // fields OMDB lacks. Re-admitting costs one extra id in a batch POST;
+    // mergeWarm keeps serving the warm OMDB row until the batch lands, and a
+    // genuine MDBList miss then writes a sentinel that gates via negativeKeys.
     if (
-      !warm.byMdblist.has(mdblistKey(item)) && !warm.byOmdb.has(omdbKey(item)) &&
+      !warm.byMdblist.has(mdblistKey(item)) &&
       !warm.negativeKeys.has(mdblistKey(item))
     ) misses.push(item);
   }

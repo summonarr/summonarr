@@ -15,6 +15,11 @@ interface ArrFormProps {
   initialApiKey: string;
   initialRootFolder: string;
   initialQualityProfileId: string;
+  // Radarr only — "" means "don't send, use Radarr's default".
+  initialMinimumAvailability?: string;
+  // Sonarr v3 only — "" means "don't send". The select renders only when the
+  // connected Sonarr actually serves language profiles (v4 removed them).
+  initialLanguageProfileId?: string;
   // "4k" targets the optional second instance (radarr4k*/sonarr4k* keys).
   variant?: "hd" | "4k";
 }
@@ -22,7 +27,16 @@ interface ArrFormProps {
 interface ArrOptions {
   rootFolders: { path: string }[];
   qualityProfiles: { id: number; name: string }[];
+  // Present only for a Sonarr v3 upstream — absent on v4 and on Radarr.
+  languageProfiles?: { id: number; name: string }[];
 }
+
+// Radarr's closed enum for when a movie counts as "available" to search.
+const MINIMUM_AVAILABILITY_OPTIONS = [
+  { value: "announced", label: "Announced" },
+  { value: "inCinemas", label: "In Cinemas" },
+  { value: "released", label: "Released" },
+] as const;
 
 export function ArrForm({
   service,
@@ -30,6 +44,8 @@ export function ArrForm({
   initialApiKey,
   initialRootFolder,
   initialQualityProfileId,
+  initialMinimumAvailability = "",
+  initialLanguageProfileId = "",
   variant = "hd",
 }: ArrFormProps) {
   const v          = variant === "4k" ? "4k" : "";
@@ -39,6 +55,8 @@ export function ArrForm({
   const keyKey     = `${service}${v}ApiKey`;
   const folderKey  = `${service}${v}RootFolder`;
   const profileKey = `${service}${v}QualityProfileId`;
+  const minAvailKey = `${service}${v}MinimumAvailability`;
+  const langKey    = `${service}${v}LanguageProfileId`;
   const versionKey = `${service}${v}Version`;
 
   const [url,    setUrl]    = useState(initialUrl);
@@ -48,6 +66,8 @@ export function ArrForm({
 
   const [rootFolder,        setRootFolder]        = useState(initialRootFolder);
   const [qualityProfileId,  setQualityProfileId]  = useState(initialQualityProfileId);
+  const [minimumAvailability, setMinimumAvailability] = useState(initialMinimumAvailability);
+  const [languageProfileId, setLanguageProfileId] = useState(initialLanguageProfileId);
   const [options,           setOptions]           = useState<ArrOptions | null>(null);
   const [optionsStatus,     setOptionsStatus]     = useState<LoadStatus>("idle");
   const [optionsSaveStatus, setOptionsSaveStatus] = useState<SaveStatus>("idle");
@@ -107,7 +127,14 @@ export function ArrForm({
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [folderKey]: rootFolder, [profileKey]: qualityProfileId }),
+        body: JSON.stringify({
+          [folderKey]: rootFolder,
+          [profileKey]: qualityProfileId,
+          // Both are clearable server-side: "" means "stop sending the field on
+          // adds" (the arr service's own default applies again).
+          ...(service === "radarr" ? { [minAvailKey]: minimumAvailability } : {}),
+          ...(service === "sonarr" && options?.languageProfiles?.length ? { [langKey]: languageProfileId } : {}),
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       setOptionsSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
@@ -203,6 +230,51 @@ export function ArrForm({
                     ))}
                   </select>
                 </div>
+
+                {service === "radarr" && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`${idPrefix}-min-availability`}>Minimum Availability</Label>
+                    <select
+                      id={`${idPrefix}-min-availability`}
+                      value={minimumAvailability}
+                      onChange={(e) => setMinimumAvailability(e.target.value)}
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="">— {label}&apos;s default —</option>
+                      {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>{o.label}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500">
+                      When added movies count as available to search — e.g. &ldquo;Released&rdquo; waits for a
+                      digital/physical release instead of grabbing early rips.
+                    </p>
+                  </div>
+                )}
+
+                {/* Sonarr v3 only — v4 removed language profiles, and the options
+                    endpoint omits the list there, so this select simply never
+                    renders against a v4 upstream. */}
+                {service === "sonarr" && (options.languageProfiles?.length ?? 0) > 0 && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor={`${idPrefix}-language-profile`}>Language Profile</Label>
+                    <select
+                      id={`${idPrefix}-language-profile`}
+                      value={languageProfileId}
+                      onChange={(e) => setLanguageProfileId(e.target.value)}
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="">— {label}&apos;s default —</option>
+                      {options.languageProfiles!.map((p) => (
+                        <option key={p.id} value={String(p.id)}>{p.name}</option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-zinc-500">
+                      Applied to series added by approved requests (Sonarr v3 — v4 handles language via
+                      custom formats instead).
+                    </p>
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 <Button

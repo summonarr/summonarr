@@ -55,3 +55,22 @@ export async function settleLimit<T, R>(
     }
   });
 }
+
+/**
+ * In-flight request coalescing: concurrent callers passing the same key share
+ * ONE execution of `factory` (and its settled value). The key clears when the
+ * shared promise settles — this dedups simultaneous work, it is not a memo.
+ * List/detail helpers wrap their whole cache-check-then-fetch body in this,
+ * keyed on the cache key, so a cold-cache stampede collapses to one upstream
+ * fan-out plus one cache write (guardrail 31). One process-wide key namespace:
+ * callers key with their cache key (`movie:603:details`, `trakt:popular:tv`),
+ * which is already globally unique.
+ */
+const inflight = new Map<string, Promise<unknown>>();
+export function coalesce<T>(key: string, factory: () => Promise<T>): Promise<T> {
+  const existing = inflight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const promise = factory().finally(() => { inflight.delete(key); });
+  inflight.set(key, promise);
+  return promise;
+}

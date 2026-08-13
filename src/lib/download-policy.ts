@@ -24,6 +24,19 @@ export function isSafeToReconcileJellyfinUsers(fetchedCount: number, priorActive
   return fetchedCount > 0 && (priorActiveCount === 0 || fetchedCount >= priorActiveCount - PRUNE_MAX_SHRINK);
 }
 
+// Escape hatch for the guard above. A genuinely shrinking server (3+ real
+// departures in one window) trips the shrink refusal — and because the ONLY
+// writer of `active: false` is the reconcile the refusal skips, the departed
+// rows stayed active forever, priorActiveCount never shrank, and the warn
+// fired every run with no remediation path (a permanent wedge unless enough
+// NEW users joined). A degraded fetch, by contrast, is transient noise. Split
+// the two by persistence: after the SAME fetched user-id set has been refused
+// RECONCILE_CONFIRM_RUNS consecutive runs, accept it as the server's real
+// state and reconcile anyway. In-memory per replica (the ledger idiom of
+// guardrail 27) — a restart just restarts the count.
+export const RECONCILE_CONFIRM_RUNS = 3;
+const refusedReconciles = new Map<MediaInstanceKey, { signature: string; runs: number }>();
+
 /**
  * Fetches all users from each configured media server, upserts them into
  * MediaServerUser, and re-enforces any download restrictions set in Summonarr.
@@ -163,7 +176,14 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
       });
       result.upserted++;
 
-      if (!u.isAdmin && downloadsEnabled === false) {
+      // Push only on DRIFT — u.downloadsEnabled is the server's CURRENT value
+      // from the same /Users fetch this run already made (absent Policy coerces
+      // to true, so only an explicit server-side false skips). Pushing when the
+      // server already reports disabled was a no-op that still paid the 2-call
+      // read-modify-write and re-opened its clobber window (the POST writes the
+      // FULL policy object, so a concurrent Jellyfin-dashboard edit of any
+      // field between our GET and POST is overwritten with the stale snapshot).
+      if (!u.isAdmin && downloadsEnabled === false && u.downloadsEnabled !== false) {
         try {
           await setJellyfinDownloadPolicy(baseUrl, apiKey, u.id, false);
           result.enforced++;
@@ -185,7 +205,29 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
   // guards against a degraded (truncated but 200) fetch mass-deactivating
   // everyone absent.
   const priorActiveCount = existingRows.filter((r) => r.active).length;
-  const safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
+  let safeToReconcile = isSafeToReconcileJellyfinUsers(users.length, priorActiveCount);
+  if (safeToReconcile) {
+    refusedReconciles.delete(instance);
+  } else if (users.length > 0) {
+    // Confirmation counter (see RECONCILE_CONFIRM_RUNS): a degraded fetch is
+    // transient; a real mass departure repeats the IDENTICAL user-id set run
+    // after run. Only the same signature accumulates — any variation resets.
+    const signature = users.map((u) => u.id).sort().join(",");
+    const prior = refusedReconciles.get(instance);
+    const runs = prior?.signature === signature ? prior.runs + 1 : 1;
+    if (runs >= RECONCILE_CONFIRM_RUNS) {
+      console.warn(
+        `[download-policy] Jellyfin user shrink for instance "${instance}" confirmed across ${runs} runs (fetched ${users.length}, ${priorActiveCount} active) — accepting it as the server's real state and reconciling`,
+      );
+      safeToReconcile = true;
+      refusedReconciles.delete(instance);
+    } else {
+      refusedReconciles.set(instance, { signature, runs });
+      console.warn(
+        `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response (${runs}/${RECONCILE_CONFIRM_RUNS} identical observations)`,
+      );
+    }
+  }
   if (safeToReconcile) {
     const currentIds = users.map((u) => u.id);
     // Scoped by serverInstance — load-bearing (guardrail 28). Without this, a
@@ -196,10 +238,6 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
       where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
       data: { active: false },
     });
-  } else if (users.length > 0) {
-    console.warn(
-      `[download-policy] Skipping Jellyfin user reconcile for instance "${instance}": fetched ${users.length} users but ${priorActiveCount} were active — refusing to mass-deactivate on a possibly-degraded response`,
-    );
   }
 
   return result;

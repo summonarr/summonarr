@@ -198,9 +198,12 @@ test("every NAV_ITEM_FEATURE_KEY flag is REGISTERED in features.ts — an unregi
   }
 });
 
-test("every feature.page.* flag is wired into the nav, except the documented non-nav one", () => {
-  // forYou gates a section of the Discover page, not a nav destination.
-  const NOT_A_NAV_DESTINATION = new Set(["feature.page.forYou"]);
+test("every feature.page.* flag is wired into the nav", () => {
+  // feature.page.forYou used to be the one documented non-nav flag (it gated
+  // only a Discover rail); the dedicated /for-you page made it a real nav
+  // destination, so every page flag is wired now. Declare an exception here if
+  // a section-only flag is ever added again.
+  const NOT_A_NAV_DESTINATION = new Set<string>([]);
   const wired = new Set(Object.values(NAV_ITEM_FEATURE_KEY));
   for (const key of registeredKeys) {
     if (!key.startsWith("feature.page.") || NOT_A_NAV_DESTINATION.has(key)) continue;

@@ -709,6 +709,38 @@ test("as the ONLY Jellyfin server it still walks episodes and rewrites the cache
   );
 });
 
+test("jellyfin recentOnly with a small windowed series set fetches episodes PER SERIES (ParentId-scoped), never the library-wide walk", async () => {
+  // getJellyfinTVEpisodes page-walks EVERY Episode in the library and filters
+  // client-side — the right shape for a full sync, but the 2h recentOnly window
+  // typically holds 1-2 shows, so the walk cost scaled with the whole library to
+  // rewrite a couple of rows. At ≤50 windowed series the route fetches each
+  // series' episodes directly instead (the fix-match pattern).
+  configureJellyfin();
+  respond = jellyfinSeriesResponder();
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const eps = episodeFetches();
+  assert.equal(eps.length, 1, "one windowed series ⇒ exactly one episode fetch");
+  assert.equal(
+    eps[0].url.searchParams.get("ParentId"),
+    "jf-show-1",
+    "the episode fetch must be ParentId-scoped to the windowed series, not a library-wide Episode walk",
+  );
+
+  // The downstream write contract is unchanged: tmdbId-scoped delete + insert.
+  const epOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
+  assert.deepEqual(
+    epOps.map((o) => ({ method: o.method, args: o.args })),
+    [
+      { method: "deleteMany", args: { where: { source: "jellyfin", tmdbId: { in: [1399] } } } },
+      { method: "createMany", args: { data: [{ source: "jellyfin", tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 }], skipDuplicates: true } },
+    ],
+  );
+});
+
 test("the full flag is strictly boolean true: a truthy non-true value and a malformed body both fall back to recentOnly", async () => {
   configurePlex();
   respond = plexMovieResponder([]);
@@ -835,7 +867,7 @@ test("an unreachable source → 502, the library untouched (zero transactions), 
   configurePlex();
   configureJellyfin();
   respond = (url) => {
-    if (url.origin === PLEX_BASE) return new Response("boom", { status: 500 });
+    if (url.origin === PLEX_BASE) return new Response("gone", { status: 404 }); // 404 not 500 — 5xx pays the real retry backoff
     // 401 fast-fails jellyfin's fetchPage on the first attempt (no retry loop).
     return new Response("unauthorized", { status: 401 });
   };

@@ -686,7 +686,10 @@ async function handleComponent(interaction: any): Promise<void> {
           routable = {
             genreIds: detail.genreList?.map((g) => g.id) ?? [],
             originalLanguage: detail.originalLanguage ?? null,
-            originCountries: [],
+            // ISO codes from the normalized details (populated since the
+            // originCountryCodes field landed; older cached rows lack it and
+            // degrade to [] — exactly the previous behavior — until TTL refresh).
+            originCountries: detail.originCountryCodes ?? [],
           };
         } catch {
           // TMDB details unavailable ⇒ fall back to the default instance.

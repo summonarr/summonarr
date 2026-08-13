@@ -9,7 +9,7 @@ import { notifyAdminsNewIssueDiscord } from "@/lib/discord-notify";
 import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { resolveTvdbIdFromTmdbId } from "@/lib/arr";
-import { verifyTmdbMedia } from "@/lib/tmdb";
+import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -116,8 +116,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }
   }
 
-  const tmdbType = mediaType === "MOVIE" ? "movie" as const : "tv" as const;
-  const verified = await verifyTmdbMedia(tmdbId, tmdbType);
+  // Three-tier cached resolver — see votes/route.ts for the rationale.
+  const verified = await resolveMediaMeta(tmdbId, mediaType as "MOVIE" | "TV");
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }

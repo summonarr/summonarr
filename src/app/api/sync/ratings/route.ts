@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
 import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
-import { isMdblistQuotaLocked } from "@/lib/mdblist";
+import { fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -81,6 +81,40 @@ export async function POST(request: NextRequest) {
         if (!seen.has(key)) {
           seen.add(key);
           all.push(item);
+        }
+      }
+
+      // MDBList pre-warm: one 200-id batch POST per ~200 stale/missing items
+      // instead of a cold single GET per item through the per-item pass below —
+      // the batch-first policy attachRatingsUnified and the library prewarm
+      // already use; this cron was the one bulk caller still looping singles
+      // (a cold or expiry-wave run burned ~1,500 GETs where ~8 POSTs do).
+      // Freshness mirrors the prewarms' 25%-remaining-TTL threshold, and a
+      // just-batched row is FRESH — so the per-item pass can neither re-fetch
+      // it nor fire its per-key stale-SWR background GETs (those escape the
+      // BATCH pacing entirely and were the worst quota offender). OMDB stays
+      // per-item on purpose: it has no batch endpoint, and the unified pass
+      // only consults it for genuine MDBList misses.
+      if (mdblistKey?.value) {
+        const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
+        // One findMany, not chunked: the pool is bounded (~1.7k) by the list
+        // helpers' page constants, unlike the library-sized prewarm scans.
+        const rows = await prisma.tmdbCache.findMany({
+          where: { key: { in: all.map(mdblistKeyFor) } },
+          select: { key: true, cachedAt: true, expiresAt: true },
+        });
+        const freshMdblist = new Set<string>();
+        for (const r of rows) {
+          const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
+          if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshMdblist.add(r.key);
+        }
+        for (const type of ["movie", "tv"] as const) {
+          const stale = all
+            .filter((m) => m.mediaType === type && !freshMdblist.has(mdblistKeyFor(m)))
+            .map((m) => ({ id: m.id, releaseDate: m.releaseDate }));
+          // Sequential per type on purpose (pacing); the helper pages at 200,
+          // checks the quota lockout itself, and never throws past a page.
+          await fetchMdblistBatch(stale, type).catch(() => {});
         }
       }
 

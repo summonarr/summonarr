@@ -2,9 +2,9 @@ import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { dummyVerify, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { createHash, createHmac } from "crypto";
-import { getPlexUser, getPlexFriendEmails, pingPlexToken } from "@/lib/plex";
-import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect, getJellyfinUserEmail } from "@/lib/jellyfin";
-import { getConfiguredJellyfinUrl, getJellyfinConfig } from "@/lib/jellyfin-config";
+import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
+import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
+import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { checkRateLimit, refundHit, getClientIp } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
@@ -143,7 +143,10 @@ export async function findOrCreatePlexUser({
 export async function findOrCreateJellyfinUser(
   jellyfinId: string,
   name: string,
-  instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
+  // Retained in the signature (the sign-in call sites pass their instance) even
+  // though resolution is now instance-agnostic: it keyed the removed real-email
+  // probe, and a future per-instance branch would want it back.
+  _instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE,
 ): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   // Provider-supplied display name is untrusted — strip HTML/control chars so it
   // can't carry markup into any downstream sink (email/Discord/push).
@@ -172,30 +175,11 @@ export async function findOrCreateJellyfinUser(
     return { id: bySynthetic.id, email: bySynthetic.email, name: name ?? bySynthetic.name, role: bySynthetic.role };
   }
 
-  // 3) Real-email lookup is the account-takeover guard: if a user with this
-  //    Jellyfin server's reported email already exists but is NOT bound to this
-  //    Jellyfin sub (jellyfinUserId), auto-linking on the email match would let
-  //    the incoming Jellyfin account inherit that existing row's identity/role.
-  //    Refuse and require an explicit admin rebind. As above, email is never a
-  //    trusted cross-provider identity anchor — only the provider subject id is.
-  let realEmail: string | null = null;
-  try {
-    const jellyfinConfig = await getJellyfinConfig(instance);
-    if (jellyfinConfig.url && jellyfinConfig.apiKey) {
-      realEmail = await getJellyfinUserEmail(jellyfinConfig.url, jellyfinConfig.apiKey, jellyfinId);
-    }
-  } catch {
-    // best-effort; missing email just means we use the synthetic anchor on create
-  }
-
-  if (realEmail) {
-    const normalizedReal = normalizeEmail(realEmail);
-    const byReal = await prisma.user.findUnique({ where: { email: normalizedReal } });
-    if (byReal) {
-      console.warn(`[auth] Refused jellyfin sign-in: ${normalizedReal} matches an existing user with no jellyfinUserId. Manual rebind required.`);
-      return PROVIDER_REBIND_REQUIRED;
-    }
-  }
+  // 3) NOTE on email: Jellyfin's API exposes no user email field (UserDto
+  //    carries none in any version), so the old "real email" probe here always
+  //    came back empty — every Jellyfin account anchors on the synthetic
+  //    address. Email remains never a trusted cross-provider identity anchor;
+  //    only the provider subject id (jellyfinUserId) is.
 
   // Refuse to mint the first user pre-setup — see isPreSetupBootstrapBlocked.
   if (await isPreSetupBootstrapBlocked()) {
@@ -206,7 +190,7 @@ export async function findOrCreateJellyfinUser(
   // 4) New user.
   const created = await prisma.user.create({
     data: {
-      email: realEmail ? normalizeEmail(realEmail) : syntheticEmail,
+      email: syntheticEmail,
       name: name ?? null,
       role: "USER",
       permissions: defaultPermissionsForRole("USER"),
@@ -846,7 +830,7 @@ export async function authorizeWithPlex(
     // a healthy one — but each instance still fails CLOSED on a plex.tv error
     // (skip it; never fall back to an unscoped list).
     for (const inst of instances) {
-      let allowed: Set<string>;
+      let allowed: PlexServerMembers;
       try {
         allowed = await getPlexFriendEmails(inst.token, inst.url);
       } catch (err) {
@@ -858,9 +842,13 @@ export async function authorizeWithPlex(
       // with stray whitespace/Unicode form can't make the two gates disagree. Added
       // unconditionally after the fetch: an admin-only server with an empty friend
       // list must still admit its admin.
-      if (inst.adminEmail) allowed.add(normalizeEmail(inst.adminEmail));
+      if (inst.adminEmail) allowed.emails.add(normalizeEmail(inst.adminEmail));
 
-      if (!allowed.has(verifiedEmail)) continue;
+      // Immutable plex.tv account id first (the same namespace sign-in pins to
+      // User.plexUserId — same identity by construction), email as the legacy
+      // fallback: an email is user-changeable on plex.tv, and a mid-window
+      // change used to bounce the member off sign-in entirely.
+      if (!allowed.ids.has(plexUserSub) && !allowed.emails.has(verifiedEmail)) continue;
 
       const plexDbUser = await findOrCreatePlexUser({
         plexUserId: plexUserSub,

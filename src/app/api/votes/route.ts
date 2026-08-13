@@ -6,7 +6,7 @@ import { Prisma } from "@/generated/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { verifyTmdbMedia } from "@/lib/tmdb";
+import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeOptional, sanitizeContainsSearch } from "@/lib/sanitize";
 import { verifyRequestToken } from "@/lib/request-token";
 import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
@@ -193,8 +193,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Invalid or expired request token" }, { status: 403 });
   }
 
-  const tmdbType = mediaType === "MOVIE" ? "movie" as const : "tv" as const;
-  const verified = await verifyTmdbMedia(tmdbId, tmdbType);
+  // Three-tier cached resolver (TmdbMediaCore -> details cache -> live TMDB),
+  // the same one POST /api/requests uses — a vote almost always targets a title
+  // the voter just viewed, so a live TMDB call per mutation was pure waste and
+  // made a cold-cache TMDB outage 422 votes for titles the app already knows.
+  const verified = await resolveMediaMeta(tmdbId, mediaType);
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }

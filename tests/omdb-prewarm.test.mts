@@ -298,7 +298,14 @@ test("triage: a fresh row skips; sub-threshold-but-UNEXPIRED rows are genuinely 
   // the 25% threshold is renewed BEFORE it expires rather than served warm by
   // the cache-first getter (which would have reported `fetched` for zero work).
   assert.deepEqual(await prewarmOmdbCache(), { total: 4, fetched: 3, notFound: 0, skipped: 1, failed: 0 });
-  assert.equal(fetchCalls.length, 6); // 701/702/703 × (external_ids + OMDB)
+  // 701's prior row already stored its imdbId (tt701), so its refresh skips the
+  // TMDB external_ids resolve and goes straight to OMDB; 702 (no row) and 703
+  // (sentinel — no id) still pay the full external_ids + OMDB pair.
+  assert.equal(fetchCalls.length, 5);
+  assert.ok(
+    !fetchCalls.some((c) => c.url.pathname === "/3/movie/701/external_ids"),
+    "a stored imdbId must spare the refresh its TMDB resolve",
+  );
 
   // 701's near-expiry row really was rewritten (7.1 → 5.0) and 703's sentinel
   // re-resolved into ratings; 700 stayed fresh and was never written.

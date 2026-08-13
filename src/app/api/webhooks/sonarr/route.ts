@@ -39,7 +39,10 @@ export async function POST(req: NextRequest) {
   if (tooLarge) return tooLarge;
 
   const clientIp = getClientIp(req.headers);
-  if (!checkRateLimit(`webhook:sonarr:${clientIp}`, 120, 60_000)) {
+  // 600/min (~10/s): a legitimate season-pack import fires one Download event
+  // per episode, and 120/min rejected the tail of a large burst. Still bounds
+  // the pre-auth cost (two Setting reads + a hash compare) per IP.
+  if (!checkRateLimit(`webhook:sonarr:${clientIp}`, 600, 60_000)) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 
@@ -198,6 +201,32 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, manualInteraction: true });
   }
 
+  // Sonarr removed the series entirely: evict its wanted/available cache rows
+  // now instead of leaving them stale until the next full sync (up to
+  // SYNC_INTERVAL), during which a re-request was swallowed as
+  // { alreadyAvailable: true } with no request row. EpisodeFileDelete is left
+  // to the periodic sync — per-episode granularity doesn't map onto the
+  // series-level cache rows. MediaRequest.status and notifiedAvailable stay
+  // untouched (the orchestrator's CAS is the sole authority — guardrail 14).
+  if (payload.eventType === "SeriesDelete" && payload.series) {
+    const rawTvdb = payload.series.tvdbId;
+    const rawTmdb = payload.series.tmdbId;
+    const delTvdbId = Number.isInteger(rawTvdb) && rawTvdb > 0 ? rawTvdb : null;
+    let delTmdbId = typeof rawTmdb === "number" && Number.isInteger(rawTmdb) && rawTmdb > 0 ? rawTmdb : null;
+    if (delTmdbId === null && delTvdbId !== null) {
+      delTmdbId = await resolveSingleTvdbToTmdb(delTvdbId);
+    }
+    if (delTmdbId !== null) {
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: delTmdbId!, arrInstance } });
+        await tx.sonarrAvailableItem.deleteMany({ where: { tmdbId: delTmdbId!, arrInstance } });
+      }, { timeout: 30_000 });
+    }
+    syncCompleted = true;
+    return NextResponse.json({ ok: true, evicted: delTmdbId !== null });
+  }
+
   if (payload.eventType !== "Download" || !payload.series) {
     syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true });
@@ -324,6 +353,18 @@ export async function POST(req: NextRequest) {
         })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
       }
     }
+  }
+
+  // A completed import ends the "stuck" episode the ManualInteractionRequired
+  // marker one-shots — clear it so a future re-park of the same series can
+  // alert again. The marker's stable key prefers tvdbId and falls back to
+  // tmdbId, so clear both candidates. Post-commit fire-and-forget, idempotent;
+  // the not-confirmed/skipped paths return before reaching here.
+  const manualMarkerKeys = [safeVdbId, safeMdbId]
+    .filter((id): id is number => id !== null)
+    .map((id) => `manualInteractionNotified:sonarr:${arrInstance}:${id}`);
+  if (manualMarkerKeys.length > 0) {
+    void prisma.setting.deleteMany({ where: { key: { in: manualMarkerKeys } } }).catch(() => {});
   }
 
   // Deferred work runs after the response is sent; library scan and notification can be slow

@@ -320,8 +320,12 @@ test("cold-cache success: concurrent callers share ONE in-flight fetch; emails l
   }
   const [s1, s2] = await Promise.all([p1, p2]);
   assert.ok(s1 && s2);
-  assert.equal(s1, s2, "both callers must receive the same cached Set instance");
-  assert.deepEqual([...s1].sort(), ["admin@example.com", "friend@example.com"]);
+  assert.equal(s1, s2, "both callers must receive the same cached members instance");
+  assert.deepEqual([...s1.emails].sort(), ["admin@example.com", "friend@example.com"]);
+  // The machine-scoped plex.tv account ids ride the same cache — the id-first
+  // join key for the sign-in and session-refresh membership gates. Only the
+  // OUR-machine block's id survives the scoping.
+  assert.deepEqual([...s1.ids].sort(), ["1"]);
 });
 
 test("within the 30-min TTL the cached set is served with zero upstream traffic", async () => {
@@ -333,7 +337,7 @@ test("within the 30-min TTL the cached set is served with zero upstream traffic"
   };
   const set = await getCachedPlexAllowlist();
   assert.ok(set);
-  assert.deepEqual([...set].sort(), ["admin@example.com", "friend@example.com"]);
+  assert.deepEqual([...set.emails].sort(), ["admin@example.com", "friend@example.com"]);
   assert.equal(identityCalls.length, identityBefore);
   assert.equal(usersCalls.length, usersBefore);
 });
@@ -347,7 +351,7 @@ test("past the TTL: stale set served instantly, ONE background refresh swaps mem
     // Served stale, synchronously with respect to the pending refresh.
     const stale = await getCachedPlexAllowlist();
     assert.ok(stale);
-    assert.deepEqual([...stale].sort(), ["admin@example.com", "friend@example.com"]);
+    assert.deepEqual([...stale.emails].sort(), ["admin@example.com", "friend@example.com"]);
   } finally {
     // Resolve even on assertion failure so the module's inflight slot clears.
     gate.resolve(xmlResponse(usersXml([{ email: "newuser@example.com", machine: MACHINE_ID }])));
@@ -357,7 +361,7 @@ test("past the TTL: stale set served instantly, ONE background refresh swaps mem
   const usersBefore = usersCalls.length;
   const fresh = await getCachedPlexAllowlist(); // fetchedAt was renewed — no new fetch
   assert.ok(fresh);
-  assert.deepEqual([...fresh].sort(), ["admin@example.com", "newuser@example.com"]);
+  assert.deepEqual([...fresh.emails].sort(), ["admin@example.com", "newuser@example.com"]);
   assert.equal(usersCalls.length, usersBefore);
 });
 
@@ -366,12 +370,12 @@ test("outage after a good set: stale membership keeps being enforced, never null
   usersResponder = () => new Response("outage", { status: 503 });
   const duringOutage = await getCachedPlexAllowlist();
   assert.ok(duringOutage, "an outage must serve the last-known set, not fail open to null");
-  assert.deepEqual([...duringOutage].sort(), ["admin@example.com", "newuser@example.com"]);
+  assert.deepEqual([...duringOutage.emails].sort(), ["admin@example.com", "newuser@example.com"]);
   await flushAsync(); // failed refresh settles; cache must be retained
   const afterFailure = await getCachedPlexAllowlist(); // inside the retry backoff — no new attempt
   const usersBefore = usersCalls.length;
   assert.ok(afterFailure);
-  assert.deepEqual([...afterFailure].sort(), ["admin@example.com", "newuser@example.com"]);
+  assert.deepEqual([...afterFailure.emails].sort(), ["admin@example.com", "newuser@example.com"]);
   assert.equal(usersCalls.length, usersBefore);
 });
 
@@ -380,11 +384,11 @@ test("an empty re-fetch after a good set also serves stale — a truncated frien
   usersResponder = () => xmlResponse(usersXml([])); // plex.tv answers, but with nobody on our server
   const set = await getCachedPlexAllowlist();
   assert.ok(set);
-  assert.deepEqual([...set].sort(), ["admin@example.com", "newuser@example.com"]);
+  assert.deepEqual([...set.emails].sort(), ["admin@example.com", "newuser@example.com"]);
   await flushAsync();
   const after = await getCachedPlexAllowlist();
   assert.ok(after, "the empty result must not replace the cached set");
-  assert.deepEqual([...after].sort(), ["admin@example.com", "newuser@example.com"]);
+  assert.deepEqual([...after.emails].sort(), ["admin@example.com", "newuser@example.com"]);
 });
 
 // ── multi-instance (the timeline continues; new slugs start cold) ───────────
@@ -425,7 +429,7 @@ test("an outage instance serves STALE into the union while a healthy instance co
   const union = await getCachedPlexAllowlist();
   assert.ok(union, "an outage on one instance must not fail the whole union open");
   assert.deepEqual(
-    [...union].sort(),
+    [...union.emails].sort(),
     ["admin@example.com", "newuser@example.com", "radmin@example.com", "rfriend@example.com"],
     "stale default ∪ fresh remote, each instance's admin in its own contribution, sneak scoped out",
   );
@@ -465,7 +469,7 @@ test("union across two healthy instances, each scoped to its OWN machineIdentifi
   const union = await getCachedPlexAllowlist();
   assert.ok(union);
   assert.deepEqual(
-    [...union].sort(),
+    [...union.emails].sort(),
     ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
     "fresh ∪ fresh: evil@ (wrong machine in default's response) and sneak@ (wrong machine in remote's) both scoped out",
   );
@@ -515,7 +519,7 @@ test("an UNCONFIGURED registry entry contributes nothing and does NOT poison", a
   const union = await getCachedPlexAllowlist();
   assert.ok(union, "an unconfigured instance must be skipped, not treated as indeterminate");
   assert.deepEqual(
-    [...union].sort(),
+    [...union.emails].sort(),
     ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
   );
   assert.equal(identityCalls.length, identityBefore, "an unconfigured instance never contacts a server");
@@ -556,7 +560,7 @@ test("a cold instance whose SCOPED set is empty is indeterminate — its admin e
   const recovered = await getCachedPlexAllowlist();
   assert.ok(recovered, "removing the sick instance from the registry restores the union");
   assert.deepEqual(
-    [...recovered].sort(),
+    [...recovered.emails].sort(),
     ["admin@example.com", "dfriend@example.com", "radmin@example.com", "rfriend@example.com"],
   );
 });
@@ -596,7 +600,7 @@ test("unconfigured→configured transition: an 'unconfigured' verdict never arms
   const after = await getCachedPlexAllowlist();
   assert.ok(after, "the newly-configured instance must be fetched, not skipped on a stale verdict");
   assert.ok(
-    after.has("tfriend@example.com") && after.has("tardyadmin@example.com"),
+    after.emails.has("tfriend@example.com") && after.emails.has("tardyadmin@example.com"),
     "the new instance's members must join the union on the FIRST call after configuration — a stale 'unconfigured' skip here is the enforcing-partial-union mass-revoke bug",
   );
   assert.equal(usersCalls.length - usersBefore, 1, "the transition call performed a real fetch for the new instance");
@@ -620,13 +624,13 @@ test("deregistering a slug EVICTS its cached state — re-adding the same slug a
     throw new Error(`unexpected plex.tv refetch for token ${token}`);
   };
   const withSwapA = await getCachedPlexAllowlist();
-  assert.ok(withSwapA?.has("olduser@example.com"), "the first server's members join the union");
+  assert.ok(withSwapA?.emails.has("olduser@example.com"), "the first server's members join the union");
 
   // Removed from the registry — this call is where the eviction happens.
   fakeNow += 1 * MIN;
   settings.plexInstances = registryJson("remote");
   const withoutSwap = await getCachedPlexAllowlist();
-  assert.ok(withoutSwap && !withoutSwap.has("olduser@example.com"), "a deregistered instance stops contributing");
+  assert.ok(withoutSwap && !withoutSwap.emails.has("olduser@example.com"), "a deregistered instance stops contributing");
 
   // Re-added under the SAME slug, pointing at a DIFFERENT server. Its cache
   // would still be TTL-fresh (~2 min old) if it had survived deregistration.
@@ -641,9 +645,9 @@ test("deregistering a slug EVICTS its cached state — re-adding the same slug a
   };
   const withSwapB = await getCachedPlexAllowlist();
   assert.ok(withSwapB, "the re-added instance must fetch cold, not poison");
-  assert.ok(withSwapB.has("newuser2@example.com"), "the NEW server's members must be enforced immediately");
+  assert.ok(withSwapB.emails.has("newuser2@example.com"), "the NEW server's members must be enforced immediately");
   assert.ok(
-    !withSwapB.has("olduser@example.com"),
+    !withSwapB.emails.has("olduser@example.com"),
     "stale state from the previous registration of this slug must not survive deregistration — that is a lockout of the new server's users",
   );
 });

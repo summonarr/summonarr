@@ -955,9 +955,11 @@ test("radarr: malformed and non-object JSON bodies → 400 Invalid JSON (auth ru
   assert.equal(replayCreates.length, 0, "an unparseable body must never be digest-recorded");
 });
 
-test("radarr: per-IP rate limit — the 121st request inside the window → 429", async () => {
+test("radarr: per-IP rate limit — the 601st request inside the window → 429", async () => {
+  // 600/min: sized for per-episode Download bursts (a season-pack import fires
+  // one event per episode); the bucket still bounds the pre-auth cost per IP.
   const ip = "198.51.100.77";
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 600; i++) {
     const { res } = await post(radarrPOST, webhookReq("radarr", { ip, body: { eventType: "Test" } }));
     assert.equal(res.status, 401, "unauthenticated calls still consume the bucket");
   }

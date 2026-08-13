@@ -120,7 +120,19 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   let live: UnifiedRatingsResult | { error: string } | undefined;
   if (liveRequested) {
     try {
-      const releaseDate = typeof detailsParsed?.releaseDate === "string" ? detailsParsed.releaseDate : undefined;
+      let releaseDate = typeof detailsParsed?.releaseDate === "string" ? detailsParsed.releaseDate : undefined;
+      if (!releaseDate) {
+        // No details blob (or a dateless one): fall back to the core row's
+        // releaseYear so the probe's cache writes land in the right TTL bucket
+        // instead of defaulting every title to the 30-day back-catalog one.
+        const core = await prisma.tmdbMediaCore
+          .findUnique({
+            where: { tmdbId_mediaType: { tmdbId, mediaType: type === "movie" ? "MOVIE" : "TV" } },
+            select: { releaseYear: true },
+          })
+          .catch(() => null);
+        if (core?.releaseYear) releaseDate = `${core.releaseYear}-01-01`;
+      }
       live = await fetchUnifiedRatings(tmdbId, type, releaseDate);
     } catch (err) {
       // Don't leak raw provider error detail to the client — log server-side,

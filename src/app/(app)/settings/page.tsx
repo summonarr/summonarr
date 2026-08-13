@@ -8,7 +8,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
-import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton } from "@/components/settings/settings-ui";
+import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton, AuditRetentionForm } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
@@ -56,6 +56,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   features: [],
   system: [
     { id: "scheduled-jobs",   label: "Scheduled Jobs",     group: "System" },
+    { id: "audit-log-settings", label: "Audit Log",        group: "System" },
     { id: "db-metrics",       label: "DB Metrics",         group: "System" },
   ],
 };
@@ -85,11 +86,11 @@ function StatusBadge({ connected, label = "Connected" }: { connected: boolean; l
 
 
 const ALL_KEYS = [
-  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId",
-  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId",
+  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId", "radarrMinimumAvailability",
+  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId", "sonarrLanguageProfileId",
   "webhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
-  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kWebhookSecret",
-  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kWebhookSecret",
+  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret",
+  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret",
   "request4kAll",
   "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
@@ -115,6 +116,7 @@ const ALL_KEYS = [
   "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
+  "auditPiiRetentionDays",
 ] as const;
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
@@ -617,6 +619,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.radarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
+                initialMinimumAvailability={cfg.radarrMinimumAvailability ?? ""}
               />
             </div>
 
@@ -637,6 +640,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.radarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
+                initialMinimumAvailability={cfg.radarr4kMinimumAvailability ?? ""}
               />
             </div>
 
@@ -656,6 +660,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.sonarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
+                initialLanguageProfileId={cfg.sonarrLanguageProfileId ?? ""}
               />
             </div>
 
@@ -676,6 +681,7 @@ export default async function SettingsPage({
                 initialApiKey={cfg.sonarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
+                initialLanguageProfileId={cfg.sonarr4kLanguageProfileId ?? ""}
               />
             </div>
 
@@ -869,6 +875,17 @@ export default async function SettingsPage({
               <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Background cron jobs and their current status. Click Run to trigger on demand.</p>
             </div>
             <CronJobTable jobs={metrics.cronJobs} />
+          </div>
+
+          <div id="audit-log-settings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <div className="mb-5">
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Audit Log</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
+                How long audit rows keep IP addresses, devices, and user names before the daily scrub redacts them.
+                A manual &ldquo;Scrub PII&rdquo; button lives on the Audit Log page.
+              </p>
+            </div>
+            <AuditRetentionForm initialDays={cfg.auditPiiRetentionDays ?? ""} />
           </div>
 
           <div id="db-metrics" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>

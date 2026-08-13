@@ -206,7 +206,15 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
     setSyncStatus("running");
     setSyncResult(null);
     try {
-      const res = await fetch(withBasePath("/api/sync/jellyfin"), { method: "POST" });
+      // { full: true } requests a full delete+replace, matching the Plex form's
+      // "Import from Plex" button. A bodyless POST runs the recentOnly
+      // insert-only path (2h window), which never removes stale rows — so this
+      // button silently couldn't repair a drifted library.
+      const res = await fetch(withBasePath("/api/sync/jellyfin"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ full: true }),
+      });
       if (!res.ok) throw new Error(await res.text());
       const data: { marked: number; scanned: { movies: number; tv: number } } = await res.json();
       setSyncResult(data);

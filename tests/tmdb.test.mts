@@ -32,8 +32,10 @@
 //    written by the pre-split getMovieReleaseInfo) is treated as a MISS and
 //    overwritten; US certification is extracted and kept; official-YouTube
 //    trailer selection; credits sliced to 12 under `:credits`; suggestions
-//    (similar-then-recommendations, self/no-poster dropped) under
-//    `:suggestions`; a fresh cached row is served with zero fetches and zero
+//    (recommendations-then-similar so the cap starves the weaker /similar
+//    source, self/no-poster dropped) under `:suggestions:v2` — the standalone
+//    getMovieSuggestions two-fetch path pins the same order and key;
+//    a fresh cached row is served with zero fetches and zero
 //    rewrites; object-form keyword rows are migrated and re-persisted; a TV row
 //    without `seasons` is busted (tmdbCache.delete) and re-fetched with the
 //    specials/placeholder seasons filtered out;
@@ -82,9 +84,11 @@ const {
   getTrending,
   getTopRatedMovies,
   getUpcomingTV,
+  getUpcomingMovies,
   searchMulti,
   getMovieDetails,
   getTVDetails,
+  getMovieSuggestions,
   discoverMoviesPage,
   discoverTVPage,
 } = await import("../src/lib/tmdb.ts");
@@ -476,6 +480,47 @@ test("upcoming TV: 10 discover pages anchored on today; past/dateless rows are f
   assert.equal(cacheUpserts[0]?.key, "tv:upcoming");
 });
 
+test("upcoming movies: region-pinned pages; already-released and dateless rows are filtered like the TV sibling", async () => {
+  const before = new Date().toISOString().slice(0, 10);
+  respond = (url) =>
+    url.searchParams.get("page") === "1"
+      ? jsonResponse(pageOf([
+          rawMovie(311, "Future Release", { release_date: "2999-06-01" }),
+          rawMovie(312, "Already Out", { release_date: "2001-01-01" }), // /movie/upcoming returns these; we drop them
+          rawMovie(313, "No Date", { release_date: undefined }),
+        ], 10))
+      : jsonResponse(pageOf([], 10));
+  const result = await getUpcomingMovies();
+
+  assert.equal(fetchCalls.length, 10);
+  const call = fetchCalls[0];
+  assert.equal(call.url.pathname, "/3/movie/upcoming");
+  // The window is region-relative — pin it to the app-wide US convention so
+  // the endpoint's dates line up with the client-side today filter.
+  assert.equal(call.url.searchParams.get("region"), "US");
+  assert.deepEqual(result.map((m) => m.id), [311], `past/dateless rows must be dropped (today=${before})`);
+  assert.equal(cacheUpserts[0]?.key, "movies:upcoming");
+});
+
+test("a 429 is retried (Retry-After honored) instead of failing the fetch outright", async () => {
+  // One throttled page used to reject the whole helper call — and the
+  // all-fulfilled cache gates then converted that into a full re-fan-out on
+  // every subsequent cold caller until a clean pass.
+  respond = (_url, callIndex) =>
+    callIndex === 0
+      ? new Response("slow down", { status: 429, headers: { "retry-after": "0.05" } })
+      : jsonResponse(pageOf([{ ...rawMovie(101, "Recovered"), media_type: "movie" }]));
+  const result = await searchMulti("retry me");
+  assert.deepEqual(result.map((m) => m.id), [101]);
+  assert.equal(fetchCalls.length, 2, "the 429 attempt plus one retry");
+
+  // Exhaustion still surfaces: three straight 429s reject after the final attempt.
+  fetchCalls.length = 0;
+  respond = () => new Response("slow down", { status: 429 });
+  await assert.rejects(() => searchMulti("always throttled"), /429/);
+  assert.equal(fetchCalls.length, 3);
+});
+
 // ── details paths ───────────────────────────────────────────────────────────
 
 test("movie details cold: append_to_response wire, certification kept, official trailer, collection, 3 cache writes with DETAILS TTL", async () => {
@@ -510,6 +555,7 @@ test("movie details cold: append_to_response wire, certification kept, official 
           rawMovie(603, "Self Reference"), // the title itself never suggests itself
           rawMovie(604, "Similar One"),
           rawMovie(605, "No Poster", { poster_path: null }), // posterless dropped
+          rawMovie(607, "Similar Two"), // survives, but only AFTER every recommendation
         ],
       },
       recommendations: { results: [rawMovie(604, "Duplicate"), rawMovie(606, "Rec One")] },
@@ -541,7 +587,7 @@ test("movie details cold: append_to_response wire, certification kept, official 
   // Exactly three cache writes: details + credits + suggestions, movie-prefixed.
   assert.deepEqual(
     cacheUpserts.map((u) => u.key).sort(),
-    ["movie:603:credits", "movie:603:details", "movie:603:suggestions"],
+    ["movie:603:credits", "movie:603:details", "movie:603:suggestions:v2"],
   );
   const details = upsertFor("movie:603:details");
   assert.ok(details);
@@ -554,8 +600,31 @@ test("movie details cold: append_to_response wire, certification kept, official 
   const credits = JSON.parse(upsertFor("movie:603:credits")!.data) as unknown[];
   assert.equal(credits.length, 12); // sliced from 13
   assert.deepEqual(credits[0], { id: 900, name: "Actor 0", character: "Role 0", profilePath: "/a0.jpg" });
-  const suggestions = JSON.parse(upsertFor("movie:603:suggestions")!.data) as { id: number }[];
-  assert.deepEqual(suggestions.map((s) => s.id), [604, 606]); // similar first, dedup, self/posterless dropped
+  const suggestions = JSON.parse(upsertFor("movie:603:suggestions:v2")!.data) as { id: number }[];
+  // Recommendations first (604 deduped into its rec-side slot, then 606), the
+  // similar-only survivor (607) last; self/posterless dropped.
+  assert.deepEqual(suggestions.map((s) => s.id), [604, 606, 607]);
+});
+
+test("getMovieSuggestions: /recommendations outranks /similar and the result caches under :suggestions:v2", async () => {
+  // The standalone two-fetch path (detail rails + the For You engine) must
+  // starve /similar, not /recommendations, when the 18-item cap bites — and
+  // must never resurrect a stale similar-first row via the old (v1) key.
+  seedCache("movie:9:suggestions", [{ id: 999, mediaType: "movie", title: "Stale v1" }]);
+  respond = (url) => {
+    if (url.pathname === "/3/movie/9/similar")
+      return jsonResponse(pageOf([rawMovie(21, "Sim Only"), rawMovie(20, "Shared")]));
+    if (url.pathname === "/3/movie/9/recommendations")
+      return jsonResponse(pageOf([rawMovie(20, "Shared"), rawMovie(22, "Rec Only")]));
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+
+  const result = await getMovieSuggestions(9);
+
+  assert.deepEqual(result.map((m) => m.id), [20, 22, 21]); // recs first, similar backfills after dedup
+  assert.equal(fetchCalls.length, 2, "the seeded v1 row must not serve as a cache hit");
+  assert.ok(upsertFor("movie:9:suggestions:v2"), "result cached under the v2 key");
+  assert.equal(upsertFor("movie:9:suggestions"), undefined, "nothing writes the retired v1 key");
 });
 
 test("movie details self-heal: a poisoned raw row (no mediaType) is a MISS and is overwritten normalized", async () => {
