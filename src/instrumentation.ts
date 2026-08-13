@@ -268,5 +268,16 @@ export async function register() {
     import("@/lib/plex-events")
       .then(({ reconcilePlexEventStream }) => reconcilePlexEventStream())
       .catch((err) => console.error("[plex-events] startup error:", err));
+
+    // Discord slash-command self-heal: re-register the commands when their
+    // schema (or guild/global scope) changed since the last successful
+    // registration — so an upgrade that alters a command option (e.g. the
+    // /link token's max_length 20 -> 32) republishes automatically instead of
+    // requiring a manual "Register commands" click. Hash-guarded so an
+    // unchanged schema makes NO Discord API call. Fire-and-forget; never blocks
+    // boot.
+    import("@/lib/discord-register")
+      .then(({ syncDiscordCommandsIfChanged }) => syncDiscordCommandsIfChanged())
+      .catch((err) => console.error("[discord] startup command sync error:", err));
   }
 }

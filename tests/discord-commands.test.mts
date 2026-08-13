@@ -105,6 +105,12 @@ const fakePrisma = {
       const value = settings.get(args.where.key);
       return value === undefined ? null : { key: args.where.key, value };
     },
+    // Both registration paths record the schema hash after a successful PUT
+    // (recordDiscordSchemaHash) so the boot self-heal won't redundantly re-push.
+    upsert: async (a: { where: { key: string }; create: { key: string; value: string } }) => {
+      settings.set(a.where.key, a.create.value);
+      return a.create;
+    },
   },
   $transaction: async (arg: unknown) => {
     const tx = {
@@ -295,23 +301,37 @@ test("the published command set preserves every name, description and option", (
 // Structural: the duplicate literal must not come back
 // ════════════════════════════════════════════════════════════════════════════
 
-test("neither registration path declares the command schema inline", () => {
-  const files = [
+test("both registration paths funnel through the shared helper — the schema lives in exactly ONE place", () => {
+  // Both routes PUT via putDiscordCommands (src/lib/discord-register.ts), which
+  // is the single module that references DISCORD_SLASH_COMMANDS for
+  // registration — so neither route can inline (and drift) a copy.
+  const routes = [
     join("src", "app", "api", "discord", "register-commands", "route.ts"),
     join("src", "app", "api", "settings", "route.ts"),
   ];
-  for (const rel of files) {
+  for (const rel of routes) {
     const src = readFileSync(join(process.cwd(), rel), "utf-8");
     assert.match(
       src,
-      /import \{[^}]*\bDISCORD_SLASH_COMMANDS\b[^}]*\} from "@\/lib\/discord-commands"/,
-      `${rel} must import the shared command definition`,
+      /import \{[^}]*\bputDiscordCommands\b[^}]*\} from "@\/lib\/discord-register"/,
+      `${rel} must register via the shared putDiscordCommands helper`,
     );
     assert.ok(
       !src.includes("max_length"),
       `${rel} declares an option constraint inline — that is how the /link cap drifted to 20`,
     );
+    assert.ok(
+      !src.includes("DISCORD_SLASH_COMMANDS"),
+      `${rel} references the schema directly — it must go through the shared helper only`,
+    );
   }
+  // The shared helper is the one place the schema is referenced for registration.
+  const helper = readFileSync(join(process.cwd(), "src", "lib", "discord-register.ts"), "utf-8");
+  assert.match(
+    helper,
+    /import \{[^}]*\bDISCORD_SLASH_COMMANDS\b[^}]*\} from "@\/lib\/discord-commands"/,
+    "the shared helper must import the single command definition",
+  );
 });
 
 test("registration produced no error logs in this harness", () => {

@@ -199,6 +199,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 - **Radarr/Sonarr delete webhooks clear stale availability immediately** instead of waiting for the next full sync.
 - **The Jellyfin "Sync Library" button in settings runs a full resync.**
 - **Metadata ratings**: closed an OMDB rate-limit lockout gap and cut a large amount of redundant upstream traffic (TMDB / OMDB / MDBList / Trakt).
+- **The Discord `/link` command self-heals.** Slash commands now re-register automatically on the first boot after an upgrade that changed them (hash-guarded, so an unchanged schema makes no Discord call) — so a fix like the `/link` token's 20→32 character limit takes effect without a manual "Register commands" click. If your server still shows the old 20-char limit after upgrading, set a **Server (Guild) ID** in Discord settings for instant per-server registration, or restart the Discord client to clear its cached command list.
 - Plus many more correctness and efficiency fixes across library sync, the play-history poller, webhooks, TRaSH-Guides sync, connection tests, and fix-match.
 
 **Dependencies**

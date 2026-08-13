@@ -10,9 +10,8 @@ import { sendTestEmail } from "@/lib/email";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
-import { DISCORD_SLASH_COMMANDS } from "@/lib/discord-commands";
+import { putDiscordCommands, recordDiscordSchemaHash } from "@/lib/discord-register";
 import { FEATURE_KEYS, invalidateFeatureFlagCache } from "@/lib/features";
-import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 
@@ -867,19 +866,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           return;
         }
 
-        const DISCORD_API = "https://discord.com/api/v10";
-        const url = cfg.discordGuildId
-          ? `${DISCORD_API}/applications/${cfg.discordClientId}/guilds/${cfg.discordGuildId}/commands`
-          : `${DISCORD_API}/applications/${cfg.discordClientId}/commands`;
-        const res = await safeFetchTrusted(url, {
-          method: "PUT",
-          headers: { Authorization: `Bot ${cfg.discordBotToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify(DISCORD_SLASH_COMMANDS),
-          allowedHosts: ["discord.com"],
-          timeoutMs: 15_000,
-        });
+        const guildId = cfg.discordGuildId?.trim() || null;
+        const res = await putDiscordCommands(cfg.discordBotToken, cfg.discordClientId, guildId);
         if (!res.ok) {
           console.error(`[discord] Command re-registration failed: ${res.status} ${await res.text()}`);
+        } else {
+          // Keep the boot self-heal's hash in step so it won't redundantly re-push.
+          await recordDiscordSchemaHash(guildId);
         }
       } catch (err) {
         console.error("[discord] Command re-registration error:", err);
