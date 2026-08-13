@@ -29,6 +29,11 @@ import { join, relative } from "node:path";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const SRC = join(REPO, "src");
+
+// Escape EVERY regex metacharacter (including backslash) before embedding a
+// literal string in a `new RegExp(...)` — a partial escape (e.g. only `.` or
+// `/@`) leaves the input incompletely sanitized.
+const reEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")) as {
   version: string;
   license: string;
@@ -101,7 +106,7 @@ test("guardrail 9: no client-state library is installed — useState + URL searc
 test("guardrail 9: nothing in src/ imports a client-state library", () => {
   // A dependency can also arrive transitively and be imported without ever
   // landing in package.json, so check the import sites too.
-  const pattern = new RegExp(`from\\s+["'](${STATE_LIBS.map((s) => s.replace(/[/@]/g, "\\$&")).join("|")})(/|["'])`);
+  const pattern = new RegExp(`from\\s+["'](${STATE_LIBS.map(reEsc).join("|")})(/|["'])`);
   const offenders = sourceFiles.filter((f) => pattern.test(readFileSync(f, "utf8")));
   assert.deepEqual(offenders.map((f) => relative(REPO, f)), []);
 });
@@ -195,7 +200,7 @@ test("no marketing-version constant in src/ — package.json plus the git tag is
   const offenders = sourceFiles.filter((f) => {
     const text = readFileSync(f, "utf8");
     // A string literal holding the exact current version — the drift-prone shape.
-    return new RegExp(`["'\`]v?${version.replace(/\./g, "\\.")}["'\`]`).test(text);
+    return new RegExp(`["'\`]v?${reEsc(version)}["'\`]`).test(text);
   });
   assert.deepEqual(
     offenders.map((f) => relative(REPO, f)),

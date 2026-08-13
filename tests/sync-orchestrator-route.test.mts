@@ -1911,8 +1911,9 @@ test("a configured source that has NEVER synced clean gets a create-only stalene
   // all, so the window has no origin, *Stale is false forever, and every user pinned to
   // that source is starved permanently — the exact failure the fallback exists to prevent.
   configureBothServers();
+  // 404 not 500 — a 5xx pays the Plex page walk's real retry backoff (see the isolation test above).
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url) // 404 not 500 — 5xx pays the real retry backoff;
+    (url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url));
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));
@@ -1940,8 +1941,9 @@ test("the staleness baseline never overwrites a real success stamp, and is not s
   configureBothServers();
   const realSuccess = String(Date.now() - 6 * 60 * 60 * 1000);
   settings.set("lastPlexSyncSucceededAt", realSuccess);
+  // 404 not 500 — a 5xx pays the Plex page walk's real retry backoff (see the isolation test above).
   respond = (url) =>
-    url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url) // 404 not 500 — 5xx pays the real retry backoff;
+    (url.origin === PLEX_ORIGIN ? new Response("gone", { status: 404 }) : jellyfinResponder([550])(url));
   seedRequest({ id: "req-avail", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-avail", status: "AVAILABLE" });
 
   await POST(syncReq({ headers: AS_CRON }));

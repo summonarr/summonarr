@@ -75,9 +75,33 @@ function walk(dir: string): string[] {
 
 // "use client" must be the first statement, but may sit under a comment banner —
 // several components in this tree lead with the guardrail-16 explainer itself.
-const USE_CLIENT = /^\s*(?:\/\/[^\n]*\n|\/\*[\s\S]*?\*\/\s*)*["']use client["']/;
+// Scanned linearly rather than with a regex: a single pattern over an
+// alternation of line/block comments (`(?:…|/\*[\s\S]*?\*/)*`) backtracks
+// catastrophically on adversarial `/*…*//*…` input (js/redos).
+function startsWithUseClient(text: string): boolean {
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === " " || c === "\t" || c === "\r" || c === "\n") { i++; continue; }
+    if (text.startsWith("//", i)) {
+      const nl = text.indexOf("\n", i);
+      if (nl === -1) return false;
+      i = nl + 1;
+      continue;
+    }
+    if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      if (end === -1) return false;
+      i = end + 2;
+      continue;
+    }
+    break;
+  }
+  return text.startsWith('"use client"', i) || text.startsWith("'use client'", i);
+}
 
-const clientFiles = walk(SRC).filter((f) => USE_CLIENT.test(readFileSync(f, "utf8")));
+const clientFiles = walk(SRC).filter((f) => startsWithUseClient(readFileSync(f, "utf8")));
 
 // ── the analyzer ────────────────────────────────────────────────────────────
 
