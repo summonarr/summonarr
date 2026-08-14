@@ -7995,7 +7995,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-oauth4webapi@3.8.5
+oauth4webapi@3.8.7
 License: MIT
 
 The MIT License (MIT)
@@ -8049,7 +8049,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-openid-client@6.8.4
+openid-client@6.8.5
 License: MIT
 
 The MIT License (MIT)
