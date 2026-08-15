@@ -24,6 +24,7 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const COLORS = {
   reset: "\x1b[0m",
@@ -122,6 +123,127 @@ interface TopLevelDecl {
 }
 
 /**
+ * Blank out comments, preserving line structure and string contents.
+ *
+ * Guard detection is a substring test over a declaration's region, so a token
+ * merely *named* in prose ("TODO: wrap this in withAdmin") would satisfy it with
+ * no guard present. A region also runs to the next column-0 declaration, which
+ * means a comment written to document the NEXT handler is attributed to the
+ * PREVIOUS one — so an unguarded handler can inherit a mention it does not own.
+ * Quotes are tracked so `//` inside a URL literal is not read as a comment.
+ */
+/** Characters after which a `/` opens a regex literal rather than dividing. */
+const REGEX_MAY_FOLLOW = new Set([
+  "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "~", "^", "<", ">",
+]);
+const KEYWORD_BEFORE_REGEX = /(?:^|[^\w$])(?:return|typeof|case|in|of|new|delete|void|instanceof|do|else|yield|await)$/;
+
+export function stripComments(src: string): string {
+  let out = "";
+  let i = 0;
+  // Last non-whitespace character emitted, used to tell a regex literal from a
+  // division. Without it, `/['"]/g` opens a phantom string that runs to the next
+  // quote in the file and swallows every comment in between — which silently
+  // restores the prose-mention hole this function exists to close.
+  let prev = "";
+
+  const takeEscape = () => {
+    out += src[i] + (src[i + 1] ?? "");
+    i += 2;
+  };
+
+  while (i < src.length) {
+    const ch = src[i];
+    const next = src[i + 1];
+
+    if (ch === "/" && next === "/") {
+      while (i < src.length && src[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) {
+        // Keep newlines so column-0 anchoring still sees real declarations.
+        if (src[i] === "\n") out += "\n";
+        i++;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "/" && (prev === "" || REGEX_MAY_FOLLOW.has(prev) || KEYWORD_BEFORE_REGEX.test(out))) {
+      out += ch;
+      i++;
+      let inClass = false;
+      // A newline ends the scan: regex literals cannot span lines, so anything
+      // else means this `/` was not one and we stop rather than eat the file.
+      while (i < src.length && src[i] !== "\n") {
+        if (src[i] === "\\") {
+          takeEscape();
+          continue;
+        }
+        const c = src[i];
+        out += c;
+        i++;
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+      }
+      prev = "/";
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      out += ch;
+      i++;
+      while (i < src.length) {
+        if (src[i] === "\\") {
+          takeEscape();
+          continue;
+        }
+        const c = src[i];
+        // An unterminated quote must not consume the rest of the file. Template
+        // literals legitimately span lines; the others do not.
+        if (c === "\n" && ch !== "`") break;
+        out += c;
+        i++;
+        if (c === ch) break;
+      }
+      prev = ch;
+      continue;
+    }
+
+    out += ch;
+    i++;
+    if (!/\s/.test(ch)) prev = ch;
+  }
+  return out;
+}
+
+/**
+ * HTTP methods exported through a form `parseTopLevelDecls` cannot model: brace
+ * re-exports (`export { GET }`, `export { handler as POST } from "./impl"`) and
+ * star re-exports.
+ *
+ * The zero-handler check in main() only fires when EVERY handler in a file is
+ * unmodeled. A file pairing one parsed handler with one re-exported method keeps
+ * a non-zero count, so that method would ship completely unaudited.
+ */
+export function findUnmodeledMethodExports(src: string): string[] {
+  const found = new Set<string>();
+  const braceRe = /^export\s*\{([^}]*)\}/gm;
+  for (let m = braceRe.exec(src); m !== null; m = braceRe.exec(src)) {
+    for (const clause of m[1].split(",")) {
+      // `handler as GET` exports GET; a bare `GET` exports GET.
+      const exported = clause.split(/\s+as\s+/).pop()?.trim();
+      if (exported && HTTP_METHODS.has(exported)) found.add(exported);
+    }
+  }
+  // `export * from "./impl"` may re-export any method, and which ones is not
+  // knowable without following the import — which this audit deliberately won't.
+  if (/^export\s*\*/m.test(src)) found.add("*");
+  return [...found];
+}
+
+/**
  * Split a route file into top-level declaration regions. Anchors on column-0
  * declaration keywords — the codebase is Prettier-formatted, so nested
  * declarations are always indented and never create false boundaries. Each
@@ -130,7 +252,7 @@ interface TopLevelDecl {
  * the entire wrapped expression — including compositions like
  * `withCronRunRecording("x", withAdmin(...))` whose guard sits deeper in.
  */
-function parseTopLevelDecls(src: string): TopLevelDecl[] {
+export function parseTopLevelDecls(src: string): TopLevelDecl[] {
   const declRe =
     /^(export\s+)?(?:async\s+)?(?:function\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)|(?:class|interface|type|enum)\s+([A-Za-z_$][\w$]*))/gm;
   const marks: Array<{ index: number; name: string; exported: boolean }> = [];
@@ -154,13 +276,27 @@ function parseTopLevelDecls(src: string): TopLevelDecl[] {
  * indirection is intentionally not followed — a guard hidden in an import is
  * exactly the opacity this audit exists to reject.
  */
-function reachesToken(
+/**
+ * True when `text` CALLS `token`, not merely mentions it.
+ *
+ * A guard is an invocation, so requiring the call shape is both more accurate
+ * and the durable defence against prose: "wrap this in withAdmin" cannot satisfy
+ * it even if comment stripping misses the comment entirely. Every guard form in
+ * this codebase is a call — `withAuth(`, `withPermission(x)(`, `requireAuth()`,
+ * `isCronAuthorized(`, `timingSafeEqual(` — so nothing legitimate is lost.
+ */
+export function callsToken(text: string, token: string): boolean {
+  // Route decl names only ever contain [\w$], but escape defensively regardless.
+  return new RegExp(`\\b${token.replace(/[\\$]/g, "\\$&")}\\s*\\(`).test(text);
+}
+
+export function reachesToken(
   decl: TopLevelDecl,
   tokens: string[],
   byName: Map<string, TopLevelDecl[]>,
   visited: Set<string> = new Set([decl.name]),
 ): boolean {
-  if (tokens.some((t) => decl.text.includes(t))) return true;
+  if (tokens.some((t) => callsToken(decl.text, t))) return true;
   for (const [name, candidates] of byName) {
     if (visited.has(name)) continue;
     // Never satisfy a handler's guard by hopping into a SIBLING HTTP-method
@@ -193,7 +329,7 @@ function routePath(file: string): string {
   return `/api/${rel}`;
 }
 
-function isAllowlisted(rel: string): boolean {
+export function isAllowlisted(rel: string): boolean {
   // A subtree match must stop at a path separator. `rel.startsWith("health")`
   // also matched a sibling like `health-internal/…`, silently exempting a brand
   // new route from the CI auth gate — the one thing this script exists to stop.
@@ -222,7 +358,22 @@ function main(): void {
     if (ROUTE_EXCEPTIONS.some((e) => e.route === route)) continue;
 
     audited++;
-    const src = readFileSync(file, "utf8");
+    // Comments are removed before any guard matching: a token named in prose is
+    // not a guard, and region boundaries would otherwise hand one handler's
+    // documentation to the handler declared above it.
+    const src = stripComments(readFileSync(file, "utf8"));
+
+    // Checked even when other handlers parse — a mixed file keeps a non-zero
+    // handler count, so the zero-handler check below would never see it.
+    const unmodeled = findUnmodeledMethodExports(src);
+    if (unmodeled.length > 0) {
+      failures.push({
+        route,
+        file,
+        reason: `HTTP method(s) exported in a style the parser cannot audit: ${unmodeled.join(", ")} — extend the parser or hand-audit`,
+      });
+      continue;
+    }
 
     const decls = parseTopLevelDecls(src);
     const byName = new Map<string, TopLevelDecl[]>();
@@ -302,4 +453,8 @@ function main(): void {
   process.exit(1);
 }
 
-main();
+// Only run the CLI when invoked directly. Tests import the parser helpers above,
+// and an unguarded main() would walk src/app/api and exit the test runner.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
