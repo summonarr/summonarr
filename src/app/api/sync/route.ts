@@ -27,7 +27,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { getArrInstances, getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
@@ -267,9 +267,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     // Rows we didn't win (unpinned, but already notifiedAvailable elsewhere); still flip
     // them AVAILABLE without re-notifying — but only when not already AVAILABLE, so a
     // stable row's availableAt isn't rewritten on every tick.
-    const catchupIds = arrUnpinned.filter((r) => !winnerIds.has(r.id)).map((r) => r.id);
+    // Keep the whole rows, not just ids: an AVAILABLE transition must also wipe
+    // stale deletion votes, and that needs tmdbId/mediaType.
+    const catchupRows = arrUnpinned.filter((r) => !winnerIds.has(r.id));
+    const catchupIds = catchupRows.map((r) => r.id);
     if (catchupIds.length > 0) {
-      await prisma.mediaRequest.updateMany({
+      const flipped = await prisma.mediaRequest.updateMany({
         // Guard on the SOURCE states, not `not: AVAILABLE`. `approved` is a snapshot
         // taken at the top of the run, so an admin who DECLINES one of these rows
         // mid-run would otherwise be matched by `not: AVAILABLE` and have their
@@ -278,6 +281,16 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         where: { id: { in: catchupIds }, notifiedAvailable: true, status: { in: ["PENDING", "APPROVED"] } },
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
+      // An ARR-driven re-add is an AVAILABLE transition like any other, so it must
+      // wipe stale deletion votes — otherwise votes cast against the PREVIOUS
+      // availability period survive the re-add and can re-fire the threshold
+      // against a copy that was already replaced. Gated on the update actually
+      // flipping rows, mirroring the toMarkOnly/alreadyNotified siblings below.
+      if (flipped.count > 0) {
+        void clearDeletionVotesForTmdbs(
+          catchupRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType as "MOVIE" | "TV" })),
+        );
+      }
     }
     marked = arrUnpinned.length;
   }
@@ -867,7 +880,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           // the identical show listing.
           const episodeFilePaths = new Map<string, string>();
           const episodes = await getPlexTVEpisodes(serverUrl, token, librarySelections.get(plexSettingKey(slug, "Libraries")), sections, ratingKeyToTmdb, episodeFilePaths);
-          allPlexEpisodeRows.push(...episodes.map((e) => ({ source: "plex" as const, ...e })));
+          // Element-wise, never `push(...array)`: spreading a library-sized array as
+          // call arguments throws RangeError past V8's argument ceiling, and the
+          // catch below would turn that into `allEpisodesFetched = false`, skipping
+          // the whole-table rewrite on EVERY run for exactly the large libraries
+          // this path exists to serve.
+          for (const e of episodes) allPlexEpisodeRows.push({ source: "plex" as const, ...e });
           // Patch the show file paths the TV fetch skipped (skipShowFilePaths)
           // onto the just-written rows. Runs AFTER this instance's library
           // write by construction (the write completed above), is
@@ -1025,7 +1043,8 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         }
         try {
           const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, librarySelections.get(jellyfinSettingKey(slug, "Libraries")), jfSeriesMap);
-          allEpisodeRows.push(...episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+          // Element-wise — see the Plex arm above.
+          for (const e of episodes) allEpisodeRows.push({ source: "jellyfin" as const, ...e });
         } catch (err) {
           console.error(`[sync] Jellyfin TV episode fetch failed for instance "${slug}":`, err);
           allEpisodesFetched = false;
@@ -1088,6 +1107,38 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     }
   } catch (err) {
     console.error("[sync] De-registered-instance sweep failed:", err);
+  }
+
+  // The same sweep for *arr instances. /api/admin/arr-instances purges on
+  // removal, but that cleanup is diff-driven — it can only recognise a slug as
+  // "just removed" in the one request where the registry stops listing it, so a
+  // failure partway through that request orphans the rows permanently, with no
+  // later request able to see them. These tables feed the availability union
+  // unscoped exactly like the library tables above, so an orphan makes its
+  // titles read "in *arr" forever.
+  //
+  // getArrInstances is the REGISTERED reader (and synthesizes the default ""
+  // slug), never getSyncableArrInstances — an instance that is registered but
+  // temporarily unconfigured must keep its rows, same rationale as above.
+  try {
+    const [registeredRadarr, registeredSonarr] = await Promise.all([
+      getArrInstances("radarr"),
+      getArrInstances("sonarr"),
+    ]);
+    const radarrSlugs = registeredRadarr.map((i) => i.slug);
+    const sonarrSlugs = registeredSonarr.map((i) => i.slug);
+    const swept = await Promise.all([
+      prisma.radarrWantedItem.deleteMany({ where: { arrInstance: { notIn: radarrSlugs } } }),
+      prisma.radarrAvailableItem.deleteMany({ where: { arrInstance: { notIn: radarrSlugs } } }),
+      prisma.sonarrWantedItem.deleteMany({ where: { arrInstance: { notIn: sonarrSlugs } } }),
+      prisma.sonarrAvailableItem.deleteMany({ where: { arrInstance: { notIn: sonarrSlugs } } }),
+    ]);
+    const sweptTotal = swept.reduce((n, r) => n + r.count, 0);
+    if (sweptTotal > 0) {
+      console.warn(`[sync] Swept ${sweptTotal} wanted/available row(s) for de-registered *arr instances`);
+    }
+  } catch (err) {
+    console.error("[sync] De-registered *arr sweep failed:", err);
   }
 
   // Demote AVAILABLE requests that have dropped out of *both* the *arr caches and the

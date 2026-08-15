@@ -173,10 +173,19 @@ export async function attachRatingsUnified(
   // MDBList *value* at all (a fresh MDBList _notFound sentinel doesn't block it —
   // such an item's ratings are the OMDB row's).
   const staleMdblist = items.filter((item) => warm.staleKeys.has(mdblistKey(item)));
-  const staleOmdb = items.filter((item) =>
-    warm.staleKeys.has(omdbKey(item))
-    && !warm.staleKeys.has(mdblistKey(item))
-    && !warm.byMdblist.has(mdblistKey(item)));
+  const staleOmdb = items.filter((item) => {
+    if (!warm.staleKeys.has(omdbKey(item))) return false;
+    if (warm.staleKeys.has(mdblistKey(item))) return false; // the MDBList batch revalidates it
+    // Gate on a USABLE MDBList row, not merely a present one. readCachedRatings
+    // admits any non-_notFound row, including a "found but entirely unscored"
+    // one — and MDBList can keep returning that fresh forever for a title it has
+    // indexed with no critic scores. Bare presence therefore trapped the item:
+    // its served ratings come from the OMDB row (mergeWarm falls through), while
+    // the refresh that would revalidate them was skipped indefinitely. Every
+    // other admission decision in this file already gates on hasAnyMdblistRating.
+    const mdb = warm.byMdblist.get(mdblistKey(item));
+    return !(mdb && hasAnyMdblistRating(mdb));
+  });
 
   if (!blocking) {
     // Only MDBLIST state gates admission here — see the blocking path's note

@@ -1326,6 +1326,15 @@ async function buildProfileBody(
   const remoteCfs = shared && !cascadeApplied
     ? shared.remoteCfs
     : await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
+  // Write the refetch back into the shared batch state. A cascade CREATES custom
+  // formats upstream, and the DB then records them as applied — so the NEXT
+  // profile in the batch computes cascadeApplied=false and takes the shared list,
+  // which without this line is the pre-cascade snapshot missing those very CFs.
+  // Their formatItems entries would be absent and Radarr/Sonarr would read the
+  // scores as unset, silently dropping TRaSH's (often large negative) scores for
+  // every profile after the first cascade. Costs no extra request — the refetch
+  // above already happened.
+  if (shared && cascadeApplied) shared.remoteCfs = remoteCfs;
 
   // Some CFs in Arr embed a trash_id field in their spec metadata — use it to map remote CFs we didn't apply ourselves
   for (const cf of remoteCfs) {

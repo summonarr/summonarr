@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import {
   ArrResponseError,
   arrErrorMessage,
+  pickSeriesByTmdbId,
   resolveSingleTvdbToTmdb,
 } from "../src/lib/arr.ts";
 
@@ -241,4 +242,66 @@ test("isSeriesWantedInSonarr tolerates a series row with no statistics block", (
   const body = fn.slice(0, fn.indexOf("\n}\n"));
   assert.match(body, /match\.statistics\?\./, "statistics must be optional-chained");
   assert.doesNotMatch(body, /match\.statistics\.[a-z]/i, "no bare statistics dereference may remain");
+});
+
+// ---------------------------------------------------------------------------
+// pickSeriesByTmdbId — the wrong-series guard shared by every Sonarr lookup.
+//
+// Sonarr degrades an unrecognized `term=tmdb:<id>` into a fuzzy SkyHook title
+// search, so a non-empty response can be entirely unrelated shows. addSeriesToSonarr
+// has guarded this since the wrong-series incident; the read paths did not, and
+// their failures are quieter — a wrong tvdbId reaches queue/library membership
+// checks, gates the webhook's AVAILABLE transition, and via resolveTvdbIdFromTmdbId
+// is PERSISTED onto Issue.tvdbId, where nothing ever re-resolves it.
+// ---------------------------------------------------------------------------
+
+test("pickSeriesByTmdbId prefers the row whose tmdbId matches, whatever its position", () => {
+  const results = [
+    { tmdbId: 999, tvdbId: 111 },
+    { tmdbId: 1399, tvdbId: 121361 },
+    { tmdbId: 555, tvdbId: 222 },
+  ];
+  assert.equal(pickSeriesByTmdbId(results, 1399)?.tvdbId, 121361);
+});
+
+test("PIN: a multi-row fuzzy result with NO tmdbId match resolves to null, never row 0", () => {
+  // The wrong-series hazard itself: SkyHook returned unrelated shows, none of
+  // which is the requested title. Returning results[0] here is what put a wrong
+  // tvdbId onto Issue rows and into queue membership checks.
+  const skyhookMiss = [
+    { tmdbId: 4321, tvdbId: 111 },
+    { tmdbId: 8765, tvdbId: 222 },
+  ];
+  assert.equal(pickSeriesByTmdbId(skyhookMiss, 1399), null);
+});
+
+test("pickSeriesByTmdbId accepts index 0 only when the lookup returned exactly one candidate", () => {
+  // A recognized id lookup yields exactly one row, and SkyHook rows may carry no
+  // tmdbId at all — so a lone result is accepted even unmatched.
+  type Row = { tmdbId?: number; tvdbId: number };
+  const lone: Row[] = [{ tvdbId: 121361 }];
+  assert.equal(pickSeriesByTmdbId(lone, 1399)?.tvdbId, 121361);
+  // …but two unmatched rows are ambiguous, so neither is trusted.
+  const ambiguous: Row[] = [{ tvdbId: 111 }, { tvdbId: 222 }];
+  assert.equal(pickSeriesByTmdbId(ambiguous, 1399), null);
+});
+
+test("pickSeriesByTmdbId returns null for an empty result set", () => {
+  assert.equal(pickSeriesByTmdbId([], 1399), null);
+});
+
+test("every Sonarr series/lookup caller routes through the shared picker", () => {
+  // Source-text pin: these functions are DB/network-bound so they cannot be
+  // invoked here, but a new call site that hand-rolls `results[0]` again would
+  // silently reintroduce the wrong-series bug.
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  // Interpolated form only — the helper's own doc comment mentions the path too.
+  const lookupCalls = source.match(/series\/lookup\?term=tmdb:\$\{/g) ?? [];
+  assert.equal(
+    lookupCalls.length,
+    2,
+    "expected exactly two lookup URLs: the shared helper and addSeriesToSonarr's Promise.all fetch",
+  );
+  assert.doesNotMatch(source, /lookup\[0\]/, "no direct lookup[0] indexing may remain");
+  assert.doesNotMatch(source, /results\[0\]\?\.(tvdbId|firstAired)/, "no direct results[0] field access may remain");
 });

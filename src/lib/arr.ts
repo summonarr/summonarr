@@ -681,14 +681,39 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
   } catch { return null; }
 }
 
+/**
+ * Resolve a Sonarr `/series/lookup?term=tmdb:<id>` result to the RIGHT series.
+ *
+ * Sonarr degrades an unrecognized tmdb id into a fuzzy SkyHook title search, so a
+ * non-empty response can be entirely unrelated shows — `results[0]` is then a
+ * different series than the caller asked about. `addSeriesToSonarr` has guarded
+ * this since the wrong-series incident; these read paths did not, and their
+ * mistakes are quieter: a wrong tvdbId reaches queue/library membership checks,
+ * gates the webhook's AVAILABLE transition, and (via resolveTvdbIdFromTmdbId) is
+ * PERSISTED onto Issue.tvdbId, where every later "Search"/"Grab release" acts on
+ * the wrong show and nothing ever re-resolves it.
+ *
+ * Prefer the row whose tmdbId matches; accept index 0 only when the lookup
+ * returned exactly one candidate, which is what a recognized id lookup yields.
+ * Returns null rather than an unverified guess.
+ */
+export function pickSeriesByTmdbId<T extends { tmdbId?: number }>(results: readonly T[], tmdbId: number): T | null {
+  return results.find((r) => r.tmdbId === tmdbId) ?? (results.length === 1 ? (results[0] ?? null) : null);
+}
+
+async function lookupSeriesByTmdbId<T extends { tmdbId?: number }>(
+  cfg: ArrCfg,
+  tmdbId: number,
+): Promise<T | null> {
+  return pickSeriesByTmdbId(await arrFetch<T[]>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`), tmdbId);
+}
+
 export async function getSeriesFirstAired(tmdbId: number, variant: ArrVariant = ""): Promise<string | null> {
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return null;
   try {
-    const results = await arrFetch<{ firstAired?: string }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    return results[0]?.firstAired ?? null;
+    const series = await lookupSeriesByTmdbId<{ tmdbId?: number; firstAired?: string }>(cfg, tmdbId);
+    return series?.firstAired ?? null;
   } catch { return null; }
 }
 
@@ -709,11 +734,9 @@ export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
+    const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
+    if (!series) return false;
+    const { tvdbId } = series;
     // Interpolated into the query — hold the never-schema-checked lookup value
     // to the same positive-integer contract isSeriesDownloadedInSonarr applies.
     if (!Number.isInteger(tvdbId) || tvdbId <= 0) return false;
@@ -789,15 +812,13 @@ export async function isSeriesDownloadedInSonarr(
     const claimedTmdbId =
       Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0 ? (ids.tmdbId as number) : null;
     if (claimedTmdbId !== null) {
-      const lookup = await arrFetch<{ tvdbId: number }[]>(
-        cfg, `/api/v3/series/lookup?term=tmdb:${claimedTmdbId}`,
-      );
+      const looked = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, claimedTmdbId);
       // Sonarr's lookup response is typed but never schema-checked, so hold it to the
       // same positive-integer contract as the payload ids above. Unguarded, a
       // malformed upstream value could become `tvdbId` below, where the `===` against
       // the library rows would silently never match — reporting "not downloaded" for a
       // series Sonarr actually has, rather than the honest `null` for unverifiable.
-      const rawResolved = lookup.length ? lookup[0].tvdbId : null;
+      const rawResolved = looked ? looked.tvdbId : null;
       const resolved =
         Number.isInteger(rawResolved) && (rawResolved as number) > 0 ? (rawResolved as number) : null;
       if (tvdbId === null) {
@@ -980,11 +1001,9 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return false;
   try {
-    const lookup = await arrFetch<{ tvdbId: number }[]>(
-      cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`
-    );
-    if (!lookup.length) return false;
-    const { tvdbId } = lookup[0];
+    const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
+    if (!series) return false;
+    const { tvdbId } = series;
     const queueSet = await getSonarrQueueSet(cfg);
     if (queueSet === null) return null;
     return queueSet.has(tvdbId);
@@ -1106,10 +1125,9 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   // Same fuzzy-title-search hazard as the Radarr add: an unmapped tmdb id makes
   // Sonarr fall back to a SkyHook title search, so results[0] can be an unrelated
   // show — which would be added to the library AND returned as this request's
-  // tvdbId, so the webhook later marks the wrong download AVAILABLE. Prefer the
-  // row whose tmdbId matches; accept [0] only when the lookup returned exactly
-  // one candidate (what a recognized id lookup always yields).
-  const series = results.find((s) => s.tmdbId === tmdbId) ?? (results.length === 1 ? results[0] : undefined);
+  // tvdbId, so the webhook later marks the wrong download AVAILABLE. Shared with
+  // every read path via pickSeriesByTmdbId so the two cannot drift apart.
+  const series = pickSeriesByTmdbId(results, tmdbId);
   if (!series) throw new Error(`Sonarr: lookup for tmdbId ${tmdbId} returned no matching series`);
   // firstAired is authoritative; without it, Sonarr's own status ("upcoming"
   // vs continuing/ended) beats the year heuristic, which read every
@@ -1256,8 +1274,10 @@ export async function resolveTvdbIdFromTmdbId(tmdbId: number, variant: ArrVarian
     const library = await arrFetch<{ tvdbId: number; tmdbId?: number }[]>(cfg, "/api/v3/series");
     const libMatch = library.find((s) => s.tmdbId === tmdbId);
     if (libMatch) return libMatch.tvdbId;
-    const results = await arrFetch<{ tvdbId: number }[]>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`);
-    return results[0]?.tvdbId ?? null;
+    // This value is PERSISTED onto Issue.tvdbId and never re-resolved, so an
+    // unverified pick here misroutes every later search/grab for that issue.
+    const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
+    return series?.tvdbId ?? null;
   } catch {
     return null;
   }

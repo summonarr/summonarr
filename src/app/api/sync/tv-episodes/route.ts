@@ -61,7 +61,11 @@ async function syncTvEpisodes() {
       const selected = await readSelection(plexSettingKey(inst.slug, "Libraries"));
       try {
         const sections = await getPlexLibrarySections(serverUrl, token);
-        episodes.push(...(await getPlexTVEpisodes(serverUrl, token, selected, sections)));
+        // Element-wise, never `push(...array)`: this accumulator unions every
+        // configured instance's episodes, so spreading it as call arguments hits
+        // V8's argument ceiling on a large library and the catch below downgrades
+        // that to `complete = false`, skipping the rewrite entirely.
+        for (const e of await getPlexTVEpisodes(serverUrl, token, selected, sections)) episodes.push(e);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[sync/tv-episodes] Plex episode sync failed for instance "${inst.slug}":`, msg);
@@ -95,7 +99,8 @@ async function syncTvEpisodes() {
       const apiKey = cfg.apiKey;
       const selected = await readSelection(jellyfinSettingKey(inst.slug, "Libraries"));
       try {
-        episodes.push(...(await getJellyfinTVEpisodes(baseUrl, apiKey, selected)));
+        // Element-wise — see the Plex arm above.
+        for (const e of await getJellyfinTVEpisodes(baseUrl, apiKey, selected)) episodes.push(e);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[sync/tv-episodes] Jellyfin episode sync failed for instance "${inst.slug}":`, msg);

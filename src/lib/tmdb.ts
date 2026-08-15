@@ -536,7 +536,7 @@ export async function searchMulti(query: string): Promise<TmdbMedia[]> {
     const data = await tmdbFetch<PagedResponse<RawMovie & RawTV & { media_type: string }>>(
       "/search/multi", { query: q, include_adult: "false" }
     );
-    const results = data.results
+    const results = (data.results ?? [])
       .filter((r) => r.media_type === "movie" || r.media_type === "tv")
       .filter((r) => r.id != null && r.id > 0)
       .map((r) => r.media_type === "movie" ? normalizeMovie(r as RawMovie) : normalizeTV(r as RawTV));
@@ -983,7 +983,7 @@ export async function getWatchProviders(type: "movie" | "tv", region = "US"): Pr
     `/watch/providers/${type}`,
     { watch_region: canonRegion },
   );
-  const providers = r.results
+  const providers = (r.results ?? [])
     .filter((p) => p.logo_path)
     .sort((a, b) => a.provider_name.localeCompare(b.provider_name));
 
@@ -1148,7 +1148,7 @@ export async function getPopularMoviesPage(page: number): Promise<PagedResult> {
 
   const r = await tmdbFetch<PagedResponse<RawMovie>>("/movie/popular", { page: String(p) });
   const result: PagedResult = {
-    items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
+    items: (r.results ?? []).filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
     totalPages: Math.min(r.total_pages, 500),
   };
   // Don't cache an empty page — a transiently-empty/erroring upstream response
@@ -1167,7 +1167,7 @@ export async function getPopularTVPage(page: number): Promise<PagedResult> {
 
   const r = await tmdbFetch<PagedResponse<RawTV>>("/tv/popular", { page: String(p) });
   const result: PagedResult = {
-    items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeTV),
+    items: (r.results ?? []).filter((item) => item.id != null && item.id > 0).map(normalizeTV),
     totalPages: Math.min(r.total_pages, 500),
   };
   if (result.items.length > 0) await setCache(key, result, TTL.DISCOVER);
@@ -1263,7 +1263,7 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
 
   const r = await tmdbFetch<PagedResponse<RawMovie>>("/discover/movie", params);
   const result: PagedResult = {
-    items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
+    items: (r.results ?? []).filter((item) => item.id != null && item.id > 0).map(normalizeMovie),
     totalPages: Math.min(r.total_pages, 500),
   };
   // Don't cache an empty page — see getPopularMoviesPage.
@@ -1298,7 +1298,7 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
 
   const r = await tmdbFetch<PagedResponse<RawTV>>("/discover/tv", params);
   const result: PagedResult = {
-    items: r.results.filter((item) => item.id != null && item.id > 0).map(normalizeTV),
+    items: (r.results ?? []).filter((item) => item.id != null && item.id > 0).map(normalizeTV),
     totalPages: Math.min(r.total_pages, 500),
   };
   // Don't cache an empty page — see getPopularMoviesPage.
