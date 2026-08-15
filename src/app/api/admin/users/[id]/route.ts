@@ -341,7 +341,28 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
   }
 
-  if ((body.role === "USER" || body.role === "ISSUE_ADMIN") && target.role === "ADMIN") {
+  // Re-resolve the role INSIDE lock 42 rather than routing on `target.role`, an
+  // unlocked read taken several round-trips earlier. The CAS below is race-safe,
+  // but the DECISION to enter it was not: a promotion landing in that window made
+  // a demotion of the now-last admin fall into the bare-update else branch, which
+  // has no lock, no count check and no re-read — dropping the instance to zero
+  // admins. The DELETE handler already re-reads under the same lock for its
+  // analogous window; this mirrors it.
+  const demoting = body.role === "USER" || body.role === "ISSUE_ADMIN";
+  const freshRole = demoting
+    ? await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+        const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
+        return fresh?.role ?? target.role;
+      })
+    : target.role;
+  // A target that became ADMIN since the first read stays gated on caller
+  // authority — otherwise winning that race would also slip past the check above.
+  if (!callerIsAdmin && freshRole === "ADMIN") {
+    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+  }
+
+  if (demoting && freshRole === "ADMIN") {
     // Advisory lock 42 + atomic row count ensures we never demote the last admin, even under concurrent requests
     const now = new Date().toISOString();
     const newRole = body.role;

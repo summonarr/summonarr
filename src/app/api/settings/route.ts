@@ -553,11 +553,25 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // while the feature stayed on would silently restore the IP-unrestricted state this
   // guard exists to prevent. Reject whenever the resulting state is feature-on +
   // empty-allowlist, regardless of which of the two this PATCH is touching.
+  // An empty string is "unchanged", not "off". enableMachineSession is NOT in
+  // CLEARABLE_KEYS, so an empty value is dropped by the write filter and the
+  // persisted row survives — but the guard below read `"" === "true"` as false and
+  // concluded the feature was off. A PATCH sending an empty toggle alongside an
+  // empty allowlist therefore passed the guard, cleared the allowlist (which IS
+  // clearable), and left the feature enabled with no IP restriction: exactly the
+  // state this guard exists to prevent. Treat empty as absent so the effective
+  // state comes from the DB row, matching what the write layer will actually leave
+  // behind. The allowlist half deliberately keeps its own handling — there an
+  // empty string IS a real clearing write.
+  const enableMachineSessionValue =
+    typeof body.enableMachineSession === "string" && body.enableMachineSession !== ""
+      ? body.enableMachineSession
+      : undefined;
   const touchesMachineSession =
-    body.enableMachineSession !== undefined || body.machineSessionAllowedIps !== undefined;
+    enableMachineSessionValue !== undefined || body.machineSessionAllowedIps !== undefined;
   if (touchesMachineSession) {
     const [enableRow, allowRow] = await Promise.all([
-      body.enableMachineSession === undefined
+      enableMachineSessionValue === undefined
         ? prisma.setting.findUnique({ where: { key: "enableMachineSession" } })
         : Promise.resolve(null),
       body.machineSessionAllowedIps === undefined
@@ -565,8 +579,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
         : Promise.resolve(null),
     ]);
     const effectiveEnabled =
-      body.enableMachineSession !== undefined
-        ? body.enableMachineSession === "true"
+      enableMachineSessionValue !== undefined
+        ? enableMachineSessionValue === "true"
         : enableRow?.value === "true";
     const effectiveAllowlistNonEmpty =
       typeof body.machineSessionAllowedIps === "string"
@@ -826,6 +840,11 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       // Best-effort: surface the test failure even when rollback didn't apply
       // cleanly. The admin sees the 422 either way and can re-save manually.
     }
+    // Release the cooldown these keys armed before the test ran. Their values
+    // were just rolled back, so nothing durable changed — but the stamp survived
+    // and 429'd the admin's corrected re-save for the next 10s, which is exactly
+    // when they are most likely to retry.
+    for (const [key] of entries) lastKeyWriteAt.delete(key);
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
     // Same for the Discord public key and the session-duration TTLs: both memos were

@@ -1819,12 +1819,12 @@ test("first-admin promotion: fires for credentials pre-setup, is refused for OID
 
 // ── revocation orchestration ────────────────────────────────────────────────
 
-test("revokeSessionById: deletes the row, bumps the cutoff FORWARD-ONLY to the row's createdAt, and marks in-memory only AFTER the commit", async () => {
+test("revokeSessionById: deletes the row and marks in-memory only AFTER the commit — WITHOUT touching the per-user cutoff", async () => {
   const T1 = new Date("2026-07-01T00:00:00.000Z");
   const T2 = new Date("2026-07-02T00:00:00.000Z");
 
-  // (a) Normal revoke: cutoff lands on the revoked row's createdAt (so newer
-  // sessions with iat > createdAt survive), and the ledger mark follows.
+  // (a) Normal revoke: the row is deleted and the ledger mark follows. The
+  // per-user cutoff is deliberately NOT stamped — see (b).
   seedUser({ id: "u-r1", email: "r1@example.com" });
   authSessions.set("sess-r1", {
     sessionId: "sess-r1", userId: "u-r1", deviceType: "desktop", deviceLabel: null,
@@ -1832,18 +1832,26 @@ test("revokeSessionById: deletes the row, bumps the cutoff FORWARD-ONLY to the r
   });
   await revokeSessionById("sess-r1");
   assert.equal(authSessions.has("sess-r1"), false);
-  assert.equal(userById("u-r1").sessionsRevokedAt?.getTime(), T1.getTime());
+  assert.equal(userById("u-r1").sessionsRevokedAt, null, "revoking ONE device must not stamp a per-user cutoff");
   assert.equal(shouldForceDbCheck("anyone", "sess-r1"), true, "the revoked session must be ledger-marked");
 
-  // (b) Forward-only: a LATER cutoff from a prior revoke-all must not be
-  // weakened back to this row's older createdAt.
+  // (b) PIN: an existing cutoff is left exactly as it was.
+  //
+  // The cutoff is `iat <= sessionsRevokedAt` and it is per-USER, so anchoring it
+  // to one session's createdAt also killed every session minted earlier. Cookie
+  // sessions hid that — they are re-signed constantly so their iat is always
+  // newer — but a bearer/native token keeps its sign-in iat for its whole ~1-year
+  // life, so revoking a laptop signed out every iOS device signed in before it.
+  // The bump bought nothing either: the cutoff is only read on the SLOW path,
+  // where the AuthSession row-presence check has already rejected the deleted
+  // session, and on the FAST path it is never reached at all.
   seedUser({ id: "u-r2", email: "r2@example.com", sessionsRevokedAt: T2 });
   authSessions.set("sess-r2", {
     sessionId: "sess-r2", userId: "u-r2", deviceType: "desktop", deviceLabel: null,
     ipAddress: null, expiresAt: new Date(Date.now() + 3_600_000), createdAt: T1, lastSeenAt: T1,
   });
   await revokeSessionById("sess-r2");
-  assert.equal(userById("u-r2").sessionsRevokedAt?.getTime(), T2.getTime(), "the cutoff must never decrease");
+  assert.equal(userById("u-r2").sessionsRevokedAt?.getTime(), T2.getTime(), "a prior revoke-all cutoff is untouched");
 
   // (c) Guardrail 27: a failed transaction PROPAGATES and leaves NO in-memory
   // mark — a phantom mark on a still-live row would lie until restart.
