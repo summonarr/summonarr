@@ -114,6 +114,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
   const [copiedHook, setCopiedHook] = useState<number | null>(null);
+  // Index of the draft whose Remove is awaiting confirmation. Indexes shift when
+  // the list changes, so every path that adds/removes/reloads drafts clears it.
+  const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
   // slug → its live root-folder/quality-profile options ("loading"/"error" while pending/failed).
   const [optionsBySlug, setOptionsBySlug] = useState<Record<string, ArrOptions | "loading" | "error">>({});
 
@@ -157,6 +160,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
       setDrafts(named.map(toDraft));
       named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
       setLoadFailed(false);
+      setConfirmRemove(null);
     } catch {
       // Leaving `drafts` empty here used to be silent — and an empty draft list
       // saves as "remove every named instance", which deletes their (encrypted,
@@ -189,11 +193,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
         hasApiKey: false, hasWebhookSecret: false, isNew: true,
       },
     ]);
+    setConfirmRemove(null);
     setStatus("idle");
   };
 
   const removeInstance = (idx: number) => {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
+    setConfirmRemove(null);
     setStatus("idle");
   };
 
@@ -254,6 +260,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
         // Now that connections are persisted, (re)load each configured instance's
         // root folders + quality profiles so the dropdowns populate.
         named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
+        setConfirmRemove(null);
         setStatus("ok");
         setMessage("Saved");
       } else {
@@ -495,10 +502,52 @@ function ServiceInstances({ service }: { service: ArrService }) {
               {test?.version && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />Connected · v{test.version}</span>}
               {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
               {!test && <span />}
-              <button type="button" onClick={() => removeInstance(idx)} className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400">
-                <Trash2 className="w-3.5 h-3.5" />Remove
-              </button>
+              {confirmRemove !== idx && (
+                <button
+                  type="button"
+                  // A draft that has never been saved has nothing server-side to
+                  // destroy, so discard it straight away and only confirm on a
+                  // persisted instance.
+                  onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
+                  className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />Remove
+                </button>
+              )}
             </div>
+
+            {/* Removal lands on Save, not on the click, because the server
+                reconciles the whole instance list. Name what actually goes:
+                the API key and webhook secret are encrypted and cannot be
+                recovered, while requests already routed to this instance are
+                left alone. */}
+            {confirmRemove === idx && (
+              <div className="rounded-md border border-red-900/60 bg-red-950/30 p-3 space-y-2">
+                <p className="text-xs text-red-200">
+                  Remove <strong>{d.name.trim() || d.slug || "this instance"}</strong>? On <strong>Save &amp; Test</strong> this
+                  deletes its stored URL, API key and webhook secret (encrypted — not recoverable, so you would need to
+                  re-copy the key from {label} and re-add the webhook), and clears its cached wanted/available
+                  rows. <strong>Existing requests are preserved.</strong>
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => removeInstance(idx)}
+                    autoFocus
+                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />Remove instance
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmRemove(null)}
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         );
       })}

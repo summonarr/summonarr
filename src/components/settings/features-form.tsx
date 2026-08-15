@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import {
@@ -21,29 +21,41 @@ interface FeaturesFormProps {
   }[];
 }
 
-// Trailing-edge coalescing pattern for rapid toggling.
+// Trailing-edge coalescing pattern for rapid toggling, batched ACROSS keys.
 //
 // Why: a naïve optimistic-update + rollback approach races when a user
 // double-clicks. Two overlapping PATCHes can land out of order, and a
 // failure on the first rolls back state the user has already re-flipped.
 //
-// How: per key we track three pieces of ref-state:
+// Why batched: /api/settings is rate limited to 10 PATCHes per minute per
+// admin, shared across every settings form. One request per flip meant an
+// admin working through the ~24 flags here started getting 429s partway,
+// with only a small red icon to explain it. The route accepts an arbitrary
+// map of allowed keys, so every pending flip goes out in ONE request —
+// matching how the multi-field settings forms (e.g. RateLimitForm) save.
+//
+// How: per key we track the user's latest intent; a short debounce lets a
+// burst of flips collect into a single body.
 //   - savedState    — last value the server acknowledged
 //   - pendingTarget — user's latest intent, only present when it differs
 //                     from savedState and hasn't been acked yet
-//   - inFlight      — set of keys whose sync loop is currently running
+//   - inFlight      — whether a flush is currently running (one at a time)
 //
-// toggle() only updates local UI + pendingTarget and fires sync(). sync()
-// is idempotent: if already running for this key, the existing loop will
-// re-read pendingTarget after the in-flight PATCH resolves and fire a
-// follow-up request only if the intent still differs from saved.
+// toggle() only updates local UI + pendingTarget and schedules a flush.
+// flush() loops: after each batch settles it re-reads pendingTarget, so a
+// key re-flipped mid-request is picked up by the next batch rather than
+// being clobbered by a stale response.
+const FLUSH_DELAY_MS = 400;
+
 export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   const [flags, setFlags] = useState<FeatureFlags>(initialFlags);
   const [statusByKey, setStatusByKey] = useState<Record<string, SaveStatus>>({});
+  const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
   const savedState = useRef<FeatureFlags>({ ...initialFlags });
   const pendingTarget = useRef<Map<string, boolean>>(new Map());
-  const inFlight = useRef<Set<string>>(new Set());
+  const inFlight = useRef(false);
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   function scheduleStatusClear(key: string) {
@@ -62,73 +74,114 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     statusTimers.current.set(key, timer);
   }
 
-  async function sync(key: string) {
-    if (inFlight.current.has(key)) return;
-    inFlight.current.add(key);
+  function bodyFor(batch: [string, boolean][]): Record<string, string> {
+    const body: Record<string, string> = {};
+    for (const [key, target] of batch) body[key] = target ? "true" : "false";
+    return body;
+  }
 
-    // Cancel any pending status clear — a new sync cycle is starting
-    const existingTimer = statusTimers.current.get(key);
-    if (existingTimer) {
-      clearTimeout(existingTimer);
-      statusTimers.current.delete(key);
-    }
+  async function flush() {
+    // One flush at a time. A toggle arriving mid-flush lands in pendingTarget
+    // and is picked up by the loop below, or by the reschedule in `finally`.
+    if (inFlight.current) return;
+    inFlight.current = true;
 
     try {
-      // Loop until pendingTarget has caught up to savedState (or we give up).
-      // The user can click again at any time; we'll see the new pendingTarget
-      // on the next iteration.
       while (true) {
-        const target = pendingTarget.current.get(key);
-        if (target === undefined) return;
-        if (target === savedState.current[key]) {
-          // Already where the user wants it — nothing to send
-          pendingTarget.current.delete(key);
-          setStatusByKey((prev) => ({ ...prev, [key]: "ok" }));
-          return;
+        // A key toggled back to the value the server already holds needs no
+        // request — settle it locally.
+        for (const [key, target] of [...pendingTarget.current]) {
+          if (target === savedState.current[key]) {
+            pendingTarget.current.delete(key);
+            setStatusByKey((prev) => ({ ...prev, [key]: "ok" }));
+            scheduleStatusClear(key);
+          }
         }
 
-        setStatusByKey((prev) => ({ ...prev, [key]: "saving" }));
+        const batch = [...pendingTarget.current];
+        if (batch.length === 0) return;
+
+        for (const [key] of batch) {
+          const existing = statusTimers.current.get(key);
+          if (existing) {
+            clearTimeout(existing);
+            statusTimers.current.delete(key);
+          }
+        }
+        setStatusByKey((prev) => {
+          const next = { ...prev };
+          for (const [key] of batch) next[key] = "saving";
+          return next;
+        });
 
         let success = false;
+        let message = "";
         try {
           const res = await fetch(withBasePath("/api/settings"), {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ [key]: target ? "true" : "false" }),
+            body: JSON.stringify(bodyFor(batch)),
           });
-          const data: { ok: boolean; error?: string } = await res.json().catch(() => ({ ok: false }));
-          success = res.ok && data.ok;
+          const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
+          success = res.ok && data.ok === true;
+          if (!success) message = data.error ?? `Save failed (${res.status})`;
         } catch {
           success = false;
+          message = "Network error — the change was not saved";
         }
 
-        if (success) {
-          savedState.current[key] = target;
-          if (pendingTarget.current.get(key) === target) {
-            pendingTarget.current.delete(key);
-            setStatusByKey((prev) => ({ ...prev, [key]: "ok" }));
-            return;
-          }
-          // User changed their mind mid-flight — loop with the new target
-          continue;
-        }
-
-        // Failure path — only roll back if the user's intent still matches
-        // what we just tried. If they've since clicked again, honor the new
-        // target on the next iteration.
-        if (pendingTarget.current.get(key) === target) {
-          setFlags((prev) => ({ ...prev, [key]: savedState.current[key] ?? false }));
+        for (const [key, target] of batch) {
+          if (success) savedState.current[key] = target;
+          // Only settle a key whose intent is still what we just sent. If the
+          // user re-flipped it mid-request, the next loop iteration sends the
+          // newer value rather than a stale response overwriting it.
+          if (pendingTarget.current.get(key) !== target) continue;
           pendingTarget.current.delete(key);
-          setStatusByKey((prev) => ({ ...prev, [key]: "error" }));
-          return;
+          if (!success) setFlags((prev) => ({ ...prev, [key]: savedState.current[key] ?? false }));
+          setStatusByKey((prev) => ({ ...prev, [key]: success ? "ok" : "error" }));
+          setErrorByKey((prev) => {
+            const next = { ...prev };
+            if (success) delete next[key];
+            else next[key] = message;
+            return next;
+          });
+          scheduleStatusClear(key);
         }
-        // else: loop and try the new target
       }
     } finally {
-      inFlight.current.delete(key);
-      scheduleStatusClear(key);
+      inFlight.current = false;
+      // Closes the race where a toggle arrives after the final loop check but
+      // before the flag clears: that scheduled flush would have returned early.
+      if (pendingTarget.current.size > 0) scheduleFlush();
     }
   }
+
+  function scheduleFlush() {
+    if (flushTimer.current) clearTimeout(flushTimer.current);
+    flushTimer.current = setTimeout(() => {
+      flushTimer.current = null;
+      void flush();
+    }, FLUSH_DELAY_MS);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (flushTimer.current) clearTimeout(flushTimer.current);
+      for (const timer of statusTimers.current.values()) clearTimeout(timer);
+      const pending = [...pendingTarget.current];
+      if (pending.length === 0) return;
+      // Each toggle used to PATCH immediately, so navigating away right after a
+      // click still saved it. The debounce would drop that; `keepalive` lets the
+      // request outlive the unmount so batching does not cost a lost flip.
+      void fetch(withBasePath("/api/settings"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(bodyFor(pending)),
+        keepalive: true,
+      }).catch(() => {});
+    };
+    // Runs once: the refs it reads are stable and always hold the latest intent.
+  }, []);
 
   function toggle(key: string) {
     // Next value is derived from the latest intent, not from React state —
@@ -140,7 +193,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
 
     pendingTarget.current.set(key, next);
     setFlags((prev) => ({ ...prev, [key]: next }));
-    void sync(key);
+    scheduleFlush();
   }
 
   return (
@@ -170,7 +223,12 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
                     {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
                     {status === "ok" && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
-                    {status === "error" && <XCircle className="w-3.5 h-3.5 text-red-400" />}
+                    {status === "error" && (
+                      <XCircle
+                        className="w-3.5 h-3.5 text-red-400"
+                        aria-label={errorByKey[feature.key] ?? "Save failed"}
+                      />
+                    )}
                     <button
                       type="button"
                       role="switch"

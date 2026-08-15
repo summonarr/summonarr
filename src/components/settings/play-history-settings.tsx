@@ -171,13 +171,18 @@ export function PlayHistorySettingsForm({
             <Input
               id="polling-interval"
               type="number"
-              min={10}
+              // 5 is the shipped default AND the floor the entrypoint clamps to
+              // (`_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5`). A min of 10
+              // rejected the value this field is seeded with on any install that
+              // never saved it, and native validation then blocked the whole
+              // form — no play-history setting could be saved at all.
+              min={5}
               max={600}
               value={pollingInterval}
               onChange={(e) => { setPollingInterval(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">How often to check for active sessions (default: 5s). Requires container restart via PLAY_HISTORY_SYNC_INTERVAL env var.</p>
+            <p className="text-xs text-zinc-500">How often to check for active sessions (default: 5s). The live cadence comes from the PLAY_HISTORY_SYNC_INTERVAL environment variable and applies on container restart — saving here records the value but does not change it.</p>
           </div>
 
           <div className="space-y-1.5">
