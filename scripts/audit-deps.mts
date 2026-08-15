@@ -29,6 +29,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 type Severity = "info" | "low" | "moderate" | "high" | "critical";
 
@@ -167,21 +168,80 @@ function loadDirectDependencies(cwd: string): Set<string> {
   return direct;
 }
 
-function runJson(command: string, args: string[], cwd: string): unknown {
+// When the registry is unreachable npm writes a JSON error envelope to STDOUT
+// (not stderr) and exits 1: `{"message": ..., "error": ...}` for audit,
+// `{"error": {code, summary, detail}}` for outdated. Both parse cleanly, so a
+// failed run is indistinguishable from a clean one unless the shape is checked.
+// Neither can be identified by exit code: `npm outdated` exits 1 merely because
+// packages are outdated, and exits 0 with `{}` when none are.
+export type ReportValidator = (parsed: unknown) => string | null;
+
+function npmErrorDetail(report: Record<string, unknown>): string | null {
+  const err = report.error;
+  if (err && typeof err === "object") {
+    const fields = err as Record<string, unknown>;
+    const parts = [fields.code, fields.summary, fields.detail].filter(
+      (part): part is string => typeof part === "string" && part.trim().length > 0,
+    );
+    if (parts.length > 0) return `npm error: ${parts.join(" — ").slice(0, 300)}`;
+  }
+  if (typeof report.message === "string" && report.message.trim()) {
+    return `npm error: ${report.message.trim().slice(0, 300)}`;
+  }
+  return null;
+}
+
+export function validateAuditReport(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== "object") return "expected a JSON object";
+  const report = parsed as Record<string, unknown>;
+  // `vulnerabilities` is the field collectVulnerabilities reads. Absent, there is
+  // no report to audit no matter what else npm returned — and treating that as
+  // "zero findings" is exactly how a broken scan passes the release gate.
+  if (report.vulnerabilities && typeof report.vulnerabilities === "object") return null;
+  return npmErrorDetail(report) ?? "no `vulnerabilities` field — not an npm audit report";
+}
+
+export function validateOutdatedReport(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== "object") return "expected a JSON object";
+  const report = parsed as Record<string, unknown>;
+  // A clean run is `{}` and every other key is a package name, so only npm's own
+  // error envelope may be rejected here. A package genuinely named "error" would
+  // carry `wanted`/`latest`, which the envelope never does.
+  const err = report.error;
+  if (err && typeof err === "object" && !("wanted" in err) && !("latest" in err)) {
+    return npmErrorDetail(report) ?? "npm returned an error envelope";
+  }
+  return null;
+}
+
+export function runJson(command: string, args: string[], cwd: string, validate?: ReportValidator): unknown {
+  const label = `${command} ${args.join(" ")}`;
   const result = spawnSync(command, args, { cwd, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
-  // npm audit / npm outdated exit non-zero when findings exist; that's expected.
+  // spawnSync reports a failure to *start* the process here, leaving status null
+  // and stdout/stderr undefined — which every check below would read as "no output".
+  if (result.error) {
+    throw new Error(`\`${label}\` could not be run: ${result.error.message}`);
+  }
+  // npm audit / npm outdated exit non-zero when findings exist; that's expected,
+  // so the exit code alone never decides success.
   const stdout = result.stdout?.trim();
   if (!stdout) {
-    if (result.status !== 0 && result.stderr) {
-      throw new Error(`${command} ${args.join(" ")} failed: ${result.stderr}`);
-    }
-    return {};
+    const stderr = result.stderr?.trim();
+    throw new Error(
+      `\`${label}\` produced no output (exit ${result.status ?? "none"})${stderr ? `: ${stderr}` : ""}`,
+    );
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(stdout);
+    parsed = JSON.parse(stdout);
   } catch (err) {
-    throw new Error(`Failed to parse JSON from \`${command} ${args.join(" ")}\`: ${(err as Error).message}`);
+    throw new Error(`Failed to parse JSON from \`${label}\`: ${(err as Error).message}`);
   }
+  const invalid = validate?.(parsed);
+  if (invalid) {
+    throw new Error(`\`${label}\` did not return a usable report: ${invalid}`);
+  }
+  return parsed;
 }
 
 interface NpmAuditJson {
@@ -554,7 +614,7 @@ function main(): void {
   if (!opts.json) {
     process.stdout.write(color("Running npm audit…\n", COLORS.dim));
   }
-  const auditJson = runJson("npm", ["audit", "--json"], cwd) as NpmAuditJson;
+  const auditJson = runJson("npm", ["audit", "--json"], cwd, validateAuditReport) as NpmAuditJson;
   let vulnerabilities = collectVulnerabilities(auditJson);
   let totals = tallySeverities(vulnerabilities);
 
@@ -588,10 +648,12 @@ function main(): void {
   let outdated: AuditResult["outdated"] = [];
   if (opts.includeOutdated) {
     if (!opts.json) process.stdout.write(color("Running npm outdated…\n", COLORS.dim));
-    const outdatedJson = runJson("npm", ["outdated", "--json", "--long"], cwd) as Record<
-      string,
-      OutdatedEntry | OutdatedEntry[]
-    >;
+    const outdatedJson = runJson(
+      "npm",
+      ["outdated", "--json", "--long"],
+      cwd,
+      validateOutdatedReport,
+    ) as Record<string, OutdatedEntry | OutdatedEntry[]>;
     outdated = collectOutdated(outdatedJson, directDependencies);
   }
 
@@ -628,4 +690,14 @@ function main(): void {
   process.exit(determineExitCode(totals, opts.minSeverity));
 }
 
-main();
+// Only run the CLI when invoked directly. Tests import the validators above, and
+// an unguarded main() would run a real npm audit and exit the test runner.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    main();
+  } catch (err) {
+    // A scan that could not run is a gate failure, never a silent pass.
+    console.error(`  ${color("✗", COLORS.red)} ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
