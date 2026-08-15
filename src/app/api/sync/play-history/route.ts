@@ -123,7 +123,7 @@ async function resolveMediaServerUserCached(
   return id;
 }
 
-async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, token: string): Promise<SyncResult> {
+async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, token: string, reanchored: boolean): Promise<SyncResult> {
   // getPlexSessions is the authoritative local-reachability probe — it runs
   // every poll. Report the result so the UI's reachability badge reflects
   // whether Summonarr can actually reach the Plex server (not plex.tv remote
@@ -537,11 +537,16 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // PlayHistory row and ledger-lock the sessionKey. Real stops linger up to
   // 60s as "Now Playing" before finalize, but the SSE feed catches them in
   // real-time as long as it's connected; this is the fallback when SSE is down.
-  const stale = activePlexSessions.filter(
-    (session) =>
-      !seenSessionKeys.has(session.sessionKey)
-      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
-  );
+  // A failed boot re-anchor leaves every lastSeenAt stale by the whole downtime,
+  // making this grace trivially true for sessions that are still playing. Skip
+  // rather than finalize on anchors known to be wrong; the next tick retries.
+  const stale = !reanchored
+    ? []
+    : activePlexSessions.filter(
+        (session) =>
+          !seenSessionKeys.has(session.sessionKey)
+          && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+      );
   const finalized = await Promise.all(
     stale.map((session) => {
       // skipSSE: caller (syncPlayHistory POST) emits a single batched
@@ -563,7 +568,7 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   return { started, updated, ended };
 }
 
-async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string, apiKey: string): Promise<SyncResult> {
+async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string, apiKey: string, reanchored: boolean): Promise<SyncResult> {
   const sessions = await getJellyfinSessions(baseUrl, apiKey);
   const now = new Date();
 
@@ -858,11 +863,14 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   // browser tab background, app reload, network reconnect — without the user
   // actually stopping. Real stops are detected within ~60s as the trade-off.
   const nowMs = now.getTime();
-  const stale = activeJfSessions.filter(
-    (session) =>
-      !seenSessionKeys.has(session.sessionKey)
-      && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
-  );
+  // See the Plex branch: a failed re-anchor makes the grace meaningless.
+  const stale = !reanchored
+    ? []
+    : activeJfSessions.filter(
+        (session) =>
+          !seenSessionKeys.has(session.sessionKey)
+          && nowMs - session.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
+      );
   const finalized = await Promise.all(
     stale.map((session) =>
       // skipSSE: see Plex branch above; one batched SSE per cron run.
@@ -918,7 +926,10 @@ async function syncPlayHistory(request: NextRequest) {
     // that's still playing. Covers Plex AND Jellyfin in one write; if the SSE
     // bootstrap already ran it, this is a no-op. Must run before the source
     // syncs read their ActiveSession rows below.
-    await reanchorActiveSessionsOnBoot();
+    // Reports rather than throws: a throw here would abort the whole tick before
+    // either source loop. On failure the sweeps below are skipped instead, since
+    // their grace would be measured off pre-restart anchors (guardrail 21).
+    const reanchored = await reanchorActiveSessionsOnBoot();
 
     const [plexEnabled, jellyfinEnabled] = await Promise.all([
       isSourceEnabled("plex"),
@@ -959,7 +970,7 @@ async function syncPlayHistory(request: NextRequest) {
         const serverUrl = cfg.url.replace(/\/$/, "");
         const token = cfg.token;
         syncPromises.push(
-          syncPlexSessions(instance.slug, serverUrl, token)
+          syncPlexSessions(instance.slug, serverUrl, token, reanchored)
             .then((r) => { results[label] = r; })
             .catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);
@@ -996,7 +1007,7 @@ async function syncPlayHistory(request: NextRequest) {
         const url = cfg.url.replace(/\/$/, "");
         const apiKey = cfg.apiKey;
         syncPromises.push(
-          syncJellyfinSessions(instance.slug, url, apiKey)
+          syncJellyfinSessions(instance.slug, url, apiKey, reanchored)
             .then((r) => { results[label] = r; })
             .catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);

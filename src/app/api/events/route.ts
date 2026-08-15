@@ -105,6 +105,13 @@ export async function GET() {
     try { controller?.close(); } catch { }
   }
 
+  // A ReadableStream defaults to highWaterMark 1, so desiredSize drops to 0 after
+  // a single enqueue. emitSSE fans out to every listener SYNCHRONOUSLY in one
+  // tick, so any handler emitting two events back-to-back drove the second
+  // enqueue's backpressure check to `<= 0` and tore down every connected client —
+  // including healthy ones that simply had not been scheduled to drain yet. SSE
+  // frames are tiny; 64 of them is ample headroom, and the check below still
+  // catches a genuinely stalled consumer.
   const stream = new ReadableStream({
     start(controller) {
 
@@ -165,7 +172,7 @@ export async function GET() {
     cancel() {
       cleanup();
     },
-  });
+  }, new CountQueuingStrategy({ highWaterMark: 64 }));
 
   return new Response(stream, {
     headers: {

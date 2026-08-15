@@ -768,16 +768,33 @@ let reanchorPromise: Promise<void> | null = null;
 // poller (whichever runs first wins — the loser awaits the same in-flight
 // write). On failure the memo is released so the next caller retries rather
 // than leaving sessions exposed to the stale-anchor finalize.
-export async function reanchorActiveSessionsOnBoot(): Promise<void> {
+/**
+ * Returns whether every row now carries a post-boot `lastSeenAt`.
+ *
+ * Callers MUST skip their absence sweep on false. The whole point of the
+ * re-anchor (guardrail 21) is that after a restart every row's `lastSeenAt` is
+ * stale by the downtime, so the 60s absence grace is trivially satisfied and a
+ * single transient gap finalizes — and ledger-locks — a session that is still
+ * playing. If the re-anchor did not run, sweeping measures the grace off exactly
+ * the pre-restart timestamps it exists to replace.
+ *
+ * It reports rather than throws on purpose: both callers invoke this before the
+ * rest of their work, and a throw would take out far more than the sweep — the
+ * poller would 500 its whole tick before either source loop ran, and the SSE
+ * bootstrap would abort the connect so the stream never opened at all.
+ */
+export async function reanchorActiveSessionsOnBoot(): Promise<boolean> {
   const inFlight = (reanchorPromise ??= prisma.activeSession
     .updateMany({ data: { lastSeenAt: new Date() } })
     .then(() => undefined));
   try {
     await inFlight;
+    return true;
   } catch (err) {
     // Only clear our own promise — a later caller may have already memoized a retry.
     if (reanchorPromise === inFlight) reanchorPromise = null;
     console.warn("[play-history] boot re-anchor of ActiveSession.lastSeenAt failed:", err);
+    return false;
   }
 }
 
@@ -2338,7 +2355,20 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
   };
 
   if (q.mode === "day") {
-    conditions.push(`DATE("startedAt") = ${bind(q.day)}::date`);
+    // Half-open range on the BARE column, not DATE("startedAt") = $n. Wrapping
+    // the column made the predicate non-sargable, so none of the startedAt
+    // indexes could serve it and all five queries below fell back to a
+    // sequential scan of the whole table on every popover click.
+    //
+    // The boundaries are computed in SQL from the bound date string rather than
+    // from a JS Date: startedAt is a tz-naive UTC column, so ::date arithmetic
+    // here buckets identically to DATE("startedAt"), with no dependency on how
+    // the driver serializes a JS Date. It also keeps the loud failure on an
+    // impossible-but-well-shaped day like 2026-02-30 — the route's regex admits
+    // it, Postgres rejects it, whereas new Date("2026-02-30") silently rolls
+    // over to March 2 and would quietly return the wrong day's rows.
+    const day = bind(q.day);
+    conditions.push(`"startedAt" >= ${day}::date AND "startedAt" < ${day}::date + INTERVAL '1 day'`);
   } else {
     // Match the source heatmaps' scoping: admin grid is bounded by the `days`
     // window (getPlayHistoryStats); the per-user grid is all-history. Only apply
