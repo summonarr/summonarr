@@ -45,7 +45,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
         setError(data.error ?? "Failed to update password");
         return;
       }
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (data.requiresRelogin) {
         window.location.href = withBasePath("/login");
         return;
@@ -54,6 +54,18 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
+    } catch {
+      // Both awaits above can throw: the fetch on a transport failure, and
+      // res.json() on a 200 carrying a non-JSON body (a reverse proxy erroring
+      // mid-response). Without this the rejection escaped handleSubmit, React
+      // dropped it, and the form just did nothing — error and success were both
+      // cleared on entry, so there was nothing on screen at all.
+      //
+      // This one matters more than a normal failed save: the route revokes every
+      // session in the same transaction that changes the password. If the write
+      // committed and only the response was lost, the user is already signed out
+      // everywhere while still looking at a page that says nothing happened.
+      setError("Network error — please try again. If the change went through, you will be signed out.");
     } finally {
       setSaving(false);
     }

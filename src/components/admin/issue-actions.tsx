@@ -89,13 +89,26 @@ export function IssueActions({
         // re-search the 4K instance, not the default. "" when there is one instance.
         body: JSON.stringify({ refetch: true, instance }),
       });
-      const data: { arrError?: string } = await res.json();
+      // res.ok has to be checked FIRST. Success was keyed purely on the absence
+      // of an `arrError` field, and the one failure that sets that field is
+      // returned as HTTP 200 — so every genuine error status (503 maintenance,
+      // 401/403, 404, 400 bad instance, 413 oversized body) arrived with no
+      // arrError and rendered a green "Search triggered". The single path the
+      // client checked was the only one the server did not report as an error.
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setArrError(data.message ?? data.error ?? `Search failed (${res.status})`);
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { arrError?: string };
       if (data.arrError) {
         setArrError(data.arrError);
       } else {
         setRefetchOk(true);
         router.refresh();
       }
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }
@@ -118,6 +131,10 @@ export function IssueActions({
         return;
       }
       router.refresh();
+    } catch {
+      // `finally` closes the resolve panel either way, so without this a network
+      // failure looked exactly like a successful resolve: panel gone, no error.
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
       setPanel(null);
@@ -134,6 +151,8 @@ export function IssueActions({
         return;
       }
       router.refresh();
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
       setPanel(null);
@@ -159,11 +178,21 @@ export function IssueActions({
         setArrError(data.error ?? "Failed to fetch releases");
         setPanel(null);
       } else {
-        const data: ArrRelease[] = await res.json();
+        const data = (await res.json()) as ArrRelease[];
         if (reqId !== releaseReqRef.current) return;
         setReleases(data);
         const first = data.find((r) => !r.rejected) ?? data[0];
         if (first) setSelectedGuid(first.guid);
+      }
+    } catch {
+      // Same staleness guard as every other write in this function — a
+      // superseded search must not report its failure over the current one.
+      // Without a catch the dialog sat on the empty `setReleases([])` from entry
+      // and read "No releases found", which is a different claim from "the
+      // search never completed".
+      if (reqId === releaseReqRef.current) {
+        setArrError("Network error — please try again.");
+        setPanel(null);
       }
     } finally {
       // Guarded too: a stale request clearing the spinner makes the UI read "done" while the
@@ -201,6 +230,8 @@ export function IssueActions({
         setGrabOk(true);
         router.refresh();
       }
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }

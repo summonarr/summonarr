@@ -64,6 +64,7 @@ export function WatchHistoryList({
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -119,6 +120,7 @@ export function WatchHistoryList({
     if (!nextCursor) return;
     const myGen = filterGen.current;
     setLoadingMore(true);
+    setLoadError(null);
     try {
       const params = new URLSearchParams();
       if (typeFilter) params.set("mediaType", typeFilter);
@@ -137,7 +139,14 @@ export function WatchHistoryList({
         });
         setTotal(data.total);
         setNextCursor(data.nextCursor);
+      } else if (filterGen.current === myGen) {
+        setLoadError("Couldn't load more. Tap to retry.");
       }
+    } catch {
+      // `if (res.ok)` with no else and no catch meant a failed page silently did
+      // nothing — same generation guard as the success path, so a superseded
+      // request cannot report its failure over the current one.
+      if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap to retry.");
     } finally {
       setLoadingMore(false);
     }
@@ -421,7 +430,7 @@ export function WatchHistoryList({
       )}
 
       {nextCursor && items.length > 0 && (
-        <div className="flex justify-center" style={{ marginTop: 12 }}>
+        <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
           <button
             type="button"
             onClick={loadMore}
@@ -430,6 +439,9 @@ export function WatchHistoryList({
           >
             {loadingMore ? "Loading…" : `Load more (${Math.max(0, total - items.length)})`}
           </button>
+          {loadError && (
+            <span role="alert" aria-live="assertive" className="text-xs text-red-400">{loadError}</span>
+          )}
         </div>
       )}
     </div>

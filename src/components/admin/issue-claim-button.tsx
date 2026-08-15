@@ -36,6 +36,8 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
         return;
       }
       router.refresh();
+    } catch {
+      setError("Network error");
     } finally {
       setBusy(false);
     }

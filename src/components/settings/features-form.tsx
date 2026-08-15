@@ -165,10 +165,16 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   }
 
   useEffect(() => {
+    // Capture the ref objects, not their contents: cleanup must read whatever
+    // is pending AT UNMOUNT, so dereferencing .current inside the closure is
+    // the point. Aliasing the containers (not the values) is what the
+    // exhaustive-deps rule actually asks for here.
+    const timers = statusTimers;
+    const pendingRef = pendingTarget;
     return () => {
       if (flushTimer.current) clearTimeout(flushTimer.current);
-      for (const timer of statusTimers.current.values()) clearTimeout(timer);
-      const pending = [...pendingTarget.current];
+      for (const timer of timers.current.values()) clearTimeout(timer);
+      const pending = [...pendingRef.current];
       if (pending.length === 0) return;
       // Each toggle used to PATCH immediately, so navigating away right after a
       // click still saved it. The debounce would drop that; `keepalive` lets the

@@ -144,6 +144,7 @@ export function PermissionsModal({
   const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
   const [mediaGrants, setMediaGrants] = useState<MediaServerGrants>(u.mediaServerGrants);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [quota, setQuota] = useState({
     movieQuotaLimit: u.movieQuotaLimit?.toString() ?? "",
     movieQuotaDays: u.movieQuotaDays?.toString() ?? "",
@@ -159,19 +160,46 @@ export function PermissionsModal({
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
-  async function savePerms(next: bigint, prev: bigint) {
+  // Every mutator in this modal is the same shape: flip local state, PATCH the
+  // one field that changed, put the state back if the server disagrees. The
+  // rollback was already written into each copy — what did not exist anywhere
+  // was any way to SAY SO. The modal had no error state at all, so a refused
+  // change simply snapped the control back with no explanation, and two of the
+  // refusals are things an admin does on purpose:
+  //   • clearing the last permission bit sends a mask of 0, which the route
+  //     rejects with a sentence explaining what to do instead;
+  //   • a quota limit of 0 is rejected because 0 already means "unlimited" —
+  //     the response spells out the three real alternatives.
+  // The route is also rate-limited to 20 PATCHes a minute and this modal
+  // renders up to 18 checkboxes, so an admin working steadily down the list
+  // hits a 429 that was equally invisible.
+  //
+  // The rollback closure only has to restore the reference it captured: both
+  // nested updates below rebuild their maps immutably and never touch `prev`,
+  // so no deep clone is involved.
+  async function patchUser(body: Record<string, unknown>, rollback: () => void): Promise<void> {
     setSaving(true);
+    setError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ permissions: next.toString() }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
-        setPerms(prev);
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        rollback();
+        setError(data?.error ?? `Failed (${res.status})`);
         return;
       }
       router.refresh();
+    } catch {
+      // A transport failure REJECTS rather than returning a response, so it
+      // skipped the !res.ok branch above entirely: the checkbox stayed flipped
+      // against an unchanged database, and the rejection escaped as an
+      // unhandled promise because every caller discards the returned promise.
+      rollback();
+      setError("Network error — please try again.");
     } finally {
       setSaving(false);
     }
@@ -181,14 +209,14 @@ export function PermissionsModal({
     const prev = perms;
     const next = (perms & bit) !== 0n ? perms & ~bit : perms | bit;
     setPerms(next);
-    void savePerms(next, prev);
+    void patchUser({ permissions: next.toString() }, () => setPerms(prev));
   }
 
   function applyPreset() {
     const prev = perms;
     const next = PRESETS[u.role] ?? PRESETS.USER;
     setPerms(next);
-    void savePerms(next, prev);
+    void patchUser({ permissions: next.toString() }, () => setPerms(prev));
   }
 
   async function toggleGrant(slug: string, field: "request" | "autoApprove") {
@@ -196,21 +224,7 @@ export function PermissionsModal({
     const entry = { ...prev[slug], [field]: !prev[slug]?.[field] };
     const next: InstanceGrantMap = { ...prev, [slug]: entry };
     setGrants(next);
-    setSaving(true);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instanceGrants: next }),
-      });
-      if (!res.ok) {
-        setGrants(prev);
-        return;
-      }
-      router.refresh();
-    } finally {
-      setSaving(false);
-    }
+    await patchUser({ instanceGrants: next }, () => setGrants(prev));
   }
 
   // Visibility grant on a RESTRICTED Plex/Jellyfin server. Service-namespaced —
@@ -222,21 +236,7 @@ export function PermissionsModal({
     serviceMap[slug] = { view: serviceMap[slug]?.view !== true };
     const next: MediaServerGrants = { ...prev, [service]: serviceMap };
     setMediaGrants(next);
-    setSaving(true);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mediaServerGrants: next }),
-      });
-      if (!res.ok) {
-        setMediaGrants(prev);
-        return;
-      }
-      router.refresh();
-    } finally {
-      setSaving(false);
-    }
+    await patchUser({ mediaServerGrants: next }, () => setMediaGrants(prev));
   }
 
   async function saveQuota(
@@ -246,37 +246,23 @@ export function PermissionsModal({
     const trimmed = raw.trim();
     const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
     if (value !== null && !Number.isFinite(value)) return;
-    setSaving(true);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [field]: value }),
-      });
-      if (res.ok) router.refresh();
-    } finally {
-      setSaving(false);
-    }
+    // Nothing changed ⇒ nothing to save. These fire from onBlur, so simply
+    // tabbing through the four inputs issued four PATCHes, each one an
+    // unconditional UPDATE plus an audit row whose before and after are
+    // identical — and each one spending a slot from the 20/min budget shared
+    // with the permission checkboxes above.
+    if (value === (u[field] ?? null)) return;
+    // Rollback restores the server's value, not the typed text: the server
+    // refused, so what it holds is still what it held before.
+    await patchUser({ [field]: value }, () =>
+      setQuota((q) => ({ ...q, [field]: u[field]?.toString() ?? "" })),
+    );
   }
 
   async function saveMaxRating(value: string) {
     const prev = maxRating;
     setMaxRating(value);
-    setSaving(true);
-    try {
-      const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxContentRating: value === "" ? null : value }),
-      });
-      if (!res.ok) {
-        setMaxRating(prev);
-        return;
-      }
-      router.refresh();
-    } finally {
-      setSaving(false);
-    }
+    await patchUser({ maxContentRating: value === "" ? null : value }, () => setMaxRating(prev));
   }
 
   const displayName = u.name ?? u.email;
@@ -451,6 +437,12 @@ export function PermissionsModal({
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
             <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+          </p>
+        )}
+
+        {error && (
+          <p role="alert" aria-live="assertive" className="text-xs text-red-400 mt-3">
+            {error}
           </p>
         )}
       </div>

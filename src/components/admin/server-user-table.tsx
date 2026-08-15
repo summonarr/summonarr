@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
@@ -148,6 +148,19 @@ function DownloadToggle({
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [optimistic, setOptimistic] = useState(enabled);
+
+  // Re-sync when the server-rendered value changes. useState's initializer runs
+  // only at first mount, and router.refresh() deliberately preserves client
+  // state while the row key (u.id) keeps this instance alive — so "Disable all"
+  // flipped the database AND the Jellyfin server while every toggle on screen
+  // went on rendering the value it read at mount. The footer count beside them
+  // reads straight from the refreshed props, so the two elements visibly
+  // contradicted each other: "3 users with downloads disabled" above three
+  // switches all showing green. The user's own click is unaffected — the prop
+  // arrives matching what they already set, so this is a no-op there.
+  useEffect(() => {
+    setOptimistic(enabled);
+  }, [enabled]);
 
   async function toggle() {
     // null means not-yet-synced — first click enables downloads
@@ -367,6 +380,9 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
 
   const plexUsers = filtered.filter((u) => u.source === "plex");
   const jellyfinUsers = filtered.filter((u) => u.source === "jellyfin");
+  const disabledJellyfinCount = jellyfinUsers.filter(
+    (u) => !u.isServerAdmin && u.downloadsEnabled === false,
+  ).length;
 
   function renderGroup(group: ServerUser[], source: "plex" | "jellyfin") {
     if (group.length === 0) return null;
@@ -489,12 +505,18 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         </table>
       </div>
 
+      {/* Both numbers describe the same set. They used to disagree: the total
+          came from the unfiltered `users` while the disabled count came from
+          the SEARCH-FILTERED `jellyfinUsers`, so filtering to audit who has
+          downloads disabled showed the full user count beside a count of only
+          the matching rows — an admin reading "1" while 12 actually existed. */}
       <p className="text-[11px] text-zinc-500">
-        {users.length} server {users.length === 1 ? "user" : "users"}
+        {filtered.length} server {filtered.length === 1 ? "user" : "users"}
+        {search.trim() && ` of ${users.length}`}
         {hasJellyfin && (
           <>
             {" · "}
-            {jellyfinUsers.filter((u) => !u.isServerAdmin && u.downloadsEnabled === false).length} Jellyfin user{jellyfinUsers.filter((u) => !u.isServerAdmin && u.downloadsEnabled === false).length === 1 ? "" : "s"} with downloads disabled
+            {disabledJellyfinCount} Jellyfin user{disabledJellyfinCount === 1 ? "" : "s"} with downloads disabled
           </>
         )}
       </p>

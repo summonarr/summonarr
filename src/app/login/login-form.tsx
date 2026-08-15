@@ -32,13 +32,22 @@ interface Props {
 async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
+): Promise<{ ok: boolean; error?: string; offline?: boolean }> {
+  let res: Response;
+  try {
+    res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    // Transport failure — offline, DNS, aborted. Reported as its own outcome
+    // rather than folded into `ok: false`, because callers answer a plain
+    // failure with "Invalid email or password." Telling someone their password
+    // is wrong when their WiFi dropped sends them to retype it forever.
+    return { ok: false, offline: true };
+  }
   if (!res.ok) {
     let error = "Sign-in failed";
     try {
@@ -95,6 +104,25 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
   useEffect(() => () => {
     qcRunRef.current += 1;
+  }, []);
+
+  // Plex and OIDC hand off with `window.location.href`, deliberately leaving
+  // `loading` true because the document is about to be destroyed. Coming BACK
+  // via the browser's Back button does not destroy it: bfcache resumes the same
+  // document with its JS heap intact, so React never remounts, no effect
+  // re-runs, and `loading` returns as true — a permanently disabled Sign in
+  // button with no error text to explain it. Reset on a persisted restore only;
+  // a normal load already starts false.
+  //
+  // qcRunRef is deliberately NOT bumped here: QuickConnect never leaves the
+  // page, so it can never be the restored flow, and cancelling it would be
+  // spurious.
+  useEffect(() => {
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) setLoading(false);
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
   }, []);
 
   const hasExternalProviders = plexEnabled || jellyfinEnabled || oidcEnabled;
@@ -246,9 +274,11 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
     if (!res.ok) {
       setError(
-        provider === "credentials"
-          ? "Invalid email or password."
-          : "Invalid credentials or Jellyfin server unreachable."
+        res.offline
+          ? "Network error — please try again."
+          : provider === "credentials"
+            ? "Invalid email or password."
+            : "Invalid credentials or Jellyfin server unreachable."
       );
       setLoading(false);
     } else {
@@ -329,8 +359,21 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     }
 
     const result = await signInWithFetch("jellyfin-quickconnect", { secret, rememberMe: String(rememberMe) });
+    // Re-check AFTER the await, not just before it. The checks above are
+    // separated from the call by nothing, so cancellation can only land while
+    // this request is in flight — and the QuickConnect card (with its "Use
+    // password instead" button) and the provider tabs are all still on screen
+    // for its whole duration. Without this, backing out still ran the else
+    // branch and navigated the user into the app. It cannot un-issue the
+    // request — the server may already have minted the session — but the
+    // navigation is the half the user actually sees.
+    if (qcRunRef.current !== myRun) return;
     if (!result.ok) {
-      setError("QuickConnect approved but sign-in failed. Contact the server owner.");
+      setError(
+        result.offline
+          ? "Network error — please try again."
+          : "QuickConnect approved but sign-in failed. Contact the server owner."
+      );
       setLoading(false);
       setQcCode(null);
     } else {
