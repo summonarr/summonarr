@@ -397,3 +397,75 @@ test("a schedule arriving mid-scan awaits the running scan instead of arming a s
   await flush();
   assert.equal(refreshCalls("/Library/Refresh").length, 1, "exactly one scan for the whole episode");
 });
+
+test("PIN: a schedule arriving during the QUEUE CHECK does not produce a second scan", async (t) => {
+  // The re-entrancy window the inFlight guard does not cover: inFlight is armed
+  // only after the queue check resolves, so a webhook landing mid-check finds no
+  // in-flight scan AND a still-present pending entry. Its
+  // clearTimeout(existing.timer) no-ops on the handle that already fired, so it
+  // arms a SECOND live timer on the same entry — and both timers' runScan calls
+  // could reach the scan tail. runScan now re-checks the timer handle it was
+  // fired by and stands down when a newer schedule has taken ownership.
+  arm(t);
+  settings.set("jellyfinUrl", "http://jf.t20.example:8096");
+  settings.set("jellyfinApiKey", "jf-key-20");
+  settings.set("radarrUrl", "http://10.0.0.7:7878");
+  settings.set("radarrApiKey", "radarr-key-20");
+
+  // A gate, not a shared Response: both invocations fetch the queue, and a
+  // Response body can only be read once — handing them the same object would
+  // make the second throw and take the retry path instead of racing.
+  let openGate!: () => void;
+  const gate = new Promise<void>((resolve) => { openGate = resolve; });
+  const emptyQueue = () =>
+    new Response(JSON.stringify({ records: [], totalRecords: 0 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  respond = (url) => {
+    if (url.includes("/api/v3/queue")) return gate.then(emptyQueue); // hold the check open
+    if (url.endsWith("/Library/Refresh")) return new Response(null, { status: 204 });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const p1 = scheduleLibraryScan("movie", 77);
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(sent.filter((s) => s.url.includes("/api/v3/queue")).length, 1, "the queue check is in flight");
+  assert.equal(refreshCalls("/Library/Refresh").length, 0, "no scan yet — the check has not resolved");
+
+  // The race: a webhook lands while the queue check is still awaiting, arming a
+  // second live timer on the same entry.
+  const p2 = scheduleLibraryScan("movie", 77);
+  await flush();
+
+  // Fire that second timer while the FIRST runScan is still awaiting. Both
+  // invocations are now inside the window, both see the pending entry, and both
+  // are about to be released — this is what produces two scans without the
+  // ownership guard. (The queue cache only populates after a fetch resolves, so
+  // the second invocation issues its own request against the same held promise.)
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  assert.equal(
+    sent.filter((s) => s.url.includes("/api/v3/queue")).length,
+    2,
+    "both runScan invocations are inside the queue-check window",
+  );
+
+  openGate();
+  await flush();
+  await p1;
+  await p2;
+
+  // Drain any orphaned timer that a leaked handle would have left behind.
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+  t.mock.timers.tick(DEBOUNCE);
+  await flush();
+
+  assert.equal(
+    refreshCalls("/Library/Refresh").length,
+    1,
+    "exactly one library scan for the whole episode, not one per timer",
+  );
+});

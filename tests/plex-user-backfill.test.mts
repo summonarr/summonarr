@@ -74,6 +74,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // Dynamic imports so the stubs above genuinely precede the module-graph load.
+const { Prisma } = await import("../src/generated/prisma/index.js");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { runPlexUserBackfillIfNeeded } = await import("../src/lib/plex-user-backfill.ts");
@@ -535,11 +536,18 @@ test("plex.tv returns no accounts (bad token): warn + skip — no binds, and NO 
 test("a unique-violation race on the update is swallowed: not bound, not unmatched, run still completes", async () => {
   // A concurrent live sign-in can bind the same plexUserId first; the loser's
   // update throws P2002 and that user needs neither warning — they're fine.
+  //
+  // Throws a REAL PrismaClientKnownRequestError: the catch discriminates on the
+  // error code, so a plain Error whose message merely contains "P2002" would
+  // exercise the unexpected-error branch instead and pin nothing about races.
   candidateRows = [{ id: "u-race", email: "owner@example.com" }];
   configurePlex();
   respond = plexResponder({ owner: { id: 100, email: "owner@example.com" }, friends: [] });
   userUpdateImpl = async () => {
-    throw new Error("P2002 unique constraint");
+    throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+      code: "P2002",
+      clientVersion: "test",
+    });
   };
 
   await runPlexUserBackfillIfNeeded();
@@ -548,6 +556,47 @@ test("a unique-violation race on the update is swallowed: not bound, not unmatch
   assert.deepEqual(warns, []); // …but no bound-count warn and no REFUSED warn
   assert.deepEqual(errors, []); // and the race is not an error
   assert.equal(settingUpserts.length, 1); // the run completed → marker stamped
+});
+
+test("PIN: a NON-race update failure is surfaced, not silently swallowed", async () => {
+  // The catch used to be bare, so a transient DB error left the user in neither
+  // `bound` nor `unmatched` — no warning at all, and the never-retry marker
+  // stamped over a failure nobody could see. It must warn and count as unmatched.
+  candidateRows = [{ id: "u-db", email: "owner@example.com" }];
+  configurePlex();
+  respond = plexResponder({ owner: { id: 100, email: "owner@example.com" }, friends: [] });
+  userUpdateImpl = async () => {
+    throw new Error("connection terminated unexpectedly");
+  };
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.equal(userUpdates.length, 1);
+  assert.ok(
+    warns.some((w) => w.includes("[plex-backfill] Binding owner@example.com failed:")),
+    warns.join("\n"),
+  );
+  assert.ok(warns.some((w) => w.includes("could NOT be bound")), "the user lands in unmatched");
+});
+
+test("PIN: a partial account fetch that leaves someone unbound withholds the run marker", async () => {
+  // getPlexAccountsDetailed swallows each hop, so an owner-only list from a
+  // FAILED friends hop looks identical to "this admin shares with nobody".
+  // Stamping the never-retry marker on that strands every friend permanently —
+  // the read side in instrumentation.ts never calls the backfill again.
+  candidateRows = [{ id: "u-friend", email: "friend@example.com" }];
+  configurePlex();
+  // Owner hop succeeds; omitting `friends` makes the shared-users hop 401 →
+  // friendsOk false, while the owner still comes back (an owner-only list).
+  respond = plexResponder({ owner: { id: 100, email: "owner@example.com" } });
+
+  await runPlexUserBackfillIfNeeded();
+
+  assert.equal(settingUpserts.length, 0, "no marker — the next boot must retry");
+  assert.ok(
+    warns.some((w) => w.includes("returned a partial account list")),
+    warns.join("\n"),
+  );
 });
 
 test("never throws: a failing candidate query degrades to a [plex-backfill] error log", async () => {

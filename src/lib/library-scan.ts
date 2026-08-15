@@ -91,6 +91,10 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
   const entry = pending.get(mediaType);
   if (!entry) return;
 
+  // The handle whose firing brought us here, compared again after the awaits
+  // below to detect a concurrent re-arm. See the ownership re-check.
+  const myTimer = entry.timer;
+
   // An UNREADABLE queue is already modelled — both helpers return null and the branches
   // below defer + retry rather than scan prematurely. A THROW was not: arrFetch raises on
   // a timeout, a non-2xx, or an unreachable host, and that escaped runScan entirely.
@@ -122,9 +126,30 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
     stillInQueue = true;
   }
 
+  // Ownership re-check, on the TIMER not the entry: scheduleLibraryScan mutates
+  // the existing entry rather than replacing it, so the entry identity is
+  // unchanged in the race this guards.
+  //
+  // During the queue-check await a webhook can call scheduleLibraryScan. Its
+  // clearTimeout(existing.timer) no-ops on the handle that already fired to get
+  // us here, so it arms a SECOND live timer on this same entry. Both timers then
+  // call runScan, both find the still-present pending entry, and both can reach
+  // the scan tail — a duplicate scan against the same backend. inFlight is armed
+  // only further down, too late to cover this window.
+  //
+  // A changed handle means a newer schedule owns the next run, so this
+  // invocation stands down; the shared entry.resolve still settles every waiter
+  // when that run completes. A missing entry means the scan already ran.
+  const current = pending.get(mediaType);
+  if (current !== entry || current.timer !== myTimer) return;
+
   if (stillInQueue) {
     if (entry.retries < MAX_QUEUE_WAIT_RETRIES) {
       entry.retries += 1;
+      // Clear before overwriting: a concurrent schedule may have armed a live
+      // timer on this entry, and dropping the handle leaks it — it would fire
+      // later against an unrelated entry and cut its debounce short.
+      clearTimeout(entry.timer);
       entry.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
       const scope = entry.tmdbId !== undefined ? `tmdbId=${entry.tmdbId}` : "total queue";
       console.warn(

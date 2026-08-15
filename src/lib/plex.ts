@@ -892,11 +892,30 @@ export interface PlexAccountInfo {
   isAdmin: boolean;
 }
 
-export async function getPlexAccounts(
+export interface PlexAccountsResult {
+  accounts: PlexAccountInfo[];
+  /** The owner hop (/api/v2/user) succeeded. */
+  ownerOk: boolean;
+  /** The friends hop (/api/users) succeeded — false on a throw OR a non-2xx. */
+  friendsOk: boolean;
+}
+
+/**
+ * Account list plus per-hop status.
+ *
+ * Both hops are swallowed independently below, so a bare array cannot express
+ * "the owner came back but the friends list failed" — that is indistinguishable
+ * from "this admin genuinely has no shared users". The one-shot Plex user
+ * backfill needs the difference: it stamps a never-retry marker, and stamping it
+ * on a half-fetched list strands every user who only appears in the missing half.
+ */
+export async function getPlexAccountsDetailed(
   serverUrl: string,
   adminToken: string,
-): Promise<PlexAccountInfo[]> {
+): Promise<PlexAccountsResult> {
   const accounts: PlexAccountInfo[] = [];
+  let ownerOk = false;
+  let friendsOk = false;
 
   try {
     // The server owner doesn't appear in the shared-users list — fetch separately and use the real
@@ -904,6 +923,7 @@ export async function getPlexAccounts(
     // by the backfill and break (provider, sub)-keyed sign-in for the owner.
     const owner = await getPlexUser(adminToken);
     accounts.push({ id: owner.id, name: owner.username, email: owner.email, thumb: owner.thumb, isAdmin: true });
+    ownerOk = true;
   } catch (err) {
     console.warn("[plex] Failed to fetch server owner info:", err instanceof Error ? err.message : String(err));
   }
@@ -916,6 +936,7 @@ export async function getPlexAccounts(
       timeoutMs: 15_000,
     });
     if (res.ok) {
+      friendsOk = true;
       const xml = await res.text();
       const userBlocks = xml.split(/<User\b/).slice(1);
       for (const block of userBlocks) {
@@ -938,7 +959,16 @@ export async function getPlexAccounts(
     console.warn("[plex] Failed to fetch shared users:", err instanceof Error ? err.message : String(err));
   }
 
-  return accounts;
+  return { accounts, ownerOk, friendsOk };
+}
+
+// Back-compat array form. Callers that only need the list (the settings-page
+// share count) keep using this; only the backfill needs the per-hop status.
+export async function getPlexAccounts(
+  serverUrl: string,
+  adminToken: string,
+): Promise<PlexAccountInfo[]> {
+  return (await getPlexAccountsDetailed(serverUrl, adminToken)).accounts;
 }
 
 // Reads the server's machineIdentifier. Swallows every error and returns null —

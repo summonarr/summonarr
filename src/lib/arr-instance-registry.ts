@@ -155,7 +155,17 @@ export async function getSyncableArrInstances(service: ArrService): Promise<ArrI
 // Persist the named-instance registry (admin settings). Validates and de-dupes;
 // the default ("") is never stored (it's synthesized). Callers must separately
 // write the per-instance connection Setting rows via arrSettingKey.
-export async function saveArrInstances(service: ArrService, entries: ArrInstanceConfig[]): Promise<void> {
+// The Setting row a registry save writes: validated, de-duped, serialized.
+//
+// PURE, and exported, so a caller that must write the registry INSIDE its own
+// transaction (the admin arr-instances route, whose registry save and removal
+// cleanup have to commit together) can hand the row to its own tx client without
+// re-implementing — or drifting from — this normalization. Mirrors
+// buildMediaInstanceRegistryWrite.
+export function buildArrInstanceRegistryWrite(
+  service: ArrService,
+  entries: ArrInstanceConfig[],
+): { key: string; value: string } {
   const seen = new Set<string>([DEFAULT_ARR_INSTANCE]);
   const clean: ArrInstanceConfig[] = [];
   for (const e of entries) {
@@ -167,9 +177,14 @@ export async function saveArrInstances(service: ArrService, entries: ArrInstance
       seen.add(norm.slug);
     }
   }
+  return { key: REGISTRY_KEY[service], value: JSON.stringify(clean) };
+}
+
+export async function saveArrInstances(service: ArrService, entries: ArrInstanceConfig[]): Promise<void> {
+  const { key, value } = buildArrInstanceRegistryWrite(service, entries);
   await prisma.setting.upsert({
-    where: { key: REGISTRY_KEY[service] },
-    create: { key: REGISTRY_KEY[service], value: JSON.stringify(clean) },
-    update: { value: JSON.stringify(clean) },
+    where: { key },
+    create: { key, value },
+    update: { value },
   });
 }

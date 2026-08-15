@@ -1,5 +1,6 @@
+import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
-import { getPlexAccounts, type PlexAccountInfo } from "./plex";
+import { getPlexAccountsDetailed, type PlexAccountInfo } from "./plex";
 import { normalizeEmail } from "./email-normalize";
 import { getMediaInstances } from "./media-instance-registry";
 import { mediaInstanceLabel, plexSettingKey } from "./media-instances";
@@ -76,6 +77,11 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
     const idByEmail = new Map<string, string>();
     const ambiguousEmails = new Set<string>();
     let accountsFetched = 0;
+    // Any configured instance that did not hand back a COMPLETE account list —
+    // it threw, returned nothing, or (the quiet one) came back owner-only
+    // because getPlexAccountsDetailed's friends hop failed or 401'd. A person
+    // reachable only through the missing half is invisible to this run.
+    let incompleteFetch = false;
 
     for (const instance of instances) {
       const tokenRow = await prisma.setting.findUnique({ where: { key: plexSettingKey(instance.slug, "AdminToken") } });
@@ -89,15 +95,28 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
       const label = mediaInstanceLabel("plex", instance.slug);
       let accounts: PlexAccountInfo[];
       try {
-        accounts = await getPlexAccounts(serverUrl, tokenRow.value);
+        const result = await getPlexAccountsDetailed(serverUrl, tokenRow.value);
+        accounts = result.accounts;
+        if (!result.ownerOk || !result.friendsOk) {
+          // Each hop is swallowed inside getPlexAccountsDetailed, so without this
+          // an owner-only list from a FAILED friends hop is indistinguishable
+          // from an admin who genuinely shares with nobody — and stamping the
+          // never-retry marker on it strands every friend permanently.
+          incompleteFetch = true;
+          console.warn(
+            `[plex-backfill] ${label} returned a partial account list (owner: ${result.ownerOk ? "ok" : "failed"}, shared users: ${result.friendsOk ? "ok" : "failed"}).`,
+          );
+        }
       } catch (err) {
-        // Defensive — getPlexAccounts swallows its own hop failures today, but
+        // Defensive — getPlexAccountsDetailed swallows its own hop failures, but
         // a throw from one instance must not cost the others' contributions.
         console.warn(`[plex-backfill] Account fetch failed for ${label}; skipping this instance:`, err instanceof Error ? err.message : String(err));
+        incompleteFetch = true;
         continue;
       }
       if (accounts.length === 0) {
         console.warn(`[plex-backfill] ${label} returned no accounts; skipping this instance (token may be invalid).`);
+        incompleteFetch = true;
         continue;
       }
       accountsFetched += accounts.length;
@@ -135,10 +154,32 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
           data: { plexUserId: plexId },
         });
         bound++;
-      } catch {
-        // Unique-violation race with a concurrent live sign-in — fine, that
-        // user got bound by the auth flow first.
+      } catch (err) {
+        // A unique-violation race with a concurrent live sign-in is fine — that
+        // user got bound by the auth flow first. Anything else is not: swallowing
+        // it left the user in neither `bound` nor `unmatched`, so nothing warned
+        // and the marker stamped over a failure nobody could see.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") continue;
+        console.warn(
+          `[plex-backfill] Binding ${u.email} failed:`,
+          err instanceof Error ? err.message : String(err),
+        );
+        unmatched.push({ id: u.id, email: u.email });
       }
+    }
+
+    // Withhold the never-retry marker when this run BOTH left someone unbound and
+    // saw an incomplete fetch: that person may be sitting in the half we failed to
+    // read, and stamping would strand them permanently (the read side in
+    // instrumentation.ts treats an absent marker as "retry next boot"). A partial
+    // failure that cost nobody a match still stamps — every candidate is resolved,
+    // so there is nothing a retry could improve.
+    if (incompleteFetch && unmatched.length > 0) {
+      console.warn(
+        `[plex-backfill] ${unmatched.length} user(s) unbound after a partial account fetch — not stamping the ` +
+          "run marker so the next boot retries.",
+      );
+      return;
     }
 
     await prisma.setting.upsert({

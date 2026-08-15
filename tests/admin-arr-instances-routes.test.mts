@@ -187,11 +187,33 @@ for (const m of ["plexLibraryItem", "jellyfinLibraryItem", "tmdbCache", "tmdbMed
 }
 // The removal cleanup deletes the de-registered slug's wanted/available cache
 // rows — record the scoped where so the pin below can assert it.
-for (const m of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", "sonarrAvailableItem"]) {
+// trashApplication joins them: it is per-instance CACHE (recordApply upserts it
+// on every apply), and a stale row resurrects on a REUSED slug as a wrong
+// remoteId that both misreports "applied" and gets pushed into a live profile.
+for (const m of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", "sonarrAvailableItem", "trashApplication"]) {
   shadowPrismaModel(prisma, m, {
     deleteMany: async (args: { where?: unknown }) => { rec(`${m}.deleteMany`, args?.where); return { count: 0 }; },
   });
 }
+// The POST handler commits the registry write, the per-instance connection rows
+// and the removal cleanup in ONE transaction, so a mid-sequence failure cannot
+// leave an instance de-registered while its rows survive (the cleanup is
+// diff-driven and never gets a second chance). Every model the callback touches
+// is already shadowed on `prisma` above, so handing the callback `prisma` itself
+// as `tx` records the ops through the same recorders.
+const txOptions: ({ timeout?: number } | undefined)[] = [];
+// Set by a test that wants to observe state at the moment the callback returns.
+let txObserver: (() => void) | null = null;
+shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown, opts?: { timeout?: number }) => {
+  if (typeof arg === "function") {
+    txOptions.push(opts);
+    rec("$transaction");
+    const out = await (arg as (tx: typeof prisma) => Promise<unknown>)(prisma);
+    txObserver?.();
+    return out;
+  }
+  return Promise.all(arg as Promise<unknown>[]);
+});
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => { rec("$queryRawUnsafe"); return []; });
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => { rec("$queryRaw"); return []; });
 
@@ -373,6 +395,64 @@ test("removing a NAMED instance DOES clean up its setting rows AND its slug-scop
   assert.deepEqual(wantedDeletes, [{ arrInstance: "anime" }]);
   assert.deepEqual(availDeletes, [{ arrInstance: "anime" }]);
   assert.equal(ops.filter((c) => c.op === "sonarrWantedItem.deleteMany").length, 0, "a radarr save must not touch sonarr caches");
+
+  // TRaSH applications are per-instance cache too: recordApply upserts them on
+  // every apply, and a stale row resurrects on a REUSED slug — listSpecs would
+  // report its remoteId as applied to a different server, and buildProfileBody
+  // would skip re-creating the custom format and push a remoteId that does not
+  // exist there into a live quality profile.
+  assert.deepEqual(
+    ops.filter((c) => c.op === "trashApplication.deleteMany").map((c) => c.args),
+    [{ arrInstance: "anime" }],
+  );
+});
+
+test("PIN: the registry write, connection rows and removal cleanup share ONE transaction", async () => {
+  // Without this the statements auto-committed individually, so a failure after
+  // the registry commit left the slug de-registered while its Setting and cache
+  // rows survived — permanently, because the cleanup is diff-driven: only the
+  // request that watches the registry stop listing a slug treats it as removed,
+  // and that request had already committed. A retry reads a `before` without it.
+  const t = await mintSession();
+  txOptions.length = 0;
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "ApiKey"), "anime-key");
+
+  await saveInstances(t, { service: "radarr", instances: [] });
+
+  assert.equal(txOptions.length, 1, "exactly one transaction for the whole write sequence");
+  assert.equal(txOptions[0]?.timeout, 30_000, "opened with BATCH_TX_TIMEOUT");
+
+  // Every write op must fall inside that transaction — i.e. after it opened.
+  const txIdx = ops.findIndex((c) => c.op === "$transaction");
+  assert.ok(txIdx >= 0, "the transaction was opened");
+  for (const writeOp of ["setting.deleteMany", "radarrWantedItem.deleteMany", "trashApplication.deleteMany"]) {
+    const idx = ops.findIndex((c) => c.op === writeOp);
+    assert.ok(idx > txIdx, `${writeOp} must run inside the transaction, not before it`);
+  }
+});
+
+test("PIN: no connection test fires while the transaction is open", async () => {
+  // Network I/O must never hold a DB transaction open (it starves the pool for
+  // as long as an unreachable *arr instance takes to time out — 30s each). The
+  // stub runs the callback inline, so recording the fetch count at the moment
+  // the callback returns proves nothing was fetched inside it.
+  const t = await mintSession();
+  txOptions.length = 0;
+  fetchCalls.length = 0;
+  registry("radarr", []);
+  let fetchesWhenTxClosed = -1;
+  txObserver = () => { fetchesWhenTxClosed = fetchCalls.length; };
+
+  await saveInstances(t, {
+    service: "radarr",
+    instances: [{ slug: "anime", name: "Anime", url: "http://10.0.0.8:7878", apiKey: "k" }],
+  });
+
+  txObserver = null;
+  assert.equal(txOptions.length, 1, "the write sequence ran in a transaction");
+  assert.equal(fetchesWhenTxClosed, 0, "zero fetches had been issued when the transaction closed");
+  assert.ok(fetchCalls.length > 0, "…and the connection test did run, afterwards");
 });
 
 test("a kept named instance is not cleaned up", async () => {

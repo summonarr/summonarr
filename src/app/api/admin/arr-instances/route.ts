@@ -13,7 +13,8 @@ import {
   FOURK_ARR_INSTANCE,
 } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
-import { getArrInstances, saveArrInstances } from "@/lib/arr-instance-registry";
+import { buildArrInstanceRegistryWrite, getArrInstances } from "@/lib/arr-instance-registry";
+import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 
 // Admin management surface for the full Radarr/Sonarr instance list (multi-
 // instance support): the registry metadata (slug/name/routing/access) AND each
@@ -85,12 +86,6 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json({ radarr, sonarr });
 });
 
-// Upsert a Setting row; encryption for the secret keys fires in the Prisma
-// extension (isSensitiveSettingKey matches radarr<Slug>ApiKey/WebhookSecret).
-async function writeSetting(key: string, value: string): Promise<void> {
-  await prisma.setting.upsert({ where: { key }, create: { key, value }, update: { value } });
-}
-
 export const POST = withAdmin(async (req, _ctx, session) => {
   const parsed = await readJsonCapped<SavePayload>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
@@ -157,7 +152,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       skipLibraryCheck: i.skipLibraryCheck === true,
       autoRoute: i.autoRoute ?? null,
     }));
-  await saveArrInstances(service, registry);
+  // One transaction for the registry write, the per-instance connection rows and
+  // the removal cleanup. Previously each statement auto-committed on its own, so
+  // a failure after the registry commit left the instance de-registered while its
+  // Setting rows and wanted/available cache rows survived — and unrecoverably so,
+  // because the cleanup is diff-driven: only the request that sees the registry
+  // stop listing a slug treats it as removed, and that request had already
+  // committed. The next attempt reads a `before` that no longer contains it.
+  // Mirrors the media-instances route. Network I/O stays outside (below).
+  const registryWrite = buildArrInstanceRegistryWrite(service, registry);
+  await prisma.$transaction(async (tx) => {
+  await tx.setting.upsert({
+    where: { key: registryWrite.key },
+    create: registryWrite,
+    update: { value: registryWrite.value },
+  });
 
   // Write each instance's connection Setting rows. Skip a secret field left at the
   // mask sentinel (unchanged); an explicit "" clears the row.
@@ -165,7 +174,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     const set = async (field: (typeof FIELDS)[number], value: string | undefined, isSecret: boolean) => {
       if (value === undefined) return;
       if (isSecret && value === MASKED_VALUE) return;
-      await writeSetting(arrSettingKey(service, inst.slug, field), value);
+      // Encryption fires in the Prisma extension (guardrail 7a) — never here.
+      await tx.setting.upsert({
+        where: { key: arrSettingKey(service, inst.slug, field) },
+        create: { key: arrSettingKey(service, inst.slug, field), value },
+        update: { value },
+      });
     };
     await set("Url", typeof inst.url === "string" ? inst.url.trim() : undefined, false);
     await set("ApiKey", inst.apiKey, true);
@@ -200,18 +214,28 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // 35); like it, this is not retroactive for slugs removed before the fix.
   for (const slug of beforeNamed) {
     if (!nextNamed.has(slug)) {
-      await prisma.setting.deleteMany({
+      await tx.setting.deleteMany({
         where: { key: { in: FIELDS.map((f) => arrSettingKey(service, slug, f)) } },
       });
       if (service === "radarr") {
-        await prisma.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-        await prisma.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+        await tx.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await tx.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
       } else {
-        await prisma.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-        await prisma.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
+        await tx.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
+        await tx.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
       }
+      // TRaSH applications are per-instance CACHE, not history: recordApply
+      // upserts them on every apply and they mirror what was pushed upstream.
+      // Left behind, they resurrect on a REUSED slug — listSpecs would report a
+      // stale remoteId as "applied" to a different server, and buildProfileBody
+      // would treat the spec as satisfied and skip re-creating the custom format,
+      // embedding a remoteId that does not exist there into a live profile push.
+      // (IssueGrab also carries arrInstance but is deliberately NOT deleted — it
+      // is a per-action record that already cascades from its Issue.)
+      await tx.trashApplication.deleteMany({ where: { arrInstance: slug } });
     }
   }
+  }, { timeout: BATCH_TX_TIMEOUT });
 
   // Connection tests for every instance that now has url + apiKey. Bounded — the
   // instance list is admin-sized but still input-scaled (guardrail 31).
