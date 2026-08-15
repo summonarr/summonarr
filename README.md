@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.22.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.22.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,12 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.22.1
+
+**Fixed**
+
+- **Now-playing failed for native clients.** The endpoint the iOS app reads for active sessions returned an error whenever anything was actually playing, which took the whole Activity dashboard down with it. The web dashboard was unaffected, so this only showed up in the app.
 
 ### v0.22.0
 
@@ -474,7 +480,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.22.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.22.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
