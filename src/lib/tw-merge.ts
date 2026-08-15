@@ -75,6 +75,16 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["row-span", /^row-(?:span|start|end)-/],
 
   ["text-align", /^text-(?:left|center|right|justify|start|end)$/],
+  // These set text-overflow / text-wrap / text-indent / text-shadow, not colour.
+  // Without their own groups they fall into the `text-color` catch-all below and
+  // one silently deletes the other (`text-ellipsis text-zinc-400` → colour only).
+  // text-overflow and text-wrap stay SEPARATE groups: they are different CSS
+  // properties, so merging them would invent a new collision.
+  ["text-overflow", /^text-(?:ellipsis|clip)$/],
+  ["text-wrap", /^text-(?:wrap|nowrap|balance|pretty)$/],
+  ["text-indent", /^-?text-indent-/],
+  ["text-shadow-size", /^text-shadow-(?:2xs|xs|sm|md|lg|xl|none)$/],
+  ["text-shadow-color", /^text-shadow-/],
   ["text-size", /^text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|\[[^\]]+\])$/],
   ["text-color", /^text-/],
 
@@ -104,12 +114,29 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["bg", /^bg-/],
 
   ["border-style", /^border-(?:solid|dashed|dotted|double|hidden|none)$/],
-  ["border-w-x", /^border-x-(?:\d|\[)/],
-  ["border-w-y", /^border-y-(?:\d|\[)/],
-  ["border-w-t", /^border-t-(?:\d|\[)/],
-  ["border-w-r", /^border-r-(?:\d|\[)/],
-  ["border-w-b", /^border-b-(?:\d|\[)/],
-  ["border-w-l", /^border-l-(?:\d|\[)/],
+  // Table layout and cell spacing are not border colour; without these they fall
+  // into the `border-color` catch-all at the end of this block.
+  ["border-collapse", /^border-(?:collapse|separate)$/],
+  ["border-spacing-x", /^border-spacing-x-/],
+  ["border-spacing-y", /^border-spacing-y-/],
+  ["border-spacing", /^border-spacing-/],
+  // Each side matches its BARE form too (the `$` alternative), exactly as the
+  // all-sides `border-w` and the `rounded-*` groups already do. Without it a
+  // bare `border-t` matches neither the width group (which wanted `border-t-`
+  // plus a digit) nor the side colour group (which wanted a trailing dash), so
+  // it fell through to `border-color` and a colour class silently deleted it.
+  // Logical sides (s/e/bs/be) are distinct utilities from the physical ones and
+  // never collide with them: `border-b` cannot match `border-bs`, and vice versa.
+  ["border-w-x", /^border-x(?:-\d|-\[|$)/],
+  ["border-w-y", /^border-y(?:-\d|-\[|$)/],
+  ["border-w-t", /^border-t(?:-\d|-\[|$)/],
+  ["border-w-r", /^border-r(?:-\d|-\[|$)/],
+  ["border-w-b", /^border-b(?:-\d|-\[|$)/],
+  ["border-w-l", /^border-l(?:-\d|-\[|$)/],
+  ["border-w-s", /^border-s(?:-\d|-\[|$)/],
+  ["border-w-e", /^border-e(?:-\d|-\[|$)/],
+  ["border-w-bs", /^border-bs(?:-\d|-\[|$)/],
+  ["border-w-be", /^border-be(?:-\d|-\[|$)/],
   ["border-w", /^border(?:-\d|-\[|$)/],
   ["border-color-x", /^border-x-/],
   ["border-color-y", /^border-y-/],
@@ -117,6 +144,10 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["border-color-r", /^border-r-/],
   ["border-color-b", /^border-b-/],
   ["border-color-l", /^border-l-/],
+  ["border-color-s", /^border-s-/],
+  ["border-color-e", /^border-e-/],
+  ["border-color-bs", /^border-bs-/],
+  ["border-color-be", /^border-be-/],
   ["border-color", /^border-/],
 
   ["rounded-t", /^rounded-t(?:-|$)/],

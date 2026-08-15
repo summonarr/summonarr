@@ -48,6 +48,72 @@ test("border width and border color are separate groups", () => {
   assert.equal(twMerge("border-2 border-red-500"), "border-2 border-red-500");
 });
 
+test("bare side borders are widths, not colors (regression: they fell into the border-color catch-all)", () => {
+  // `border-t` matched neither the width group (which wanted `border-t-` plus a
+  // digit) nor the side color group (which wanted a trailing dash), so it fell
+  // through to /^border-/ and a color class silently deleted it. This shipped:
+  // ui/drawer.tsx's DrawerPopup base is "… border-t border-zinc-800 …", so the
+  // primitive rendered no top border at all. Each side now carries the bare `$`
+  // alternative, exactly as all-sides `border-w` and `rounded-*` already did.
+  assert.equal(twMerge("border-t border-zinc-800"), "border-t border-zinc-800");
+  assert.equal(twMerge("border-zinc-800 border-t"), "border-zinc-800 border-t");
+  assert.equal(twMerge("border-b border-x border-red-500"), "border-b border-x border-red-500");
+  // Widths still collapse within one side, and sides stay independent of each other.
+  assert.equal(twMerge("border-t border-t-4"), "border-t-4");
+  assert.equal(twMerge("border-t border-b"), "border-t border-b");
+  assert.equal(twMerge("border-t-2 border-t-red-500"), "border-t-2 border-t-red-500");
+});
+
+test("logical border sides are distinct utilities from the physical ones", () => {
+  // `border-b` must not swallow `border-bs`: the width regexes require -digit,
+  // -[ or end-of-string after the side, so the extra letter cannot match.
+  assert.equal(twMerge("border-b border-bs"), "border-b border-bs");
+  assert.equal(twMerge("border-e border-b"), "border-e border-b");
+  assert.equal(twMerge("border-bs border-be"), "border-bs border-be");
+  assert.equal(twMerge("border-s border-s-2"), "border-s-2");
+  assert.equal(twMerge("border-s border-s-red-500"), "border-s border-s-red-500");
+  // …and `border-s` must not capture the border words that merely start with s.
+  assert.equal(twMerge("border-s border-solid"), "border-s border-solid");
+  assert.equal(twMerge("border-s border-separate"), "border-s border-separate");
+  assert.equal(twMerge("border-s border-spacing-2"), "border-s border-spacing-2");
+});
+
+test("table border utilities are not border colors", () => {
+  assert.equal(twMerge("border-collapse border-red-500"), "border-collapse border-red-500");
+  assert.equal(twMerge("border-collapse border-separate"), "border-separate");
+  assert.equal(twMerge("border-spacing-2 border-zinc-800"), "border-spacing-2 border-zinc-800");
+  assert.equal(twMerge("border-spacing-x-2 border-spacing-y-4"), "border-spacing-x-2 border-spacing-y-4");
+  assert.equal(twMerge("border-spacing-2 border-spacing-4"), "border-spacing-4");
+});
+
+test("text-overflow and text-wrap are their own groups, not text colors", () => {
+  // Same catch-all bug as bare side borders, on /^text-/: these set
+  // text-overflow and text-wrap, so a color class silently deleted them.
+  assert.equal(twMerge("text-ellipsis text-zinc-400"), "text-ellipsis text-zinc-400");
+  assert.equal(twMerge("text-zinc-400 text-ellipsis"), "text-zinc-400 text-ellipsis");
+  assert.equal(twMerge("truncate text-ellipsis text-sm text-zinc-400"), "truncate text-ellipsis text-sm text-zinc-400");
+  // They remain SEPARATE groups from each other — different CSS properties, so
+  // folding them together would invent a collision that never existed.
+  assert.equal(twMerge("text-ellipsis text-balance"), "text-ellipsis text-balance");
+  // Each still collapses within itself.
+  assert.equal(twMerge("text-ellipsis text-clip"), "text-clip");
+  assert.equal(twMerge("text-wrap text-nowrap"), "text-nowrap");
+  // Unaffected neighbours: size, alignment and the whitespace group.
+  assert.equal(twMerge("text-nowrap text-sm"), "text-nowrap text-sm");
+  assert.equal(twMerge("text-wrap text-left"), "text-wrap text-left");
+  assert.equal(twMerge("whitespace-nowrap text-nowrap"), "whitespace-nowrap text-nowrap");
+});
+
+test("text-indent and text-shadow are not text colors", () => {
+  assert.equal(twMerge("text-indent-4 text-zinc-400"), "text-indent-4 text-zinc-400");
+  assert.equal(twMerge("text-indent-2 text-indent-8"), "text-indent-8");
+  // text-shadow carries the same size-vs-color overload border already models.
+  assert.equal(twMerge("text-shadow-sm text-red-500"), "text-shadow-sm text-red-500");
+  assert.equal(twMerge("text-shadow-sm text-shadow-red-500"), "text-shadow-sm text-shadow-red-500");
+  assert.equal(twMerge("text-shadow-sm text-shadow-lg"), "text-shadow-lg");
+  assert.equal(twMerge("text-shadow-none text-shadow-md"), "text-shadow-md");
+});
+
 test("unknown classes key by themselves — deduped, never cross-merged", () => {
   assert.equal(twMerge("foo foo"), "foo");
   assert.equal(twMerge("foo bar"), "foo bar");
