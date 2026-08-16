@@ -253,6 +253,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     }
     ```
 
+16a. **The `nonce` mismatch on the root layout's theme script is NOT a guardrail-16 bug — do not go hunting for render-time nondeterminism, and do not remove its `suppressHydrationWarning`.**
+
+    Why:
+    - Under a **header-delivered** CSP (which [src/proxy.ts](src/proxy.ts) sets on every request) the browser moves the nonce into an internal slot and blanks the content attribute — HTML spec, "nonce attributes", so a CSS attribute selector can't exfiltrate it. Verified live: `getAttribute("nonce")` → `""` while `.nonce` → the real value, and the served HTML carries the real value.
+    - React's **DEV-only** hydration attribute check reads props back with `getAttribute` (`diffHydratedProperties` → `hydrateAttribute` in react-dom), so it compares that `""` against the real nonce from the RSC payload and logs *"A tree hydrated but some attributes of the server rendered HTML didn't match the client properties"* on every page.
+    - **Read the diff direction correctly**: React's `describePropertiesDiff` prints `+` for the CLIENT props and `-` for the value it read back from the DOM (which it labels "server"). `+ nonce="<real>"` / `- nonce=""` therefore means the server HTML was **right** and the DOM readback was blanked — not "the client lost the nonce". Misreading this sends you looking for a nonexistent threading bug in `headers()`.
+    - It is a `console.error` only: React never patches up or re-renders attribute mismatches, so there is **no #418, no recoverable error, no client re-render**. `diffHydratedProperties`/`hydrateAttribute`/`serverDifferences` are absent from the production react-dom build entirely, so it never fired outside `next dev`.
+
+    Rules:
+    - The nonce cannot be dropped from that tag — `strict-dynamic` blocks un-nonced inline scripts, and the anti-FOUC script would be CSP-killed. `suppressHydrationWarning` on the `<script>` is the fix; the one on `<html>` does **not** cascade to it.
+    - The CI crawl ([scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)) never saw this: it builds and runs `npm run start`, i.e. **production**, where the diff path does not exist. There is no ignore-filter to narrow. Its `/#418/` match is on `pageerror` — real hydration *errors*, a different class.
+    - Corollary gap, accepted: because CI runs production, dev-only attribute-mismatch **warnings** are invisible to it. A genuine one (a `Date.now()`-derived attribute) would only surface in a local `next dev` console — which is exactly why that console must stay free of known-benign noise.
+
 17. **Do not "fix" the intentional fire-and-forget `tmdbId` backfill in [src/app/(app)/admin/activity/page.tsx](src/app/(app)/admin/activity/page.tsx).**
 
     Why:
@@ -534,6 +547,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The losing copies also ride in-memory on `JellyfinLibraryItemData.duplicateItemIds`, and `buildSeriesItemIdIndex` maps every one of them. All three series-map builders go through it — [/api/sync/route.ts](src/app/api/sync/route.ts), [/api/sync/jellyfin/route.ts](src/app/api/sync/jellyfin/route.ts), and `getJellyfinTVEpisodes`'s internal fallback. Its `.values()` repeat per copy: dedupe before using them as a tmdbId list (the `tmdbIdsBeingReplaced` delete scope).
     - **Which copy becomes the stored row is `prefersCandidate` — newest `addedAt`, item-id tiebreak — NOT arrival order.** The library-scoped walk fetches folders concurrently, so plain last-write-wins let the winner (and with it the row's `itemId`, `filePath`, `addedAt` and ratings) flip between syncs. Order-independence is the whole point; don't "simplify" it back to a bare `items.set()`. The rule is also what the unscoped single-query path already did by construction (`SortBy=DateCreated` ascending + last write), so single-library servers see no change.
     - **fix-match remaps EVERY copy, serially.** All copies of a title are mismatched on the server, so remapping one left the others reporting the old tmdbId and the next library sync could elect an unfixed copy — the admin's correction silently reverted. Only a total failure aborts; a partial one still records the copies that moved and returns a `warning` naming the shortfall. Keep it serial — parallel `FullRefresh` calls are how these start timing out.
+
+38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
+
+    Why:
+    - React's development build calls `eval()` to reconstruct server-side error stacks in the browser, and Turbopack's HMR runtime evaluates modules the same way. Without the carve-out every `next dev` page logged *"eval() is not supported in this environment"* and those debugging features were dark — a permanent console error that trains people to ignore the dev console, which is the only place dev-only hydration **warnings** ever surface (guardrail 16a).
+    - Widening it is a real vulnerability, not a lint nit: `'unsafe-eval'` makes any string reaching `eval()`/`new Function()` executable, which is most of what the per-request nonce + `'strict-dynamic'` policy exists to prevent. Production is the response an attacker can reach.
+
+    Rules:
+    - The condition lives inline in [src/proxy.ts](src/proxy.ts)'s `cspValue`. `next build` sets `NODE_ENV=production`, so Turbopack constant-folds the branch away — the string is **absent from the production bundle**, not merely false at runtime. Verify that way (`grep unsafe-eval` the built `.next/server/chunks/*.js`), not by reading the source.
+    - `tests/proxy.test.mts` pins BOTH directions (development grants it; `production`/`test`/unset never do). A one-sided pin would be satisfied by a hardcoded constant — keep both.
+    - Next's CSP guide documents this exact carve-out and states neither React nor Next uses `eval()` in production. `style-src` needs no dev branch here: it is already `'unsafe-inline'` in every environment.
+    - [SECURITY.md](SECURITY.md) describes the **shipped** posture. It stays accurate only while this branch is dev-only — if that ever changes, that file changes with it.
 
 ## Working principles
 
