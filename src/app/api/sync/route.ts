@@ -14,7 +14,7 @@ import {
 import { getPlexTmdbIds, getPlexLibrarySections, getPlexTVEpisodes, type PlexLibraryItemData, type PlexTVEpisodeData, type PlexLegacyGuidRef } from "@/lib/plex";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
 import { getPlexConfig } from "@/lib/plex-config";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { type MediaInstanceKey, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
@@ -1037,10 +1037,9 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         // Built from THIS instance's own TV map, never the cross-instance union: Jellyfin
         // item ids are server-local and can collide across independently-administered
         // servers, so a global series map could resolve episodes onto the wrong show.
-        const jfSeriesMap = new Map<string, number>();
-        for (const [tmdbId, data] of tvIds) {
-          if (data.itemId) jfSeriesMap.set(data.itemId, tmdbId);
-        }
+        // Keyed on every item id per series — a show in two of this server's libraries
+        // files its episodes under two SeriesIds, and only one id survives into the row.
+        const jfSeriesMap = buildSeriesItemIdIndex(tvIds);
         try {
           const episodes = await getJellyfinTVEpisodes(baseUrl, apiKey, librarySelections.get(jellyfinSettingKey(slug, "Libraries")), jfSeriesMap);
           // Element-wise — see the Plex arm above.

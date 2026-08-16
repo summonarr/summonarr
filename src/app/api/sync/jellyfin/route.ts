@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -103,16 +103,17 @@ async function syncJellyfin(request: NextRequest) {
     );
   }
 
-  const seriesItemIdToTmdbId = new Map<string, number>();
-  for (const [tmdbId, data] of tvIds) {
-    if (data.itemId) seriesItemIdToTmdbId.set(data.itemId, tmdbId);
-  }
+  // Keyed on EVERY item id per series, not just the stored one — a show in two
+  // libraries files its episodes under two SeriesIds and the unlisted one's
+  // episodes would be dropped on the floor.
+  const seriesItemIdToTmdbId = buildSeriesItemIdIndex(tvIds);
 
   // Fire-and-forget: episode cache is best-effort and must not block the main library write.
   // On recentOnly, scope deletes to the series we're about to repopulate so unrelated cached
   // episodes survive (the recentOnly tv filter is a 2h window, not the whole library).
   const episodeRecentOnly = recentOnly;
-  const tmdbIdsBeingReplaced = Array.from(seriesItemIdToTmdbId.values());
+  // Deduped: a duplicated series contributes one entry per item id.
+  const tmdbIdsBeingReplaced = Array.from(new Set(seriesItemIdToTmdbId.values()));
   // Decided BEFORE the fetch, like the Plex twin: bailing out inside the .then()
   // still page-walked every Episode in the library first, then threw the whole
   // result away on any multi-server install.

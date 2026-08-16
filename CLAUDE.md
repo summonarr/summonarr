@@ -520,6 +520,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **Never sum `plexMarked` and `jellyfinMarked`.** One marking pass, one `stillPending` snapshot, so a title on both servers is counted once by each. Report per source.
     - **One POST to `/api/sync` already syncs Jellyfin.** Its Jellyfin arm is a strict superset of a bodiless `/api/sync/jellyfin` call (full unwindowed replace over every instance, vs insert-only inside a 2-hour window on the default alone). Don't add a second call; it re-runs the whole marking pass and races the orchestrator's own delete-and-replace.
 
+37. **NEVER build a Jellyfin series→tmdbId map from `JellyfinLibraryItemData.itemId` alone — use `buildSeriesItemIdIndex`.** This is the SAME-server, multi-*library* twin of guardrail 35 (which is about multi-*server*); the two are independent.
+
+    Why:
+    - One title legitimately sits in several libraries on ONE server (Anime vs TV, HD vs 4K, an accidental double-import). `getJellyfinItemsByType` still collapses to one row per tmdbId because `JellyfinLibraryItem` is keyed `@@id([tmdbId, mediaType, serverInstance])` with a single `jellyfinItemId` — there is nowhere to persist a second id.
+    - Each copy carries its OWN item id, and every episode is filed under whichever `SeriesId` its copy has. `processEpisodes` `continue`s on an unrecognised `SeriesId`, so a map built from the surviving id dropped the other copy's **entire episode set** out of `TVEpisodeCache` — silently, presenting as "those seasons aren't in the library".
+
+    Rules:
+    - The losing copies' ids ride along in `JellyfinLibraryItemData.duplicateItemIds`, and `buildSeriesItemIdIndex` ([jellyfin.ts](src/lib/jellyfin.ts)) maps every one of them. All three builders go through it — [/api/sync/route.ts](src/app/api/sync/route.ts), [/api/sync/jellyfin/route.ts](src/app/api/sync/jellyfin/route.ts), and `getJellyfinTVEpisodes`'s internal fallback. Its `.values()` repeat per copy: dedupe before using them as a tmdbId list (the `tmdbIdsBeingReplaced` delete scope).
+    - **Which copy becomes the stored row is `prefersCandidate` — newest `addedAt`, item-id tiebreak — NOT arrival order.** The library-scoped walk fetches folders concurrently, so plain last-write-wins let the winner (and with it the row's `itemId`, `filePath`, `addedAt` and ratings) flip between syncs. Order-independence is the whole point; don't "simplify" it back to a bare `items.set()`. The rule is also what the unscoped single-query path already did by construction (`SortBy=DateCreated` ascending + last write), so single-library servers see no change.
+    - **Known residual — consumers that resolve a STORED `jellyfinItemId` back to a title still only ever see the winner**: `resolveShowTmdbId` ([play-history.ts](src/lib/play-history.ts)), the fix-match row read, and the admin-activity backfill. A watch of the losing copy attributes to nobody. Closing that needs a second persisted id (a `jellyfinItemIds String[]` column), not another in-memory index — don't attempt it with one.
+
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.
