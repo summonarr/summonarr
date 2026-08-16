@@ -47,9 +47,21 @@ export default async function VotesPage({
     where,
     _count: { id: true },
     _max: { createdAt: true },
-    orderBy: sort === "recent"
-      ? { _max: { createdAt: "desc" } }
-      : { _count: { id: "desc" } },
+    // Both sorts need a TIEBREAKER, because both are paginated with skip/take.
+    // Neither key is unique across groups — most titles hold exactly one vote,
+    // so ordering by _count alone leaves the bulk of the table in one tied
+    // block that Postgres may return in a different order per query. Two
+    // requests for two pages are two queries, so a title could appear on both
+    // pages while another appeared on neither. Appending the group key makes
+    // the order total, and it is free: [tmdbId, mediaType] is the group key
+    // already being computed.
+    orderBy: [
+      sort === "recent"
+        ? { _max: { createdAt: "desc" } }
+        : { _count: { id: "desc" } },
+      { tmdbId: "asc" },
+      { mediaType: "asc" },
+    ],
     skip: (page - 1) * PAGE_SIZE,
     take: PAGE_SIZE,
   });

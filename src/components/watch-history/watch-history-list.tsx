@@ -64,6 +64,7 @@ export function WatchHistoryList({
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -92,6 +93,17 @@ export function WatchHistoryList({
     filterGen.current += 1;
     setRefreshing(true);
     setError(null);
+    // Drop the cursor for the duration of the refetch. The generation counter
+    // cannot cover this on its own: it is bumped synchronously HERE, while
+    // nextCursor is state that only updates when the refetch resolves. In that
+    // window the component holds the NEW generation and the OLD cursor, so a
+    // "Load more" click captures a generation that still matches on return and
+    // sails through the guard — sending the previous query's keyset position
+    // into the new filter. Rows between the new page 1 and that stale position
+    // are never fetched, and the cursor installed afterwards sits below the
+    // gap, so the hole is permanent for the session. Clearing it also removes
+    // the button, which is the honest affordance while page 1 is reloading.
+    setNextCursor(null);
     const params = new URLSearchParams();
     if (typeFilter) params.set("mediaType", typeFilter);
     if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());
@@ -119,6 +131,7 @@ export function WatchHistoryList({
     if (!nextCursor) return;
     const myGen = filterGen.current;
     setLoadingMore(true);
+    setLoadError(null);
     try {
       const params = new URLSearchParams();
       if (typeFilter) params.set("mediaType", typeFilter);
@@ -137,7 +150,14 @@ export function WatchHistoryList({
         });
         setTotal(data.total);
         setNextCursor(data.nextCursor);
+      } else if (filterGen.current === myGen) {
+        setLoadError("Couldn't load more. Tap to retry.");
       }
+    } catch {
+      // `if (res.ok)` with no else and no catch meant a failed page silently did
+      // nothing — same generation guard as the success path, so a superseded
+      // request cannot report its failure over the current one.
+      if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap to retry.");
     } finally {
       setLoadingMore(false);
     }
@@ -421,7 +441,7 @@ export function WatchHistoryList({
       )}
 
       {nextCursor && items.length > 0 && (
-        <div className="flex justify-center" style={{ marginTop: 12 }}>
+        <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
           <button
             type="button"
             onClick={loadMore}
@@ -430,6 +450,9 @@ export function WatchHistoryList({
           >
             {loadingMore ? "Loading…" : `Load more (${Math.max(0, total - items.length)})`}
           </button>
+          {loadError && (
+            <span role="alert" aria-live="assertive" className="text-xs text-red-400">{loadError}</span>
+          )}
         </div>
       )}
     </div>

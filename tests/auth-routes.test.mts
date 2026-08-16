@@ -550,9 +550,13 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   assert.deepEqual(await bodyOf(res), { ok: true });
 
   // The server-side revoke actually happened: the AuthSession row is gone and
-  // the user's sessionsRevokedAt cutoff was bumped to the revoked row's createdAt.
+  // the AuthSession row is gone — which is what the slow path checks first.
   assert.equal(authSessions.has("sess-co"), false, "the AuthSession row must be deleted");
-  assert.deepEqual(users[0].sessionsRevokedAt, created, "sessionsRevokedAt must bump to the row's createdAt");
+  // Signing out ONE device must not stamp the per-user cutoff: it is compared as
+  // `iat <= cutoff`, so it would also kill every session minted earlier — invisible
+  // for cookies (re-signed constantly) but fatal for bearer tokens, which keep their
+  // sign-in iat for a year. Row-presence already rejects this session.
+  assert.equal(users[0].sessionsRevokedAt, null, "a single sign-out must not stamp a per-user cutoff");
 
   // Both Summonarr cookie variants are cleared (Max-Age=0), plus no-store headers.
   const setCookies = res.headers.getSetCookie();

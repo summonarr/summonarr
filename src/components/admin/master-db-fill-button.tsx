@@ -7,7 +7,13 @@ import { withBasePath } from "@/lib/base-path";
 
 type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "error";
 
-export function MasterDbFillButton() {
+export function MasterDbFillButton({
+  plexConfigured,
+  jellyfinConfigured,
+}: {
+  plexConfigured: boolean;
+  jellyfinConfigured: boolean;
+}) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [summary, setSummary] = useState<string | null>(null);
 
@@ -15,33 +21,70 @@ export function MasterDbFillButton() {
     setPhase("phase1");
     setSummary(null);
 
-    let plexCount = 0;
-    let jellyCount = 0;
+    const libraryParts: string[] = [];
+    let libraryDegraded = false;
     try {
-      const [plexRes, jellyRes] = await Promise.all([
-        fetch(withBasePath("/api/sync/plex"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ full: true }),
-        }),
-        fetch(withBasePath("/api/sync/jellyfin"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ full: true }),
-        }),
-      ]);
-      const plexData = await plexRes.json() as { scanned?: { movies: number; tv: number }; error?: string };
-      const jellyData = await jellyRes.json() as { scanned?: { movies: number; tv: number }; error?: string };
+      // Only the servers that exist. The old code POSTed to both and gated the
+      // failure on `!plexRes.ok && !jellyRes.ok` — a logical AND, so BOTH had to
+      // fail before anything was reported. On a two-server deployment that
+      // turned a real Jellyfin outage into green text: the Jellyfin error was
+      // discarded, its count fell through to 0, and `if (jellyCount > 0)` simply
+      // omitted the line, so the summary read as a clean fill.
+      //
+      // Note this is the opposite mistake from resync-library-button, which
+      // took the FIRST error and so went red whenever either server was merely
+      // absent. Neither could tell "not configured" from "broken"; both now
+      // decide it before the request instead of from the response.
+      const targets = [
+        ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
+        ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
+      ];
 
-      if (!plexRes.ok && !jellyRes.ok) {
+      if (targets.length === 0) {
         setPhase("error");
-        setSummary(`Library sync failed — ${plexData.error ?? "Plex error"} · ${jellyData.error ?? "Jellyfin error"}`);
+        setSummary("No media servers configured — set up Plex or Jellyfin first");
         setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
         return;
       }
 
-      plexCount = (plexData.scanned?.movies ?? 0) + (plexData.scanned?.tv ?? 0);
-      jellyCount = (jellyData.scanned?.movies ?? 0) + (jellyData.scanned?.tv ?? 0);
+      const outcomes = await Promise.all(
+        targets.map(async ({ name, path }) => {
+          try {
+            const res = await fetch(withBasePath(path), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ full: true }),
+            });
+            // .catch on the parse: a reverse proxy erroring mid-response sends
+            // HTML, and a bare .json() would throw past the per-target guard
+            // into the outer catch, losing the other server's result too.
+            const data = (await res.json().catch(() => null)) as
+              | { scanned?: { movies: number; tv: number }; error?: string }
+              | null;
+            if (!res.ok || data?.error) {
+              return { ok: false, text: `${name} ${data?.error ?? `failed (${res.status})`}` };
+            }
+            const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
+            return { ok: true, text: `${name} ${count.toLocaleString("en-US")} items` };
+          } catch {
+            return { ok: false, text: `${name} network error` };
+          }
+        }),
+      );
+
+      // Every configured server failed ⇒ there is no library to warm from, so
+      // stop rather than running phase 2 over nothing and calling it a success.
+      if (!outcomes.some((o) => o.ok)) {
+        setPhase("error");
+        setSummary(`Library sync failed — ${outcomes.map((o) => o.text).join(" · ")}`);
+        setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
+        return;
+      }
+      // A partial failure carries on to the TMDB warm — the server that did
+      // sync has real rows worth warming — but its text rides along in the
+      // summary so it cannot be mistaken for a clean run.
+      libraryParts.push(...outcomes.map((o) => o.text));
+      libraryDegraded = outcomes.some((o) => !o.ok);
     } catch {
       setPhase("error");
       setSummary("Library sync failed — check server logs");
@@ -59,9 +102,10 @@ export function MasterDbFillButton() {
         setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
         return;
       }
-      const parts: string[] = [];
-      if (plexCount > 0) parts.push(`Plex ${plexCount.toLocaleString("en-US")} items`);
-      if (jellyCount > 0) parts.push(`Jellyfin ${jellyCount.toLocaleString("en-US")} items`);
+      // Every configured server is named, including one that scanned 0 items —
+      // the old `if (count > 0)` guard silently omitted such a line, which is
+      // exactly how a failed server disappeared from the summary.
+      const parts: string[] = [...libraryParts];
       const fetched    = warmData.fetched    ?? 0;
       const backfilled = warmData.backfilled ?? 0;
       const skipped    = warmData.skipped    ?? 0;
@@ -70,7 +114,9 @@ export function MasterDbFillButton() {
       if (backfilled > 0) tmdbParts.push(`${backfilled.toLocaleString("en-US")} backfilled`);
       if (skipped    > 0) tmdbParts.push(`${skipped.toLocaleString("en-US")} already cached`);
       parts.push(`TMDB: ${tmdbParts.join(", ") || "0 items"}`);
-      setPhase("done");
+      // A summary that names a failed server must not render green — the two
+      // together read as "this worked" over the top of "this did not".
+      setPhase(libraryDegraded ? "error" : "done");
       setSummary(parts.join(" · "));
     } catch {
       setPhase("error");

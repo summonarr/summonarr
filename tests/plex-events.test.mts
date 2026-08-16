@@ -797,15 +797,39 @@ test("GR27: a failed PlayHistory write leaves the session un-ledgered so a later
   );
 });
 
-test("a stop for a session we never tracked just ledgers the key (no cross-check, no writes)", async () => {
+test("a stop for a session we never tracked cross-checks, then ledgers the key (no writes)", async () => {
+  plexSnapshotSessions = []; // Plex agrees the session is gone
   const sessBefore = sessionFetches().length;
   const histBefore = historyRows().length;
   pushFrame(playingFrame({ sessionKey: "stop-ghost", state: "stopped", viewOffset: 1_000 }));
   await waitFor(() => isPlexSessionRecentlyFinalized("plex:stop-ghost"), "ledger mark for the unseen session");
   await drain(20);
-  assert.equal(sessionFetches().length, sessBefore, "no /status/sessions cross-check for a session with no DB row");
+  assert.equal(sessionFetches().length, sessBefore + 1, "the no-row branch cross-checks before ledgering");
   assert.equal(historyRows().length, histBefore, "no PlayHistory row for a session we never observed");
   assert.equal(deletesFor("plex:stop-ghost").length, 0);
+});
+
+test("PIN: a spurious stop for a session Plex STILL reports must not ledger it — that blinds a brand-new play", async () => {
+  // A playback has no ActiveSession row until the 5s poller creates one (two
+  // ticks for DLNA). A spurious stop inside that window used to ledger the key
+  // unconditionally: the poller filters ledgered keys out BEFORE it can create
+  // the row, and clearFinalizedNotInCurrentSnapshot only releases keys ABSENT
+  // from the snapshot — so a still-playing key could never release itself and
+  // the entire watch was lost for the 1h TTL.
+  plexSnapshotSessions = [{ sessionKey: "stop-newborn" }]; // still playing
+  const sessBefore = sessionFetches().length;
+  const histBefore = historyRows().length;
+
+  pushFrame(playingFrame({ sessionKey: "stop-newborn", state: "stopped", viewOffset: 1_000 }));
+  await waitFor(() => sessionFetches().length > sessBefore, "the cross-check fetch");
+  await drain(20);
+
+  assert.equal(
+    isPlexSessionRecentlyFinalized("plex:stop-newborn"),
+    false,
+    "a session Plex still reports must stay un-ledgered so the poller can create its row",
+  );
+  assert.equal(historyRows().length, histBefore, "nothing to finalize — there was no row");
 });
 
 // ═══ Phase F — SSE frame plumbing and event routing ═════════════════════════

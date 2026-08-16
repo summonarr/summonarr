@@ -435,36 +435,32 @@ export function invalidateUserSession(userId: string): void {
 }
 
 export async function revokeSessionById(sessionId: string): Promise<void> {
-  // Bump sessionsRevokedAt to the revoked session's createdAt so refreshToken()'s
-  // cutoff check on OTHER replicas rejects the revoked session's JWT even within
-  // the 60s dbCheckedAt cache window (otherwise the cached token passes for up to
-  // 60s after row deletion). The refresh cutoff is `iat <= sessionsRevokedAt` and
-  // the JWT is signed in (almost always) the same wall-clock second the row is
-  // created, so createdAt catches the revoked token while sparing newer sessions
-  // (iat > createdAt). Older sessions are caught too — acceptable for "revoke this
-  // device", since per-session granularity isn't expressible against a per-user
-  // timestamp. We deliberately do NOT push the cutoff to `now`: that would
-  // invalidate every current session of the user (revoke-one → revoke-everywhere).
+  // Deliberately does NOT touch sessionsRevokedAt.
+  //
+  // It used to bump the cutoff to the revoked row's createdAt, on the theory that
+  // another replica might serve the deleted session from its dbCheckedAt cache.
+  // That reasoning does not survive contact with the code: the cutoff is only ever
+  // consulted on the SLOW path, where the AuthSession row-presence check already
+  // rejects the deleted session several lines earlier; on the FAST path the
+  // function returns before it even loads the user, so the cutoff is unreachable
+  // there. And this deployment is a single Node process (guardrail 17), so
+  // markSessionForceRevoked below forces the very next request onto the slow path
+  // anyway. The bump bought nothing.
+  //
+  // What it cost was real. The cutoff is `iat <= sessionsRevokedAt`, and it is
+  // per-USER, so anchoring it to one session's createdAt also kills every session
+  // minted earlier. Cookie sessions hide this — they are re-signed constantly, so
+  // their iat is always newer — but a bearer/native token keeps its sign-in iat for
+  // its whole ~1-year life. Revoking a laptop therefore signed out every iOS device
+  // that had been signed in longer. Revoke-all still stamps a cutoff ("now"), which
+  // is correct for its everywhere semantics.
   await prisma.$transaction(async (tx) => {
     const row = await tx.authSession.findUnique({
       where: { sessionId },
-      select: { userId: true, createdAt: true },
+      select: { userId: true },
     });
     if (!row) return;
     await tx.authSession.delete({ where: { sessionId } });
-    // Never DECREASE sessionsRevokedAt — a prior full-user revoke may have set it
-    // higher and overwriting would weaken that cutoff. Only bump forward.
-    const userRow = await tx.user.findUnique({
-      where: { id: row.userId },
-      select: { sessionsRevokedAt: true },
-    });
-    const existing = userRow?.sessionsRevokedAt;
-    if (!existing || row.createdAt > existing) {
-      await tx.user.update({
-        where: { id: row.userId },
-        data: { sessionsRevokedAt: row.createdAt },
-      });
-    }
   });
   // Mark in-memory only AFTER the DB revocation commits (matches
   // revokeAllUserSessions). The error is intentionally not swallowed: a failed

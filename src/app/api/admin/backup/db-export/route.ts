@@ -20,19 +20,43 @@ function escapeSQL(value: unknown): string {
   }
   if (typeof value === "bigint") return String(value);
   if (value instanceof Date) return `'${value.toISOString()}'`;
-  // Prisma returns Json/Jsonb columns as parsed objects/arrays. String(value)
-  // would produce "[object Object]" — re-serialize with JSON.stringify so the
-  // dump contains a valid JSON literal that Postgres can re-parse on INSERT.
+  // A native Postgres ARRAY column (text[] etc) also arrives as a JS array, and
+  // it needs an ARRAY literal, not a JSON one. Emitting `'["a","b"]'` for
+  // JellyfinLibraryItem.jellyfinItemIds made Postgres reject the row with
+  // `22P02 malformed array literal` — the EMPTY array too, so it was every row
+  // in that table, not just guardrail-37's duplicate-copy rows. The importer
+  // runs the whole dump in one transaction, so the first such row rolled back
+  // the entire restore while the export itself returned 200 and looked perfect.
+  //
+  // The quoted `'{a,b}'` form is deliberate: it stays a plain single-quoted
+  // string, so backup-import's SAFE_LITERAL_RE still accepts it. An ARRAY[...]
+  // constructor would be rejected by that validator.
+  //
+  // Discriminating on the JS shape is only sound because NO Json column in this
+  // schema holds a top-level array — one that did would arrive as an array too
+  // and get an array literal written into a jsonb column, which is this same
+  // bug in reverse. tests/schema-invariants.test.mts pins that assumption; if
+  // it ever goes red, this needs the real column type rather than the shape.
+  if (Array.isArray(value)) {
+    const elements = value.map((el) => {
+      if (el === null) return "NULL";
+      // Per-element quoting, then the outer pass escapes the SQL quotes.
+      return `"${String(el).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    });
+    return `'${`{${elements.join(",")}}`.replace(/\0/g, "").replace(/'/g, "''")}'`;
+  }
+  // Prisma returns Json/Jsonb columns as parsed objects. String(value) would
+  // produce "[object Object]" — re-serialize with JSON.stringify so the dump
+  // contains a valid JSON literal that Postgres can re-parse on INSERT.
   const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
   const str = raw.replace(/\0/g, "").replace(/'/g, "''");
   return `'${str}'`;
 }
 
 // Streams the whole database as a re-runnable SQL dump (enum types + paginated
-// INSERTs) inside one REPEATABLE READ snapshot; `counts` is mutated in place.
+// INSERTs) inside one REPEATABLE READ snapshot.
 function buildSqlStream(
   exportedBy: string,
-  counts: { tables: number; rows: number },
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
 
@@ -106,10 +130,13 @@ function buildSqlStream(
               }
 
               let totalRows = 0;
-              let offset = 0;
               let columns: string[] | null = null;
               let colList = "";
               let orderClause: string | null = null;
+              // Keyset cursor: the previous page's last row, projected onto the
+              // key columns. null on the first page.
+              let cursor: unknown[] | null = null;
+              let keyCols: string[] | null = null;
 
               while (true) {
                 if (orderClause === null) {
@@ -137,10 +164,48 @@ function buildSqlStream(
                   orderClause = safeIdents.length > 0
                     ? "ORDER BY " + safeIdents.join(", ")
                     : "ORDER BY ctid";
+                  // Only a PK gives us a cursor. The two PK-less tables
+                  // (VerificationToken, DiscordMergeCode) stay on OFFSET: ctid
+                  // would have to be SELECTed to be carried forward, and that
+                  // extra column would pollute the INSERT column list, which is
+                  // derived from Object.keys(rows[0]). Both are tiny and
+                  // expiry-purged, so the quadratic cost never materializes.
+                  keyCols = safeIdents.length > 0 ? safeIdents : null;
                 }
-                const rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
-                  `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${offset}`,
-                );
+
+                // Keyset, not LIMIT/OFFSET. OFFSET re-walks and discards every
+                // preceding index+heap entry on each page, so a single table
+                // costs O(n^2/CHUNK): measured on a 300k-row PlayHistory,
+                // page 1 ran in 1.2ms and the last page in 108ms, and the full
+                // walk took 14.0s versus 0.47s for the keyset form.
+                //
+                // The row-value comparison handles composite PKs uniformly —
+                // 10 of the 38 exported tables have one — and degenerates to
+                // the single-column case for the rest. Postgres infers the
+                // parameter types from the row-comparison context, including an
+                // enum in the middle of the key (MediaType), so no per-table
+                // casts are needed and the plan stays an index condition rather
+                // than a filter.
+                //
+                // Output is byte-identical: same ORDER BY, same per-row INSERT.
+                // That matters because backup-import is a strict allowlist that
+                // pins the statement shape, so this is purely a cost change.
+                let rows: Record<string, unknown>[];
+                if (keyCols && cursor) {
+                  const placeholders = cursor.map((_, i) => `$${i + 1}`).join(", ");
+                  rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+                    `SELECT * FROM "public"."${table}" WHERE (${keyCols.join(", ")}) > (${placeholders}) ${orderClause} LIMIT ${CHUNK_SIZE}`,
+                    ...cursor,
+                  );
+                } else if (keyCols) {
+                  rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+                    `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE}`,
+                  );
+                } else {
+                  rows = await tx.$queryRawUnsafe<Record<string, unknown>[]>(
+                    `SELECT * FROM "public"."${table}" ${orderClause} LIMIT ${CHUNK_SIZE} OFFSET ${totalRows}`,
+                  );
+                }
                 if (rows.length === 0) break;
 
                 if (columns === null) {
@@ -167,15 +232,18 @@ function buildSqlStream(
                   // aborting the entire restore.
                   write(`INSERT INTO "public"."${table}" (${colList}) VALUES (${values}) ON CONFLICT DO NOTHING;\n`);
                   totalRows++;
-                  counts.rows++;
                 }
 
                 if (rows.length < CHUNK_SIZE) break;
-                offset += CHUNK_SIZE;
+                if (keyCols) {
+                  // Advance the cursor to the last row's key. keyCols are
+                  // quoted identifiers, so strip the quotes to index the row.
+                  const last = rows[rows.length - 1];
+                  cursor = keyCols.map((c) => last[c.slice(1, -1).replace(/""/g, '"')]);
+                }
               }
 
               write(`-- Table: ${table} (${totalRows} rows)\n\n`);
-              counts.tables++;
             }
           },
           { timeout: EXPORT_TIMEOUT_MS, isolationLevel: "RepeatableRead" },
@@ -216,10 +284,9 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     );
   }
 
-  const counts = { tables: 0, rows: 0 };
   let body: ReadableStream<Uint8Array>;
   try {
-    body = wrapEncryptStream(buildSqlStream(session.user.id, counts), password);
+    body = wrapEncryptStream(buildSqlStream(session.user.id), password);
   } catch (err) {
     if (err instanceof BackupCryptoError) {
       return NextResponse.json({ error: err.message }, { status: err.status });

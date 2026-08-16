@@ -13,7 +13,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
-import { hasPermission, Permission, parsePermissions } from "@/lib/permissions";
 import { getVisibleAdminItems } from "@/lib/nav-items";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { NotificationBell } from "@/components/layout/notification-bell";
@@ -31,6 +30,7 @@ import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { getClientBadgeVisibility } from "@/lib/badge-visibility";
 
 type MediaFilter = "all" | "movie" | "tv";
 
@@ -409,22 +409,18 @@ export function Header() {
   const router = useRouter();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
-  const provider = session?.user?.provider;
   const permsStr = session?.user?.permissions;
-  const eff = permsStr ? parsePermissions(permsStr) : 0n;
-  const isAdminLike = role === "ADMIN" || hasPermission(eff, Permission.ADMIN) || role === "ISSUE_ADMIN" || hasPermission(eff, Permission.MANAGE_ISSUES);
   // The avatar menu's Settings entry used to render for EVERY signed-in user, but
   // /settings is ADMIN-only and redirects everyone else to "/" — so most users had
   // a dead item in their own menu. Resolved through the shared nav resolver rather
   // than a local ADMIN check so it follows the page's gate if that ever changes.
   const canOpenSettings = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role)
     .some((i) => i.href === "/settings");
-  const showPlex =
-    isAdminLike || provider === "plex";
-  const showJellyfin =
-    isAdminLike ||
-    provider === "jellyfin" ||
-    provider === "jellyfin-quickconnect";
+  // Shared with MobileNav and the server surfaces. This copy already read the
+  // permission bits, but still keyed on `provider` rather than `mediaServer` —
+  // which are different fields for a credentials or OIDC sign-in, where
+  // mediaServer comes from the admin-set User column.
+  const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
   // `image` isn't part of SummonarrSession yet — claims are kept slim. Avatar
   // falls back to initials when image is absent, which is the existing
   // behaviour for credentials/plex/jellyfin users who never had it set anyway.

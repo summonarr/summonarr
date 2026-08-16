@@ -24,6 +24,10 @@ interface FilterBarProps {
   // Latest year for the From/To Year dropdowns. Computed server-side so SSR
   // and hydration share one value — see the comment over `buildYears` below.
   maxYear: number;
+  // The parent's startTransition. Filter changes are now real navigations that
+  // the server answers, so the grid needs to know one is in flight — owning the
+  // transition here would keep isPending out of reach of the spinner.
+  navigate: (cb: () => void) => void;
 }
 
 const SORT_OPTIONS = [
@@ -117,6 +121,7 @@ export function FilterBar({
   activeWatchProvider,
   activeHideAvailable,
   maxYear,
+  navigate,
 }: FilterBarProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -130,8 +135,10 @@ export function FilterBar({
       else params.set(k, v);
     }
     params.delete("page");
-    router.push(`${pathname}?${params.toString()}`);
-  }, [router, pathname, searchParams]);
+    // Wrapped by the parent's transition so the grid can show a pending
+    // overlay for the whole navigation, not just its tail.
+    navigate(() => router.push(`${pathname}?${params.toString()}`));
+  }, [router, pathname, searchParams, navigate]);
 
   const activeRatingValue = activeRatingFilter
     ? activeRatingFilter
@@ -157,7 +164,14 @@ export function FilterBar({
     const bTop = TOP_PROVIDER_IDS.has(b.provider_id);
     if (aTop && !bTop) return -1;
     if (!aTop && bTop) return 1;
-    return a.provider_name.localeCompare(b.provider_name);
+    // Pinned locale. Bare localeCompare uses the RUNTIME default — Node's on
+    // the server, the browser's on the client — and this list is rendered into
+    // SSR HTML. Czech and Slovak sort the "ch" digraph after "h" (moving the
+    // real provider "Chili"), Lithuanian and Latvian collate Y next to I, and
+    // Estonian puts Z between S and T; any of those reorders the <option> list
+    // between server and client and reports a hydration mismatch. Guardrail 16
+    // is written around the clock, but locale is the same class of bug.
+    return a.provider_name.localeCompare(b.provider_name, "en");
   });
   const activeProviderName = sortedProviders.find((p) => String(p.provider_id) === activeWatchProvider)?.provider_name;
 
@@ -262,7 +276,7 @@ export function FilterBar({
         {hasFilters && (
           <button
             type="button"
-            onClick={() => router.push(pathname)}
+            onClick={() => navigate(() => router.push(pathname))}
             className="ds-tap inline-flex items-center gap-1 transition-colors"
             style={{
               padding: "5px 10px",

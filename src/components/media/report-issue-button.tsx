@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
@@ -73,8 +73,17 @@ export function ReportIssueButton({
   const [prevScope, setPrevScope] = useState(scope);
   if (scope !== prevScope) {
     setPrevScope(scope);
-    setSelectedSeason(tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null);
-    setSelectedEpisode(null);
+    const nextSeason = tvSeasons.length > 0 ? tvSeasons[0].seasonNumber : null;
+    setSelectedSeason(nextSeason);
+    // Seed the episode too, exactly as the season above is seeded. Leaving it
+    // null did NOT leave the field blank — a controlled <select> whose value
+    // matches no option falls back to displaying the first one, so the dropdown
+    // read "Episode 1" while the state was null. The user saw a complete form,
+    // submitted, and got the server's raw `episodeNumber is required for
+    // EPISODE scope` back about a field they were looking at.
+    setSelectedEpisode(
+      tvSeasons.find((s) => s.seasonNumber === nextSeason)?.episodes[0] ?? null,
+    );
     setManualSeason("");
     setManualEpisode("");
   }
@@ -82,7 +91,12 @@ export function ReportIssueButton({
   const isTV = mediaType === "TV";
   const useManualInputs = isTV && (availabilityFailed || (dialogState === "open" && tvSeasons.length === 0));
 
+  // Per-open generation, bumped by closeDialog. openDialog awaits a fetch and
+  // must not write back to a run the user already dismissed.
+  const openGen = useRef(0);
+
   async function openDialog() {
+    const myGen = ++openGen.current;
     // Prefill seeds (watch-history rows pass the entry's episode). prevScope
     // must be seeded too, or the render-time scope-change reset clobbers the
     // seeded season/episode on the first render after opening.
@@ -132,11 +146,20 @@ export function ReportIssueButton({
       }
     }
 
+    // Only open if this run is still the current one. The dialog is dismissable
+    // while the availability fetch is in flight — the header X is disabled, but
+    // Escape and an outside click both route through onOpenChange — so without
+    // this the fetch settled after the user had closed it and reopened the
+    // dialog on top of whatever they had moved on to. Same generation-ref shape
+    // as issue-actions' releaseReqRef and watch-history-list's filterGen.
+    if (openGen.current !== myGen) return;
     setDialogState("open");
   }
 
   function closeDialog() {
     if (dialogState === "submitting") return;
+    // Bumping here is what makes an in-flight openDialog give up.
+    openGen.current += 1;
     setDialogState("idle");
   }
 

@@ -392,7 +392,15 @@ export default async function LibraryDiffPage({
   const [plexItems, jellyfinItems, prefixRows, freshMovieCount, freshTvCount] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
-    prisma.setting.findMany({ where: { key: { in: ["plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix"] } } }),
+    // The four connection keys ride along on the existing query so the Re-sync
+    // button can be told which servers exist rather than POSTing to both and
+    // reading a not-configured 400 as a failure. Not derived from
+    // plexItems.length: a configured-but-empty or freshly-added server has no
+    // rows yet and would be wrongly reported as absent.
+    prisma.setting.findMany({ where: { key: { in: [
+      "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
+      "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
+    ] } } }),
     prisma.tmdbCache.count({
       where: { key: { startsWith: "movie:", endsWith: ":details" }, expiresAt: { gt: threshold } },
     }),
@@ -413,6 +421,17 @@ export default async function LibraryDiffPage({
   tvArrMapPromise.catch(() => {});
 
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
+
+  // Whether a server is CONNECTED — the same url+key gates /api/sync/plex and
+  // /api/sync/jellyfin apply themselves, so the Re-sync button can skip one that
+  // is not there rather than POSTing to it and reading the 400 as a failure.
+  // Default instance only, which is all that button syncs (it sends no slug).
+  //
+  // Deliberately NOT the `plexConfigured` further down: that one means "has
+  // library ROWS" and drives the has-anything-synced-yet empty state. A freshly
+  // connected server has none, and is exactly the case that needs the button.
+  const plexSyncConfigured = !!(prefixCfg.plexServerUrl && prefixCfg.plexAdminToken);
+  const jellyfinSyncConfigured = !!(prefixCfg.jellyfinUrl && prefixCfg.jellyfinApiKey);
 
   // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
   // slug list comes from the library rows rather than the instance registry:
@@ -440,7 +459,15 @@ export default async function LibraryDiffPage({
 
   const plexConfigured    = plexItems.length > 0;
   const jellyfinConfigured = jellyfinItems.length > 0;
-  const neither = !plexConfigured && !jellyfinConfigured;
+  // A diff needs BOTH sides. With only one server holding rows the set-difference
+  // degenerates to that server's entire library — "every Plex title is missing
+  // from Jellyfin" is technically true and completely useless, and it is exactly
+  // the render that falls over: measured at ~12MB of HTML and 70k DOM elements
+  // for an ordinary 5,000-title library, ~61MB and 350k at the 25,000 cap, plus
+  // the same rows again in the RSC payload. The old gate only caught BOTH sides
+  // being empty, so every single-server deployment — which guardrail 35 notes is
+  // the common shape — walked into it from a first-class nav link.
+  const oneSided = !plexConfigured || !jellyfinConfigured;
 
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
   const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
@@ -452,12 +479,22 @@ export default async function LibraryDiffPage({
   const rawOnlyJellyfin  = jellyfinItems.filter((i) => !plexSet.has(`${i.tmdbId}:${i.mediaType}`));
   const inSyncCount      = [...plexSet].filter((k)  =>  jellyfinSet.has(k)).length;
 
-  const filteredOnlyPlex = activeType
-    ? rawOnlyPlex.filter((i) => i.mediaType === activeType)
-    : rawOnlyPlex;
-  const filteredOnlyJellyfin = activeType
-    ? rawOnlyJellyfin.filter((i) => i.mediaType === activeType)
-    : rawOnlyJellyfin;
+  // Skip the whole enrichment pipeline on a one-sided deployment. The render is
+  // gated below, but fetchOverviews + enrichItems run BEFORE that gate and are
+  // the expensive half — three more queries per call over what would be the
+  // entire library — so gating only the JSX would still pay for a result nobody
+  // is shown. The tab counts that read the raw arrays live inside the gated
+  // branch, so nothing downstream observes these being empty.
+  const filteredOnlyPlex = oneSided
+    ? []
+    : activeType
+      ? rawOnlyPlex.filter((i) => i.mediaType === activeType)
+      : rawOnlyPlex;
+  const filteredOnlyJellyfin = oneSided
+    ? []
+    : activeType
+      ? rawOnlyJellyfin.filter((i) => i.mediaType === activeType)
+      : rawOnlyJellyfin;
 
   // Backfill overview for just the difference rows (the only place it is rendered),
   // then merge it into the enrichItems input.
@@ -665,7 +702,7 @@ export default async function LibraryDiffPage({
         subtitle="Media present on one server but missing from the other."
         right={
           <div className="flex items-center gap-2 flex-wrap">
-            <ResyncLibraryButton />
+            <ResyncLibraryButton plexConfigured={plexSyncConfigured} jellyfinConfigured={jellyfinSyncConfigured} />
             <SyncTVEpisodesButton />
             <WarmCacheButton uncachedCount={uncachedCount} />
           </div>
@@ -731,7 +768,7 @@ export default async function LibraryDiffPage({
         </div>
       )}
 
-      {neither ? (
+      {oneSided ? (
         <div
           className="text-center ds-mono"
           style={{
@@ -743,7 +780,9 @@ export default async function LibraryDiffPage({
             color: "var(--ds-fg-subtle)",
           }}
         >
-          Neither Plex nor Jellyfin has been synced yet.{" "}
+          {!plexConfigured && !jellyfinConfigured
+            ? "Neither Plex nor Jellyfin has been synced yet."
+            : `Only ${plexConfigured ? "Plex" : "Jellyfin"} has been synced — a library diff needs both servers.`}{" "}
           <Link
             href="/admin"
             className="hover:underline"

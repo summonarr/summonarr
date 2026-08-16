@@ -302,3 +302,78 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
     `play-history.ts's raw SQL references table(s) that are not models in schema.prisma: ${missing.join(", ")}`,
   );
 });
+
+// ── guardrail 37: the second Jellyfin item id column ────────────────────────
+//
+// One title can sit in several libraries on ONE server (Anime vs TV, HD vs 4K,
+// an accidental double-import) and each copy carries its own Jellyfin item id,
+// but @@id([tmdbId, mediaType, serverInstance]) allows exactly one row. Before
+// jellyfinItemIds the losing copies' ids were simply lost, so a watch filed
+// under one resolved to no title and the episodes filed under it vanished from
+// TVEpisodeCache. Dropping this column back out is a `db push` away and nothing
+// else in the tree would fail.
+
+// db-export's escapeSQL decides between a Postgres ARRAY literal ('{a,b}') and
+// a JSON literal ('["a","b"]') by asking Array.isArray(value) — it has no
+// column type at hand. Prisma hands back a JS array for BOTH a scalar-list
+// column and a Json column holding a top-level array, so that discriminator is
+// only sound while no Json column stores one.
+//
+// It is not a hypothetical. Emitting the JSON form for the one real scalar list
+// (JellyfinLibraryItem.jellyfinItemIds) made Postgres reject the row with
+// `22P02 malformed array literal` — the EMPTY array included, so every row of
+// that table — and the importer runs the whole dump in one transaction, so the
+// first one rolled back the entire restore behind a 200 OK export. A Json
+// column holding an array would be the same failure in the other direction: an
+// array literal written into jsonb.
+//
+// So this pin is the standing condition for that shortcut. If it goes red,
+// escapeSQL must be taught the real column type instead.
+test("no Json column may hold a top-level array — db-export discriminates array columns by JS shape", () => {
+  const jsonFields: string[] = [];
+  for (const m of models.values()) {
+    for (const line of m.body.split("\n")) {
+      const match = /^\s*(\w+)\s+Json\b/.exec(line);
+      if (match) jsonFields.push(`${m.name}.${match[1]}`);
+    }
+  }
+  // A vacuous pass would be worse than no pin — it must actually find them.
+  assert.ok(jsonFields.length > 0, "found no Json columns at all; the schema walk is broken, not the invariant");
+
+  // Every writer must type the value as an object. A `Json` column whose TS
+  // type permits an array is the thing that breaks escapeSQL.
+  const KNOWN_OBJECT_VALUED = new Set([
+    "User.instanceGrants",
+    "User.mediaServerGrants",
+    "TrashSpec.payload",
+  ]);
+  for (const field of jsonFields) {
+    assert.ok(
+      KNOWN_OBJECT_VALUED.has(field),
+      `${field} is a new Json column. If it can hold a TOP-LEVEL ARRAY, db-export will emit a Postgres ` +
+        `array literal for it and the restore fails with 22P02. Confirm it only ever holds an object, then ` +
+        `add it here — or make escapeSQL type-aware.`,
+    );
+  }
+});
+
+test("guardrail 37: JellyfinLibraryItem keeps jellyfinItemIds alongside jellyfinItemId, defaulted so db push can add it to a populated table", () => {
+  const m = model("JellyfinLibraryItem");
+  assert.ok(m.fields.includes("jellyfinItemId"), "the single canonical id column must stay — every read ORs against it for rows predating the array");
+  assert.ok(m.fields.includes("jellyfinItemIds"), "JellyfinLibraryItem is missing jellyfinItemIds; duplicate-library copies become unresolvable again");
+
+  const decl = m.body.split("\n").find((l) => /^\s*jellyfinItemIds\s/.test(l)) ?? "";
+  assert.match(decl, /String\[\]/, `jellyfinItemIds must be a String[] — got: ${decl.trim()}`);
+  assert.match(
+    decl,
+    /@default\(\[\]\)/,
+    "jellyfinItemIds must @default([]) — a list column with no default cannot be added to a populated table, " +
+      "and the entrypoint applies schema changes with db push at boot",
+  );
+
+  assert.ok(
+    /@@index\(\[jellyfinItemIds\][^)]*type:\s*Gin/.test(m.body),
+    "jellyfinItemIds needs a GIN index: the 5s play-history poller ORs a has/hasSome over it on every tick, " +
+      "and a btree cannot serve an array containment operator — the query degrades to a full scan of the library",
+  );
+});

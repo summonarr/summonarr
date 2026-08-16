@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.22.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.23.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,44 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.23.0
+
+The remediation release: 102 verified findings from a full-tree review, closed across fifteen waves.
+
+**Added**
+
+- Jellyfin titles that appear in more than one library now keep every copy's item id, so a duplicated show no longer loses one copy's entire episode set.
+- `/api/sync` reports `skippedSources` alongside `failedSources`, so a client can tell "this server was never configured" apart from "this server failed".
+- Admin audit-log rows can be PII-scrubbed on demand, matching the scheduled scrub.
+
+**Changed**
+
+- Browse pages run the discover pipeline once per filter change instead of twice.
+- `/popular` bounds its TMDB fan-out; the watch-activity ranking stays global across all servers by design.
+- Database exports walk each table by keyset rather than LIMIT/OFFSET — roughly 14s to 0.5s on a 300k-row table, with byte-identical output.
+- Bearer (native app) requests reuse the refreshed session token, halving their per-request session database cost.
+- The OpenAPI document now matches the API: six undocumented operations added, and the audit-log, requests, votes, play-history, health and config entries corrected.
+
+**Fixed**
+
+- Database restores failed outright on any Jellyfin library row, because array columns were exported in the wrong format. The export looked successful and the restore rolled back everything.
+- Email could hang forever against a silent SMTP relay, leaking the connection and permanently wedging the notification queue. Bare SMTP reply codes also cost a hidden 30 seconds per message while reporting success.
+- A restart could mark a still-playing Plex stream as stopped and never show it again.
+- Revoking one device's session no longer signs out every older native session.
+- Deleting a grouped play now really removes it, instead of the play returning on reload with corrupted progress.
+- Deactivated accounts no longer receive iOS push notifications.
+- "Hide available" now hides only what you can actually watch, and agrees between the first page and every page after it.
+- The play-history settings form could not be saved on a default install.
+- Feature toggles no longer trip the admin rate limit and silently roll back.
+- Failed actions in the UI surface an error instead of leaving a spinner.
+- Sync buttons no longer report failure when a media server simply is not configured, nor success when a configured one genuinely fails.
+- Discord's request flow matches the web routes; role sync no longer touches never-linked or deactivated accounts.
+- Sonarr lookups no longer match the wrong series, and a large library no longer silently skips the episode-cache rewrite.
+- Chart day labels no longer shift by a day for users east of UTC.
+- Play-history search treats `%` and `_` as literal characters.
+- Several UI elements lost a border or background to a class-merging bug.
+- Security scanning can no longer pass green when the scanner itself fails.
 
 ### v0.22.1
 
@@ -480,7 +518,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.22.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.23.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

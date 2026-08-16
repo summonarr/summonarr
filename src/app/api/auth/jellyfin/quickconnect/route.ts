@@ -183,6 +183,15 @@ export async function GET(req: NextRequest) {
       // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
       // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
       const deadline = Date.now() + LONG_POLL_MAX_MS;
+      // ONE abort listener for the whole long-poll, not one per tick. The
+      // per-iteration `{ once: true }` listener only self-removed if the abort
+      // actually fired; on the far commoner timeout-wins path it stayed attached,
+      // so a full ~13-tick poll accumulated 13 live listeners on the same signal
+      // and tripped Node's max-listeners warning.
+      let abortWake: (() => void) | null = null;
+      const onAbort = () => abortWake?.();
+      req.signal.addEventListener("abort", onAbort, { once: true });
+      try {
       while (Date.now() < deadline) {
         if (req.signal.aborted) {
           return NextResponse.json({ authenticated: false }, { status: 499 });
@@ -194,15 +203,22 @@ export async function GET(req: NextRequest) {
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) break;
-        await new Promise((resolve, reject) => {
+        await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, Math.min(LONG_POLL_TICK_MS, remaining));
-          req.signal.addEventListener("abort", () => {
+          // The shared listener wakes this tick early; the loop-top check then
+          // returns 499. Clearing abortWake after each tick keeps the closure
+          // from outliving the promise it belongs to.
+          abortWake = () => {
             clearTimeout(timer);
-            reject(new Error("aborted"));
-          }, { once: true });
-        }).catch(() => { /* aborted — handled by the next loop-top check */ });
+            resolve();
+          };
+        });
+        abortWake = null;
       }
       return NextResponse.json({ authenticated: false });
+      } finally {
+        req.signal.removeEventListener("abort", onAbort);
+      }
     } finally {
       globalInflight = Math.max(0, globalInflight - 1);
       const remaining = (inflightByIp.get(ipKey) ?? 1) - 1;

@@ -52,10 +52,30 @@ test("IPv6 loopback / link-local / ULA are local; global IPv6 is not", () => {
   assert.equal(isLocalHost("[2001:db8::1]"), false);
 });
 
-test("DNS hostnames are NOT local — only localhost and IP literals qualify", () => {
+test("publicly-resolvable DNS hostnames are NOT local", () => {
   assert.equal(isLocalHost("summonarr.example.com"), false);
   assert.equal(isLocalHost("summonarr.example.com:3001"), false);
-  assert.equal(isLocalHost("myserver.local"), false); // mDNS name still isn't provably LAN
+  assert.equal(isLocalHost("plex.tv"), false);
+});
+
+test("PIN: the Host gate accepts exactly the hosts the boot check calls private", () => {
+  // These two must agree. isPublicAuthHost treats the private suffixes and bare
+  // single-label hosts as private, so a deployment with AUTH_URL=http://nas.lan:3001
+  // boots cleanly — but isLocalHost used to reject them, so the Host gate then 403'd
+  // every request. Startup said "fine", runtime said "no", and the documented LAN
+  // example was the broken case.
+  //
+  // Not a security relaxation: the Host header is client-supplied and spoofable, so
+  // this gate is footgun-prevention for a misconfigured PUBLIC deployment, never a
+  // boundary — and a public AUTH_URL is still refused at boot outright.
+  for (const host of ["nas.lan", "summonarr.local", "app.internal", "media.home", "x.home.arpa", "box.localhost"]) {
+    assert.equal(isLocalHost(host), true, `${host} boots as private, so the Host gate must accept it`);
+    assert.equal(isPublicAuthHost(host), false, `${host} must still read as private at boot`);
+  }
+  // A bare single-label host (docker service name, AUTH_URL=http://summonarr:3000).
+  assert.equal(isLocalHost("summonarr"), true);
+  assert.equal(isLocalHost("summonarr:3000"), true);
+  assert.equal(isPublicAuthHost("summonarr"), false);
 });
 
 test("degenerate input fails closed (not local)", () => {

@@ -10,9 +10,12 @@
  *   3. an EXCEPTIONS entry is stale — the route was deleted, or it's now
  *      documented (so the exception should be removed).
  *
- * It is PATH-level (not per-method) — enough to catch "undocumented surface"
- * without duplicating every method signature. Paths are compared in the spec's
- * own keyspace: no `/api` prefix, and `[seg]` → `{seg}`.
+ * It also compares METHODS per path (4), because path-level parity alone made a
+ * whole class of drift invisible: a path counts as documented the instant ONE
+ * method under it is, so `/admin/audit-log` documenting only `get` fully
+ * satisfied the check while its DELETE shipped undocumented. Six operations had
+ * accumulated that way. Paths are compared in the spec's own keyspace: no `/api`
+ * prefix, and `[seg]` → `{seg}`.
  *
  * Usage:
  *   node scripts/audit-openapi.mts          # human report, non-zero exit on drift
@@ -21,6 +24,10 @@
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { stripComments, parseTopLevelDecls, findUnmodeledMethodExports } from "./audit-routes.mts";
+
+/** Every method with a handler anywhere in this tree. No PUT/HEAD/OPTIONS exists. */
+const HTTP_METHODS = new Set(["GET", "POST", "PATCH", "PUT", "DELETE", "HEAD", "OPTIONS"]);
 
 const COLORS = {
   reset: "\x1b[0m",
@@ -98,6 +105,18 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/cron/warm-list-cache", reason: "cron job (CRON_SECRET)" },
 ];
 
+/**
+ * Individual operations left undocumented on a path that IS otherwise
+ * documented. Deliberately separate from EXCEPTIONS: that list excepts a whole
+ * path, and several of its 41 entries cover paths carrying two or three methods
+ * each, so folding methods into it would inflate it to ~55 entries and lose the
+ * "this entire surface is undocumented" meaning it currently carries.
+ *
+ * Empty today, and that is the point — all six operations this check was
+ * written to find have been documented rather than excepted.
+ */
+const METHOD_EXCEPTIONS: Array<{ op: string; reason: string }> = [];
+
 const HTTP_FILES = new Set(["route.ts", "route.tsx"]);
 
 function walk(dir: string, out: string[]): void {
@@ -114,12 +133,55 @@ function specPath(file: string): string {
   return "/" + rel.replace(/\[([^\]]+)\]/g, "{$1}");
 }
 
-/** Extract documented top-level path keys from the hand-maintained spec source. */
-function documentedPaths(): Set<string> {
+/**
+ * Extract documented paths AND the methods under each, from the hand-maintained
+ * spec source.
+ *
+ * Structural, not evaluated. The spec is a plain object literal, so `eval`-ing
+ * it would be more robust against reformatting — but this script runs in CI on
+ * every push, and executing a source file to lint it is a bargain worth
+ * declining. Path keys sit at 4-space indent and method keys at 6, so each
+ * path's window runs to the next 4-space key.
+ */
+function documentedOps(): Map<string, Set<string>> {
   const src = readFileSync(SPEC_FILE, "utf8");
-  const re = /^ {4}"(\/[^"]+)"\s*:\s*\{/gm;
+  const pathRe = /^ {4}"(\/[^"]+)"\s*:\s*\{/gm;
+  const hits: Array<{ path: string; from: number }> = [];
+  for (let m = pathRe.exec(src); m !== null; m = pathRe.exec(src)) {
+    hits.push({ path: m[1], from: m.index + m[0].length });
+  }
+  const out = new Map<string, Set<string>>();
+  for (let i = 0; i < hits.length; i++) {
+    const window = src.slice(hits[i].from, i + 1 < hits.length ? hits[i + 1].from : src.length);
+    const methods = new Set<string>();
+    const methodRe = /^ {6}(get|post|patch|put|delete|head|options)\s*:\s*\{/gm;
+    for (let m = methodRe.exec(window); m !== null; m = methodRe.exec(window)) {
+      methods.add(m[1].toUpperCase());
+    }
+    out.set(hits[i].path, methods);
+  }
+  return out;
+}
+
+/**
+ * The HTTP methods a route file actually exports.
+ *
+ * Reuses audit-routes.mts's parsers rather than re-deriving them — that file
+ * already handles every export shape in this tree (wrapper, curried wrapper,
+ * bare async function, non-async function, and a bare alias), and it is the
+ * one with the test suite. `findUnmodeledMethodExports` is carried over too, so
+ * a future `export { handler as PUT }` fails loudly instead of silently reading
+ * as "no PUT exported".
+ */
+function exportedMethods(file: string): Set<string> {
+  const src = stripComments(readFileSync(file, "utf8"));
   const found = new Set<string>();
-  for (let m = re.exec(src); m !== null; m = re.exec(src)) found.add(m[1]);
+  for (const decl of parseTopLevelDecls(src)) {
+    if (decl.exported && HTTP_METHODS.has(decl.name)) found.add(decl.name);
+  }
+  for (const name of findUnmodeledMethodExports(src)) {
+    if (HTTP_METHODS.has(name)) found.add(name);
+  }
   return found;
 }
 
@@ -129,8 +191,10 @@ function main(): void {
   const files: string[] = [];
   walk(API_ROOT, files);
   const actual = new Set(files.map(specPath));
-  const documented = documentedPaths();
+  const documentedByPath = documentedOps();
+  const documented = new Set(documentedByPath.keys());
   const exceptionRoutes = new Set(EXCEPTIONS.map((e) => e.route));
+  const methodExceptionOps = new Set(METHOD_EXCEPTIONS.map((e) => e.op));
 
   // 1. New/undocumented routes not grandfathered.
   const undocumented = [...actual].filter((p) => !documented.has(p) && !exceptionRoutes.has(p)).sort();
@@ -142,11 +206,47 @@ function main(): void {
     .map((e) => e.route)
     .sort();
 
-  const ok = undocumented.length === 0 && phantom.length === 0 && staleExceptions.length === 0;
+  // 4. Method-level drift, scoped to paths that ARE documented. A wholly
+  //    undocumented path is check 1's business; reporting each of its methods
+  //    here too would just duplicate that.
+  const undocumentedOps: string[] = [];
+  const phantomOps: string[] = [];
+  for (const file of files) {
+    const p = specPath(file);
+    const documentedMethods = documentedByPath.get(p);
+    if (!documentedMethods) continue; // path undocumented entirely — check 1 owns it
+    const exported = exportedMethods(file);
+    for (const m of exported) {
+      if (!documentedMethods.has(m) && !methodExceptionOps.has(`${m} ${p}`)) undocumentedOps.push(`${m} ${p}`);
+    }
+    for (const m of documentedMethods) {
+      if (!exported.has(m)) phantomOps.push(`${m} ${p}`);
+    }
+  }
+  undocumentedOps.sort();
+  phantomOps.sort();
+  // A method exception is stale once the operation is documented, or its path
+  // stopped being documented at all (then it belongs in EXCEPTIONS, not here).
+  const staleMethodExceptions = METHOD_EXCEPTIONS
+    .filter((e) => {
+      const [method, ...rest] = e.op.split(" ");
+      const p = rest.join(" ");
+      const doc = documentedByPath.get(p);
+      return !doc || doc.has(method);
+    })
+    .map((e) => e.op)
+    .sort();
+
+  const ok = undocumented.length === 0 && phantom.length === 0 && staleExceptions.length === 0 &&
+    undocumentedOps.length === 0 && phantomOps.length === 0 && staleMethodExceptions.length === 0;
 
   if (json) {
     console.log(JSON.stringify(
-      { actual: actual.size, documented: documented.size, exceptions: exceptionRoutes.size, undocumented, phantom, staleExceptions },
+      {
+        actual: actual.size, documented: documented.size, exceptions: exceptionRoutes.size,
+        undocumented, phantom, staleExceptions,
+        undocumentedOps, phantomOps, staleMethodExceptions,
+      },
       null, 2,
     ));
     process.exit(ok ? 0 : 1);
@@ -157,11 +257,12 @@ function main(): void {
   console.log(
     `\n  ${color(String(actual.size), COLORS.bold)} routes · ` +
       `${color(String(documented.size), COLORS.bold)} documented · ` +
-      `${color(String(exceptionRoutes.size), COLORS.bold)} grandfathered\n`,
+      `${color(String(exceptionRoutes.size), COLORS.bold)} grandfathered · ` +
+      `${color(String([...documentedByPath.values()].reduce((n, m) => n + m.size, 0)), COLORS.bold)} operations\n`,
   );
 
   if (ok) {
-    console.log(color("  ✓ Every route is documented or explicitly excepted; the spec has no phantom paths.\n", COLORS.green));
+    console.log(color("  ✓ Every route and method is documented or explicitly excepted; the spec has no phantom entries.\n", COLORS.green));
     process.exit(0);
   }
 
@@ -173,6 +274,22 @@ function main(): void {
   if (phantom.length > 0) {
     console.log(color(`  ✗ ${phantom.length} documented path(s) with no route file (stale spec entry):`, COLORS.red + COLORS.bold));
     for (const p of phantom) console.log(color(`      ${p}`, COLORS.yellow));
+    console.log();
+  }
+  if (undocumentedOps.length > 0) {
+    console.log(color(`  ✗ ${undocumentedOps.length} undocumented method(s) on an otherwise-documented path:`, COLORS.red + COLORS.bold));
+    for (const o of undocumentedOps) console.log(color(`      ${o}`, COLORS.yellow));
+    console.log(color("    (path-level parity passes these — one documented method marks the whole path done)", COLORS.dim));
+    console.log();
+  }
+  if (phantomOps.length > 0) {
+    console.log(color(`  ✗ ${phantomOps.length} documented method(s) with no exported handler:`, COLORS.red + COLORS.bold));
+    for (const o of phantomOps) console.log(color(`      ${o}`, COLORS.yellow));
+    console.log();
+  }
+  if (staleMethodExceptions.length > 0) {
+    console.log(color(`  ✗ ${staleMethodExceptions.length} stale METHOD_EXCEPTIONS entr(y/ies) — now documented, or the path left the spec; delete it:`, COLORS.red + COLORS.bold));
+    for (const o of staleMethodExceptions) console.log(color(`      ${o}`, COLORS.yellow));
     console.log();
   }
   if (staleExceptions.length > 0) {

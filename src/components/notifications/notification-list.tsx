@@ -29,6 +29,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   const [total, setTotal] = useState(initialTotal);
   const [hasMore, setHasMore] = useState(initialItems.length < initialTotal);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const mounted = useHasMounted();
 
   const anyUnread = items.some((n) => !n.readAt);
@@ -68,6 +69,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   }
   async function loadMore() {
     setLoading(true);
+    setError(null);
     try {
       const last = items[items.length - 1];
       const q = last ? `?cursor=${encodeURIComponent(`${last.createdAt}|${last.id}`)}` : "";
@@ -82,7 +84,14 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         });
         setTotal(data.total);
         setHasMore(data.nextCursor != null);
+      } else {
+        setError("Couldn't load more. Tap to retry.");
       }
+    } catch {
+      // `if (res.ok)` with no else meant a failed page load did nothing at all:
+      // the spinner stopped, the list was unchanged, and "Load more" sat there
+      // looking like it had simply reached the end.
+      setError("Couldn't load more. Tap to retry.");
     } finally {
       setLoading(false);
     }
@@ -149,7 +158,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       </div>
 
       {hasMore && (
-        <div className="flex justify-center" style={{ marginTop: 12 }}>
+        <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
           <button
             type="button"
             onClick={loadMore}
@@ -158,6 +167,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
           >
             {loading ? "Loading…" : `Load more (${total - items.length})`}
           </button>
+          {error && (
+            <span role="alert" aria-live="assertive" className="text-xs text-red-400">{error}</span>
+          )}
         </div>
       )}
     </div>

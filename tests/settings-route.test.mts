@@ -538,3 +538,67 @@ test("PATCH: an empty webhook secret is WRITTEN, not skipped — the admin form'
   assert.equal(write.create.value, "", "it must be stored empty, not left at the previous secret");
 });
 
+
+// ---------------------------------------------------------------------------
+// The machine-session guard. POST /api/auth/machine-session mints a fully
+// privileged ADMIN session for any caller holding CRON_SECRET, and its own IP
+// check only applies when the allowlist is non-empty — so "feature on + empty
+// allowlist" means any IP can mint an admin session. This guard exists to make
+// that state unreachable, and had no test coverage at all.
+// ---------------------------------------------------------------------------
+
+test("machine-session: enabling with an empty allowlist is refused", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ enableMachineSession: "true" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /empty IP allowlist/);
+});
+
+test("machine-session: clearing the allowlist while the feature stays on is refused", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("enableMachineSession", "true");
+  settings.set("machineSessionAllowedIps", "10.0.0.5");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ machineSessionAllowedIps: "" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 400, "the effective post-PATCH state is what matters, not which field moved");
+  assert.equal(settings.get("machineSessionAllowedIps"), "10.0.0.5", "the allowlist must survive the refusal");
+});
+
+test("PIN: an EMPTY enableMachineSession cannot smuggle an allowlist clear past the guard", async () => {
+  // enableMachineSession is not clearable, so an empty value is dropped by the
+  // write filter and the persisted "true" survives — but the guard read
+  // `"" === "true"` as false and concluded the feature was off. The allowlist IS
+  // clearable, so the PATCH went through and left exactly the unreachable state:
+  // enabled, with no IP restriction. Empty must read as "unchanged", not "off".
+  const admin = await mintSession("ADMIN");
+  settings.set("enableMachineSession", "true");
+  settings.set("machineSessionAllowedIps", "10.0.0.5");
+  const res = await PATCH(
+    patchReq(
+      JSON.stringify({ enableMachineSession: "", machineSessionAllowedIps: "" }),
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 400);
+  assert.equal(settings.get("enableMachineSession"), "true", "the feature is still on…");
+  assert.equal(settings.get("machineSessionAllowedIps"), "10.0.0.5", "…so the allowlist must not have been cleared");
+});
+
+test("machine-session: enabling alongside a non-empty allowlist in the SAME patch is allowed", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(
+      JSON.stringify({ enableMachineSession: "true", machineSessionAllowedIps: "10.0.0.5" }),
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(settings.get("enableMachineSession"), "true");
+});

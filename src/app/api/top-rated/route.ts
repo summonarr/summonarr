@@ -70,12 +70,20 @@ async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
   const missing = items.filter((i) => !i.posterPath);
   if (missing.length === 0) return items;
 
+  // Two IN clauses, not one OR per item. `missing` is a whole page of results,
+  // so the OR form emitted a predicate with one (tmdbId = ? AND mediaType = ?)
+  // pair per item — a query whose TEXT grows with the page and which the
+  // planner has to walk clause by clause. The composite key is
+  // [tmdbId, mediaType], so grouping by media type turns it into two index
+  // range scans over an id list instead.
+  const movieIds = missing.filter((i) => i.mediaType === "movie").map((i) => i.id);
+  const tvIds = missing.filter((i) => i.mediaType !== "movie").map((i) => i.id);
   const coreRows = await prisma.tmdbMediaCore.findMany({
     where: {
-      OR: missing.map((i) => ({
-        tmdbId: i.id,
-        mediaType: i.mediaType === "movie" ? "MOVIE" : "TV",
-      })),
+      OR: [
+        ...(movieIds.length ? [{ mediaType: "MOVIE" as const, tmdbId: { in: movieIds } }] : []),
+        ...(tvIds.length ? [{ mediaType: "TV" as const, tmdbId: { in: tvIds } }] : []),
+      ],
     },
   });
   const coreMap = new Map(coreRows.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));

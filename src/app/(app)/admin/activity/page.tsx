@@ -281,9 +281,16 @@ export default async function ActivityPage({
       const plexPairs = stillNeedLibrary
         .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
         .map((s: typeof stillNeedLibrary[0]) => ({ plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance }));
+      // Both id columns (guardrail 37): a title in two Jellyfin libraries has an
+      // id per copy but only one is the stored `jellyfinItemId`, so a session on
+      // the other copy never resolved here. Rows predating `jellyfinItemIds` are
+      // `[]`, so the legacy branch stays.
       const jellyfinPairs = stillNeedLibrary
         .filter((s: typeof stillNeedLibrary[0]) => s.source === "jellyfin")
-        .map((s: typeof stillNeedLibrary[0]) => ({ jellyfinItemId: s.sourceItemId!, serverInstance: s.serverInstance }));
+        .flatMap((s: typeof stillNeedLibrary[0]) => [
+          { jellyfinItemId: s.sourceItemId!, serverInstance: s.serverInstance },
+          { jellyfinItemIds: { has: s.sourceItemId! }, serverInstance: s.serverInstance },
+        ]);
       const [plexItems, jellyfinItems] = await Promise.all([
         plexPairs.length > 0
           ? prisma.plexLibraryItem.findMany({
@@ -294,7 +301,7 @@ export default async function ActivityPage({
         jellyfinPairs.length > 0
           ? prisma.jellyfinLibraryItem.findMany({
               where: { OR: jellyfinPairs },
-              select: { tmdbId: true, mediaType: true, jellyfinItemId: true, serverInstance: true },
+              select: { tmdbId: true, mediaType: true, jellyfinItemId: true, jellyfinItemIds: true, serverInstance: true },
             })
           : [],
       ]);
@@ -302,7 +309,11 @@ export default async function ActivityPage({
         if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
       }
       for (const i of jellyfinItems) {
+        // Every id the row answers to — the session's sourceItemId may be any of them.
         if (i.jellyfinItemId) resolvedTmdb[`item:${i.serverInstance}:${i.jellyfinItemId}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        for (const id of i.jellyfinItemIds) {
+          resolvedTmdb[`item:${i.serverInstance}:${id}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        }
       }
     }
 

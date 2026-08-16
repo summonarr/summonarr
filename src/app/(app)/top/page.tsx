@@ -105,11 +105,16 @@ async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
 
 function applyFilters(
   items: TmdbMedia[],
-  opts: { hideAvailable: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },
+  opts: { hideAvailable: boolean; showPlex: boolean; showJellyfin: boolean; minImdb?: string; minVotes?: string; fromYear?: string; toYear?: string },
 ): TmdbMedia[] {
   let result = items;
   if (opts.hideAvailable) {
-    result = result.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    // Gate on the user's own server visibility, matching /api/top-rated. Without
+    // it a Plex-pinned user had Jellyfin-only titles hidden from this
+    // server-rendered page while the route that serves every subsequent page
+    // kept them — so the same filter produced two different lists depending on
+    // which half of the pair answered.
+    result = result.filter((m) => !((opts.showPlex && m.plexAvailable) || (opts.showJellyfin && m.jellyfinAvailable)));
   }
   if (opts.minImdb) {
     const threshold = parseFloat(opts.minImdb);
@@ -154,7 +159,7 @@ export default async function TopRatedPage({
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
-  const filterOpts = { hideAvailable, minImdb, minVotes, fromYear, toYear };
+  const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
 
   const [

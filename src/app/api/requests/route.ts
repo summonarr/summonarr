@@ -8,6 +8,7 @@ import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { emitSSE } from "@/lib/sse-emitter";
+import { scheduleDownloadCheck } from "@/lib/download-check";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
@@ -627,6 +628,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
     if (pushedTvdbId !== null) {
       await prisma.mediaRequest.updateMany({ where: { id: request.id }, data: { tvdbId: pushedTvdbId } });
     }
+
+    // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
+    // orchestrator's next sweep. Scheduled only here, on the push-succeeded path:
+    // unlike /api/requests/[id] the rollback above returns early having already
+    // cleared pendingNotifyAt, so a job queued for it would have nothing to do.
+    scheduleDownloadCheck({
+      requestId: request.id,
+      tmdbId,
+      mediaType,
+      arrInstance: instanceSlug,
+      requestedBy: session.user.id,
+      title: request.title,
+    }, { name: "requests:auto-approve-90s-download-check" });
 
     return NextResponse.json(request, { status: 201 });
   }

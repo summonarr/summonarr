@@ -7,6 +7,7 @@ import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { exceedsCap } from "@/lib/content-rating";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
+import { scheduleDownloadChecks, type DownloadCheckTarget } from "@/lib/download-check";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { resolveMediaMeta } from "@/lib/request-meta";
@@ -84,7 +85,26 @@ class QuotaExceeded extends Error {
   }
 }
 
-export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session) => {
+// The door check accepts ANY request grant, not just the umbrella bit.
+// REQUEST_MOVIE / REQUEST_TV narrow REQUEST rather than depending on it
+// (Overseerr semantics — either the umbrella OR the specific bit grants a
+// type), and the permissions modal renders all three as independent
+// checkboxes. So a perfectly ordinary mask of REQUEST_MOVIE|REQUEST_TV was
+// 403'd here while the single-request route created the row happily, and the
+// UI — which computes button visibility with the umbrella-aware canRequest —
+// showed the button and surfaced a raw "Forbidden" beside it.
+//
+// This stays as a cheap door check rather than becoming withAuth: a caller
+// with no request grant at all should be refused before paying the TMDB
+// routing work. The REAL decision is per item, per media type and per
+// instance, and it already lives at the canRequestInstance call below — which
+// has been umbrella-correct since the route's first commit. This gate was
+// simply stricter than the gate it precedes.
+export const POST = withPermission([
+  Permission.REQUEST,
+  Permission.REQUEST_MOVIE,
+  Permission.REQUEST_TV,
+])(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
 
@@ -594,6 +614,10 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back
   // to PENDING on push failure like the single route. Every created row emits request:new.
   const rowByKey = new Map(createdRows.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
+  // Rows that armed pendingNotifyAt AND landed in *arr — collected here rather than
+  // derived from `outcomes`, which cannot distinguish an auto-approved row that was
+  // pushed from a mirrored one that deliberately skipped both the push and the flag.
+  const downloadChecks: DownloadCheckTarget[] = [];
   const outcomes = await mapLimit(prepared, ARR_CONCURRENCY, async (p): Promise<CreateOutcome> => {
     const row = rowByKey.get(keyOf(p.tmdbId, p.mediaType));
     if (!row) return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "error" };
@@ -645,8 +669,21 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
         );
     }
 
+    downloadChecks.push({
+      requestId: row.id,
+      tmdbId: p.tmdbId,
+      mediaType: p.mediaType,
+      arrInstance: p.arrInstance,
+      requestedBy: targetUserId,
+      title: p.title,
+    });
     return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
   });
+
+  // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
+  // orchestrator's next sweep. One batched job, not one per row — a 50-item bulk
+  // request would otherwise take half the delayed-job run queue on its own.
+  scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;

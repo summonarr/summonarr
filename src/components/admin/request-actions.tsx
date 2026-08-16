@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
@@ -24,6 +24,24 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
 
   const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null);
   const status = optimisticStatus ?? currentStatus;
+
+  // Drop the optimistic value as soon as the server-rendered status catches up.
+  //
+  // router.refresh() re-renders the server component but deliberately preserves
+  // client state, and the row's key is derived from the title (tmdbId:mediaType),
+  // not from the request or its status — so this instance survives every refresh
+  // and the optimistic value, once set, masked `currentStatus` for the life of
+  // the page. Two consequences, the second much worse than a stale label:
+  //   • sync flips the row to AVAILABLE — the chip beside these buttons reads it
+  //     straight from the server data and says "Available" while this column
+  //     still renders the APPROVED actions. The row contradicts itself.
+  //   • a NEW requester joins the group. The group goes back to PENDING, but the
+  //     mask keeps rendering the APPROVED branch, so Approve/Decline are not
+  //     rendered AT ALL and the admin cannot action the new request without a
+  //     hard reload.
+  useEffect(() => {
+    setOptimisticStatus(null);
+  }, [currentStatus]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
@@ -90,6 +108,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       setShowReply(false);
       setReplySaved(true);
       router.refresh();
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }
@@ -163,12 +183,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? `Request failed (${res.status})`);
         return;
       }
-      const data: { arrError?: string } = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { arrError?: string };
       if (data.arrError) {
         setArrError(data.arrError);
       } else {
         setRetryOk(true);
       }
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }
@@ -189,12 +211,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? `Request failed (${res.status})`);
         return;
       }
-      const data: { arrError?: string } = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { arrError?: string };
       if (data.arrError) {
         setArrError(data.arrError);
       } else {
         setRetryOk(true);
       }
+    } catch {
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
     }
@@ -210,6 +234,11 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         return;
       }
       router.refresh();
+    } catch {
+      // `finally` closes the confirm dialog unconditionally, so a network
+      // failure previously read as "cancelled" — dialog gone, row still there,
+      // nothing said. The row surviving a delete needs an explanation.
+      setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
       setShowDeleteConfirm(false);
@@ -372,6 +401,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       <div className="flex flex-col items-end gap-1">
         <span className="text-xs text-indigo-400 font-medium">Available</span>
         {replyBlock}
+        {/* saveReply is reachable from this branch too, so it needs somewhere to
+            report a failure — otherwise a reply on an available title silently
+            does nothing. */}
+        {arrError && (
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
+            <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
+          </span>
+        )}
       </div>
     );
   }
@@ -417,6 +454,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             Deny — permanent
           </Button>
         </div>
+        {/* A failed decline returns BEFORE setShowDeclineNote(false), so this
+            branch is still on screen holding the error it just set. Without a
+            render site here the message had nowhere to go and the decline
+            failed in complete silence — on a 4xx as well as a network error. */}
+        {arrError && (
+          <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 text-right">
+            <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
+          </span>
+        )}
       </div>
     );
   }
@@ -510,7 +556,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         </Button>
       </div>
       {arrError && (
-        <span className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
+        <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
           <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
         </span>
       )}
@@ -528,21 +574,57 @@ export function SyncButton() {
     setLoading(true);
     setResult(null);
     try {
-      const [arrRes, jellyfinRes] = await Promise.all([
-        fetch(withBasePath("/api/sync"), { method: "POST" }),
-        fetch(withBasePath("/api/sync/jellyfin"), { method: "POST" }),
-      ]);
+      // ONE call. The orchestrator's own Jellyfin arm already does a full,
+      // unwindowed replace across every configured instance — a strict superset
+      // of what a bodiless POST to /api/sync/jellyfin does, which is insert-only
+      // inside a 2-hour window on the default instance alone. The second call
+      // bought nothing and re-ran the entire marking pass (a full scan of every
+      // PENDING/APPROVED request, the visibility gate, and a second CAS attempt),
+      // while racing the orchestrator's own delete-and-replace of the same slug.
+      const res = await fetch(withBasePath("/api/sync"), { method: "POST" });
 
-      const arrData: { marked: number; reverted: number; plexMarked: number; error?: string } = await arrRes.json();
-      const jellyfinData: { marked: number; error?: string } = await jellyfinRes.json();
+      // These annotations are a claim, not a check — res.json() is `any`, so
+      // nothing here is validated by the compiler. Read the fields defensively.
+      const data = (await res.json().catch(() => ({}))) as {
+        marked?: number; plexMarked?: number; jellyfinMarked?: number;
+        skipped?: boolean; error?: string;
+        failedSources?: string[]; skippedSources?: string[];
+      };
 
-      if (arrData.error || jellyfinData.error) {
-        setResult(arrData.error ?? jellyfinData.error ?? "Sync failed");
-      } else {
-        const totalMarked = arrData.marked + arrData.plexMarked + jellyfinData.marked;
-        setResult(totalMarked > 0 ? `Marked ${totalMarked} available` : "Up to date");
-        router.refresh();
+      // The orchestrator answers { skipped: true } with HTTP 200 and no counts
+      // when the advisory lock is already held — the internal hourly cron or a
+      // Plex-SSE-triggered run is mid-flight. Every count field is absent here,
+      // so this has to be read before any arithmetic.
+      if (data.skipped) {
+        setResult("A sync is already running");
+        return;
       }
+      if (!res.ok) {
+        setResult(data.error ?? `Sync failed (${res.status})`);
+        return;
+      }
+
+      // A degraded run answers 200 WITH `error` set — some configured source
+      // failed while the rest refreshed normally. Report per source and STILL
+      // refresh: the rows that did update are the whole reason for the click.
+      const failed = new Set(data.failedSources ?? []);
+      const skipped = new Set(data.skippedSources ?? []);
+
+      // Never summed. plexMarked and jellyfinMarked are produced by the same
+      // marking pass over the same stillPending snapshot, so a title held by
+      // both servers is counted once by each — adding them reported it twice.
+      // Per-source is both the honest reading and what an admin can act on.
+      const parts = ([["Plex", "plex", data.plexMarked], ["Jellyfin", "jellyfin", data.jellyfinMarked]] as const)
+        .filter(([, key]) => !skipped.has(key))
+        .map(([name, key, count]) => (failed.has(key) ? `${name} failed` : `${name} ${count ?? 0}`));
+
+      // A *arr outage is worth saying even though its count is not per-server.
+      for (const source of ["radarr", "sonarr"]) {
+        if (failed.has(source)) parts.push(`${source} failed`);
+      }
+
+      setResult(parts.length > 0 ? parts.join(" · ") : "No media servers configured");
+      router.refresh();
     } catch {
       setResult("Sync failed");
     } finally {
@@ -578,10 +660,12 @@ export function SyncRolesButton() {
     setIsError(false);
     try {
       const res = await fetch(withBasePath("/api/discord/sync-roles"), { method: "POST" });
-      const data: { synced?: number; error?: string } = await res.json();
-      if (data.error) {
+      const data = (await res.json().catch(() => ({}))) as { synced?: number; error?: string };
+      // res.ok first: an error status carrying no `error` key (or a non-JSON
+      // body from a reverse proxy) otherwise reported "Synced 0 users".
+      if (!res.ok || data.error) {
         setIsError(true);
-        setResult(data.error);
+        setResult(data.error ?? `Sync failed (${res.status})`);
       } else {
         setResult(`Synced ${data.synced ?? 0} user${data.synced !== 1 ? "s" : ""}`);
       }

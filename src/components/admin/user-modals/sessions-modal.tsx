@@ -40,6 +40,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   const [loading, setLoading]         = useState(true);
   const [revoking, setRevoking]       = useState<string | null>(null);
   const [revokingAll, setRevokingAll] = useState(false);
+  const [error, setError]             = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
   // Guardrail 16: formatRelativeTime uses Date.now() and toLocaleDateString varies by locale
@@ -62,6 +63,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   async function revoke(sessionId: string) {
     setConfirmingRevoke(null);
     setRevoking(sessionId);
+    setError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
         method:  "DELETE",
@@ -69,10 +71,17 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         body:    JSON.stringify({ sessionId }),
       });
       if (!res.ok) {
-        console.error("[sessions] revoke failed:", res.status);
+        // A failed revoke reported only to the devtools console, so the row
+        // stayed in the list with no explanation and the admin was left unsure
+        // whether the device had actually been signed out. That is the wrong
+        // thing to be unsure about.
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(data?.error ?? `Could not revoke session (${res.status})`);
         return;
       }
       setSessions((s) => s.filter((r) => r.sessionId !== sessionId));
+    } catch {
+      setError("Network error — the session may still be active.");
     } finally {
       setRevoking(null);
     }
@@ -81,6 +90,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   async function revokeAll() {
     setConfirmingRevokeAll(false);
     setRevokingAll(true);
+    setError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`), {
         method:  "DELETE",
@@ -88,10 +98,13 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         body:    JSON.stringify({ all: true }),
       });
       if (!res.ok) {
-        console.error("[sessions] revokeAll failed:", res.status);
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setError(data?.error ?? `Could not revoke sessions (${res.status})`);
         return;
       }
       setSessions([]);
+    } catch {
+      setError("Network error — the sessions may still be active.");
     } finally {
       setRevokingAll(false);
     }
@@ -136,6 +149,11 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         <p className="text-xs text-zinc-500 mb-4 truncate">{displayName}</p>
 
         {}
+        {error && (
+          <p role="alert" aria-live="assertive" className="text-xs text-red-400 mb-2">
+            {error}
+          </p>
+        )}
         <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
           {loading && (
             <div className="flex items-center gap-2 py-4 justify-center">

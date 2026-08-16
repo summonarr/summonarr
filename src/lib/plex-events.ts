@@ -429,7 +429,7 @@ class PlexEventStreamManager {
     // downtime can't make the absence-grace check below trivially true and
     // finalize a still-playing session on the first (fragile) boot snapshot.
     // Once-guarded — only the first reconcile after process start does this.
-    await reanchorActiveSessionsOnBoot();
+    const reanchored = await reanchorActiveSessionsOnBoot();
 
     let plexSessions;
     let activeDbRows;
@@ -478,6 +478,15 @@ class PlexEventStreamManager {
     // card disappears forever from the user's perspective. lastSeenAt is the
     // wall-clock anchor for "we know it was active recently"; a sub-60s gap
     // means trust the cached state and let the next snapshot confirm.
+    // A failed re-anchor leaves every lastSeenAt stale by the whole downtime, so
+    // the grace below would be trivially true for rows that are still playing.
+    // Skip the sweep entirely rather than finalize on anchors we know are wrong;
+    // the poller retries the re-anchor on its next tick.
+    if (!reanchored) {
+      console.warn("[plex-events] skipping bootstrap absence sweep — boot re-anchor did not run");
+      return;
+    }
+
     const stale = activeDbRows.filter((r) =>
       !seenKeys.has(r.sessionKey)
       && nowMs - r.lastSeenAt.getTime() >= SESSION_ABSENCE_GRACE_MS,
@@ -767,14 +776,41 @@ class PlexEventStreamManager {
     }
   }
 
+  /**
+   * Is Plex still reporting this session key?
+   *
+   * Returns false when Plex is unreachable: a real stop must win over a
+   * transient error, and the ledger entry the caller then writes is what closes
+   * the re-create race. This cannot keep a genuine ghost alive — a ghost is
+   * reaped by the poller's independent stall detector, which keys on a frozen
+   * progressUpdatedAt and never consults this path.
+   */
+  private async stillReportedByPlex(sessionKey: string): Promise<boolean> {
+    if (!this.currentUrl || !this.currentToken) return false;
+    try {
+      const sessions = await getPlexSessions(this.currentUrl, this.currentToken);
+      return sessions.some((s) => s.sessionKey === sessionKey);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[plex-events] stop cross-check failed for ${sessionKey}: ${msg}`);
+      return false;
+    }
+  }
+
   private async finalizeStopped(sessionKey: string, viewOffset: number | undefined): Promise<void> {
     const id = activeSessionId("plex", this.instance, sessionKey);
     try {
       const existing = await prisma.activeSession.findUnique({ where: { id } });
       if (!existing) {
-        // Plex sent stop for a session we never saw (started before our
-        // connection, finalized by the poller already, …). Gate against a
-        // racey re-create just in case.
+        // No row yet does NOT mean nothing is playing: a brand-new playback has
+        // no ActiveSession until the 5s poller creates one (two ticks for DLNA).
+        // Marking the ledger unconditionally here made a spurious stop inside
+        // that window invisible to the poller for the full 1h TTL — the poller
+        // filters ledgered keys out before it can create the row, and
+        // clearFinalizedNotInCurrentSnapshot only releases keys ABSENT from the
+        // snapshot, so a still-playing key can never release itself. The whole
+        // watch was lost. Cross-check first; only ledger a key Plex agrees is gone.
+        if (await this.stillReportedByPlex(sessionKey)) return;
         markPlexSessionFinalized(id);
         return;
       }
@@ -788,18 +824,13 @@ class PlexEventStreamManager {
       // any state (playing, paused, buffering), treat the SSE as advisory and
       // let the 5s poller drive state going forward. The poller's stall
       // detector + grace window catch true stops within 60s as the backstop.
-      if (this.currentUrl && this.currentToken) {
-        try {
-          const sessions = await getPlexSessions(this.currentUrl, this.currentToken);
-          if (sessions.some((s) => s.sessionKey === sessionKey)) return;
-        } catch (err) {
-          // Network blip cross-checking — fall through and finalize. Real stops
-          // should win over transient errors; the 1h ledger entry below
-          // prevents a racey reappearance from recreating the row.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[plex-events] cross-check failed for ${id}: ${msg}`);
-        }
-      }
+      // Plex Web and several cast/mobile clients emit a spurious state="stopped"
+      // on pause, app-background, or player navigation. Confirm against
+      // /status/sessions: if Plex still reports the session in any state, treat
+      // the SSE as advisory and let the poller drive. A network blip falls
+      // through and finalizes — real stops win over transient errors, and the
+      // ledger entry below closes the re-create race.
+      if (await this.stillReportedByPlex(sessionKey)) return;
 
       const now = new Date();
       const finalized = applyFinalTick(existing, now, {

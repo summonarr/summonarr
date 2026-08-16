@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, isMovieDownloadingInRadarr, isSeriesDownloadingInSonarr, getMovieReleaseInfo, getSeriesFirstAired } from "@/lib/arr";
-import { notifyUserDownloadPending, notifyUserAwaitingRelease, assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
@@ -11,11 +11,10 @@ import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
-import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { scheduleDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
-import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { canAutoApproveInstance, canRequest, canRequestInstance, defaultPermissionsForRole, effectivePermissions, hasPermission, parseInstanceGrants, parseMediaServerGrants, Permission } from "@/lib/permissions";
 import { getMediaInstanceAccessLists, visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
@@ -751,6 +750,10 @@ async function handleComponent(interaction: any): Promise<void> {
         // different instance must not block this one.
         where: { tmdbId: selected.id, mediaType, requestedBy: dbUser.id, arrInstance: routedSlug },
       });
+      // Set when a stale, non-permanent DECLINED row must be cleared to make room
+      // for the re-request. Deleted inside whichever create transaction runs, so an
+      // abort rolls it back with everything else.
+      let staleDeclinedId: string | null = null;
       if (existing) {
         if (existing.permanentlyDeclined) {
           confirmEmbed.color = 0xed4245;
@@ -760,13 +763,17 @@ async function handleComponent(interaction: any): Promise<void> {
         }
         // An ordinary (non-permanent) decline is not terminal — parity with the web
         // route: drop the stale DECLINED row and fall through to a fresh request.
-        // APPROVED/AVAILABLE/PENDING still block. deleteMany no-ops on a concurrent
-        // double re-request instead of throwing.
+        // APPROVED/AVAILABLE/PENDING still block.
         if (existing.status === "DECLINED") {
-          // CAS on status + permanentlyDeclined: if an admin re-approved or made the
-          // decline permanent between the read and here, the delete no-ops and the
-          // create below 409s on the surviving row instead of orphaning/evading it.
-          await prisma.mediaRequest.deleteMany({ where: { id: existing.id, status: "DECLINED", permanentlyDeclined: false } });
+          // Deferred to the create transactions below, never committed here.
+          // Deleting up front destroyed the admin's decline (and its adminNote) on
+          // every path that then aborts without creating a replacement: the
+          // alreadyAvailable branch returns without creating anything, and either
+          // transaction can throw QUOTA_EXCEEDED or exhaust runWithSerializableRetry's
+          // P2034 attempts. The title then read as never-requested. Matches
+          // requests/route.ts and requests/bulk/route.ts, which were both fixed for
+          // exactly this.
+          staleDeclinedId = existing.id;
         } else {
           confirmEmbed.color = 0xfee75c;
           confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
@@ -834,13 +841,21 @@ async function handleComponent(interaction: any): Promise<void> {
         if (alreadyAvailable) {
           // Parity with the web route (requests/route.ts alreadyAvailable branch):
           // a library hit is NOT a request — don't create a row, so it doesn't
-          // consume the user's rolling quota. Still clear any deletion votes.
-          void clearDeletionVotesForTmdbs([{ tmdbId: selected.id, mediaType }]);
+          // consume the user's rolling quota.
+          //
+          // No clearDeletionVotesForTmdbs here. That helper is the GLOBAL wipe for
+          // genuine AVAILABLE transitions: it deletes every user's vote for the
+          // title and clears the deletionVoteNotified gate. This branch transitions
+          // nothing — the title was already available — so calling it let any user
+          // reset the whole community tally just by re-requesting, and the threshold
+          // could never accumulate. The requester's own contradictory vote is
+          // already cleared by the userId-scoped delete above, which is the only
+          // half the web route does.
           note = "It's already in the library!";
           confirmEmbed.color = 0x57f287;
         } else if (mayAutoApprove) {
           // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
-          // scheduleDelayed job still yields a follow-up notification.
+          // scheduleDownloadCheck job still yields a follow-up notification.
           // Serializable is load-bearing: at the default Read Committed two concurrent
           // txs both read count < limit and both commit past the quota boundary, and
           // runWithSerializableRetry's P2034 retry can never fire (parity with
@@ -852,6 +867,15 @@ async function handleComponent(interaction: any): Promise<void> {
                   where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
+              }
+              // Only now that a create is guaranteed to follow, and in the same tx —
+              // an abort past this point rolls the delete back with it. deleteMany
+              // (not delete) no-ops on a concurrent double re-request; the CAS on
+              // status + permanentlyDeclined leaves the row intact if an admin
+              // re-approved it or made the decline permanent since the read, and the
+              // create below then surfaces P2002 instead of evading that.
+              if (staleDeclinedId) {
+                await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
               return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
             }, { isolationLevel: "Serializable" })
@@ -896,52 +920,13 @@ async function handleComponent(interaction: any): Promise<void> {
             confirmEmbed.color = 0x57f287;
           }
 
-          scheduleDelayed(90_000, async () => {
-            try {
-              const current = await prisma.mediaRequest.findUnique({ where: { id: request.id }, select: { status: true } });
-              if (current?.status !== "APPROVED") return;
-
-              const downloading = mediaType === "MOVIE"
-                ? await isMovieDownloadingInRadarr(selected.id, routedSlug)
-                : await isSeriesDownloadingInSonarr(selected.id, routedSlug);
-              // Skip on true (downloading) AND null (queue unreadable); only a
-              // confirmed "not downloading" fires the pending notify.
-              if (downloading !== false) return;
-
-              const now = new Date();
-              let released = true;
-              let soonestReleaseDate: string | null = null;
-
-              if (mediaType === "MOVIE") {
-                const info = await getMovieReleaseInfo(selected.id);
-                if (info) {
-                  const futureDates = [info.digitalRelease, info.physicalRelease]
-                    .filter((d): d is string => !!d && new Date(d) > now);
-                  const pastDates = [info.digitalRelease, info.physicalRelease]
-                    .filter((d): d is string => !!d && new Date(d) <= now);
-                  if (pastDates.length === 0 && futureDates.length > 0) {
-                    released = false;
-                    // Chronological, not lexicographic — see the identical fix in
-                    // /api/requests/[id] and the comparator in the sync orchestrator.
-                    soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-                  }
-                }
-              } else {
-                const firstAired = await getSeriesFirstAired(selected.id, routedSlug);
-                if (firstAired && new Date(firstAired) > now) {
-                  released = false;
-                  soonestReleaseDate = firstAired;
-                }
-              }
-
-              if (!released) {
-                await notifyUserAwaitingRelease(dbUser.id, selected.title, mediaType, soonestReleaseDate);
-              } else {
-                await notifyUserDownloadPending(dbUser.id, selected.title, mediaType);
-              }
-            } catch (err) {
-              console.error("[interactions] 90s download-check failed:", err);
-            }
+          scheduleDownloadCheck({
+            requestId: request.id,
+            tmdbId: selected.id,
+            mediaType,
+            arrInstance: routedSlug,
+            requestedBy: dbUser.id,
+            title: selected.title,
           }, { name: "interactions:90s-download-check" });
         } else {
           // If another request for this title ON THE SAME INSTANCE is already APPROVED
@@ -961,6 +946,13 @@ async function handleComponent(interaction: any): Promise<void> {
                   where: { requestedBy: dbUser.id, mediaType, createdAt: { gte: rq.since }, status: { notIn: ["DECLINED"] } },
                 });
                 if (count >= rq.limit) throw new Error("QUOTA_EXCEEDED");
+              }
+              // Same rollback-safety as the auto-approve tx above: deleted only in
+              // the tx that creates the replacement, so a QUOTA_EXCEEDED throw or a
+              // P2034 retry-exhaustion cannot leave the decline erased with nothing
+              // in its place.
+              if (staleDeclinedId) {
+                await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
                 where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
@@ -1110,8 +1102,11 @@ async function handleComponent(interaction: any): Promise<void> {
       const adminName = adminUser.name ?? adminUser.email;
 
       if (action === "admin_approve") {
-        // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync orchestrator's
-        // 90s "not yet downloading" follow-up notifier fires for Discord-button approvals too.
+        // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync
+        // orchestrator's 90s "not yet downloading" follow-up notifier fires for
+        // Discord-button approvals too. Arming the field is only half of it — the
+        // scheduleDownloadCheck below is what runs the check PROMPTLY at ~90s; the
+        // orchestrator sweep is the backstop for when this job is dropped or fails.
         const claimed = await prisma.mediaRequest.updateMany({
           where: { id: requestId, status: "PENDING" },
           data: { status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
@@ -1170,6 +1165,17 @@ async function handleComponent(interaction: any): Promise<void> {
         if (!arrFailed && request.requestedBy !== adminUser.id) {
           notifyRequestStatusChange("APPROVED", request);
         }
+        // Queued unconditionally, exactly like the web PATCH path: on an arr failure the
+        // row rolled back to PENDING and the job's own status re-read bails, so there is
+        // no second gate to keep in sync here.
+        scheduleDownloadCheck({
+          requestId: request.id,
+          tmdbId: request.tmdbId,
+          mediaType: request.mediaType,
+          arrInstance: request.arrInstance,
+          requestedBy: request.requestedBy,
+          title: request.title,
+        }, { name: "interactions:admin-approve-90s-download-check" });
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
           title: arrFailed ? `⚠️ Approved (arr failed) — ${request.title}` : `✅ Approved — ${request.title}`,

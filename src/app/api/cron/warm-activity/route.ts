@@ -29,12 +29,29 @@ export async function POST(request: NextRequest) {
     async () => {
       clearActivityCache();
       const startTime = Date.now();
-      const { warmed } = await warmActivityCache();
+      let warmed: number;
+      try {
+        ({ warmed } = await warmActivityCache());
+      } catch (err) {
+        // A throw used to skip the ledger write altogether, so the row kept the
+        // last SUCCESSFUL run — the dashboard stayed green and only the ageing
+        // "Last Run" timestamp hinted anything was wrong.
+        await recordCronRun("activity", Date.now() - startTime, false);
+        throw err;
+      }
+
       const durationMs = Date.now() - startTime;
 
       // `lastRunAt` observability — written for both admin and cron triggers
       // (cf. /settings?tab=system). Stored in Setting, not AuditLog, so cron
       // runs don't flood the audit table.
+            // `ok` is derived, not assumed. Two ways a warm used to write green:
+      // a throw skipped this line entirely and left the PREVIOUS success
+      // standing, and a run that completed while reporting failures wrote an
+      // affirmative success anyway. The cron table reads `ok === false` to show
+      // Error, and the container reschedules a failing job every
+      // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
+      // tick while being retried 12x an hour.
       await recordCronRun("activity", durationMs);
 
       // Skip audit log for automated cron runs to avoid flooding the audit table

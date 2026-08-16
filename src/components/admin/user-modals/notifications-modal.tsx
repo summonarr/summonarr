@@ -32,6 +32,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
     notifyOnIssue: u.notifyOnIssue,
   });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const titleId = `notif-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -44,6 +45,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
     const prevPrefs = { ...prefs };
     setPrefs((p) => ({ ...p, [key]: newVal }));
     setSaving(true);
+    setError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/users/${u.id}`), {
         method: "PATCH",
@@ -51,10 +53,18 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
         body: JSON.stringify({ [key]: newVal }),
       });
       if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setPrefs(prevPrefs);
+        setError(data?.error ?? `Failed (${res.status})`);
         return;
       }
       router.refresh();
+    } catch {
+      // A transport failure rejects instead of returning a response, so it
+      // skipped the rollback above entirely and left the switch showing a
+      // preference the server never stored.
+      setPrefs(prevPrefs);
+      setError("Network error — please try again.");
     } finally {
       setSaving(false);
     }
@@ -138,6 +148,12 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
             <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+          </p>
+        )}
+
+        {error && (
+          <p role="alert" aria-live="assertive" className="text-xs text-red-400 mt-3">
+            {error}
           </p>
         )}
       </div>

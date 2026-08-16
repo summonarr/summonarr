@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useTransition } from "react";
 import { useSearchParams } from "next/navigation";
 import type { TmdbMedia, Genre, WatchProvider } from "@/lib/tmdb-types";
 import { MediaCard } from "./media-card";
@@ -9,10 +9,8 @@ import { PaginationBar } from "./pagination-bar";
 import { Loader2, Filter, AlertTriangle } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
 import { usePathname } from "next/navigation";
-import { withBasePath } from "@/lib/base-path";
 
 interface BrowseGridProps {
-  mediaType: "movie" | "tv";
   initialItems: TmdbMedia[];
   initialTotalPages: number;
   initialPage: number;
@@ -23,16 +21,14 @@ interface BrowseGridProps {
   // Latest year to show in From/To Year filter dropdowns. Computed by the
   // server page so SSR and hydration match — see filter-bar.tsx.
   maxYear: number;
+  // True when the server's discover fetch failed. Replaces the client fetch's
+  // own error state: without it a TMDB outage renders an empty grid under the
+  // "TMDB token not configured" empty state, which names the wrong cause.
+  failed?: boolean;
 }
 
-interface BrowseResult {
-  items: TmdbMedia[];
-  totalPages: number;
-  page: number;
-}
 
 export function BrowseGrid({
-  mediaType,
   initialItems,
   initialTotalPages,
   initialPage,
@@ -41,15 +37,10 @@ export function BrowseGrid({
   showPlex,
   showJellyfin,
   maxYear,
+  failed,
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
-
-  const [items, setItems] = useState<TmdbMedia[]>(initialItems);
-  const [totalPages, setTotalPages] = useState(initialTotalPages);
-  const [currentPage, setCurrentPage] = useState(initialPage);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
 
   const genreId       = searchParams.get("genreId") || undefined;
   const keywordId     = searchParams.get("keywordId") || undefined;
@@ -62,70 +53,35 @@ export function BrowseGrid({
   const sortBy        = searchParams.get("sortBy") || undefined;
   const watchProvider = searchParams.get("watchProvider") || undefined;
   const hideAvailable = searchParams.get("hideAvailable") === "1";
-  const page          = Math.max(1, parseInt(searchParams.get("page") ?? "1", 10) || 1);
 
-  const fetchResults = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams();
-      params.set("mediaType", mediaType);
-      params.set("page", String(page));
-      if (genreId)       params.set("genreId", genreId);
-      if (keywordId)     params.set("keywordId", keywordId);
-      if (minRating)     params.set("minRating", minRating);
-      if (ratingFilter)  params.set("ratingFilter", ratingFilter);
-      if (minVoteCount)  params.set("minVoteCount", minVoteCount);
-      if (fromYear)      params.set("fromYear", fromYear);
-      if (toYear)        params.set("toYear", toYear);
-      if (sortBy)        params.set("sortBy", sortBy);
-      if (watchProvider) params.set("watchProvider", watchProvider);
-      if (hideAvailable) params.set("hideAvailable", "1");
+  // The SERVER owns every filter and page change.
+  //
+  // This component used to re-run the whole discover + enrichment pipeline
+  // against /api/browse on every search-param change — while the RSC page,
+  // which reads searchParams and is force-dynamic, had already run the exact
+  // same pipeline to produce `initialItems`. The two ran serially, so a filter
+  // change cost both round-trips added together, roughly 30 DB queries instead
+  // of 15, and the server's result was then thrown away unread: `hasFilters`
+  // gated the sync effect specifically to stop it overwriting the client fetch.
+  //
+  // Worse than the waste, the two paths could disagree, and did — the route
+  // resolved 4K visibility unscoped and badge visibility without the
+  // integration flags, so page 1 (server) and page 2 (client) rendered
+  // different badges and filtered differently. Deleting this fetch removes the
+  // second path entirely rather than trying to keep two copies in step.
+  //
+  // /api/browse itself stays: the iOS client is its consumer.
+  // React's own pending mechanism — no dependency, no client-state library
+  // (guardrail 9). Strictly better than the spinner it replaces: that one was
+  // driven by the client fetch, which only began AFTER the server render had
+  // finished, so it covered the tail of the wait. isPending covers all of it.
+  const [isPending, startTransition] = useTransition();
 
-      const res = await fetch(withBasePath(`/api/browse?${params.toString()}`), { signal });
-      if (!res.ok) {
-        setError(true);
-        return;
-      }
-      const data = await res.json() as BrowseResult;
-      setItems(data.items);
-      setTotalPages(data.totalPages);
-      setCurrentPage(data.page);
-      setError(false);
-    } catch (err) {
-      // A superseded fetch (filters changed mid-flight) is aborted — ignore it so
-      // the newer request's results aren't clobbered by this stale one. Leave the
-      // prior results in place on any other error.
-      if ((err as Error)?.name === "AbortError") return;
-      setError(true);
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }, [mediaType, page, genreId, keywordId, minRating, ratingFilter, minVoteCount, fromYear, toYear, sortBy, watchProvider, hideAvailable]);
+  const items = initialItems;
+  const totalPages = initialTotalPages;
+  const currentPage = initialPage;
 
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
-
-  const [isInitial, setIsInitial] = useState(true);
-  useEffect(() => {
-    if (isInitial) {
-      setIsInitial(false);
-      return;
-    }
-    const controller = new AbortController();
-    fetchResults(controller.signal);
-    return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchResults]);
-
-  // On the unfiltered grid the server component is the source of truth, so a
-  // router.refresh() (driven by LiveRefresh on request:* SSE events) passes
-  // fresh initialItems that must replace local state. With filters active the
-  // grid is client-fetched, so leave that state untouched.
-  useEffect(() => {
-    if (hasFilters) return;
-    setItems(initialItems);
-    setTotalPages(initialTotalPages);
-    setCurrentPage(initialPage);
-  }, [initialItems, initialTotalPages, initialPage, hasFilters]);
   const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
 
   return (
@@ -157,9 +113,10 @@ export function BrowseGrid({
         activeWatchProvider={watchProvider}
         activeHideAvailable={hideAvailable}
         maxYear={maxYear}
+        navigate={startTransition}
       />
 
-      {error && !loading && (
+      {failed && !isPending && (
         <div
           role="alert"
           className="ds-mono"
@@ -182,7 +139,7 @@ export function BrowseGrid({
       )}
 
       <div className="relative min-h-[200px]">
-        {loading && (
+        {isPending && (
           <div
             className="absolute inset-0 z-10 flex items-center justify-center"
             style={{
@@ -201,7 +158,7 @@ export function BrowseGrid({
             />
           </div>
         )}
-        {items.length === 0 && !loading ? (
+        {items.length === 0 && !isPending ? (
           hasFilters ? (
             <EmptyState
               icon={Filter}

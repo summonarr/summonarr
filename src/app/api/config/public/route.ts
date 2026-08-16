@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getFeatureFlags } from "@/lib/features";
 import { safeExternalHref } from "@/lib/safe-url";
+import { DONATION_SETTING_KEYS } from "@/lib/donations";
 
 // User-readable slice of admin config for native clients. The web reads these
 // from server components (donate links, MOTD) or the admin-only /api/settings
@@ -17,12 +18,11 @@ const PUBLIC_SETTING_KEYS = [
   "motdEnabled",
   "motdTitle",
   "motdBody",
-  "donationPaypal",
-  "donationVenmo",
-  "donationZelle",
-  "donationAmazon",
-  "donationPatreon",
-  "donationBuyMeACoffee",
+  // Spread, not retyped. DONATION_SETTING_KEYS exists to be the one place a
+  // donation method is registered — the hand-copied list here meant adding a
+  // provider lit it up on the web and left native clients blind to it, which is
+  // exactly the drift the shared constant was introduced to prevent.
+  ...DONATION_SETTING_KEYS,
   // Soft-upgrade lever: the iOS app compares this to its own build number and
   // shows a dismissible update sheet when behind. An integer, not a secret.
   "recommendedIosBuild",

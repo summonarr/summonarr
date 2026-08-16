@@ -57,7 +57,17 @@ export function isLocalHost(host: string | null | undefined): boolean {
   if (lower === "localhost") return true;
   if (/^\d+(\.\d+){3}$/.test(lower)) return isLoopbackOrPrivateIPv4(lower);
   if (lower.includes(":")) return isLoopbackOrPrivateIPv6(lower);
-  return false;
+  // Non-resolvable-on-the-internet name suffixes, and bare single-label hosts.
+  //
+  // These are the same shapes isPublicAuthHost already treats as private, so a
+  // deployment with AUTH_URL=http://nas.lan:3001 booted cleanly and then had every
+  // request 403'd by the Host gate that calls this function — startup and runtime
+  // disagreed about what "local" means, and the docs' own LAN example was the
+  // broken case. This is not a security relaxation: the comment at the top of this
+  // file states the Host header is client-supplied and spoofable, so the gate is
+  // footgun-prevention for a misconfigured public deployment, never a boundary.
+  if (PRIVATE_SUFFIXES.some((suffix) => lower.endsWith(suffix))) return true;
+  return !lower.includes(".");
 }
 
 // ── startup policy ──────────────────────────────────────────────────────────

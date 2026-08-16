@@ -32,6 +32,10 @@ type Responder = (chunk: string) => string | null;
 class FakeSmtpSocket extends EventEmitter {
   readonly writes: string[] = [];
   wasDestroyed = false;
+  // Every destroy() argument, in order. `destroy(err)` followed by a bare
+  // `destroy()` are two distinct events with different meanings, and a scalar
+  // flag collapses them — losing the Error the first one carries.
+  readonly destroyCalls: Array<Error | undefined> = [];
   greeted: boolean;
   readonly responder: Responder;
   readonly greeting: string | null;
@@ -67,8 +71,9 @@ class FakeSmtpSocket extends EventEmitter {
   }
 
   end(): void {}
-  destroy(): void {
+  destroy(err?: Error): void {
     this.wasDestroyed = true;
+    this.destroyCalls.push(err);
   }
 }
 
@@ -78,8 +83,14 @@ interface RunOptions {
   /** EHLO capability lines advertised on the re-EHLO after STARTTLS. */
   capsAfterTls?: string[];
   greeting?: string;
-  /** Per-verb canned reply overrides (verb → full reply incl. CRLF). */
-  overrides?: Partial<Record<string, string>>;
+  /**
+   * Per-verb canned reply overrides (verb → full reply incl. CRLF).
+   *
+   * `null` means the server answers NOTHING to that verb — the silent-peer case
+   * (hung middlebox, stateful firewall), which emits no error event at all and
+   * is the only way the read timeout is reachable.
+   */
+  overrides?: Partial<Record<string, string | null>>;
   config?: Partial<SmtpConfig>;
   msg?: Partial<SmtpMessage>;
 }
@@ -88,6 +99,7 @@ interface RunResult {
   error: unknown; // undefined on success
   writes: string[]; // every client write, chronological across sockets
   socketWrites: string[][]; // writes grouped per socket (plaintext vs post-TLS)
+  socketDestroys: Array<Array<Error | undefined>>; // destroy() args, grouped per socket
   netConnectOpts: Array<{ host: string; port: number }>;
   tlsConnectOpts: Array<{
     host: string | undefined;
@@ -118,8 +130,10 @@ function makeResponder(opts: RunOptions): Responder {
       return "235 2.7.0 authentication successful\r\n";
     }
     const verb = chunk.replace(/\r\n$/, "").split(/[ :]/)[0].toUpperCase();
+    // `!== undefined`, not truthiness — a null override means "answer nothing",
+    // which is exactly how a silent peer is expressed.
     const override = opts.overrides?.[verb];
-    if (override) return override;
+    if (override !== undefined) return override;
     switch (verb) {
       case "EHLO": {
         const caps = (tlsStarted ? (opts.capsAfterTls ?? opts.caps) : opts.caps) ?? [];
@@ -181,6 +195,7 @@ async function runSendMail(opts: RunOptions = {}): Promise<RunResult> {
     error: undefined,
     writes: [],
     socketWrites: [],
+    socketDestroys: [],
     netConnectOpts: [],
     tlsConnectOpts: [],
   };
@@ -224,6 +239,7 @@ async function runSendMail(opts: RunOptions = {}): Promise<RunResult> {
     tlsMod.connect = realTlsConnect;
   }
   result.socketWrites = sockets.map((s) => [...s.writes]);
+  result.socketDestroys = sockets.map((s) => [...s.destroyCalls]);
   result.writes = sockets.flatMap((s) => s.writes);
   return result;
 }
@@ -648,4 +664,140 @@ test("NUL bytes in From/To are stripped alongside CR/LF", async () => {
   assert.equal(header(headers, "From"), "noreply@example.com");
   assert.equal(header(headers, "To"), "user@dest.example");
   assert.equal(r.writes.includes("RCPT TO:<user@dest.example>\r\n"), true);
+});
+
+// ── bare reply codes (RFC 5321 §4.2) ────────────────────────────────────────
+//
+// `Reply-code [ SP textstring ] CRLF` makes BOTH the space and the text
+// optional, and the prose is a normative MUST on the client side: any text,
+// "including no text at all … MUST be acceptable", with an explicit
+// compatibility note that clients "SHOULD be prepared to process the code alone
+// (with or without a trailing space character)".
+//
+// The reply-completeness scan required the space, so a bare code never looked
+// like a terminated reply and every command died on the 30s read timeout. These
+// run instantly when the parser is right and take 30s to go red when it is not,
+// which is the same signal — a regression cannot pass quickly.
+//
+// The `220 ` variant (code + space, no text) already worked and is pinned here
+// too, because §4.2 says the space is part of the text: it must keep working.
+test("a bare reply code with no trailing space is a complete reply — greeting", async () => {
+  const r = await runSendMail({ greeting: "220\r\n" });
+  assert.equal(r.error, undefined, "a bare 220 banner must not stall the read");
+  assert.equal(r.writes[0], `EHLO ${EXPECTED_EHLO}\r\n`);
+});
+
+test("a bare reply code with no trailing space is a complete reply — mid-session", async () => {
+  const r = await runSendMail({ overrides: { MAIL: "250\r\n" } });
+  assert.equal(r.error, undefined, "a bare 250 to MAIL FROM must not stall the read");
+  assert.ok(
+    r.writes.includes("RCPT TO:<user@dest.example>\r\n"),
+    `the session must proceed past MAIL FROM — got: ${JSON.stringify(r.writes)}`,
+  );
+});
+
+// QUIT is the nastiest variant and needs a TIMING assertion, not an error one:
+// sendMail reads the QUIT reply inside a swallow-everything try/catch, so a
+// bare 221 never surfaces as a failure. The mail is delivered and the call
+// reports success — it just costs a silent extra 30s read timeout every time.
+// Across a settleLimit(…, 3) fan-out to 30 admins that is seconds vs ~5 minutes.
+test("a bare 221 on QUIT does not silently cost a 30s read timeout", async () => {
+  const started = process.hrtime.bigint();
+  const r = await runSendMail({ overrides: { QUIT: "221\r\n" } });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.equal(r.error, undefined);
+  assert.ok(
+    elapsedMs < 5_000,
+    `sending took ${Math.round(elapsedMs)}ms — a bare 221 is being read as an incomplete reply, ` +
+      `so every send stalls until READ_TIMEOUT_MS and the cost is invisible to the caller`,
+  );
+});
+
+test("code plus a trailing space but no text stays acceptable", async () => {
+  const r = await runSendMail({ greeting: "220 \r\n" });
+  assert.equal(r.error, undefined);
+});
+
+// ── defensive paths (buffer cap, read timeout) ──────────────────────────────
+//
+// These are the paths that exist for a hostile or broken peer, and they had
+// ZERO coverage: nothing in tests/ referenced the cap, the timeout, or the
+// destroy that releases the fd. tests/email.test.mts cannot reach them either —
+// it installs THROWING net/tls connect stubs, so it only ever tests pre-connect
+// failure.
+
+test("reply-buffer cap: an oversized reply rejects, destroys the socket, and writes nothing", async () => {
+  // MAX_SMTP_REPLY_BYTES is 1 MiB. Flood the very FIRST read (the banner) so
+  // the cap fires before any command — and any credential — reaches the wire.
+  const r = await runSendMail({
+    greeting: `220 ${"x".repeat(1024 * 1024)}\r\n`,
+    caps: ["AUTH PLAIN"],
+    config: { auth: { user: "alice", pass: "s3cret" } },
+  });
+  assert.equal(asSmtpError(r.error).message, "SMTP reply exceeded buffer cap");
+  // Without the cap this is NOT a hang — measured against a cap-less build, the
+  // 1 MiB banner parses as a perfectly valid 220, the session runs to
+  // completion, and `AUTH PLAIN AGFsaWNlAHMzY3JldA==` is handed to the flooding
+  // peer. So the assertion that matters is that nothing was written at all.
+  assert.deepEqual(r.writes, []);
+  // Destroyed WITH the error, exactly once: the cap sets `closed`, so
+  // sendMail's `finally { conn.close() }` early-returns and adds no second
+  // destroy. Contrast the read-timeout test below, which records two.
+  assert.deepEqual(
+    r.socketDestroys[0].map((e) => e?.message),
+    ["SMTP reply exceeded buffer cap"],
+  );
+});
+
+test("reply-buffer cap: a reply exactly AT the cap is still accepted", async () => {
+  // The check is `> MAX`, not `>=`. A large-but-legal EHLO capability list must
+  // not be clipped, so the boundary is pinned from both sides — a cap that
+  // rejects at the limit would break real servers, and only this direction
+  // catches it.
+  const banner = `220 ${"x".repeat(1024 * 1024 - 6)}\r\n`;
+  assert.equal(banner.length, 1024 * 1024);
+  const r = await runSendMail({ greeting: banner });
+  assert.equal(r.error, undefined);
+  assert.equal(r.writes[0], `EHLO ${EXPECTED_EHLO}\r\n`);
+});
+
+test("read timeout: a peer that goes silent mid-session is torn down, not awaited forever", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The banner answers, then the server stops replying to EHLO entirely — the
+  // hung-middlebox case, which emits no error event at all. It is the only way
+  // the read timeout is reachable: every ACTIVE failure rejects via `error`.
+  const pending = runSendMail({ overrides: { EHLO: null } });
+  // Let connectSocket resolve (disarming the CONNECT deadline) and let
+  // readReply arm its own timer BEFORE ticking, or the tick fires the wrong
+  // timer. setImmediate is not mocked when only setTimeout is, so each hop
+  // drains the microtask queue the fake socket runs on.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(30_000);
+  // Deadline the settle rather than a bare `await pending`. This guard is
+  // load-bearing, not decoration: with the timer removed that promise never
+  // settles, and `npm test` passes no --test-timeout (node:test's default is
+  // infinite), so a regression would HANG THE WHOLE SUITE instead of failing
+  // it. With the race it fails in ~2ms and names the cause.
+  const settled = await Promise.race([
+    pending.then((value) => ({ value })),
+    (async () => {
+      for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+      return null;
+    })(),
+  ]);
+  assert.ok(settled, "sendMail never settled — the read timeout never fired");
+  const r = settled.value;
+  assert.equal(asSmtpError(r.error).message, "SMTP read timed out after 30000ms");
+  // EHLO went out; nothing followed it.
+  assert.deepEqual(r.writes, [`EHLO ${EXPECTED_EHLO}\r\n`]);
+  // TWO destroys, in order: the timer's own destroy(err), which releases the
+  // fd, then the bare destroy() from sendMail's finally-block conn.close() —
+  // the timeout path deliberately never sets `closed`. A scalar "was destroyed"
+  // flag collapses these and loses the Error the first one carries, which is
+  // why the harness records the arguments.
+  assert.deepEqual(
+    r.socketDestroys[0].map((e) => e?.message),
+    ["SMTP read timeout", undefined],
+  );
 });

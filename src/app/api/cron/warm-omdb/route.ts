@@ -34,11 +34,28 @@ export async function POST(request: NextRequest) {
     WARM_OMDB_LOCK_ID,
     async () => {
       const startTime = Date.now();
-      const result = await prewarmOmdbCache();
+      let result;
+      try {
+        result = await prewarmOmdbCache();
+      } catch (err) {
+        // A throw used to skip the ledger write altogether, so the row kept the
+        // last SUCCESSFUL run — the dashboard stayed green and only the ageing
+        // "Last Run" timestamp hinted anything was wrong.
+        await recordCronRun("omdb", Date.now() - startTime, false);
+        throw err;
+      }
+
       const durationMs = Date.now() - startTime;
 
       // `lastRunAt` observability — see warm-activity for rationale.
-      await recordCronRun("omdb", durationMs);
+            // `ok` is derived, not assumed. Two ways a warm used to write green:
+      // a throw skipped this line entirely and left the PREVIOUS success
+      // standing, and a run that completed while reporting failures wrote an
+      // affirmative success anyway. The cron table reads `ok === false` to show
+      // Error, and the container reschedules a failing job every
+      // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
+      // tick while being retried 12x an hour.
+      await recordCronRun("omdb", durationMs, result.failed === 0);
 
       if (authCtx.trigger !== "cron") {
         await logAudit({

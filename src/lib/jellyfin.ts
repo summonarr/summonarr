@@ -215,6 +215,37 @@ export interface JellyfinLibraryItemData {
   contentRating:  string | null;
   communityRating: number | null;
   addedAt:        Date | null;
+  // Item ids of the OTHER copies of this title, when it sits in more than one
+  // library (Anime vs TV, HD vs 4K, an accidental double-import). Sorted, and
+  // empty for the overwhelmingly common single-copy case. Only `itemId` is
+  // persisted — JellyfinLibraryItem is keyed @@id([tmdbId, mediaType,
+  // serverInstance]) with a single `jellyfinItemId` — but the losing copies'
+  // ids still have to be resolvable in-process or every episode filed under
+  // them disappears. See buildSeriesItemIdIndex.
+  duplicateItemIds: string[];
+}
+
+// Which copy of a duplicated title becomes the stored row. Deliberately
+// order-INDEPENDENT: the library-scoped walk fetches folders concurrently, so a
+// plain last-write-wins let the winner flip between syncs and took the row's
+// itemId, filePath, addedAt and ratings with it.
+//
+// Most recently added wins, ties broken on the item id. That is also what the
+// unscoped single-query path already did by construction — it sorts
+// DateCreated ascending and the last write won — so a server whose libraries
+// aren't individually scoped sees no change at all.
+function prefersCandidate(
+  candidate: JellyfinLibraryItemData,
+  incumbent: JellyfinLibraryItemData,
+): boolean {
+  const a = candidate.addedAt?.getTime() ?? null;
+  const b = incumbent.addedAt?.getTime() ?? null;
+  if (a !== b) {
+    if (a === null) return false; // an undated copy never displaces a dated one
+    if (b === null) return true;
+    return a > b;
+  }
+  return (candidate.itemId ?? "") > (incumbent.itemId ?? "");
 }
 
 const LIBRARY_PAGE_SIZE   = 5_000;
@@ -394,21 +425,43 @@ async function getJellyfinItemsByType(
     ? `&MinDateLastSaved=${encodeURIComponent(minDateLastSaved.toISOString())}`
     : "";
 
+  // Every item id seen for a tmdb id that turned up more than once. Populated
+  // only on a collision, so the single-copy case allocates nothing extra.
+  const extraItemIds = new Map<number, Set<string>>();
+
   const processItems = (batch: JellyfinItem[]) => {
     for (const item of batch) {
       const tmdb = item.ProviderIds?.Tmdb ?? item.ProviderIds?.tmdb;
       if (tmdb) {
         const n = parseInt(tmdb, 10);
-        if (!isNaN(n)) items.set(n, {
-          filePath:        item.Path ?? null,
-          itemId:          item.Id ?? null,
-          title:           item.Name ?? null,
-          year:            item.ProductionYear != null ? String(item.ProductionYear) : null,
-          overview:        item.Overview ?? null,
-          contentRating:   item.OfficialRating ?? null,
-          communityRating: item.CommunityRating ?? null,
-          addedAt:         item.DateCreated ? new Date(item.DateCreated) : null,
-        });
+        if (!isNaN(n)) {
+          const candidate: JellyfinLibraryItemData = {
+            filePath:        item.Path ?? null,
+            itemId:          item.Id ?? null,
+            title:           item.Name ?? null,
+            year:            item.ProductionYear != null ? String(item.ProductionYear) : null,
+            overview:        item.Overview ?? null,
+            contentRating:   item.OfficialRating ?? null,
+            communityRating: item.CommunityRating ?? null,
+            addedAt:         item.DateCreated ? new Date(item.DateCreated) : null,
+            duplicateItemIds: [],
+          };
+          const incumbent = items.get(n);
+          if (!incumbent) {
+            items.set(n, candidate);
+          } else {
+            // Same title in two libraries. Keep both ids addressable, then let
+            // prefersCandidate — not arrival order — decide which row survives.
+            let ids = extraItemIds.get(n);
+            if (!ids) {
+              ids = new Set<string>();
+              extraItemIds.set(n, ids);
+              if (incumbent.itemId) ids.add(incumbent.itemId);
+            }
+            if (candidate.itemId) ids.add(candidate.itemId);
+            if (prefersCandidate(candidate, incumbent)) items.set(n, candidate);
+          }
+        }
       } else if (itemType === "Series") {
         // Series without a TMDB provider ID are intentionally skipped; episode lookups rely on the
         // itemId→tmdbId mapping built from this loop, so un-mapped series simply produce no episodes.
@@ -442,6 +495,25 @@ async function getJellyfinItemsByType(
     );
   }
 
+  // Fold the collision bookkeeping into the surviving rows. Sorted so the list
+  // is as stable between syncs as the winner it hangs off. Counted HERE rather
+  // than at collision time so the same item served twice (an overlapping page
+  // during a library that changed mid-walk) doesn't report as a duplicate copy.
+  let duplicatedTmdbIds = 0;
+  for (const [tmdbId, ids] of extraItemIds) {
+    const winner = items.get(tmdbId);
+    if (!winner) continue;
+    if (winner.itemId) ids.delete(winner.itemId);
+    if (ids.size === 0) continue;
+    winner.duplicateItemIds = Array.from(ids).sort();
+    duplicatedTmdbIds++;
+  }
+  if (duplicatedTmdbIds > 0) {
+    console.warn(
+      `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable for episode mapping, but only the winner's file path and ratings are stored.`,
+    );
+  }
+
   return items;
 }
 
@@ -457,6 +529,35 @@ interface JellyfinEpisodeItem {
   IndexNumber?: number;
 }
 
+// The value for JellyfinLibraryItem.jellyfinItemIds: every id this title
+// occupies, the stored `itemId` first. Reads OR this against `jellyfinItemId`
+// (rows written before the column existed are `[]`), so the winner appearing in
+// both is deliberate rather than redundant — it keeps the array a complete
+// answer on its own once a full sync has rewritten the row.
+export function libraryItemIds(data: JellyfinLibraryItemData): string[] {
+  return data.itemId ? [data.itemId, ...data.duplicateItemIds] : [...data.duplicateItemIds];
+}
+
+// EVERY Jellyfin item id that resolves to a given series, not just the one whose
+// row survives into JellyfinLibraryItem.
+//
+// A show sitting in two libraries has two item ids, and each of its episodes
+// carries whichever SeriesId it was filed under. processEpisodes below `continue`s
+// on a SeriesId it doesn't recognise, so a map built from the surviving id alone
+// silently drops the losing copy's ENTIRE episode set from TVEpisodeCache — which
+// then reads as "these seasons aren't in the library". Build the map from this,
+// never from `data.itemId` alone.
+export function buildSeriesItemIdIndex(
+  seriesItems: Map<number, JellyfinLibraryItemData>,
+): Map<string, number> {
+  const index = new Map<string, number>();
+  for (const [tmdbId, data] of seriesItems) {
+    if (data.itemId) index.set(data.itemId, tmdbId);
+    for (const duplicateId of data.duplicateItemIds) index.set(duplicateId, tmdbId);
+  }
+  return index;
+}
+
 export async function getJellyfinTVEpisodes(
   baseUrl: string,
   apiKey: string,
@@ -465,16 +566,9 @@ export async function getJellyfinTVEpisodes(
 ): Promise<JellyfinTVEpisodeData[]> {
   const base = baseUrl.replace(/\/$/, "");
 
-  let seriesMap: Map<string, number>;
-  if (seriesItemIdToTmdbId) {
-    seriesMap = seriesItemIdToTmdbId;
-  } else {
-    seriesMap = new Map();
-    const seriesItems = await getJellyfinItemsByType(base, apiKey, "Series", libraryIds);
-    for (const [tmdbId, data] of seriesItems) {
-      if (data.itemId) seriesMap.set(data.itemId, tmdbId);
-    }
-  }
+  const seriesMap: Map<string, number> = seriesItemIdToTmdbId
+    ? seriesItemIdToTmdbId
+    : buildSeriesItemIdIndex(await getJellyfinItemsByType(base, apiKey, "Series", libraryIds));
 
   if (seriesMap.size === 0) return [];
 

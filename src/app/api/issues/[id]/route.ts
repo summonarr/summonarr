@@ -206,6 +206,15 @@ export const DELETE = withIssueAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  // The last mutation in the issues/votes family that was missing this, and not
+  // a harmless omission: withIssueAdmin is authoritative on MANAGE_ISSUES, while
+  // maintenanceGuard exempts only the ADMIN superbit — and the ISSUE_ADMIN
+  // preset carries MANAGE_ISSUES WITHOUT ADMIN. So during maintenance an issue
+  // admin was refused every other action here and could still hard-delete a
+  // row, which is the most destructive one in the family.
+  const maintenance = await maintenanceGuard();
+  if (maintenance) return maintenance;
+
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });

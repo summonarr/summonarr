@@ -48,6 +48,12 @@ function project(
   enriched: Map<string, TmdbMedia>,
   hideAvailable: boolean,
   limit: number,
+  // The user's own server visibility. A Plex-pinned user must not have
+  // Jellyfin-only titles dropped from their rails — every paginated surface
+  // (/api/top-rated, /api/upcoming, browse-query) already gates this way, and
+  // the rails here linking to those pages showed a different set than the page
+  // they led to.
+  vis: { showPlex: boolean; showJellyfin: boolean },
 ): TmdbMedia[] {
   const out: TmdbMedia[] = [];
   for (const m of raw) {
@@ -56,7 +62,7 @@ function project(
     // (the user hid it). Drop it — do NOT fall back to the raw item, which would
     // resurrect the hidden title onto the rail.
     if (!e) continue;
-    if (hideAvailable && (e.plexAvailable || e.jellyfinAvailable)) continue;
+    if (hideAvailable && ((vis.showPlex && e.plexAvailable) || (vis.showJellyfin && e.jellyfinAvailable))) continue;
     out.push(e);
     if (out.length >= limit) break;
   }
@@ -75,6 +81,7 @@ export default async function DiscoverPage({
   const [sp, session, flags] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags()]);
   const hideAvailable = sp.hideAvailable === "1";
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const vis = { showPlex, showJellyfin };
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
   const forYouEnabled = flags["feature.page.forYou"];
@@ -133,7 +140,7 @@ export default async function DiscoverPage({
   const enriched = await attachAllAvailability(displaySet, session?.user.id, { show4k });
   const emap = new Map(enriched.map((m) => [`${m.mediaType}-${m.id}`, m]));
 
-  const trendingItems = project(trending,  emap, hideAvailable, trending.length);
+  const trendingItems = project(trending,  emap, hideAvailable, trending.length, vis);
   const featuredMovie = trendingItems.find((m) => m.mediaType === "movie");
   const featuredTV = trendingItems.find((m) => m.mediaType === "tv");
   const featuredKeys = new Set(
@@ -146,20 +153,20 @@ export default async function DiscoverPage({
   );
   const rails: { title: string; subtitle: string; href?: string; items: TmdbMedia[] }[] = [
     ...(forYouEnabled
-      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", items: project(forYou, emap, hideAvailable, RAIL_SIZE) }]
+      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
       : []),
-    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE) },
-    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE) },
+    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
     ...(upcomingEnabled
       ? [
-          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", items: project(upMovies, emap, hideAvailable, RAIL_SIZE) },
-          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", items: project(upTV,     emap, hideAvailable, RAIL_SIZE) },
+          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
     ...(topEnabled
       ? [
-          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", items: project(topMovies, emap, hideAvailable, RAIL_SIZE) },
-          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", items: project(topTV,     emap, hideAvailable, RAIL_SIZE) },
+          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
   ];

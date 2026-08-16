@@ -19,6 +19,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { isFeatureEnabled } from "@/lib/features";
 import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
@@ -72,6 +73,10 @@ export default async function MovieDetailPage({
     radarr4kAvailable,
     radarr4kWanted,
     radarrInstances,
+    votesEnabled,
+    issuesEnabled,
+    plexEnabled,
+    jellyfinEnabled,
     onWatchlist,
     onHidden,
   ] = await Promise.all([
@@ -110,6 +115,17 @@ export default async function MovieDetailPage({
     prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     getSyncableArrInstances("radarr"),
+    // The TV detail page has gated on these four since it was written; this
+    // page never did. Without the page flags the Report-issue and Vote-to-
+    // delete buttons render even when the feature is off, and only fail on
+    // submit with the API's 403 — a dead-end button. Without the integration
+    // flags getBadgeVisibility defaults both servers to true, so a disabled
+    // Plex still shows Plex badges AND still satisfies the showPlex gate that
+    // guards those very buttons.
+    isFeatureEnabled("feature.page.votes"),
+    isFeatureEnabled("feature.page.issues"),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
     session
       ? prisma.watchlistItem
           .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "MOVIE" } }, select: { id: true } })
@@ -126,7 +142,7 @@ export default async function MovieDetailPage({
   const jellyfinAvailable = !!jellyfinItem;
   const arrPending        = !!radarrWanted;
   const requested         = !!userRequest;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
   const canRequestMovies = session ? canRequest(session.user.permissions, "MOVIE", false) : false;
   const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
   const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
@@ -374,7 +390,7 @@ export default async function MovieDetailPage({
                   initialHidden={onHidden}
                 />
               )}
-              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
+              {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
                   tmdbId={media.id}
                   mediaType="MOVIE"
@@ -382,7 +398,7 @@ export default async function MovieDetailPage({
                   posterPath={media.posterPath}
                 />
               )}
-              {((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
+              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
                 <VoteDeleteButton
                   tmdbId={media.id}
                   mediaType="MOVIE"

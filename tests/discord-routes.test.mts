@@ -135,8 +135,26 @@ shadowPrismaModel(prisma, "user", {
   },
   findMany: async (args: { where?: Record<string, unknown> } = {}) => {
     rec("user.findMany", args.where);
-    const w = args.where as { discordId?: { not?: null } } | undefined;
-    const rows = w?.discordId?.not === null ? appUsers.filter((u) => u.discordId !== null) : appUsers;
+    // Models the three filters sync-roles actually uses. Without the email and
+    // deactivatedAt halves the stub returned every linked row for both of that
+    // route's queries, so its scoping tests passed no matter what the route asked
+    // for — the filter has to be honoured here for those pins to mean anything.
+    const w = args.where as
+      | {
+          discordId?: { not?: null };
+          deactivatedAt?: null | { not?: null };
+          NOT?: { email?: { endsWith?: string } };
+        }
+      | undefined;
+    let rows = appUsers;
+    if (w?.discordId?.not === null) rows = rows.filter((u) => u.discordId !== null);
+    if (w && "deactivatedAt" in w) {
+      rows = w.deactivatedAt === null
+        ? rows.filter((u) => u.deactivatedAt === null)
+        : rows.filter((u) => u.deactivatedAt !== null);
+    }
+    const suffix = w?.NOT?.email?.endsWith;
+    if (suffix) rows = rows.filter((u) => !u.email.endsWith(suffix));
     return rows.map((u) => ({ ...u }));
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
@@ -857,6 +875,47 @@ test("sync-roles only selects users that actually have a discordId", async () =>
   assert.equal(body.synced, 1);
   const where = opsOf("user.findMany")[0].args as { discordId?: { not?: null } };
   assert.deepEqual(where.discordId, { not: null });
+});
+
+test("PIN: sync-roles skips SHADOW accounts — a real snowflake is not a real link", async () => {
+  // The bot creates a User row for anyone who runs a slash command, with their
+  // real discordId and a synthetic discord_<id>@discord.local email. Nobody has
+  // linked those to a real account, so granting them the linked/server roles
+  // hands out guild perks to people who never linked. discordId alone cannot
+  // tell them apart — the email suffix is the only discriminator.
+  const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+  appUsers.push(
+    { id: "real", email: "real@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null },
+    { id: "shadow", email: `discord_${VALID_SNOWFLAKE}@discord.local`, role: "USER", discordId: "222222222222222222", permissions: 0n, deactivatedAt: null },
+  );
+
+  const body = await (await doSyncRoles(token)).json();
+
+  assert.equal(body.synced, 1, "only the genuinely linked account is synced");
+  const granted = fetchCalls.filter((c) => c.method === "PUT").map((c) => c.url.pathname);
+  assert.ok(
+    granted.every((p) => p.includes(VALID_SNOWFLAKE)),
+    `no role may be granted to the shadow account: ${granted.join(", ")}`,
+  );
+});
+
+test("PIN: sync-roles STRIPS Summonarr-managed roles from a deactivated account", async () => {
+  // Deactivation leaves role, permissions and discordId intact (guardrail 33
+  // disables, it does not scrub), and assignDiscordRolesOnLink's diff only runs
+  // while an account is linked — so a banned admin kept the Discord admin role
+  // forever. revokeDiscordRolesOnUnlink is otherwise only reachable from an
+  // explicit /unlink a banned user never performs. Skipping is not enough.
+  const { token } = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+  appUsers.push(
+    { id: "banned", email: "banned@example.com", role: "ADMIN", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: new Date() },
+  );
+
+  const body = await (await doSyncRoles(token)).json();
+
+  assert.equal(body.synced, 0, "a deactivated account is never granted roles");
+  assert.equal(body.revoked, 1, "…it is actively stripped instead");
+  assert.deepEqual(fetchCalls.filter((c) => c.method === "PUT"), [], "no grants for a banned user");
+  assert.ok(fetchCalls.some((c) => c.method === "DELETE"), "managed roles are revoked");
 });
 
 test("a failing Discord role call does not fail the whole sync", async () => {

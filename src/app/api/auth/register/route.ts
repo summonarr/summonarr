@@ -112,10 +112,14 @@ export async function POST(req: NextRequest) {
   }
   registrationInFlight = true;
 
-  const passwordHash = await hashPassword(password);
-
   let user: { id: string; email: string; name: string | null; role: string };
+  // hashPassword sits INSIDE the try. Outside it, a throw there — bcrypt failure,
+  // OOM — skipped the finally, leaving the flag latched true for the life of the
+  // process. Since setup_completed_at was never written, every later attempt hit
+  // the in-flight check and got a permanent "Registration is closed", so the
+  // instance could not be bootstrapped at all without a restart.
   try {
+    const passwordHash = await hashPassword(password);
     user = await prisma.$transaction(async (tx) => {
       // Advisory lock 43 ensures only one concurrent initial-registration transaction can succeed
       await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(43)");

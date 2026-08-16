@@ -92,7 +92,10 @@ const ALL_KEYS = [
   "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret",
   "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret",
   "request4kAll",
-  "plexAdminEmail", "plexServerUrl", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
+  // plexAdminToken rides along so the sync buttons can be told whether Plex is
+  // configured — the same url+token pair /api/sync/plex itself gates on. It was
+  // already read below, but inside a block-scoped Promise.all the JSX cannot see.
+  "plexAdminEmail", "plexServerUrl", "plexAdminToken", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
   "motdEnabled", "motdTitle", "motdBody",
@@ -138,6 +141,13 @@ export default async function SettingsPage({
   // safeDecryptSettingValue clears entries on successful read, so the banner
   // disappears automatically on the next page load after the operator re-saves.
   const decryptFailures = getSettingDecryptFailures();
+
+  // Exactly the gates /api/sync/plex and /api/sync/jellyfin apply themselves, so
+  // the sync buttons can skip a server that is not there instead of POSTing to
+  // it and reading the resulting 400 as a failure. Default instance only, which
+  // is what those buttons sync — they send no `instance` slug (guardrail 35).
+  const plexConfigured = !!(cfg.plexServerUrl && cfg.plexAdminToken);
+  const jellyfinConfigured = !!(cfg.jellyfinUrl && cfg.jellyfinApiKey);
 
   const baseUrl = cfg.siteUrl?.replace(/\/$/, "") ?? process.env.AUTH_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
 
@@ -953,7 +963,7 @@ export default async function SettingsPage({
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Library Cache</h3>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <ResyncLibraryButton />
+                    <ResyncLibraryButton plexConfigured={plexConfigured} jellyfinConfigured={jellyfinConfigured} />
                     <SyncTVEpisodesButton />
                     <RatingsWarmButton />
                     <ActivityWarmButton />
@@ -1008,7 +1018,7 @@ export default async function SettingsPage({
                     ));
                   })()}
                 </div>
-                <MasterDbFillButton />
+                <MasterDbFillButton plexConfigured={plexConfigured} jellyfinConfigured={jellyfinConfigured} />
               </div>
 
               <div className="border-t border-zinc-800 pt-5">

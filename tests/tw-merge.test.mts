@@ -104,9 +104,18 @@ test("text-overflow and text-wrap are their own groups, not text colors", () => 
   assert.equal(twMerge("whitespace-nowrap text-nowrap"), "whitespace-nowrap text-nowrap");
 });
 
-test("text-indent and text-shadow are not text colors", () => {
-  assert.equal(twMerge("text-indent-4 text-zinc-400"), "text-indent-4 text-zinc-400");
-  assert.equal(twMerge("text-indent-2 text-indent-8"), "text-indent-8");
+test("indent-* is the real text-indent utility (regression: the group guarded text-indent-*, which is not a Tailwind class)", () => {
+  // Tailwind spells the text-indent property `indent-4`, never `text-indent-4`.
+  // The old group therefore matched nothing that can exist, while the real
+  // utility had no group and two of them never collapsed.
+  assert.equal(twMerge("indent-2 indent-8"), "indent-8");
+  assert.equal(twMerge("indent-4 -indent-2"), "-indent-2");
+  // It is not on the text- prefix, so it never touched the colour catch-all.
+  assert.equal(twMerge("indent-4 text-zinc-400"), "indent-4 text-zinc-400");
+  assert.equal(twMerge("indent-4 text-sm"), "indent-4 text-sm");
+});
+
+test("text-shadow is not a text color", () => {
   // text-shadow carries the same size-vs-color overload border already models.
   assert.equal(twMerge("text-shadow-sm text-red-500"), "text-shadow-sm text-red-500");
   assert.equal(twMerge("text-shadow-sm text-shadow-red-500"), "text-shadow-sm text-shadow-red-500");
@@ -156,6 +165,25 @@ test("inset negative lookahead keeps inset-x/inset-y out of the inset group", ()
   assert.equal(twMerge("inset-x-2 inset-x-4"), "inset-x-4");
 });
 
+test("inset-shadow-* and inset-ring-* are box shadows, not positional inset (regression: the inset group swallowed them)", () => {
+  // Both are real Tailwind v4 utilities, and the positional regex only excludes
+  // x-/y-, so `inset-shadow-sm` matched /^-?inset-(?!x-|y-)/ and a plain
+  // `inset-4` silently deleted it (or was deleted by it).
+  assert.equal(twMerge("inset-4 inset-shadow-sm"), "inset-4 inset-shadow-sm");
+  assert.equal(twMerge("inset-0 inset-ring-2"), "inset-0 inset-ring-2");
+  assert.equal(twMerge("inset-shadow-sm inset-ring-2"), "inset-shadow-sm inset-ring-2");
+  // Each carries the same size/width-vs-color split as shadow and ring.
+  assert.equal(twMerge("inset-shadow-sm inset-shadow-red-500"), "inset-shadow-sm inset-shadow-red-500");
+  assert.equal(twMerge("inset-ring-2 inset-ring-red-500"), "inset-ring-2 inset-ring-red-500");
+  // …and still collapses within itself.
+  assert.equal(twMerge("inset-shadow-sm inset-shadow-lg"), "inset-shadow-lg");
+  assert.equal(twMerge("inset-shadow-red-500 inset-shadow-blue-500"), "inset-shadow-blue-500");
+  assert.equal(twMerge("inset-ring inset-ring-4"), "inset-ring-4");
+  // The positional groups are untouched.
+  assert.equal(twMerge("inset-0 inset-4"), "inset-4");
+  assert.equal(twMerge("inset-x-2 inset-shadow-sm"), "inset-x-2 inset-shadow-sm");
+});
+
 test("group-* and peer-* variant prefixes form independent class spaces", () => {
   // VARIANT_RE has dedicated alternatives for group-*/peer-* and their
   // named-group (/name) forms — advertised in the module header comment.
@@ -168,6 +196,429 @@ test("group-* and peer-* variant prefixes form independent class spaces", () => 
   );
   assert.equal(twMerge("peer-checked:p-2 peer-checked:p-4"), "peer-checked:p-4");
   assert.equal(twMerge("peer-focus/name:mt-2 peer-focus/name:mt-4"), "peer-focus/name:mt-4");
+});
+
+test("col-span/col-start/col-end are three CSS properties, not one group (regression: they shared a group)", () => {
+  // /^col-(?:span|start|end)-/ folded grid-column, grid-column-start and
+  // grid-column-end into one class space, so a start/end pair annihilated
+  // itself. This shipped: ui/card.tsx's CardAction base drops row-span-2.
+  assert.equal(twMerge("col-start-2 col-end-4"), "col-start-2 col-end-4");
+  assert.equal(twMerge("row-start-2 row-end-4"), "row-start-2 row-end-4");
+  assert.equal(twMerge("col-span-2 col-start-1"), "col-span-2 col-start-1");
+  assert.equal(
+    twMerge("col-start-2 row-span-2 row-start-1 self-start justify-self-end"),
+    "col-start-2 row-span-2 row-start-1 self-start justify-self-end",
+  );
+  // Each still collapses within itself…
+  assert.equal(twMerge("col-span-2 col-span-4"), "col-span-4");
+  assert.equal(twMerge("col-start-1 col-start-3"), "col-start-3");
+  assert.equal(twMerge("row-end-2 row-end-5"), "row-end-5");
+  // …and the col-* / row-* axes stay independent of each other.
+  assert.equal(twMerge("col-span-2 row-span-2"), "col-span-2 row-span-2");
+  assert.equal(twMerge("col-start-1 row-start-1"), "col-start-1 row-start-1");
+});
+
+test("justify-content, justify-items and justify-self are three properties, not one group (regression: one /^justify-/ group)", () => {
+  // The parallel place-content/place-items/place-self trio was already split;
+  // justify-* was not, so a component's justify-self was deleted by any
+  // justify-content a caller passed in, and vice versa.
+  assert.equal(twMerge("justify-center justify-self-end"), "justify-center justify-self-end");
+  assert.equal(twMerge("justify-self-end justify-center"), "justify-self-end justify-center");
+  assert.equal(twMerge("justify-between justify-items-center"), "justify-between justify-items-center");
+  assert.equal(twMerge("justify-items-center justify-self-start"), "justify-items-center justify-self-start");
+  assert.equal(
+    twMerge("justify-start justify-items-end justify-self-auto"),
+    "justify-start justify-items-end justify-self-auto",
+  );
+  // Each still collapses within itself.
+  assert.equal(twMerge("justify-start justify-center"), "justify-center");
+  assert.equal(twMerge("justify-items-start justify-items-center"), "justify-items-center");
+  assert.equal(twMerge("justify-self-start justify-self-center"), "justify-self-center");
+  // v4's -safe alignments land in the same three groups, not a fourth.
+  assert.equal(twMerge("justify-center justify-end-safe"), "justify-end-safe");
+  assert.equal(twMerge("justify-self-center justify-self-end-safe"), "justify-self-end-safe");
+  assert.equal(twMerge("justify-end-safe justify-self-end-safe"), "justify-end-safe justify-self-end-safe");
+  // The align-* shorthands sit on their own prefixes and stay unaffected.
+  assert.equal(twMerge("justify-self-end self-start"), "justify-self-end self-start");
+  assert.equal(twMerge("justify-items-center items-center"), "justify-items-center items-center");
+  // place-* already modelled this split; it must not regress.
+  assert.equal(twMerge("place-content-center place-self-end"), "place-content-center place-self-end");
+  assert.equal(twMerge("place-items-center place-self-end"), "place-items-center place-self-end");
+});
+
+test("align-content and the CSS `content` property are separate groups (regression: one /^content-/ group)", () => {
+  // `content-none` and `content-[…]` set the CSS `content` property (pseudo-
+  // element text); `content-center` and friends set align-content. One group
+  // meant either could silently delete the other.
+  assert.equal(twMerge("content-center content-['x']"), "content-center content-['x']");
+  assert.equal(twMerge("content-between content-none"), "content-between content-none");
+  assert.equal(twMerge("content-none content-stretch"), "content-none content-stretch");
+  // Each still collapses within itself.
+  assert.equal(twMerge("content-center content-between"), "content-between");
+  assert.equal(twMerge("content-normal content-stretch"), "content-stretch");
+  assert.equal(twMerge("content-none content-['x']"), "content-['x']");
+});
+
+test("shadow-xs and shadow-2xs are sizes, not colors (regression: the color lookahead omitted them)", () => {
+  // Both exist in the Tailwind v4 shadow scale but were missing from the
+  // shadow-color negative lookahead, so they landed in the color group and a
+  // color class deleted the size.
+  assert.equal(twMerge("shadow-xs shadow-red-500"), "shadow-xs shadow-red-500");
+  assert.equal(twMerge("shadow-2xs shadow-red-500"), "shadow-2xs shadow-red-500");
+  // They collapse against the rest of the size scale, not alongside it.
+  assert.equal(twMerge("shadow-xs shadow-sm"), "shadow-sm");
+  assert.equal(twMerge("shadow-2xs shadow-xs"), "shadow-xs");
+  assert.equal(twMerge("shadow-lg shadow-2xs"), "shadow-2xs");
+  // The neighbouring 2xl entry in the same lookahead must not regress.
+  assert.equal(twMerge("shadow-xs shadow-2xl"), "shadow-2xl");
+  assert.equal(twMerge("shadow-2xl shadow-red-500"), "shadow-2xl shadow-red-500");
+});
+
+test("decoration thickness and decoration color are separate groups (regression: one group)", () => {
+  // text-decoration-thickness vs text-decoration-color — the same size-vs-color
+  // overload border, shadow and text-shadow already model.
+  assert.equal(twMerge("decoration-2 decoration-red-500"), "decoration-2 decoration-red-500");
+  assert.equal(twMerge("decoration-red-500 decoration-2"), "decoration-red-500 decoration-2");
+  assert.equal(twMerge("decoration-auto decoration-zinc-400"), "decoration-auto decoration-zinc-400");
+  assert.equal(twMerge("decoration-from-font decoration-red-500"), "decoration-from-font decoration-red-500");
+  // Each still collapses within itself.
+  assert.equal(twMerge("decoration-2 decoration-4"), "decoration-4");
+  assert.equal(twMerge("decoration-from-font decoration-2"), "decoration-2");
+  assert.equal(twMerge("decoration-red-500 decoration-blue-500"), "decoration-blue-500");
+  // Style remains its own group, unchanged.
+  assert.equal(twMerge("decoration-wavy decoration-2"), "decoration-wavy decoration-2");
+  assert.equal(twMerge("decoration-wavy decoration-dotted"), "decoration-dotted");
+});
+
+test("v4 gradient utilities are background images, not colors (regression: only the legacy `gradient-` spelling was recognised)", () => {
+  // Tailwind v4 renamed bg-gradient-* to bg-linear-*, and added bg-radial /
+  // bg-conic. Unrecognised, they fell into the /^bg-/ color catch-all.
+  assert.equal(twMerge("bg-linear-to-r bg-red-500"), "bg-linear-to-r bg-red-500");
+  assert.equal(twMerge("bg-radial bg-red-500"), "bg-radial bg-red-500");
+  assert.equal(twMerge("bg-conic-180 bg-red-500"), "bg-conic-180 bg-red-500");
+  assert.equal(twMerge("bg-red-500 bg-linear-45"), "bg-red-500 bg-linear-45");
+  // New and legacy spellings share one group, so they collapse together.
+  assert.equal(twMerge("bg-gradient-to-r bg-linear-to-l"), "bg-linear-to-l");
+  assert.equal(twMerge("bg-linear-to-r bg-radial"), "bg-radial");
+  assert.equal(twMerge("bg-none bg-conic"), "bg-conic");
+  // Colors still collapse among themselves.
+  assert.equal(twMerge("bg-red-500 bg-blue-500"), "bg-blue-500");
+});
+
+test("divide-* utilities merge (regression: no group at all, so every divide class keyed by itself)", () => {
+  assert.equal(twMerge("divide-x-2 divide-x-4"), "divide-x-4");
+  assert.equal(twMerge("divide-y divide-y-4"), "divide-y-4");
+  assert.equal(twMerge("divide-zinc-800 divide-red-500"), "divide-red-500");
+  assert.equal(twMerge("divide-solid divide-dashed"), "divide-dashed");
+  // Width and color live on DIFFERENT prefixes here (divide-x/divide-y vs bare
+  // divide), so unlike border there are no per-axis color utilities to model.
+  assert.equal(twMerge("divide-x divide-zinc-800"), "divide-x divide-zinc-800");
+  assert.equal(twMerge("divide-x-2 divide-y-2"), "divide-x-2 divide-y-2");
+  assert.equal(
+    twMerge("divide-x-2 divide-dashed divide-red-500"),
+    "divide-x-2 divide-dashed divide-red-500",
+  );
+  // The -reverse flags are their own utilities, not widths and not colors.
+  assert.equal(twMerge("divide-x-2 divide-x-reverse"), "divide-x-2 divide-x-reverse");
+  assert.equal(twMerge("divide-x-reverse divide-y-reverse"), "divide-x-reverse divide-y-reverse");
+  assert.equal(twMerge("divide-x-reverse divide-red-500"), "divide-x-reverse divide-red-500");
+});
+
+test("ring width, ring-inset and ring color are three groups (regression: ring-inset sat in ring-w, bare ring matched nothing)", () => {
+  // ring-inset toggles the inset flag; it is not a width, so /^ring-(?:\d|inset|\[)/
+  // wrongly collapsed the pair. Bare `ring` matched no group at all and only
+  // merged with ring colors by accident — the unknown-class fallback returns the
+  // base string "ring", which happened to equal the catch-all group's NAME.
+  // It is a width (1px in v4), so it now joins ring-w explicitly and the
+  // catch-all is renamed ring-color; neither depends on that coincidence.
+  assert.equal(twMerge("ring-inset ring-4"), "ring-inset ring-4");
+  assert.equal(twMerge("ring-4 ring-inset"), "ring-4 ring-inset");
+  assert.equal(twMerge("ring ring-red-500"), "ring ring-red-500");
+  assert.equal(twMerge("ring-inset ring-red-500"), "ring-inset ring-red-500");
+  // Widths collapse, including the bare form (this now matches real
+  // tailwind-merge; it used to be pinned as a divergence).
+  assert.equal(twMerge("ring ring-2"), "ring-2");
+  assert.equal(twMerge("ring-2 ring"), "ring");
+  assert.equal(twMerge("ring-2 ring-4"), "ring-4");
+  assert.equal(twMerge("ring-2 ring-red-500"), "ring-2 ring-red-500");
+  // ring-offset keeps its own width/color split and never matches ring-w.
+  assert.equal(twMerge("ring-2 ring-offset-2"), "ring-2 ring-offset-2");
+  assert.equal(twMerge("ring-offset-2 ring-offset-red-500"), "ring-offset-2 ring-offset-red-500");
+  assert.equal(twMerge("ring-offset-2 ring-offset-4"), "ring-offset-4");
+});
+
+test("logical corner radii are their own corners, not the all-corners group (regression: /^rounded-/ swallowed them)", () => {
+  // The physical corners were modelled; the logical ones (s/e/ss/se/es/ee) were
+  // not, so any two of them annihilated each other.
+  assert.equal(twMerge("rounded-s-lg rounded-e-lg"), "rounded-s-lg rounded-e-lg");
+  assert.equal(twMerge("rounded-ss-lg rounded-se-lg"), "rounded-ss-lg rounded-se-lg");
+  assert.equal(twMerge("rounded-es-lg rounded-ee-lg"), "rounded-es-lg rounded-ee-lg");
+  // Each still collapses within itself.
+  assert.equal(twMerge("rounded-s-md rounded-s-lg"), "rounded-s-lg");
+  assert.equal(twMerge("rounded-ee-md rounded-ee-lg"), "rounded-ee-lg");
+  // A single-letter side must not swallow the two-letter corner that extends
+  // it — the same (?:-|$) guard that keeps border-b out of border-bs.
+  assert.equal(twMerge("rounded-s-lg rounded-ss-md"), "rounded-s-lg rounded-ss-md");
+  assert.equal(twMerge("rounded-e-lg rounded-ee-md"), "rounded-e-lg rounded-ee-md");
+  // …and `rounded-sm` is a SIZE, not a logical side, so it stays all-corners.
+  assert.equal(twMerge("rounded-sm rounded-lg"), "rounded-lg");
+  assert.equal(twMerge("rounded-s-lg rounded-sm"), "rounded-s-lg rounded-sm");
+  // Physical corners are untouched.
+  assert.equal(twMerge("rounded-t-md rounded-b-lg"), "rounded-t-md rounded-b-lg");
+});
+
+test("logical inset sides are not the all-sides inset shorthand (regression: the positional catch-all swallowed them)", () => {
+  assert.equal(twMerge("inset-s-0 inset-e-0"), "inset-s-0 inset-e-0");
+  assert.equal(twMerge("inset-bs-0 inset-be-0"), "inset-bs-0 inset-be-0");
+  assert.equal(twMerge("inset-4 inset-s-2"), "inset-4 inset-s-2");
+  // Each collapses within itself, negatives included.
+  assert.equal(twMerge("inset-s-2 inset-s-4"), "inset-s-4");
+  assert.equal(twMerge("inset-s-2 -inset-s-4"), "-inset-s-4");
+  assert.equal(twMerge("-inset-be-2 inset-be-4"), "inset-be-4");
+  // The single-letter sides must not swallow the two-letter block sides.
+  assert.equal(twMerge("inset-s-2 inset-bs-4"), "inset-s-2 inset-bs-4");
+  // …nor collide with the box-shadow utilities parked on the same prefix.
+  assert.equal(twMerge("inset-s-2 inset-shadow-sm"), "inset-s-2 inset-shadow-sm");
+  assert.equal(twMerge("inset-e-2 inset-ring-2"), "inset-e-2 inset-ring-2");
+  // x/y stay independent.
+  assert.equal(twMerge("inset-x-2 inset-s-4"), "inset-x-2 inset-s-4");
+});
+
+test("3D transform axes are separate from the 2D shorthands (regression: rotate-x/y/z, scale-z and translate-z fell into them)", () => {
+  assert.equal(twMerge("rotate-x-45 rotate-y-45"), "rotate-x-45 rotate-y-45");
+  assert.equal(twMerge("rotate-45 rotate-x-45"), "rotate-45 rotate-x-45");
+  assert.equal(twMerge("rotate-z-45 rotate-y-90"), "rotate-z-45 rotate-y-90");
+  assert.equal(twMerge("scale-50 scale-z-75"), "scale-50 scale-z-75");
+  assert.equal(twMerge("translate-4 translate-z-8"), "translate-4 translate-z-8");
+  // Each collapses within itself, negatives included.
+  assert.equal(twMerge("rotate-x-45 -rotate-x-90"), "-rotate-x-90");
+  assert.equal(twMerge("scale-z-75 scale-z-100"), "scale-z-100");
+  assert.equal(twMerge("-translate-z-4 translate-z-8"), "translate-z-8");
+  // The 2D axis groups that already existed are unaffected.
+  assert.equal(twMerge("scale-x-50 scale-y-75"), "scale-x-50 scale-y-75");
+  assert.equal(twMerge("skew-x-3 skew-y-6"), "skew-x-3 skew-y-6");
+  assert.equal(twMerge("rotate-45 rotate-90"), "rotate-90");
+});
+
+test("bg-blend-* and the v4 background positions are not background colors (regression: the /^bg-/ catch-all)", () => {
+  // This shipped: ui/avatar.tsx's AvatarBadge base is
+  // "… bg-primary text-primary-foreground bg-blend-color …", so the badge
+  // merged down without its background colour entirely.
+  assert.equal(twMerge("bg-primary bg-blend-color"), "bg-primary bg-blend-color");
+  assert.equal(twMerge("bg-blend-multiply bg-red-500"), "bg-blend-multiply bg-red-500");
+  assert.equal(twMerge("bg-blend-multiply bg-blend-screen"), "bg-blend-screen");
+  // v4 renamed bg-left-top to bg-top-left; only the legacy spelling was listed.
+  assert.equal(twMerge("bg-top-left bg-red-500"), "bg-top-left bg-red-500");
+  assert.equal(twMerge("bg-bottom-right bg-red-500"), "bg-bottom-right bg-red-500");
+  // Both spellings share the one position group.
+  assert.equal(twMerge("bg-center bg-top-left"), "bg-top-left");
+  assert.equal(twMerge("bg-left-top bg-bottom-right"), "bg-bottom-right");
+  // Colours still collapse among themselves.
+  assert.equal(twMerge("bg-red-500 bg-blue-500"), "bg-blue-500");
+});
+
+test("transition-behavior is not the transition shorthand (regression: /^transition(?:-|$)/ swallowed it)", () => {
+  assert.equal(twMerge("transition-all transition-discrete"), "transition-all transition-discrete");
+  assert.equal(twMerge("transition-discrete transition-colors"), "transition-discrete transition-colors");
+  assert.equal(twMerge("transition-none transition-discrete"), "transition-none transition-discrete");
+  // Each collapses within itself.
+  assert.equal(twMerge("transition-discrete transition-normal"), "transition-normal");
+  assert.equal(twMerge("transition transition-all"), "transition-all");
+});
+
+test("space-*-reverse is a flag, not a margin (regression: it sat in the space-x/space-y groups)", () => {
+  assert.equal(twMerge("space-x-4 space-x-reverse"), "space-x-4 space-x-reverse");
+  assert.equal(twMerge("space-y-4 space-y-reverse"), "space-y-4 space-y-reverse");
+  assert.equal(twMerge("space-x-reverse space-y-reverse"), "space-x-reverse space-y-reverse");
+  assert.equal(twMerge("space-x-2 space-x-4"), "space-x-4");
+  // Matches the divide-*-reverse split already in the table.
+  assert.equal(twMerge("divide-x-2 divide-x-reverse"), "divide-x-2 divide-x-reverse");
+});
+
+test("font-stretch is not font-family (regression: the /^font-/ catch-all)", () => {
+  assert.equal(twMerge("font-mono font-stretch-75%"), "font-mono font-stretch-75%");
+  assert.equal(twMerge("font-stretch-condensed font-sans"), "font-stretch-condensed font-sans");
+  assert.equal(twMerge("font-stretch-50% font-stretch-100%"), "font-stretch-100%");
+  assert.equal(twMerge("font-mono font-serif"), "font-serif");
+  // Weight keeps its own group.
+  assert.equal(twMerge("font-bold font-stretch-75%"), "font-bold font-stretch-75%");
+});
+
+test("the -safe alignment variants land in their alignment group (regression: content-*-safe fell into the CSS content group)", () => {
+  assert.equal(twMerge("content-center-safe content-['x']"), "content-center-safe content-['x']");
+  assert.equal(twMerge("content-none content-center-safe"), "content-none content-center-safe");
+  assert.equal(twMerge("content-center content-end-safe"), "content-end-safe");
+  // Every other alignment prefix already had this right — its catch-all IS the
+  // same property — so they must not regress.
+  assert.equal(twMerge("justify-start justify-center-safe"), "justify-center-safe");
+  assert.equal(twMerge("items-start items-center-safe"), "items-center-safe");
+  assert.equal(twMerge("self-start self-end-safe"), "self-end-safe");
+  assert.equal(twMerge("justify-self-start justify-self-end-safe"), "justify-self-end-safe");
+  assert.equal(twMerge("justify-items-start justify-items-center-safe"), "justify-items-center-safe");
+  assert.equal(twMerge("place-content-start place-content-center-safe"), "place-content-center-safe");
+});
+
+test("families that had no group at all now collapse (regression: each class keyed by itself)", () => {
+  // flex-<number>: the regex matched a literal `1`, so flex-10/11/12 collapsed
+  // by accident (they start with "flex-1") while flex-2…flex-9 matched nothing.
+  assert.equal(twMerge("flex-1 flex-2"), "flex-2");
+  assert.equal(twMerge("flex-2 flex-3"), "flex-3");
+  assert.equal(twMerge("flex-1 flex-12"), "flex-12");
+  assert.equal(twMerge("flex-auto flex-5"), "flex-5");
+  // …without disturbing the direction/wrap groups on the same prefix.
+  assert.equal(twMerge("flex-2 flex-col"), "flex-2 flex-col");
+  assert.equal(twMerge("flex-2 flex-wrap"), "flex-2 flex-wrap");
+  assert.equal(twMerge("flex flex-1"), "flex flex-1"); // display vs flex
+
+  // placeholder-<color> sets `color` on the placeholder pseudo-element.
+  assert.equal(twMerge("placeholder-zinc-500 placeholder-zinc-600"), "placeholder-zinc-600");
+  assert.equal(twMerge("placeholder-zinc-500 text-zinc-100"), "placeholder-zinc-500 text-zinc-100");
+
+  // col-auto/row-auto set the same shorthand as col-span/row-span.
+  assert.equal(twMerge("col-span-2 col-auto"), "col-auto");
+  assert.equal(twMerge("row-auto row-span-3"), "row-span-3");
+  assert.equal(twMerge("col-auto col-start-2"), "col-auto col-start-2");
+
+  // inline-table and list-item are displays; the group listed 19 of 21 members.
+  assert.equal(twMerge("flex inline-table"), "inline-table");
+  assert.equal(twMerge("block list-item"), "list-item");
+  assert.equal(twMerge("list-item table-row"), "table-row");
+});
+
+test("logical start-*/end-* are the same properties as inset-s-*/inset-e-* (regression: they had no group)", () => {
+  assert.equal(twMerge("inset-s-0 start-full"), "start-full");
+  assert.equal(twMerge("end-auto inset-e-4"), "inset-e-4");
+  assert.equal(twMerge("start-px start-auto"), "start-auto");
+  assert.equal(twMerge("-start-full start-px"), "start-px");
+  // inline-start and inline-end remain different properties.
+  assert.equal(twMerge("start-full end-full"), "start-full end-full");
+  // Neighbours on the positional block are unaffected.
+  assert.equal(twMerge("start-full top-0"), "start-full top-0");
+  assert.equal(twMerge("start-full inset-x-2"), "start-full inset-x-2");
+  // "start" and "end" are ordinary words, so the value shape is constrained:
+  // a bare /^end-/ would merge prose that reached a class string.
+  assert.equal(twMerge("end-credits end-to-end"), "end-credits end-to-end");
+  assert.equal(twMerge("start-case start-full"), "start-case start-full");
+  assert.equal(twMerge("end-full end-to-end"), "end-full end-to-end");
+  // Real value shapes all still land in the group.
+  assert.equal(twMerge("start-0 start-1/2"), "start-1/2");
+  assert.equal(twMerge("end-[3px] end-4"), "end-4");
+});
+
+test("negative forms share their positive group (regression: several families lacked the -? prefix)", () => {
+  assert.equal(twMerge("col-start-2 -col-start-1"), "-col-start-1");
+  assert.equal(twMerge("-col-end-1 col-end-4"), "col-end-4");
+  assert.equal(twMerge("row-start-2 -row-start-1"), "-row-start-1");
+  assert.equal(twMerge("-row-end-1 row-end-4"), "row-end-4");
+  assert.equal(twMerge("underline-offset-2 -underline-offset-1"), "-underline-offset-1");
+  assert.equal(twMerge("bg-linear-30 -bg-linear-90"), "-bg-linear-90");
+  assert.equal(twMerge("-bg-conic-30 bg-conic-60"), "bg-conic-60");
+  // A negative must still not leak into a neighbouring group.
+  assert.equal(twMerge("-col-start-1 -col-end-1"), "-col-start-1 -col-end-1");
+  assert.equal(twMerge("-bg-linear-90 bg-red-500"), "-bg-linear-90 bg-red-500");
+});
+
+// ---------------------------------------------------------------------------
+// Families that had NO group at all until the full-table audit. Each is used in
+// src/, so two of them could meet through cn(base, className) and the winner
+// would fall to stylesheet order instead of last-write.
+// ---------------------------------------------------------------------------
+
+test("layout families that had no group at all now collapse", () => {
+  assert.equal(twMerge("aspect-square aspect-video"), "aspect-video");
+  assert.equal(twMerge("isolate isolation-auto"), "isolation-auto");
+  assert.equal(twMerge("auto-rows-min auto-rows-max"), "auto-rows-max");
+  assert.equal(twMerge("auto-cols-min auto-cols-fr"), "auto-cols-fr");
+  assert.equal(twMerge("overscroll-contain overscroll-none"), "overscroll-none");
+  assert.equal(twMerge("mix-blend-darken mix-blend-lighten"), "mix-blend-lighten");
+  // Axes and neighbouring properties stay independent.
+  assert.equal(twMerge("auto-rows-min auto-cols-min"), "auto-rows-min auto-cols-min");
+  assert.equal(twMerge("overscroll-x-none overscroll-y-auto"), "overscroll-x-none overscroll-y-auto");
+  assert.equal(twMerge("overscroll-contain overscroll-x-none"), "overscroll-contain overscroll-x-none");
+  // mix-blend-mode is not background-blend-mode.
+  assert.equal(twMerge("mix-blend-darken bg-blend-color"), "mix-blend-darken bg-blend-color");
+});
+
+test("typography families that had no group at all now collapse", () => {
+  assert.equal(twMerge("line-clamp-1 line-clamp-2"), "line-clamp-2");
+  assert.equal(twMerge("line-clamp-2 line-clamp-none"), "line-clamp-none");
+  assert.equal(twMerge("align-top align-middle"), "align-middle");
+  assert.equal(twMerge("antialiased subpixel-antialiased"), "subpixel-antialiased");
+  assert.equal(twMerge("accent-indigo-500 accent-indigo-600"), "accent-indigo-600");
+  // list-style-type, list-style-position and list-style-image are three
+  // properties sharing one prefix — and `list-item` is a DISPLAY, which the
+  // display group already owns.
+  assert.equal(twMerge("list-disc list-decimal"), "list-decimal");
+  assert.equal(twMerge("list-inside list-outside"), "list-outside");
+  assert.equal(twMerge("list-disc list-inside"), "list-disc list-inside");
+  assert.equal(twMerge("list-none list-image-none"), "list-none list-image-none");
+  assert.equal(twMerge("list-disc list-item"), "list-disc list-item");
+  assert.equal(twMerge("block list-item"), "list-item");
+  // accent-color is not text colour.
+  assert.equal(twMerge("accent-indigo-500 text-indigo-600"), "accent-indigo-500 text-indigo-600");
+});
+
+test("font-variant-numeric toggles are independent, not one group", () => {
+  // Each sets its own --tw-* var and they COMPOSE, so they must never merge.
+  assert.equal(twMerge("tabular-nums ordinal"), "tabular-nums ordinal");
+  assert.equal(twMerge("slashed-zero diagonal-fractions"), "slashed-zero diagonal-fractions");
+  assert.equal(twMerge("lining-nums tabular-nums"), "lining-nums tabular-nums");
+  assert.equal(twMerge("normal-nums ordinal"), "normal-nums ordinal");
+  // …but each collapses against its own sibling.
+  assert.equal(twMerge("proportional-nums tabular-nums"), "tabular-nums");
+  assert.equal(twMerge("lining-nums oldstyle-nums"), "oldstyle-nums");
+  assert.equal(twMerge("diagonal-fractions stacked-fractions"), "stacked-fractions");
+});
+
+test("outline splits into width, style, colour and offset, like border and ring", () => {
+  assert.equal(twMerge("outline outline-2"), "outline-2");
+  assert.equal(twMerge("outline-dashed outline-dotted"), "outline-dotted");
+  assert.equal(twMerge("outline-red-500 outline-blue-500"), "outline-blue-500");
+  assert.equal(twMerge("outline-offset-2 -outline-offset-4"), "-outline-offset-4");
+  assert.equal(twMerge("outline-hidden outline-none"), "outline-none");
+  // The four are independent of each other.
+  assert.equal(twMerge("outline-2 outline-red-500"), "outline-2 outline-red-500");
+  assert.equal(twMerge("outline-none outline-2"), "outline-none outline-2");
+  assert.equal(twMerge("outline-offset-2 outline-2"), "outline-offset-2 outline-2");
+  // …and none of them touch the ring family.
+  assert.equal(twMerge("outline-2 ring-2"), "outline-2 ring-2");
+});
+
+test("gradient stops split colour from position, per stop", () => {
+  assert.equal(twMerge("to-zinc-900 to-red-500"), "to-red-500");
+  assert.equal(twMerge("from-zinc-900 from-red-500"), "from-red-500");
+  assert.equal(twMerge("via-zinc-900 via-none"), "via-none");
+  assert.equal(twMerge("from-10% from-50%"), "from-50%");
+  // Each stop is its own property, and colour never collapses with position.
+  assert.equal(twMerge("from-zinc-900 to-zinc-900"), "from-zinc-900 to-zinc-900");
+  assert.equal(twMerge("to-zinc-900 to-50%"), "to-zinc-900 to-50%");
+  // The direction utility is a separate group again.
+  assert.equal(twMerge("bg-linear-to-r from-zinc-900"), "bg-linear-to-r from-zinc-900");
+});
+
+test("backdrop filters are one group per filter function, never a single backdrop group", () => {
+  assert.equal(twMerge("backdrop-blur-sm backdrop-blur-lg"), "backdrop-blur-lg");
+  assert.equal(twMerge("backdrop-grayscale backdrop-grayscale-50"), "backdrop-grayscale-50");
+  assert.equal(twMerge("backdrop-saturate-50 backdrop-saturate-150"), "backdrop-saturate-150");
+  assert.equal(twMerge("backdrop-hue-rotate-15 backdrop-hue-rotate-90"), "backdrop-hue-rotate-90");
+  // Different filter functions COMPOSE into one backdrop-filter, so folding
+  // them into a single group would delete half the effect.
+  assert.equal(twMerge("backdrop-blur-sm backdrop-opacity-50"), "backdrop-blur-sm backdrop-opacity-50");
+  assert.equal(
+    twMerge("backdrop-brightness-50 backdrop-contrast-75"),
+    "backdrop-brightness-50 backdrop-contrast-75",
+  );
+  assert.equal(twMerge("backdrop-invert backdrop-sepia"), "backdrop-invert backdrop-sepia");
+});
+
+test("transform, transform-style and transform-box are three properties", () => {
+  assert.equal(twMerge("transform-gpu transform-none"), "transform-none");
+  assert.equal(twMerge("transform-3d transform-flat"), "transform-flat");
+  assert.equal(twMerge("transform-border transform-content"), "transform-content");
+  assert.equal(twMerge("transform-gpu transform-3d"), "transform-gpu transform-3d");
+  assert.equal(twMerge("transform-gpu transform-fill"), "transform-gpu transform-fill");
+  // …and none of them touch the individual transform-function groups.
+  assert.equal(twMerge("transform-gpu translate-x-2"), "transform-gpu translate-x-2");
 });
 
 // ---------------------------------------------------------------------------
@@ -194,14 +645,15 @@ test("shadow size and shadow color are separate groups (regression: color entry 
   assert.equal(twMerge("shadow-inner shadow-red-500"), "shadow-inner shadow-red-500");
 });
 
-test("PIN: bare 'ring' is not in the ring-w group", () => {
-  // /^ring-(?:\d|inset|\[)/ requires a dash, so bare `ring` keys by itself
-  // (unknown-class fallback) and survives next to ring-2. Real tailwind-merge
-  // collapses `ring ring-2` to `ring-2`.
-  assert.equal(twMerge("ring ring-2"), "ring ring-2");
-  // Within the group, widths still collapse and colors stay separate.
-  assert.equal(twMerge("ring-2 ring-4"), "ring-4");
-  assert.equal(twMerge("ring-2 ring-red-500"), "ring-2 ring-red-500");
+test("PIN: the grid shorthand does not evict a preceding col-start/col-end", () => {
+  // Real tailwind-merge models one-directional CONFLICTS between groups:
+  // col-span-* sets the grid-column shorthand, so it overrides an earlier
+  // col-start-*/col-end-*. This merger has no cross-group conflict mechanism —
+  // groups only ever collapse within themselves — so both survive. The failure
+  // mode is conservative (a redundant class, never a dropped one), which is why
+  // splitting the three properties apart is still the right trade.
+  assert.equal(twMerge("col-start-1 col-span-2"), "col-start-1 col-span-2");
+  assert.equal(twMerge("row-end-3 row-span-2"), "row-end-3 row-span-2");
 });
 
 test("PIN: arbitrary text values always classify as text-size", () => {

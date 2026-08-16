@@ -87,7 +87,16 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // metacharacters and bound the length (search-box DoS, matches /api/votes).
   if (user) where.userName = { contains: sanitizeContainsSearch(user), mode: "insensitive" };
   if (target) where.target = { contains: sanitizeContainsSearch(target), mode: "insensitive" };
-  if (hideCron) where.userId = { not: "system" };
+  // "Hide cron" means hide the SYSTEM principal, not hide every row without a
+  // user. `{ not: "system" }` compiles to `"userId" <> 'system'`, and in SQL
+  // NULL <> 'system' is NULL, not TRUE — so Postgres drops every NULL-userId row
+  // too. Three writers produce those, and the one that matters is
+  // /api/auth/machine-session, which mints an ADMIN-impersonating JWT from
+  // CRON_SECRET and is deliberately attributed to the machine rather than to the
+  // assumed admin. That row is the only record the mint happened, and ticking a
+  // filter labelled "Showing only real users" silently removed it — including
+  // from the CSV/JSON export.
+  if (hideCron) where.AND = [{ OR: [{ userId: null }, { userId: { not: "system" } }] }];
 
   const date = new Date().toISOString().slice(0, 10);
 

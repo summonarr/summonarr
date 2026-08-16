@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
+import { settleLimit } from "@/lib/concurrency";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
@@ -97,15 +98,30 @@ export default async function PopularOnServerPage({
     if (items.length === 0) return [];
     const dbType = type === "movie" ? "MOVIE" : "TV";
 
+    // One IN clause, not one OR per item. mediaType and the freshness bound are
+    // the same for every item here, so the OR form only varied tmdbId — it grew
+    // the query text with the page for no selectivity the planner could not get
+    // from an id list against the [tmdbId, mediaType] key.
     const coreRows = await prisma.tmdbMediaCore.findMany({
       where: {
-        OR: items.map((i) => ({ tmdbId: i.tmdbId, mediaType: dbType, expiresAt: { gt: new Date() } })),
+        tmdbId: { in: items.map((i) => i.tmdbId) },
+        mediaType: dbType,
+        expiresAt: { gt: new Date() },
       },
     });
     const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
 
-    const results = await Promise.allSettled(
-      items.map(async (item) => {
+    // Bounded, not a bare Promise.allSettled over the page (guardrail 31). Only
+    // items missing a fresh TmdbMediaCore row reach the network, but on a cold
+    // cache that is every one of them — POPULAR_PER_PAGE is 40, and movies and
+    // TV resolve concurrently, so the unbounded form burst up to 80 TMDB detail
+    // requests at once against an API that tolerates ~50/s. 8 matches the cap
+    // the push fan-outs use; the TMDB list helpers sit at 5 because each of
+    // those tasks is itself a multi-page fetch.
+    const results = await settleLimit(
+      items,
+      8,
+      async (item) => {
         const core = coreMap.get(item.tmdbId);
         const details: TmdbMedia = core
           ? {
@@ -132,7 +148,7 @@ export default async function PopularOnServerPage({
           episodes: item.episodes,
           totalHours: item.totalHours,
         };
-      }),
+      },
     );
     return results
       .filter((r): r is PromiseFulfilledResult<EnrichedMedia> => r.status === "fulfilled")

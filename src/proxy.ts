@@ -311,9 +311,23 @@ export async function proxy(request: NextRequest) {
 
   // Nonce is propagated via x-nonce request header; server components read it to stamp inline scripts
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  // `next dev` ONLY. React's development build calls eval() to reconstruct
+  // server-side error stacks in the browser, and Turbopack's HMR runtime
+  // evaluates modules the same way; without this every dev page logs "eval()
+  // is not supported in this environment" and those debugging features go
+  // dark. Next's CSP guide documents this exact carve-out and states neither
+  // React nor Next uses eval() in production.
+  //
+  // NEVER widen this past `=== "development"`. 'unsafe-eval' turns any string
+  // that reaches eval()/new Function() into executable script, which is most
+  // of what the nonce + 'strict-dynamic' policy exists to prevent — and a
+  // production response is the one an attacker can reach. `next build` sets
+  // NODE_ENV=production, so this reads false for every shipped deployment;
+  // tests/proxy.test.mts pins both directions.
+  const isDev = process.env.NODE_ENV === "development";
   const cspValue = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
     `style-src 'self' 'unsafe-inline'`,
     "img-src 'self' data: https://image.tmdb.org https://plex.tv https://assets.plex.tv https://secure.gravatar.com https://i0.wp.com",
     "font-src 'self'",
@@ -332,18 +346,35 @@ export async function proxy(request: NextRequest) {
   // is verified twice per request (here, then again in authenticateRequest for
   // API routes / authActive() for page renders), and both read the token off the
   // forwarded request. When this pass ROTATED the sessionId (a role/permission
-  // change), the incoming cookie is already dead — the second pass would find no
-  // AuthSession row and 401 the route or redirect the page to /login.
+  // change), the incoming credential is already dead — the second pass would find
+  // no AuthSession row and 401 the route or redirect the page to /login. It also
+  // carries the `dbCheckedAt` claim this pass just stamped, so the second verify
+  // takes the fast path instead of repeating the whole DB-checked slow path.
   //
   // Must be set BEFORE NextResponse.next(): Next snapshots these headers into
   // x-middleware-request-* at construction time, so mutating afterwards is a
-  // no-op. Cookie sessions only — a bearer client sends no cookie and rides its
-  // original token (guardrail 6b).
-  if (refreshResult?.refreshed && !bearerToken) {
-    requestHeaders.set(
-      "cookie",
-      replaceSessionCookie(request.headers.get("cookie"), refreshResult.refreshed.token),
-    );
+  // no-op.
+  if (refreshResult?.refreshed) {
+    if (bearerToken) {
+      // Bearer transport: rewrite the FORWARDED Authorization header. This is
+      // purely server-internal — the client keeps the token it sent, is handed
+      // no replacement (no Set-Cookie, no token in a body), and still rides its
+      // original fixed-lifetime token to expiry, so guardrail 6b's "no sliding
+      // refresh for bearer clients" is preserved. Without this a bearer request
+      // paid the full DB-checked verify TWICE: `dbCheckedAt` is stamped only by
+      // the re-sign here and reached the downstream verifier only via the cookie
+      // rewrite below, so a bearer token could never carry the claim and could
+      // never take the fast path.
+      requestHeaders.set(
+        "authorization",
+        `Bearer ${refreshResult.refreshed.token}`,
+      );
+    } else {
+      requestHeaders.set(
+        "cookie",
+        replaceSessionCookie(request.headers.get("cookie"), refreshResult.refreshed.token),
+      );
+    }
   }
 
   const response = NextResponse.next({ request: { headers: requestHeaders } });

@@ -652,7 +652,17 @@ test("resolveShowTmdbId: jellyfin keys map via JellyfinLibraryItem, serverInstan
   jellyfinLibRow = { tmdbId: 66732 };
   assert.equal(await resolveShowTmdbId("jellyfin", "jf-item-1", ""), 66732);
   assert.equal(jellyfinLibCalls.length, 1);
-  assert.deepEqual(jellyfinLibCalls[0].where, { jellyfinItemId: "jf-item-1", mediaType: "TV", serverInstance: "" });
+  // guardrail 37: the key is matched against BOTH id columns. A show in two
+  // libraries has an item id per copy and only one can be the stored
+  // `jellyfinItemId`, so a watch filed under the other copy resolved to nobody
+  // and its history attributed to no account. The legacy `jellyfinItemId` branch
+  // has to stay alongside `jellyfinItemIds` — rows written before that column
+  // existed carry `[]` until a full sync rewrites them.
+  assert.deepEqual(jellyfinLibCalls[0].where, {
+    mediaType: "TV",
+    serverInstance: "",
+    OR: [{ jellyfinItemId: "jf-item-1" }, { jellyfinItemIds: { has: "jf-item-1" } }],
+  });
   assert.equal(plexLibCalls.length, 0);
 });
 

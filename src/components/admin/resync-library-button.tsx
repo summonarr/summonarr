@@ -6,7 +6,13 @@ import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-export function ResyncLibraryButton() {
+export function ResyncLibraryButton({
+  plexConfigured,
+  jellyfinConfigured,
+}: {
+  plexConfigured: boolean;
+  jellyfinConfigured: boolean;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -17,27 +23,62 @@ export function ResyncLibraryButton() {
     setStatus("loading");
     setResult(null);
     try {
-      const [plexRes, jellyfinRes] = await Promise.all([
-        fetch(withBasePath("/api/sync/plex"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
-        fetch(withBasePath("/api/sync/jellyfin"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ full: true }) }),
-      ]);
+      // Call only the servers that exist. This used to POST to both
+      // unconditionally and then fold the two answers into one `??` chain, so
+      // the FIRST error won — and on a single-server deployment that error was
+      // always the other server's `400 {"error":"… not configured"}`. The
+      // configured server had just rewritten its whole library and the admin
+      // was shown a red failure naming a server they do not run, with no counts
+      // and no refresh.
+      //
+      // The booleans come from the page rather than from probing, so an absent
+      // server costs no request at all. They describe the DEFAULT instance,
+      // which is exactly right here: this button sends no `instance` slug, so
+      // the default is all it ever syncs (guardrail 35).
+      const targets = [
+        ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
+        ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
+      ];
 
-      const plexData   = await plexRes.json().catch(() => null)   as { scanned?: { movies: number; tv: number }; error?: string } | null;
-      const jellyData  = await jellyfinRes.json().catch(() => null) as { scanned?: { movies: number; tv: number }; error?: string } | null;
-
-      const err =
-        plexData?.error ??
-        jellyData?.error ??
-        (!plexRes.ok ? `Plex sync failed (${plexRes.status})` : undefined) ??
-        (!jellyfinRes.ok ? `Jellyfin sync failed (${jellyfinRes.status})` : undefined);
-      if (err) {
-        setStatus("error");
-        setResult(err);
-      } else {
-        const plexCount   = (plexData?.scanned?.movies  ?? 0) + (plexData?.scanned?.tv  ?? 0);
-        const jellyCount  = (jellyData?.scanned?.movies ?? 0) + (jellyData?.scanned?.tv ?? 0);
+      if (targets.length === 0) {
+        // Not an error — nothing is misconfigured, there is simply nothing to
+        // re-scan. Neutral styling says that; red would not.
         setStatus("done");
-        setResult(`Plex ${plexCount}, Jellyfin ${jellyCount} items`);
+        setResult("No media servers configured");
+        setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+        return;
+      }
+
+      const outcomes = await Promise.all(
+        targets.map(async ({ name, path }) => {
+          try {
+            const res = await fetch(withBasePath(path), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ full: true }),
+            });
+            const data = (await res.json().catch(() => null)) as
+              | { scanned?: { movies: number; tv: number }; error?: string }
+              | null;
+            if (!res.ok || data?.error) {
+              return { name, ok: false, text: `${name} ${data?.error ?? `failed (${res.status})`}` };
+            }
+            const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
+            return { name, ok: true, text: `${name} ${count.toLocaleString("en-US")} items` };
+          } catch {
+            return { name, ok: false, text: `${name} network error` };
+          }
+        }),
+      );
+
+      const succeeded = outcomes.filter((o) => o.ok);
+      // Red whenever a CONFIGURED server failed — that is a real fault and the
+      // whole point of the distinction. But still refresh if any server did
+      // sync: those rows are what the admin clicked for, and withholding the
+      // refresh left the page showing pre-sync counts.
+      setStatus(succeeded.length === outcomes.length ? "done" : "error");
+      setResult(outcomes.map((o) => o.text).join(" · "));
+      if (succeeded.length > 0) {
         const search = searchParams.toString();
         router.push(pathname + (search ? `?${search}` : ""));
       }
