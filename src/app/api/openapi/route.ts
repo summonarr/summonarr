@@ -1357,37 +1357,61 @@ const spec = {
       post: {
         tags: ["Admin – Sync"],
         summary: "Run the full sync orchestrator (admin session or CRON_SECRET)",
+        description:
+          "Always a FULL library replace. The body is not read — the `{ full: true }` flag " +
+          "is parsed only by /sync/plex and /sync/jellyfin. Runs the Radarr/Sonarr refreshes " +
+          "and then the Plex and Jellyfin arms concurrently, each fanning out over every " +
+          "configured instance, so a single call covers both media servers.",
         security: [{ session: [] }, { cronSecret: [] }],
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: { full: { type: "boolean", description: "Delete-and-repopulate instead of incremental" } },
-              },
-            },
-          },
-        },
         responses: {
           "200": {
-            description: "Sync summary",
+            description:
+              "Sync summary. Also the response for a DEGRADED run (a configured source failed) " +
+              "and for a run skipped because one was already in flight — the status is " +
+              "deliberately never 5xx, because the container's cron reschedules a non-2xx after " +
+              "CRON_RETRY_INTERVAL and a full library replace every 5 minutes during an outage " +
+              "is worse than a missed hour.",
+            headers: {
+              "X-Cron-Degraded": {
+                description: "Comma-separated failed sources. Present only on a degraded run.",
+                schema: { type: "string" },
+              },
+            },
             content: {
               "application/json": {
                 schema: {
                   type: "object",
                   properties: {
                     checked: { type: "object", properties: { approved: { type: "integer" }, available: { type: "integer" } } },
-                    marked: { type: "integer" },
+                    marked: { type: "integer", description: "Radarr/Sonarr-driven marks only; library marks are in plexMarked/jellyfinMarked" },
                     reverted: { type: "integer" },
+                    repushed: { type: "integer" },
                     plexMarked: { type: "integer" },
-                    jellyfinMarked: { type: "integer" },
+                    jellyfinMarked: { type: "integer", description: "Counted off the SAME pending snapshot as plexMarked, so a title on both servers appears in both — do not sum them" },
                     radarrWanted: { type: "integer" },
                     sonarrWanted: { type: "integer" },
+                    failedSources: {
+                      type: "array",
+                      items: { type: "string", enum: ["radarr", "sonarr", "plex", "jellyfin"] },
+                      description: "Sources that ARE configured and failed. Omitted when empty.",
+                    },
+                    skippedSources: {
+                      type: "array",
+                      items: { type: "string", enum: ["radarr", "sonarr", "plex", "jellyfin"] },
+                      description:
+                        "Sources not configured (or feature-disabled) and therefore never attempted. " +
+                        "Omitted when empty. Needed because the counts cannot express it: an " +
+                        "unconfigured server and a configured one that matched nothing both report 0.",
+                    },
+                    error: { type: "string", description: "Present only on a degraded run, alongside failedSources." },
+                    skipped: { type: "boolean", description: "true when another sync held the advisory lock. Every count field is then ABSENT." },
+                    reason: { type: "string" },
                   },
                 },
               },
             },
           },
+          "403": { description: "Neither an admin session nor a valid CRON_SECRET" },
         },
       },
     },

@@ -574,40 +574,57 @@ export function SyncButton() {
     setLoading(true);
     setResult(null);
     try {
-      const [arrRes, jellyfinRes] = await Promise.all([
-        fetch(withBasePath("/api/sync"), { method: "POST" }),
-        fetch(withBasePath("/api/sync/jellyfin"), { method: "POST" }),
-      ]);
+      // ONE call. The orchestrator's own Jellyfin arm already does a full,
+      // unwindowed replace across every configured instance — a strict superset
+      // of what a bodiless POST to /api/sync/jellyfin does, which is insert-only
+      // inside a 2-hour window on the default instance alone. The second call
+      // bought nothing and re-ran the entire marking pass (a full scan of every
+      // PENDING/APPROVED request, the visibility gate, and a second CAS attempt),
+      // while racing the orchestrator's own delete-and-replace of the same slug.
+      const res = await fetch(withBasePath("/api/sync"), { method: "POST" });
 
       // These annotations are a claim, not a check — res.json() is `any`, so
       // nothing here is validated by the compiler. Read the fields defensively.
-      const arrData = (await arrRes.json().catch(() => ({}))) as {
-        marked?: number; plexMarked?: number; skipped?: boolean; error?: string;
-      };
-      const jellyfinData = (await jellyfinRes.json().catch(() => ({}))) as {
-        marked?: number; error?: string;
+      const data = (await res.json().catch(() => ({}))) as {
+        marked?: number; plexMarked?: number; jellyfinMarked?: number;
+        skipped?: boolean; error?: string;
+        failedSources?: string[]; skippedSources?: string[];
       };
 
       // The orchestrator answers { skipped: true } with HTTP 200 and no counts
       // when the advisory lock is already held — the internal hourly cron or a
-      // Plex-SSE-triggered run is mid-flight. That went straight into the
-      // arithmetic below as undefined + undefined + 0 = NaN, NaN > 0 is false,
-      // and the admin was told "Up to date" when their sync had been discarded.
-      if (arrData.skipped) {
+      // Plex-SSE-triggered run is mid-flight. Every count field is absent here,
+      // so this has to be read before any arithmetic.
+      if (data.skipped) {
         setResult("A sync is already running");
         return;
       }
-      // Only fail on the arr/orchestrator error. Reporting jellyfinData.error
-      // too meant a Plex-only deployment saw "Jellyfin server not configured"
-      // on every single click — /api/sync/jellyfin 400s when Jellyfin is unset —
-      // even though the orchestrator run it was really waiting on had succeeded.
-      if (!arrRes.ok || arrData.error) {
-        setResult(arrData.error ?? `Sync failed (${arrRes.status})`);
-      } else {
-        const totalMarked = (arrData.marked ?? 0) + (arrData.plexMarked ?? 0) + (jellyfinData.marked ?? 0);
-        setResult(totalMarked > 0 ? `Marked ${totalMarked} available` : "Up to date");
-        router.refresh();
+      if (!res.ok) {
+        setResult(data.error ?? `Sync failed (${res.status})`);
+        return;
       }
+
+      // A degraded run answers 200 WITH `error` set — some configured source
+      // failed while the rest refreshed normally. Report per source and STILL
+      // refresh: the rows that did update are the whole reason for the click.
+      const failed = new Set(data.failedSources ?? []);
+      const skipped = new Set(data.skippedSources ?? []);
+
+      // Never summed. plexMarked and jellyfinMarked are produced by the same
+      // marking pass over the same stillPending snapshot, so a title held by
+      // both servers is counted once by each — adding them reported it twice.
+      // Per-source is both the honest reading and what an admin can act on.
+      const parts = ([["Plex", "plex", data.plexMarked], ["Jellyfin", "jellyfin", data.jellyfinMarked]] as const)
+        .filter(([, key]) => !skipped.has(key))
+        .map(([name, key, count]) => (failed.has(key) ? `${name} failed` : `${name} ${count ?? 0}`));
+
+      // A *arr outage is worth saying even though its count is not per-server.
+      for (const source of ["radarr", "sonarr"]) {
+        if (failed.has(source)) parts.push(`${source} failed`);
+      }
+
+      setResult(parts.length > 0 ? parts.join(" · ") : "No media servers configured");
+      router.refresh();
     } catch {
       setResult("Sync failed");
     } finally {

@@ -1960,3 +1960,82 @@ test("the staleness baseline never overwrites a real success stamp, and is not s
   await settle();
   assert.deepEqual(settingCreateManyData, [], "a clean run seeds no baseline");
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// skippedSources — "never attempted" is not "failed"
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Why this field has to exist at all: plexMarked/jellyfinMarked are initialised
+// to 0 and always serialized, so "this deployment has no Jellyfin" and "Jellyfin
+// is configured and matched nothing" arrive at a client byte-identical. With no
+// way to ask the server, every admin sync control instead probed the per-source
+// routes and read their `400 {"error":"… not configured"}` as a failure — which
+// is why a single-server deployment saw a red error on every click while its one
+// configured server had synced perfectly.
+test("skippedSources names the media server that is NOT configured, and failedSources stays empty", async () => {
+  // Plex only — the shape of the overwhelming majority of real deployments.
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  respond = plexResponder([100]);
+  seedRequest({ id: "req-p", tmdbId: 100, mediaType: "MOVIE", requestedBy: "u-p", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(res.status, 200);
+  const skipped = (b.skippedSources ?? []) as string[];
+  assert.ok(skipped.includes("jellyfin"), "an unconfigured Jellyfin is reported as skipped");
+  assert.ok(!skipped.includes("plex"), "a configured Plex is NOT skipped");
+  // The distinction the whole field exists for: skipped is not failed.
+  assert.equal(b.failedSources, undefined, "nothing FAILED — the run was clean");
+  assert.equal(b.error, undefined, "and therefore no degraded error string");
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+  assert.equal(b.plexMarked, 1, "the configured server still did its work");
+  assert.equal(requests.get("req-p")?.status, "AVAILABLE");
+});
+
+test("a CONFIGURED server that fails is reported as failed, never as skipped", async () => {
+  // The counterpart, and the reason a client cannot just treat both lists alike:
+  // suppressing not-configured must not also suppress a real outage. Wave 8 made
+  // exactly that mistake in SyncButton — it stopped reading the Jellyfin channel
+  // at all, so a genuine 502 became "Up to date".
+  configureBothServers();
+  respond = (url) =>
+    url.origin === PLEX_ORIGIN ? plexResponder([100])(url) : new Response("nope", { status: 401 });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.deepEqual(b.failedSources, ["jellyfin"], "configured + broken ⇒ failed");
+  assert.ok(
+    !((b.skippedSources ?? []) as string[]).includes("jellyfin"),
+    "a configured server must never appear as skipped — that would hide the outage",
+  );
+});
+
+test("a configured media server never appears in skippedSources, and *arr uses synced-slugs not the flag", async () => {
+  // The arr half is a deliberate asymmetry worth pinning: radarrEnabled means
+  // "the step did not blow up", and an enabled-but-unconfigured Radarr still
+  // sets radarrSyncSucceeded while refreshing nothing. So the predicate keys on
+  // the synced-slug set instead — otherwise an install with no *arr at all
+  // would report them as neither skipped nor failed, i.e. as working.
+  configureBothServers();
+  respond = bothServersRespond([100], [200]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  const skipped = (b.skippedSources ?? []) as string[];
+  assert.ok(!skipped.includes("plex"), "a configured Plex is never skipped");
+  assert.ok(!skipped.includes("jellyfin"), "a configured Jellyfin is never skipped");
+  assert.deepEqual(
+    skipped.sort(),
+    ["radarr", "sonarr"],
+    "no *arr is configured in this harness, so both are skipped — proving the list is derived " +
+      "from what was actually there to sync, not from the enabled flag",
+  );
+  assert.equal(b.failedSources, undefined, "and nothing failed");
+});

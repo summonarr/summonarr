@@ -1695,6 +1695,31 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     ...(jellyfinConfiguredEnabled && !jellyfinSyncSucceeded ? ["jellyfin"] : []),
   ];
 
+  // The counterpart to failedSources: a source that is not configured (or whose
+  // feature flag is off) was never ATTEMPTED, which is a different thing from
+  // failing and must never be painted as an error.
+  //
+  // A client cannot work this out from the counts. plexMarked/jellyfinMarked are
+  // initialised to 0 and always serialized, so "no Jellyfin on this deployment"
+  // and "Jellyfin is configured and matched nothing" both arrive as 0. That
+  // ambiguity is why every admin sync control in the tree got this wrong: with
+  // no way to ask the server, they each probed the per-source routes and read
+  // the resulting `400 {"error":"Jellyfin server not configured"}` as a failure.
+  // The predicates were already computed above for the guards — this just says
+  // out loud what the run actually covered.
+  // For *arr, `radarrEnabled` is deliberately NOT "configured" — the flag means
+  // "the step did not blow up", and an enabled-but-unconfigured integration
+  // still sets radarrSyncSucceeded while refreshing nothing (see the comment on
+  // radarrSyncedSlugs above). So the synced-slug set, not the flag, is what
+  // says whether any instance was actually there to sync. Plex/Jellyfin already
+  // have a genuine configured-and-enabled predicate.
+  const skippedSources = [
+    ...(!radarrEnabled || (radarrSyncSucceeded && radarrSyncedSlugs.size === 0) ? ["radarr"] : []),
+    ...(!sonarrEnabled || (sonarrSyncSucceeded && sonarrSyncedSlugs.size === 0) ? ["sonarr"] : []),
+    ...(!plexConfiguredEnabled ? ["plex"] : []),
+    ...(!jellyfinConfiguredEnabled ? ["jellyfin"] : []),
+  ];
+
   return NextResponse.json(
     {
       checked: { approved: approved.length, available: available.length },
@@ -1709,6 +1734,10 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       ...(failedSources.length > 0
         ? { failedSources, error: `Sync degraded — ${failedSources.join(", ")} failed to refresh` }
         : {}),
+      // Both source lists are omitted when empty, matching failedSources above:
+      // absent means "nothing skipped", which is the correct reading for an
+      // older client that has never heard of the field.
+      ...(skippedSources.length > 0 ? { skippedSources } : {}),
     },
     failedSources.length > 0
       ? { headers: { "X-Cron-Degraded": failedSources.join(",") } }
