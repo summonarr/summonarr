@@ -86,7 +86,10 @@ export default async function UpcomingPage({
   let items = await attachAllAvailability(raw, session?.user.id, { show4k });
 
   if (hideAvailable) {
-    items = items.filter((m) => !(m.plexAvailable || m.jellyfinAvailable));
+    // Gate on the user's own server visibility, matching /api/upcoming. Without
+    // it a Plex-pinned user had Jellyfin-only titles hidden here but kept by the
+    // route, so the same toggle produced two different lists.
+    items = items.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
   }
 
   return (
