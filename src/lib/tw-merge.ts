@@ -11,6 +11,14 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["overflow-x", /^overflow-x-/],
   ["overflow-y", /^overflow-y-/],
   ["z", /^-?z-/],
+  // Box shadows, not positional inset — parked here because the positional
+  // regex below only excludes x-/y-, so it would otherwise swallow them
+  // (groupOf returns the FIRST match). Both are real Tailwind v4 utilities and
+  // carry the same size/width-vs-color split as `shadow` and `ring`.
+  ["inset-shadow-size", /^inset-shadow-(?:2xs|xs|sm|md|lg|xl|2xl|none)$/],
+  ["inset-shadow-color", /^inset-shadow-/],
+  ["inset-ring-w", /^inset-ring(?:-\d|-\[|$)/],
+  ["inset-ring-color", /^inset-ring-/],
   ["inset", /^-?inset-(?!x-|y-)/],
   ["inset-x", /^-?inset-x-/],
   ["inset-y", /^-?inset-y-/],
@@ -63,6 +71,10 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["justify", /^justify-/],
   ["items", /^items-/],
+  // align-content values only. Everything else under /^content-/ sets the CSS
+  // `content` property (content-none, content-['…']) — a different property, so
+  // it stays in the catch-all below and the two never delete each other.
+  ["content-align", /^content-(?:normal|center|start|end|between|around|evenly|baseline|stretch)$/],
   ["content", /^content-/],
   ["self", /^self-/],
   ["place-items", /^place-items-/],
@@ -71,8 +83,16 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["grid-cols", /^grid-cols-/],
   ["grid-rows", /^grid-rows-/],
-  ["col-span", /^col-(?:span|start|end)-/],
-  ["row-span", /^row-(?:span|start|end)-/],
+  // grid-column, grid-column-start and grid-column-end are three properties; one
+  // shared group made a start/end pair annihilate itself. Cross-group conflicts
+  // are not modelled (the shorthand does not evict a preceding start/end) —
+  // that leaves a redundant class, never a dropped one. See the PIN test.
+  ["col-span", /^col-span-/],
+  ["col-start", /^col-start-/],
+  ["col-end", /^col-end-/],
+  ["row-span", /^row-span-/],
+  ["row-start", /^row-start-/],
+  ["row-end", /^row-end-/],
 
   ["text-align", /^text-(?:left|center|right|justify|start|end)$/],
   // These set text-overflow / text-wrap / text-indent / text-shadow, not colour.
@@ -100,6 +120,9 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["uppercase", /^(?:uppercase|lowercase|capitalize|normal-case)$/],
 
   ["decoration-style", /^decoration-(?:solid|double|dotted|dashed|wavy|none)$/],
+  // text-decoration-thickness vs text-decoration-color — the same size-vs-color
+  // overload border, shadow and text-shadow already model.
+  ["decoration-w", /^decoration-(?:\d|from-font|auto|\[)/],
   ["decoration", /^decoration-/],
   ["underline", /^(?:underline|overline|line-through|no-underline)$/],
   ["underline-offset", /^underline-offset-/],
@@ -108,7 +131,10 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["bg-repeat", /^bg-(?:repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/],
   ["bg-size", /^bg-(?:auto|cover|contain)$/],
   ["bg-position", /^bg-(?:top|right|bottom|left|center|right-top|right-bottom|left-top|left-bottom)$/],
-  ["bg-image", /^bg-(?:none|gradient-)/],
+  // Tailwind v4 renamed bg-gradient-* to bg-linear-* and added bg-radial /
+  // bg-conic; unrecognised, the new spellings fell into the bg colour catch-all.
+  // radial/conic need no trailing dash — both are valid bare utilities.
+  ["bg-image", /^bg-(?:none|gradient-|linear-|radial|conic)/],
   ["bg-clip", /^bg-clip-/],
   ["bg-origin", /^bg-origin-/],
   ["bg", /^bg-/],
@@ -150,6 +176,18 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["border-color-be", /^border-be-/],
   ["border-color", /^border-/],
 
+  // Divider borders had NO group, so every divide-* class keyed by itself and
+  // two conflicting ones never collapsed. Width and colour live on different
+  // prefixes here (divide-x/divide-y vs bare divide), so unlike border there
+  // are no per-axis colour utilities — anything not a width, a reverse flag or
+  // a style is a colour. The reverse flags are their own utilities.
+  ["divide-style", /^divide-(?:solid|dashed|dotted|double|hidden|none)$/],
+  ["divide-x-reverse", /^divide-x-reverse$/],
+  ["divide-y-reverse", /^divide-y-reverse$/],
+  ["divide-w-x", /^divide-x(?:-\d|-\[|$)/],
+  ["divide-w-y", /^divide-y(?:-\d|-\[|$)/],
+  ["divide-color", /^divide-/],
+
   ["rounded-t", /^rounded-t(?:-|$)/],
   ["rounded-r", /^rounded-r(?:-|$)/],
   ["rounded-b", /^rounded-b(?:-|$)/],
@@ -160,15 +198,25 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["rounded-br", /^rounded-br(?:-|$)/],
   ["rounded", /^rounded(?:-|$)/],
 
-  ["ring-w", /^ring-(?:\d|inset|\[)/],
+  // ring-inset toggles the inset flag rather than setting a width, so it gets
+  // its own group. Bare `ring` IS a width (1px in v4) and now says so: it used
+  // to match no group and merge with ring colours only by accident, because the
+  // unknown-class fallback returns the base string "ring", which happened to
+  // equal the catch-all group's NAME. Renaming that group to ring-color is safe
+  // now, and nothing depends on the coincidence any more.
+  ["ring-inset", /^ring-inset$/],
+  ["ring-w", /^ring(?:-\d|-\[|$)/],
   ["ring-offset-w", /^ring-offset-(?:\d|\[)/],
   ["ring-offset", /^ring-offset-/],
-  ["ring", /^ring-/],
+  ["ring-color", /^ring-/],
 
   // shadow-color must precede shadow (groupOf returns the FIRST match) or the
   // negative-lookahead color entry is unreachable and sizes/colors wrongly
   // collapse into one group — same ordering rule as border-w/border-color above.
-  ["shadow-color", /^shadow-(?!sm|md|lg|xl|2xl|inner|none)/],
+  // The excluded list must carry the WHOLE v4 size scale: 2xs and xs were
+  // missing, so those two sizes landed in the colour group and a colour class
+  // deleted them. (`inner` is v3-only; kept as harmless back-compat.)
+  ["shadow-color", /^shadow-(?!2xs|xs|sm|md|lg|xl|2xl|inner|none)/],
   ["shadow", /^shadow(?:-|$)/],
   ["opacity", /^opacity-/],
 
