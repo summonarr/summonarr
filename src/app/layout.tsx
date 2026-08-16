@@ -86,8 +86,33 @@ export default async function RootLayout({
         <script
           nonce={nonce}
           // Sets data-theme / .dark / data-accent from localStorage before
-          // paint. suppressHydrationWarning above absorbs the resulting
-          // server/client attribute divergence on <html>.
+          // paint. suppressHydrationWarning on <html> absorbs the resulting
+          // server/client attribute divergence there — it does not cascade, and
+          // this tag needs its own for a separate, unavoidable reason:
+          //
+          // - Under a HEADER-delivered CSP (src/proxy.ts sets one on every
+          //   request) the browser moves the nonce into an internal slot and
+          //   blanks the content attribute — HTML spec, "nonce attributes", so
+          //   a CSS attribute selector can't exfiltrate it. `.nonce` still
+          //   returns the real value; `getAttribute("nonce")` returns "".
+          // - React's DEV-only hydration attribute check reads props back with
+          //   `getAttribute` (diffHydratedProperties → hydrateAttribute), so it
+          //   compares that "" against the real nonce it got from the RSC
+          //   payload and logs "A tree hydrated but some attributes of the
+          //   server rendered HTML didn't match the client properties" — on
+          //   every page, since the root layout renders on every page.
+          //
+          // Inherent, not a defect in this tree: every nonce'd inline script
+          // authored as JSX hits it, and the nonce cannot be dropped because
+          // `strict-dynamic` blocks un-nonced inline scripts. It is a console
+          // warning only — React does not patch up or re-render attribute
+          // mismatches (no #418, no client re-render, guardrail 16 unaffected)
+          // and the entire diff path is absent from the production react-dom
+          // build, so it never fired outside `next dev`.
+          //
+          // Suppressing is safe here specifically: the only other prop is a
+          // module-level constant string, which cannot diverge.
+          suppressHydrationWarning
           dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }}
         />
       </head>

@@ -253,6 +253,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     }
     ```
 
+16a. **The `nonce` mismatch on the root layout's theme script is NOT a guardrail-16 bug — do not go hunting for render-time nondeterminism, and do not remove its `suppressHydrationWarning`.**
+
+    Why:
+    - Under a **header-delivered** CSP (which [src/proxy.ts](src/proxy.ts) sets on every request) the browser moves the nonce into an internal slot and blanks the content attribute — HTML spec, "nonce attributes", so a CSS attribute selector can't exfiltrate it. Verified live: `getAttribute("nonce")` → `""` while `.nonce` → the real value, and the served HTML carries the real value.
+    - React's **DEV-only** hydration attribute check reads props back with `getAttribute` (`diffHydratedProperties` → `hydrateAttribute` in react-dom), so it compares that `""` against the real nonce from the RSC payload and logs *"A tree hydrated but some attributes of the server rendered HTML didn't match the client properties"* on every page.
+    - **Read the diff direction correctly**: React's `describePropertiesDiff` prints `+` for the CLIENT props and `-` for the value it read back from the DOM (which it labels "server"). `+ nonce="<real>"` / `- nonce=""` therefore means the server HTML was **right** and the DOM readback was blanked — not "the client lost the nonce". Misreading this sends you looking for a nonexistent threading bug in `headers()`.
+    - It is a `console.error` only: React never patches up or re-renders attribute mismatches, so there is **no #418, no recoverable error, no client re-render**. `diffHydratedProperties`/`hydrateAttribute`/`serverDifferences` are absent from the production react-dom build entirely, so it never fired outside `next dev`.
+
+    Rules:
+    - The nonce cannot be dropped from that tag — `strict-dynamic` blocks un-nonced inline scripts, and the anti-FOUC script would be CSP-killed. `suppressHydrationWarning` on the `<script>` is the fix; the one on `<html>` does **not** cascade to it.
+    - The CI crawl ([scripts/e2e-crawl.mts](scripts/e2e-crawl.mts)) never saw this: it builds and runs `npm run start`, i.e. **production**, where the diff path does not exist. There is no ignore-filter to narrow. Its `/#418/` match is on `pageerror` — real hydration *errors*, a different class.
+    - Corollary gap, accepted: because CI runs production, dev-only attribute-mismatch **warnings** are invisible to it. A genuine one (a `Date.now()`-derived attribute) would only surface in a local `next dev` console — which is exactly why that console must stay free of known-benign noise.
+
 17. **Do not "fix" the intentional fire-and-forget `tmdbId` backfill in [src/app/(app)/admin/activity/page.tsx](src/app/(app)/admin/activity/page.tsx).**
 
     Why:
