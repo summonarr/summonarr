@@ -9,6 +9,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
@@ -47,6 +48,10 @@ export default async function PopularOnServerPage({
   const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
   if (!session) return null;
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Scopes the ranking itself, not just the badges. Without it this page listed
+  // titles that only exist on a restricted server, with play and viewer counts,
+  // to users with no grant for it.
+  const visible = await getVisibleServerInstances(session);
   const [show4k, playHistoryEnabled] = await Promise.all([
     getShow4kVisibility(session),
     isPlayHistoryEnabled(),
@@ -80,10 +85,10 @@ export default async function PopularOnServerPage({
   const [moviesResult, tvResult] = await Promise.all([
     mediaTypeFilter === "tv"
       ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-      : getMostPopularOnServer({ mediaType: "MOVIE", sort, page }),
+      : getMostPopularOnServer({ mediaType: "MOVIE", sort, page, visible }),
     mediaTypeFilter === "movies"
       ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-      : getMostPopularOnServer({ mediaType: "TV", sort, page }),
+      : getMostPopularOnServer({ mediaType: "TV", sort, page, visible }),
   ]);
 
   const totalPages = Math.max(moviesResult.totalPages, tvResult.totalPages);

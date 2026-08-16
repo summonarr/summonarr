@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { getMostPopularOnServer, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -26,6 +27,7 @@ type EnrichedMedia = TmdbMedia & {
 };
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const visible = await getVisibleServerInstances(session);
   if (!(await isFeatureEnabled("feature.page.popular"))) {
     return NextResponse.json({ error: "Popular is disabled" }, { status: 403 });
   }
@@ -47,10 +49,10 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const [moviesResult, tvResult] = await Promise.all([
       mediaTypeFilter === "tv"
         ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-        : getMostPopularOnServer({ mediaType: "MOVIE", sort, page }),
+        : getMostPopularOnServer({ mediaType: "MOVIE", sort, page, visible }),
       mediaTypeFilter === "movies"
         ? Promise.resolve({ items: [], totalItems: 0, totalPages: 1, page: 1 })
-        : getMostPopularOnServer({ mediaType: "TV", sort, page }),
+        : getMostPopularOnServer({ mediaType: "TV", sort, page, visible }),
     ]);
 
     async function resolveMedia(
