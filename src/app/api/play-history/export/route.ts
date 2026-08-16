@@ -4,13 +4,57 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { sanitizeContainsSearch } from "@/lib/sanitize";
-import type { Prisma } from "@/generated/prisma";
+import { composeWhere, parsePlayHistoryFilters, PLAY_METHODS } from "@/lib/play-history-filters";
+import { SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
 
 const MAX_EXPORT_ROWS = 10_000;
 const PAGE_SIZE = 1000;
+
+// The exported column set, shared by the CSV and JSON paths so the two can
+// never drift. `mediaServerUser.username` is the one non-PlayHistory field, so
+// it rides a join alias rather than this list.
+const EXPORT_COLUMNS = [
+  "id", "title", "mediaType", "year", "seasonNumber", "episodeNumber", "episodeTitle",
+  "source", "startedAt", "stoppedAt", "duration", "playDuration", "pausedDuration",
+  "watched", "platform", "player", "device", "playMethod", "videoCodec", "audioCodec",
+  "resolution", "bitrate", "videoDecision", "audioDecision", "container",
+] as const;
+
+const EXPORT_SELECT = EXPORT_COLUMNS.map((c) => `h."${c}"`).join(", ");
+
+// One exported row: the columns above (as the pg driver types them) plus the
+// joined username. Dates arrive as Date objects, so the ISO serialization below
+// matches what Prisma's client produced.
+interface ExportRow {
+  id: string;
+  title: string;
+  mediaType: "MOVIE" | "TV" | null;
+  year: string | null;
+  seasonNumber: number | null;
+  episodeNumber: number | null;
+  episodeTitle: string | null;
+  source: string;
+  startedAt: Date;
+  stoppedAt: Date;
+  duration: number;
+  playDuration: number;
+  pausedDuration: number | null;
+  watched: boolean;
+  platform: string | null;
+  player: string | null;
+  device: string | null;
+  playMethod: string | null;
+  videoCodec: string | null;
+  audioCodec: string | null;
+  resolution: string | null;
+  bitrate: number | null;
+  videoDecision: string | null;
+  audioDecision: string | null;
+  container: string | null;
+  username: string;
+}
 
 function escapeCSV(value: unknown): string {
   if (value == null) return "";
@@ -48,31 +92,17 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const format = params.get("format") === "json" ? "json" : "csv";
 
-  const where: Record<string, unknown> = {};
-
   const source = params.get("source");
-  if (source === "plex" || source === "jellyfin") where.source = source;
-
   const mediaType = params.get("mediaType");
-  if (mediaType === "MOVIE" || mediaType === "TV") where.mediaType = mediaType;
-
   const watched = params.get("watched");
-  if (watched === "true") where.watched = true;
-  else if (watched === "false") where.watched = false;
-
   const userId = params.get("userId");
-  if (userId) where.mediaServerUserId = userId;
-
+  const tmdbId = params.get("tmdbId");
   const playMethod = params.get("playMethod");
-  if (playMethod && ["DirectPlay", "DirectStream", "Transcode"].includes(playMethod)) {
-    where.playMethod = playMethod;
-  }
-
   const platform = params.get("platform");
-  if (platform) where.platform = platform;
-
   const startDate = params.get("startDate");
   const endDate = params.get("endDate");
+  const search = (params.get("search")?.trim() ?? "").slice(0, SEARCH_TERM_MAX_LEN);
+
   // Reject unparseable dates with a 400 BEFORE the audit write below — an
   // Invalid Date fed into the query throws an uncaught 500, and the paper-trail
   // row must not record an export that never ran.
@@ -81,21 +111,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: `${name} must be a valid date` }, { status: 400 });
     }
   }
-  if (startDate || endDate) {
-    where.startedAt = {
-      ...(startDate ? { gte: new Date(startDate) } : {}),
-      ...(endDate ? { lte: new Date(endDate) } : {}),
-    };
-  }
 
-  const search = sanitizeContainsSearch(params.get("search")?.trim() ?? "");
-  if (search) {
-    where.OR = [
-      { title: { contains: search, mode: "insensitive" } },
-      { ipAddress: { contains: search, mode: "insensitive" } },
-      { mediaServerUser: { username: { contains: search, mode: "insensitive" } } },
-    ];
-  }
+  // Raw fragments, not a Prisma `where`, and shared with the list route the
+  // admin table exports FROM — so "export what I'm looking at" holds for every
+  // filter, `search` included. Prisma's `contains` emits an ILIKE with no
+  // ESCAPE clause, so a term carrying a `%`/`_` could only be made safe there
+  // by stripping the character, which silently exported the wrong rows (a
+  // `john_doe` export searched for `johndoe`). See src/lib/play-history-filters.ts.
+  const { whereSql, binds, nextBindIndex } = composeWhere(parsePlayHistoryFilters(params));
 
   // Play-history export streams up to MAX_EXPORT_ROWS of viewer PII (titles,
   // usernames, devices, IP-correlated rows). Record a paper-trail row so the
@@ -119,7 +142,11 @@ export async function GET(request: NextRequest) {
         mediaType: mediaType ?? null,
         watched: watched ?? null,
         userId: userId ?? null,
-        playMethod: where.playMethod ?? null,
+        tmdbId: tmdbId ?? null,
+        // The VALIDATED value, not the raw param — an unrecognized playMethod
+        // never narrows the query, so logging it would record a scope the
+        // export did not actually have.
+        playMethod: playMethod && PLAY_METHODS.includes(playMethod) ? playMethod : null,
         platform: platform ?? null,
         startDate: startDate ?? null,
         endDate: endDate ?? null,
@@ -134,39 +161,18 @@ export async function GET(request: NextRequest) {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 
   if (format === "json") {
-    const rows = await prisma.playHistory.findMany({
-      where,
-      orderBy: { startedAt: "desc" },
-      take: MAX_EXPORT_ROWS,
-      select: {
-        id: true,
-        title: true,
-        mediaType: true,
-        year: true,
-        seasonNumber: true,
-        episodeNumber: true,
-        episodeTitle: true,
-        source: true,
-        startedAt: true,
-        stoppedAt: true,
-        duration: true,
-        playDuration: true,
-        pausedDuration: true,
-        watched: true,
-        platform: true,
-        player: true,
-        device: true,
-        playMethod: true,
-        videoCodec: true,
-        audioCodec: true,
-        resolution: true,
-        bitrate: true,
-        videoDecision: true,
-        audioDecision: true,
-        container: true,
-        mediaServerUser: { select: { username: true, source: true } },
-      },
-    });
+    const rows = await prisma.$queryRawUnsafe<ExportRow[]>(
+      `
+        SELECT ${EXPORT_SELECT}, msu."username" AS username
+        FROM "PlayHistory" h
+        LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
+        WHERE 1=1 ${whereSql}
+        ORDER BY h."startedAt" DESC
+        LIMIT $${nextBindIndex}
+      `,
+      ...binds,
+      MAX_EXPORT_ROWS,
+    );
     const data = rows.map((r) => ({
       id: r.id,
       title: r.title,
@@ -175,7 +181,7 @@ export async function GET(request: NextRequest) {
       seasonNumber: r.seasonNumber,
       episodeNumber: r.episodeNumber,
       episodeTitle: r.episodeTitle,
-      username: r.mediaServerUser.username,
+      username: r.username,
       source: r.source,
       startedAt: r.startedAt.toISOString(),
       stoppedAt: r.stoppedAt.toISOString(),
@@ -219,65 +225,49 @@ export async function GET(request: NextRequest) {
       try {
         controller.enqueue(encoder.encode(headers.join(",") + "\n"));
 
-        let cursor: string | undefined = undefined;
+        // Keyset cursor over (startedAt, id) DESC — the same predicate Prisma's
+        // `cursor` + `skip: 1` compiled to, written out because the filters are
+        // now raw fragments. The expanded OR form (rather than a row
+        // comparison) mirrors src/lib/my-watch-history.ts, which avoids relying
+        // on Postgres inferring parameter types inside a row constructor.
+        let cursor: { startedAt: Date; id: string } | null = null;
         let emitted = 0;
 
         while (emitted < MAX_EXPORT_ROWS) {
           const remaining = MAX_EXPORT_ROWS - emitted;
           const take = Math.min(PAGE_SIZE, remaining);
-          type PlayHistoryRow = Prisma.PlayHistoryGetPayload<{
-            select: {
-              id: true; title: true; mediaType: true; year: true;
-              seasonNumber: true; episodeNumber: true; episodeTitle: true;
-              source: true; startedAt: true; stoppedAt: true;
-              duration: true; playDuration: true; pausedDuration: true; watched: true;
-              platform: true; player: true; device: true; playMethod: true;
-              videoCodec: true; audioCodec: true; resolution: true; bitrate: true;
-              videoDecision: true; audioDecision: true; container: true;
-              mediaServerUser: { select: { username: true; source: true } };
-            };
-          }>;
-          const page: PlayHistoryRow[] = await prisma.playHistory.findMany({
-            where,
-            orderBy: [{ startedAt: "desc" }, { id: "desc" }],
-            take,
-            ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-            select: {
-              id: true,
-              title: true,
-              mediaType: true,
-              year: true,
-              seasonNumber: true,
-              episodeNumber: true,
-              episodeTitle: true,
-              source: true,
-              startedAt: true,
-              stoppedAt: true,
-              duration: true,
-              playDuration: true,
-              pausedDuration: true,
-              watched: true,
-              platform: true,
-              player: true,
-              device: true,
-              playMethod: true,
-              videoCodec: true,
-              audioCodec: true,
-              resolution: true,
-              bitrate: true,
-              videoDecision: true,
-              audioDecision: true,
-              container: true,
-              mediaServerUser: { select: { username: true, source: true } },
-            },
-          });
+
+          const pageBinds: unknown[] = [...binds];
+          let cursorSql = "";
+          if (cursor) {
+            cursorSql =
+              ` AND (h."startedAt" < $${nextBindIndex}` +
+              ` OR (h."startedAt" = $${nextBindIndex} AND h."id" < $${nextBindIndex + 1}))`;
+            pageBinds.push(cursor.startedAt, cursor.id);
+          }
+          // Derived from the array so it can't drift from what was pushed —
+          // nextBindIndex when there's no cursor, nextBindIndex + 2 with one.
+          const limitBind = pageBinds.length + 1;
+          pageBinds.push(take);
+
+          const page = await prisma.$queryRawUnsafe<ExportRow[]>(
+            `
+              SELECT ${EXPORT_SELECT}, msu."username" AS username
+              FROM "PlayHistory" h
+              LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
+              WHERE 1=1 ${whereSql}${cursorSql}
+              ORDER BY h."startedAt" DESC, h."id" DESC
+              LIMIT $${limitBind}
+            `,
+            ...pageBinds,
+          );
 
           if (page.length === 0) break;
           for (const r of page) {
             const line = [
               escapeCSV(r.title), escapeCSV(r.mediaType), escapeCSV(r.year),
               escapeCSV(r.seasonNumber), escapeCSV(r.episodeNumber), escapeCSV(r.episodeTitle),
-              escapeCSV(r.mediaServerUser.username), escapeCSV(r.source),
+              escapeCSV(r.username), escapeCSV(r.source),
               escapeCSV(r.startedAt.toISOString()), escapeCSV(r.stoppedAt.toISOString()),
               escapeCSV(r.duration), escapeCSV(r.playDuration), escapeCSV(r.pausedDuration),
               escapeCSV(r.watched), escapeCSV(r.platform), escapeCSV(r.player),
@@ -290,7 +280,8 @@ export async function GET(request: NextRequest) {
           }
 
           emitted += page.length;
-          cursor = page[page.length - 1].id;
+          const last = page[page.length - 1];
+          cursor = { startedAt: last.startedAt, id: last.id };
 
           if (page.length < take) break;
         }
