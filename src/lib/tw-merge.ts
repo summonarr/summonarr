@@ -19,6 +19,14 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["inset-shadow-color", /^inset-shadow-/],
   ["inset-ring-w", /^inset-ring(?:-\d|-\[|$)/],
   ["inset-ring-color", /^inset-ring-/],
+  // Logical inset sides, modelled alongside the physical ones exactly as the
+  // logical border sides are. The positional catch-all below excludes only
+  // x-/y-, so without these `inset-s-0 inset-e-0` annihilated itself. The extra
+  // letter keeps them distinct: `inset-s-` cannot match `inset-shadow-`.
+  ["inset-s", /^-?inset-s-/],
+  ["inset-e", /^-?inset-e-/],
+  ["inset-bs", /^-?inset-bs-/],
+  ["inset-be", /^-?inset-be-/],
   ["inset", /^-?inset-(?!x-|y-)/],
   ["inset-x", /^-?inset-x-/],
   ["inset-y", /^-?inset-y-/],
@@ -55,6 +63,10 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["my", /^-?my-/],
   ["m", /^-?m-/],
 
+  // The -reverse flags set only a custom property, not a margin — same split
+  // the divide-*-reverse groups already carry.
+  ["space-x-reverse", /^space-x-reverse$/],
+  ["space-y-reverse", /^space-y-reverse$/],
   ["space-x", /^-?space-x-/],
   ["space-y", /^-?space-y-/],
   ["gap-x", /^gap-x-/],
@@ -79,7 +91,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // align-content values only. Everything else under /^content-/ sets the CSS
   // `content` property (content-none, content-['…']) — a different property, so
   // it stays in the catch-all below and the two never delete each other.
-  ["content-align", /^content-(?:normal|center|start|end|between|around|evenly|baseline|stretch)$/],
+  ["content-align", /^content-(?:normal|center|start|end|between|around|evenly|baseline|stretch)(?:-safe)?$/],
   ["content", /^content-/],
   ["self", /^self-/],
   ["place-items", /^place-items-/],
@@ -115,6 +127,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["font-weight", /^font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black)$/],
   ["font-style", /^(?:italic|not-italic)$/],
+  ["font-stretch", /^font-stretch-/],
   ["font", /^font-/],
 
   ["leading", /^leading-/],
@@ -135,11 +148,12 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["bg-attachment", /^bg-(?:fixed|local|scroll)$/],
   ["bg-repeat", /^bg-(?:repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/],
   ["bg-size", /^bg-(?:auto|cover|contain)$/],
-  ["bg-position", /^bg-(?:top|right|bottom|left|center|right-top|right-bottom|left-top|left-bottom)$/],
+  ["bg-position", /^bg-(?:top|right|bottom|left|center|top-left|top-right|bottom-left|bottom-right|right-top|right-bottom|left-top|left-bottom)$/],
   // Tailwind v4 renamed bg-gradient-* to bg-linear-* and added bg-radial /
   // bg-conic; unrecognised, the new spellings fell into the bg colour catch-all.
   // radial/conic need no trailing dash — both are valid bare utilities.
   ["bg-image", /^bg-(?:none|gradient-|linear-|radial|conic)/],
+  ["bg-blend", /^bg-blend-/],
   ["bg-clip", /^bg-clip-/],
   ["bg-origin", /^bg-origin-/],
   ["bg", /^bg-/],
@@ -201,6 +215,14 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["rounded-tr", /^rounded-tr(?:-|$)/],
   ["rounded-bl", /^rounded-bl(?:-|$)/],
   ["rounded-br", /^rounded-br(?:-|$)/],
+  // Logical corners. The (?:-|$) guard keeps `rounded-s` off `rounded-ss` and,
+  // just as importantly, off the `rounded-sm` SIZE.
+  ["rounded-s", /^rounded-s(?:-|$)/],
+  ["rounded-e", /^rounded-e(?:-|$)/],
+  ["rounded-ss", /^rounded-ss(?:-|$)/],
+  ["rounded-se", /^rounded-se(?:-|$)/],
+  ["rounded-es", /^rounded-es(?:-|$)/],
+  ["rounded-ee", /^rounded-ee(?:-|$)/],
   ["rounded", /^rounded(?:-|$)/],
 
   // ring-inset toggles the inset flag rather than setting a width, so it gets
@@ -225,6 +247,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["shadow", /^shadow(?:-|$)/],
   ["opacity", /^opacity-/],
 
+  ["transition-behavior", /^transition-(?:discrete|normal)$/],
   ["transition", /^transition(?:-|$)/],
   ["duration", /^duration-/],
   ["ease", /^ease-/],
@@ -233,10 +256,15 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["translate-x", /^-?translate-x-/],
   ["translate-y", /^-?translate-y-/],
+  ["translate-z", /^-?translate-z-/],
   ["translate", /^-?translate-/],
   ["scale-x", /^-?scale-x-/],
   ["scale-y", /^-?scale-y-/],
+  ["scale-z", /^-?scale-z-/],
   ["scale", /^-?scale-/],
+  ["rotate-x", /^-?rotate-x-/],
+  ["rotate-y", /^-?rotate-y-/],
+  ["rotate-z", /^-?rotate-z-/],
   ["rotate", /^-?rotate-/],
   ["skew-x", /^-?skew-x-/],
   ["skew-y", /^-?skew-y-/],

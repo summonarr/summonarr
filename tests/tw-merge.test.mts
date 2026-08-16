@@ -338,6 +338,117 @@ test("ring width, ring-inset and ring color are three groups (regression: ring-i
   assert.equal(twMerge("ring-offset-2 ring-offset-4"), "ring-offset-4");
 });
 
+test("logical corner radii are their own corners, not the all-corners group (regression: /^rounded-/ swallowed them)", () => {
+  // The physical corners were modelled; the logical ones (s/e/ss/se/es/ee) were
+  // not, so any two of them annihilated each other.
+  assert.equal(twMerge("rounded-s-lg rounded-e-lg"), "rounded-s-lg rounded-e-lg");
+  assert.equal(twMerge("rounded-ss-lg rounded-se-lg"), "rounded-ss-lg rounded-se-lg");
+  assert.equal(twMerge("rounded-es-lg rounded-ee-lg"), "rounded-es-lg rounded-ee-lg");
+  // Each still collapses within itself.
+  assert.equal(twMerge("rounded-s-md rounded-s-lg"), "rounded-s-lg");
+  assert.equal(twMerge("rounded-ee-md rounded-ee-lg"), "rounded-ee-lg");
+  // A single-letter side must not swallow the two-letter corner that extends
+  // it — the same (?:-|$) guard that keeps border-b out of border-bs.
+  assert.equal(twMerge("rounded-s-lg rounded-ss-md"), "rounded-s-lg rounded-ss-md");
+  assert.equal(twMerge("rounded-e-lg rounded-ee-md"), "rounded-e-lg rounded-ee-md");
+  // …and `rounded-sm` is a SIZE, not a logical side, so it stays all-corners.
+  assert.equal(twMerge("rounded-sm rounded-lg"), "rounded-lg");
+  assert.equal(twMerge("rounded-s-lg rounded-sm"), "rounded-s-lg rounded-sm");
+  // Physical corners are untouched.
+  assert.equal(twMerge("rounded-t-md rounded-b-lg"), "rounded-t-md rounded-b-lg");
+});
+
+test("logical inset sides are not the all-sides inset shorthand (regression: the positional catch-all swallowed them)", () => {
+  assert.equal(twMerge("inset-s-0 inset-e-0"), "inset-s-0 inset-e-0");
+  assert.equal(twMerge("inset-bs-0 inset-be-0"), "inset-bs-0 inset-be-0");
+  assert.equal(twMerge("inset-4 inset-s-2"), "inset-4 inset-s-2");
+  // Each collapses within itself, negatives included.
+  assert.equal(twMerge("inset-s-2 inset-s-4"), "inset-s-4");
+  assert.equal(twMerge("inset-s-2 -inset-s-4"), "-inset-s-4");
+  assert.equal(twMerge("-inset-be-2 inset-be-4"), "inset-be-4");
+  // The single-letter sides must not swallow the two-letter block sides.
+  assert.equal(twMerge("inset-s-2 inset-bs-4"), "inset-s-2 inset-bs-4");
+  // …nor collide with the box-shadow utilities parked on the same prefix.
+  assert.equal(twMerge("inset-s-2 inset-shadow-sm"), "inset-s-2 inset-shadow-sm");
+  assert.equal(twMerge("inset-e-2 inset-ring-2"), "inset-e-2 inset-ring-2");
+  // x/y stay independent.
+  assert.equal(twMerge("inset-x-2 inset-s-4"), "inset-x-2 inset-s-4");
+});
+
+test("3D transform axes are separate from the 2D shorthands (regression: rotate-x/y/z, scale-z and translate-z fell into them)", () => {
+  assert.equal(twMerge("rotate-x-45 rotate-y-45"), "rotate-x-45 rotate-y-45");
+  assert.equal(twMerge("rotate-45 rotate-x-45"), "rotate-45 rotate-x-45");
+  assert.equal(twMerge("rotate-z-45 rotate-y-90"), "rotate-z-45 rotate-y-90");
+  assert.equal(twMerge("scale-50 scale-z-75"), "scale-50 scale-z-75");
+  assert.equal(twMerge("translate-4 translate-z-8"), "translate-4 translate-z-8");
+  // Each collapses within itself, negatives included.
+  assert.equal(twMerge("rotate-x-45 -rotate-x-90"), "-rotate-x-90");
+  assert.equal(twMerge("scale-z-75 scale-z-100"), "scale-z-100");
+  assert.equal(twMerge("-translate-z-4 translate-z-8"), "translate-z-8");
+  // The 2D axis groups that already existed are unaffected.
+  assert.equal(twMerge("scale-x-50 scale-y-75"), "scale-x-50 scale-y-75");
+  assert.equal(twMerge("skew-x-3 skew-y-6"), "skew-x-3 skew-y-6");
+  assert.equal(twMerge("rotate-45 rotate-90"), "rotate-90");
+});
+
+test("bg-blend-* and the v4 background positions are not background colors (regression: the /^bg-/ catch-all)", () => {
+  // This shipped: ui/avatar.tsx's AvatarBadge base is
+  // "… bg-primary text-primary-foreground bg-blend-color …", so the badge
+  // merged down without its background colour entirely.
+  assert.equal(twMerge("bg-primary bg-blend-color"), "bg-primary bg-blend-color");
+  assert.equal(twMerge("bg-blend-multiply bg-red-500"), "bg-blend-multiply bg-red-500");
+  assert.equal(twMerge("bg-blend-multiply bg-blend-screen"), "bg-blend-screen");
+  // v4 renamed bg-left-top to bg-top-left; only the legacy spelling was listed.
+  assert.equal(twMerge("bg-top-left bg-red-500"), "bg-top-left bg-red-500");
+  assert.equal(twMerge("bg-bottom-right bg-red-500"), "bg-bottom-right bg-red-500");
+  // Both spellings share the one position group.
+  assert.equal(twMerge("bg-center bg-top-left"), "bg-top-left");
+  assert.equal(twMerge("bg-left-top bg-bottom-right"), "bg-bottom-right");
+  // Colours still collapse among themselves.
+  assert.equal(twMerge("bg-red-500 bg-blue-500"), "bg-blue-500");
+});
+
+test("transition-behavior is not the transition shorthand (regression: /^transition(?:-|$)/ swallowed it)", () => {
+  assert.equal(twMerge("transition-all transition-discrete"), "transition-all transition-discrete");
+  assert.equal(twMerge("transition-discrete transition-colors"), "transition-discrete transition-colors");
+  assert.equal(twMerge("transition-none transition-discrete"), "transition-none transition-discrete");
+  // Each collapses within itself.
+  assert.equal(twMerge("transition-discrete transition-normal"), "transition-normal");
+  assert.equal(twMerge("transition transition-all"), "transition-all");
+});
+
+test("space-*-reverse is a flag, not a margin (regression: it sat in the space-x/space-y groups)", () => {
+  assert.equal(twMerge("space-x-4 space-x-reverse"), "space-x-4 space-x-reverse");
+  assert.equal(twMerge("space-y-4 space-y-reverse"), "space-y-4 space-y-reverse");
+  assert.equal(twMerge("space-x-reverse space-y-reverse"), "space-x-reverse space-y-reverse");
+  assert.equal(twMerge("space-x-2 space-x-4"), "space-x-4");
+  // Matches the divide-*-reverse split already in the table.
+  assert.equal(twMerge("divide-x-2 divide-x-reverse"), "divide-x-2 divide-x-reverse");
+});
+
+test("font-stretch is not font-family (regression: the /^font-/ catch-all)", () => {
+  assert.equal(twMerge("font-mono font-stretch-75%"), "font-mono font-stretch-75%");
+  assert.equal(twMerge("font-stretch-condensed font-sans"), "font-stretch-condensed font-sans");
+  assert.equal(twMerge("font-stretch-50% font-stretch-100%"), "font-stretch-100%");
+  assert.equal(twMerge("font-mono font-serif"), "font-serif");
+  // Weight keeps its own group.
+  assert.equal(twMerge("font-bold font-stretch-75%"), "font-bold font-stretch-75%");
+});
+
+test("the -safe alignment variants land in their alignment group (regression: content-*-safe fell into the CSS content group)", () => {
+  assert.equal(twMerge("content-center-safe content-['x']"), "content-center-safe content-['x']");
+  assert.equal(twMerge("content-none content-center-safe"), "content-none content-center-safe");
+  assert.equal(twMerge("content-center content-end-safe"), "content-end-safe");
+  // Every other alignment prefix already had this right — its catch-all IS the
+  // same property — so they must not regress.
+  assert.equal(twMerge("justify-start justify-center-safe"), "justify-center-safe");
+  assert.equal(twMerge("items-start items-center-safe"), "items-center-safe");
+  assert.equal(twMerge("self-start self-end-safe"), "self-end-safe");
+  assert.equal(twMerge("justify-self-start justify-self-end-safe"), "justify-self-end-safe");
+  assert.equal(twMerge("justify-items-start justify-items-center-safe"), "justify-items-center-safe");
+  assert.equal(twMerge("place-content-start place-content-center-safe"), "place-content-center-safe");
+});
+
 // ---------------------------------------------------------------------------
 // Pinning tests: documented divergences from the real `tailwind-merge` package.
 // These assert CURRENT behavior so a regression (or a well-meaning "fix" that
