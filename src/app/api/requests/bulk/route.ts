@@ -85,7 +85,26 @@ class QuotaExceeded extends Error {
   }
 }
 
-export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session) => {
+// The door check accepts ANY request grant, not just the umbrella bit.
+// REQUEST_MOVIE / REQUEST_TV narrow REQUEST rather than depending on it
+// (Overseerr semantics — either the umbrella OR the specific bit grants a
+// type), and the permissions modal renders all three as independent
+// checkboxes. So a perfectly ordinary mask of REQUEST_MOVIE|REQUEST_TV was
+// 403'd here while the single-request route created the row happily, and the
+// UI — which computes button visibility with the umbrella-aware canRequest —
+// showed the button and surfaced a raw "Forbidden" beside it.
+//
+// This stays as a cheap door check rather than becoming withAuth: a caller
+// with no request grant at all should be refused before paying the TMDB
+// routing work. The REAL decision is per item, per media type and per
+// instance, and it already lives at the canRequestInstance call below — which
+// has been umbrella-correct since the route's first commit. This gate was
+// simply stricter than the gate it precedes.
+export const POST = withPermission([
+  Permission.REQUEST,
+  Permission.REQUEST_MOVIE,
+  Permission.REQUEST_TV,
+])(async (req, _ctx, session) => {
   const maint = await maintenanceGuard();
   if (maint) return maint;
 

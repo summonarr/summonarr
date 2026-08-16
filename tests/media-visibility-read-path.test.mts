@@ -502,3 +502,55 @@ test("TVEpisodeCache gate: the provider preference still narrows, and never wide
   assert.deepEqual(visibleEpisodeSourcesFrom(false, false, ["plex", "jellyfin"]), []);
   assert.deepEqual(visibleEpisodeSourcesFrom(false, true, ["plex"]), []);
 });
+
+// ── the bulk route's door check ─────────────────────────────────────────────
+
+// REQUEST_MOVIE / REQUEST_TV NARROW the REQUEST umbrella rather than depending
+// on it (Overseerr semantics), and the permissions modal renders all three as
+// independent checkboxes — so REQUEST_MOVIE|REQUEST_TV with no umbrella bit is
+// an ordinary mask an admin can produce in two clicks. The route-level gate
+// demanded the umbrella and 403'd it, while the single-request route created
+// the row and the UI showed the button, because both use the umbrella-aware
+// canRequest. Nothing exercised the gate negatively: the only existing bulk
+// tests use an ADMIN caller, who passes via the superbit.
+test("bulk accepts a caller granted only the GRANULAR request bits", async () => {
+  const granular = makeUser("granular", {
+    role: "USER",
+    permissions: Permission.REQUEST_MOVIE | Permission.REQUEST_TV,
+  });
+  usersById.set("granular", granular);
+  const granularToken = await mintSession(granular);
+  // Already requested, so the classification short-circuits before the create
+  // transaction — this test is about the door, not the write path.
+  existingRequests = [{ id: "r1", tmdbId: 603, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false }];
+  const res = await inScope(() =>
+    bulkRequest(
+      postJson("http://localhost:3000/api/requests/bulk", granularToken, {
+        items: [{ tmdbId: 603, mediaType: "MOVIE" }],
+      }),
+      undefined,
+    ),
+  );
+  assert.notEqual(
+    res.status, 403,
+    "a mask of REQUEST_MOVIE|REQUEST_TV must reach the handler — the per-item " +
+      "canRequestInstance gate is what decides, and it has always been umbrella-correct",
+  );
+});
+
+// The control. Without it the assertion above would also pass on a route that
+// had no permission gate at all.
+test("bulk still refuses a caller with NO request grant", async () => {
+  const none = makeUser("norequest", { role: "USER", permissions: Permission.REQUEST_ADVANCED });
+  usersById.set("norequest", none);
+  const noneToken = await mintSession(none);
+  const res = await inScope(() =>
+    bulkRequest(
+      postJson("http://localhost:3000/api/requests/bulk", noneToken, {
+        items: [{ tmdbId: 603, mediaType: "MOVIE" }],
+      }),
+      undefined,
+    ),
+  );
+  assert.equal(res.status, 403, "no request bit at all is still refused at the door");
+});
