@@ -149,7 +149,10 @@ shadowPrismaModel(prisma, "user", {
 
 // ── AuditLog store ───────────────────────────────────────────────────────────
 type AuditRow = {
-  id: string; createdAt: Date; userId: string; userName: string; action: string;
+  // userId is NULLABLE in the schema, and modelling it as `string` here is part
+  // of why the hideCron defect was invisible to this suite: the fixture type
+  // could not express a machine-session row at all.
+  id: string; createdAt: Date; userId: string | null; userName: string; action: string;
   target: string; details: string | null; ipAddress: string | null;
   userAgent: string | null; provider: string | null;
 };
@@ -174,10 +177,23 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
       if (a.in && !a.in.includes(r.action)) return false;
       continue;
     }
+    if (k === "AND") {
+      for (const clause of v as Record<string, unknown>[]) if (!auditMatch(r, clause)) return false;
+      continue;
+    }
+    if (k === "OR") {
+      if (!(v as Record<string, unknown>[]).some((clause) => auditMatch(r, clause))) return false;
+      continue;
+    }
     if (k === "userId") {
-      const u = v as string | { not?: string };
+      const u = v as string | null | { not?: string };
+      if (u === null) { if (r.userId != null) return false; continue; }
       if (typeof u === "string") { if (r.userId !== u) return false; continue; }
-      if (u.not !== undefined && r.userId === u.not) return false;
+      // SQL semantics, deliberately: `userId <> 'system'` is NULL — not TRUE —
+      // for a NULL row, so Postgres EXCLUDES it. Modelling this the JS way
+      // (`r.userId === u.not`) let a NULL row survive here while it vanished in
+      // production, which is exactly how the hideCron bug stayed invisible.
+      if (u.not !== undefined) { if (r.userId == null || r.userId === u.not) return false; }
       continue;
     }
     if (k === "userName" || k === "target") {
@@ -642,11 +658,28 @@ test("audit-log: dateTo is inclusive of the requested day", async () => {
   assert.equal(where.createdAt.lt.toISOString().slice(0, 10), "2026-07-02");
 });
 
-test("audit-log: hideCron excludes the system actor", async () => {
+test("audit-log: hideCron excludes the system actor but KEEPS null-actor rows", async () => {
+  // Asserts on the rows returned, not on the where-shape. The previous version
+  // pinned `{ not: "system" }` literally, so it locked the defect in: that
+  // compiles to `userId <> 'system'`, which in SQL drops every NULL-userId row
+  // as well — including the AUTH_LOGIN written when /api/auth/machine-session
+  // mints an admin-impersonating JWT from CRON_SECRET. That row is the only
+  // record such a mint happened, and it disappeared from the filtered view and
+  // from the CSV export.
+  auditRows = [
+    audit({ id: "a1", userId: "system", userName: "system", action: "LIBRARY_SYNC" }),
+    audit({ id: "a2", userId: null, userName: "machine", action: "AUTH_LOGIN" }),
+    audit({ id: "a3", userId: "u-real", userName: "Ada", action: "AUTH_LOGIN" }),
+  ];
+
   const t = await mintSession();
-  await listAudit(t, "?hideCron=1");
-  const where = (opsOf("auditLog.findMany")[0].args as { where: { userId: { not: string } } }).where;
-  assert.deepEqual(where.userId, { not: "system" });
+  const res = await listAudit(t, "?hideCron=1");
+  const body = (await res.json()) as { logs: { id: string }[] };
+  const ids = body.logs.map((r) => r.id);
+
+  assert.ok(!ids.includes("a1"), "the system actor is hidden — that is what the filter is for");
+  assert.ok(ids.includes("a2"), "a machine-session mint has a NULL userId and must SURVIVE the filter");
+  assert.ok(ids.includes("a3"), "and a real user's row obviously survives");
 });
 
 test("audit-log: hasMore/nextCursor page correctly", async () => {

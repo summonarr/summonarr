@@ -159,6 +159,9 @@ shadowPrismaModel(prisma, "authSession", {
 });
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: { where: { id: string } }) => {
+    // Recorded so a test can observe WHICH user rows a handler reads — the
+    // self-reply pin keys off the reporter lookup not happening at all.
+    rec("user.findUnique", args);
     const u = usersById.get(args.where.id);
     return u ? { ...u } : null;
   },
@@ -898,4 +901,65 @@ test("refetch REJECTS a malformed instance slug instead of coercing it to the de
   const res = await patchIssue(admin.token, "issue-rf3", { refetch: true, instance: "../../etc" });
   assert.equal(res.status, 400);
   assert.equal(fetchCalls.length, 0, "a rejected request must not have contacted any server");
+});
+
+// An issue admin who REPORTED the issue and then replies is talking to
+// themselves. The inbox row skipped that case from the start; Discord, push and
+// email gated only on the reporter being ACTIVE, so a self-hosted instance where
+// the admin files their own issues sent them a DM, a push and an email about
+// every one of their own replies. Commit 40fea6e fixed the identical shape in
+// the sibling PATCH resolve path and this handler was missed — hence a pin
+// rather than a second silent fix.
+//
+// This asserts on the reporter LOOKUP, not on outbound fetches. A first attempt
+// asserted "no network calls on a self-reply" and its own control proved that
+// worthless: the reporter-facing channels never reach the wire under this
+// harness at all, so the assertion passed against the buggy code too. The
+// lookup is the honest observable — the fix short-circuits the read, so its
+// absence is visible and its presence on a normal reply is the control.
+test("admin replying in their OWN reported thread reads no reporter row and notifies nobody", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  // (1) Admin IS the reporter — nothing reporter-facing may run.
+  issueRow = { id: "issue-self", status: "OPEN", reportedBy: admin.userId, title: "Dune", mediaType: "MOVIE", tmdbId: 438631, posterPath: null, claimedBy: null };
+  ops.length = 0;
+  const selfReply = await postMessage(admin.token, "issue-self", { body: "noting this for myself" });
+  assert.equal(selfReply.status, 201);
+  await flushMicrotasks();
+
+  // Filtered by SELECT shape, not by id: the session-verification path reads the
+  // same row on every request, and in the self case that is the same user. Only
+  // the notification read asks for notifyOnIssue.
+  const isReporterRead = (o: { args?: unknown }) =>
+    !!(o.args as { select?: Record<string, boolean> } | undefined)?.select?.notifyOnIssue;
+  const selfLookups = opsOf("user.findUnique").filter(isReporterRead);
+  assert.equal(
+    selfLookups.length, 0,
+    "a self-reply must not even look the reporter up — that read is what gates Discord, push and email",
+  );
+  assert.equal(opsOf("notification.create").length, 0, "and no inbox row — that guard was already correct");
+
+  // (2) THE CONTROL. Same admin, somebody else's thread: the reporter IS read.
+  // Without this the assertion above would also pass on a handler that never
+  // notified anyone at all.
+  const other = await mintSession({ role: "USER" });
+  usersById.set(other.userId, {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: "other@example.com", notificationEmail: null,
+  });
+  issueRow = { id: "issue-other", status: "OPEN", reportedBy: other.userId, title: "Dune", mediaType: "MOVIE", tmdbId: 438631, posterPath: null, claimedBy: null };
+  ops.length = 0;
+  const otherReply = await postMessage(admin.token, "issue-other", { body: "on it" });
+  assert.equal(otherReply.status, 201);
+  await flushMicrotasks();
+
+  const otherLookups = opsOf("user.findUnique").filter(isReporterRead);
+  assert.ok(
+    otherLookups.length > 0,
+    "control: a reply to someone else's thread DOES read the reporter — otherwise the pin above is vacuous",
+  );
+  assert.equal(
+    otherLookups.length, 1,
+    "and reads it exactly once — the deactivatedAt chokepoint and the email prefs share one query",
+  );
 });

@@ -153,20 +153,35 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
     // re-scatter it into the per-channel queries). Account removal disables
     // rather than scrubs, so a removed reporter keeps a live email, Discord link
     // and push subscriptions and would otherwise be notified forever.
-    const reporterActive = prisma.user
-      .findUnique({ where: { id: issue.reportedBy }, select: { deactivatedAt: true } })
-      .then((u) => !!u && u.deactivatedAt == null)
-      .catch(() => false);
+    //
+    // It also decides self-replies. An issue admin who REPORTED the issue and
+    // then replies in their own thread is talking to themselves — the inbox row
+    // already skipped that case, and the comment beside it even names the
+    // request routes' selfAction guard as the pattern, but Discord, push and
+    // email all gated purely on the reporter being active. Commit 40fea6e fixed
+    // exactly this shape in the sibling PATCH resolve path; this handler has the
+    // identical structure plus an extra email channel, and was missed.
+    const selfAction = issue.reportedBy === session.user.id;
+
+    // One read, not two: the deactivatedAt chokepoint and the email preferences
+    // were separate findUniques for the same row.
+    const reporter = selfAction
+      ? Promise.resolve(null)
+      : prisma.user
+          .findUnique({
+            where: { id: issue.reportedBy },
+            select: { deactivatedAt: true, email: true, notificationEmail: true, notifyOnIssue: true },
+          })
+          .catch(() => null);
+    // Fails CLOSED — a null row (missing, or a failed read) means no notification.
+    const reporterActive = reporter.then((u) => !!u && u.deactivatedAt == null);
 
     void reporterActive.then((active) => {
       if (!active) return;
       void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
       void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
     });
-    // An issue admin who reported the issue and then replies in their own thread
-    // shouldn't get a self-notification inbox row ("<self> replied…"). Mirrors the
-    // selfAction guard the request routes use.
-    if (issue.reportedBy !== session.user.id) {
+    if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_REPLY",
         title: issue.title,
@@ -176,11 +191,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         posterPath: issue.posterPath,
       });
     }
-    void prisma.user
-      .findUnique({
-        where: { id: issue.reportedBy },
-        select: { email: true, notificationEmail: true, notifyOnIssue: true },
-      })
+    void reporter
       .then(async (reporter) => {
         if (!reporter?.notifyOnIssue) return;
         if (!(await reporterActive)) return; // same chokepoint as above
