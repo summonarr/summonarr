@@ -20,9 +20,34 @@ function escapeSQL(value: unknown): string {
   }
   if (typeof value === "bigint") return String(value);
   if (value instanceof Date) return `'${value.toISOString()}'`;
-  // Prisma returns Json/Jsonb columns as parsed objects/arrays. String(value)
-  // would produce "[object Object]" — re-serialize with JSON.stringify so the
-  // dump contains a valid JSON literal that Postgres can re-parse on INSERT.
+  // A native Postgres ARRAY column (text[] etc) also arrives as a JS array, and
+  // it needs an ARRAY literal, not a JSON one. Emitting `'["a","b"]'` for
+  // JellyfinLibraryItem.jellyfinItemIds made Postgres reject the row with
+  // `22P02 malformed array literal` — the EMPTY array too, so it was every row
+  // in that table, not just guardrail-37's duplicate-copy rows. The importer
+  // runs the whole dump in one transaction, so the first such row rolled back
+  // the entire restore while the export itself returned 200 and looked perfect.
+  //
+  // The quoted `'{a,b}'` form is deliberate: it stays a plain single-quoted
+  // string, so backup-import's SAFE_LITERAL_RE still accepts it. An ARRAY[...]
+  // constructor would be rejected by that validator.
+  //
+  // Discriminating on the JS shape is only sound because NO Json column in this
+  // schema holds a top-level array — one that did would arrive as an array too
+  // and get an array literal written into a jsonb column, which is this same
+  // bug in reverse. tests/schema-invariants.test.mts pins that assumption; if
+  // it ever goes red, this needs the real column type rather than the shape.
+  if (Array.isArray(value)) {
+    const elements = value.map((el) => {
+      if (el === null) return "NULL";
+      // Per-element quoting, then the outer pass escapes the SQL quotes.
+      return `"${String(el).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    });
+    return `'${`{${elements.join(",")}}`.replace(/\0/g, "").replace(/'/g, "''")}'`;
+  }
+  // Prisma returns Json/Jsonb columns as parsed objects. String(value) would
+  // produce "[object Object]" — re-serialize with JSON.stringify so the dump
+  // contains a valid JSON literal that Postgres can re-parse on INSERT.
   const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
   const str = raw.replace(/\0/g, "").replace(/'/g, "''");
   return `'${str}'`;
