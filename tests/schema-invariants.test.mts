@@ -302,3 +302,34 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
     `play-history.ts's raw SQL references table(s) that are not models in schema.prisma: ${missing.join(", ")}`,
   );
 });
+
+// ── guardrail 37: the second Jellyfin item id column ────────────────────────
+//
+// One title can sit in several libraries on ONE server (Anime vs TV, HD vs 4K,
+// an accidental double-import) and each copy carries its own Jellyfin item id,
+// but @@id([tmdbId, mediaType, serverInstance]) allows exactly one row. Before
+// jellyfinItemIds the losing copies' ids were simply lost, so a watch filed
+// under one resolved to no title and the episodes filed under it vanished from
+// TVEpisodeCache. Dropping this column back out is a `db push` away and nothing
+// else in the tree would fail.
+
+test("guardrail 37: JellyfinLibraryItem keeps jellyfinItemIds alongside jellyfinItemId, defaulted so db push can add it to a populated table", () => {
+  const m = model("JellyfinLibraryItem");
+  assert.ok(m.fields.includes("jellyfinItemId"), "the single canonical id column must stay — every read ORs against it for rows predating the array");
+  assert.ok(m.fields.includes("jellyfinItemIds"), "JellyfinLibraryItem is missing jellyfinItemIds; duplicate-library copies become unresolvable again");
+
+  const decl = m.body.split("\n").find((l) => /^\s*jellyfinItemIds\s/.test(l)) ?? "";
+  assert.match(decl, /String\[\]/, `jellyfinItemIds must be a String[] — got: ${decl.trim()}`);
+  assert.match(
+    decl,
+    /@default\(\[\]\)/,
+    "jellyfinItemIds must @default([]) — a list column with no default cannot be added to a populated table, " +
+      "and the entrypoint applies schema changes with db push at boot",
+  );
+
+  assert.ok(
+    /@@index\(\[jellyfinItemIds\][^)]*type:\s*Gin/.test(m.body),
+    "jellyfinItemIds needs a GIN index: the 5s play-history poller ORs a has/hasSome over it on every tick, " +
+      "and a btree cannot serve an array containment operator — the query degrades to a full scan of the library",
+  );
+});

@@ -541,6 +541,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // operator the remap landed remotely and a re-sync will reconcile the cache,
   // rather than implying nothing happened.
   let remoteRemapped = false;
+  // Set when a title had several copies on the server and only some could be
+  // remapped — the operator has to know the rest still carry the old match.
+  let partialWarning: string | null = null;
   try {
     if (server === "plex") {
       const item = await prisma.plexLibraryItem.findFirst({
@@ -600,14 +603,52 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
     } else {
       const item = await prisma.jellyfinLibraryItem.findFirst({
         where: { tmdbId, mediaType, serverInstance },
-        select: { jellyfinItemId: true, filePath: true },
+        select: { jellyfinItemId: true, jellyfinItemIds: true, filePath: true },
       });
-      if (!item?.jellyfinItemId) {
+      // EVERY copy, not just the stored id (guardrail 37). A title in two
+      // libraries is mismatched on the server in both places; remapping one left
+      // the other reporting the old tmdbId, so the very next library sync could
+      // elect the unfixed copy and the admin's correction silently reverted.
+      // Deduped and ordered with the stored id first — `jellyfinItemIds` already
+      // contains it on any row written since that column landed.
+      const targetItemIds = Array.from(new Set([
+        ...(item?.jellyfinItemId ? [item.jellyfinItemId] : []),
+        ...(item?.jellyfinItemIds ?? []),
+      ]));
+      if (targetItemIds.length === 0) {
         return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
       }
-      const jellyfinResult = await fixJellyfinMatch(item.jellyfinItemId, correctTmdbId, mediaType, serverInstance, item.filePath);
+      // Serial, not concurrent: each call drives a FullRefresh on the server and
+      // then polls for confirmation, and hammering a Jellyfin box with parallel
+      // metadata refreshes is how these calls start timing out.
+      const applied: Array<Awaited<ReturnType<typeof fixJellyfinMatch>>> = [];
+      const failedCopies: string[] = [];
+      for (const targetId of targetItemIds) {
+        try {
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null));
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);
+          failedCopies.push(targetId);
+        }
+      }
+      // Only a total failure aborts. With one copy this is exactly the old
+      // behaviour (the throw propagates to the caller's handler); with several,
+      // refusing to record the copies that DID move would leave the DB claiming
+      // a match the server no longer has.
+      if (applied.length === 0) {
+        const first = failedCopies[0] ?? "";
+        throw new Error(`Jellyfin match failed for every copy of this title (${failedCopies.length}): ${first}`);
+      }
+      const jellyfinResult = applied[0];
       const resolvedItemId = jellyfinResult.newItemId;
+      const resolvedItemIds = Array.from(new Set(applied.map((r) => r.newItemId)));
       remoteRemapped = true;
+      if (failedCopies.length > 0) {
+        partialWarning =
+          `DB updated to TMDB #${correctTmdbId}, and ${applied.length} of ${targetItemIds.length} copies of this title were re-matched on Jellyfin. ` +
+          `${failedCopies.length} could not be — those copies still report the old match, so a later library sync may bring it back. Retry, or fix them in Jellyfin directly.`;
+      }
 
       await prisma.$transaction(async (tx) => {
         // Same locks as the sync orchestrator (2001 library, 2002 episode), 2001 before
@@ -617,8 +658,8 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
         await tx.jellyfinLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
-          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, jellyfinItemId: resolvedItemId },
-          update: { jellyfinItemId: resolvedItemId },
+          create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item?.filePath ?? null, jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
+          update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
         });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
@@ -646,7 +687,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
     }
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json(partialWarning ? { ok: true, warning: partialWarning } : { ok: true });
   } catch (err) {
     // Log the real detail server-side only — the message can carry the
     // configured Plex/Jellyfin server URL, internal paths, or upstream

@@ -121,8 +121,17 @@ export async function resolveShowTmdbId(
     });
     return item?.tmdbId ?? null;
   }
+  // ORed across both id columns (guardrail 37): a show in two libraries has two
+  // item ids and only one can be the stored `jellyfinItemId`, so a watch filed
+  // under the other copy resolved to nobody. `jellyfinItemIds` carries every id,
+  // but rows written before that column existed are `[]` — hence the OR rather
+  // than a straight swap to `has`.
   const item = await prisma.jellyfinLibraryItem.findFirst({
-    where: { jellyfinItemId: showKey, mediaType: "TV", serverInstance },
+    where: {
+      mediaType: "TV",
+      serverInstance,
+      OR: [{ jellyfinItemId: showKey }, { jellyfinItemIds: { has: showKey } }],
+    },
     select: { tmdbId: true },
   });
   return item?.tmdbId ?? null;

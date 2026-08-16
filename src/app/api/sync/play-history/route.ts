@@ -674,11 +674,28 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         // serverInstance-scoped like the Plex prefetch: Jellyfin item ids are
         // server-local GUIDs, so a collision is unlikely but the scope keeps
         // this instance's watch from resolving against another server's row.
-        where: { jellyfinItemId: { in: itemIdsNeedingLookup }, serverInstance: instance },
-        select: { jellyfinItemId: true, tmdbId: true, mediaType: true },
+        //
+        // ORed across both id columns (guardrail 37) — a title in two libraries
+        // has an id per copy and only one is the stored `jellyfinItemId`, so a
+        // watch of the other copy used to fall through to "unknown". Rows
+        // predating `jellyfinItemIds` are `[]`, so both branches are needed.
+        where: {
+          serverInstance: instance,
+          OR: [
+            { jellyfinItemId: { in: itemIdsNeedingLookup } },
+            { jellyfinItemIds: { hasSome: itemIdsNeedingLookup } },
+          ],
+        },
+        select: { jellyfinItemId: true, jellyfinItemIds: true, tmdbId: true, mediaType: true },
       })
     : [];
-  const libMap = new Map(libRows.map((r) => [r.jellyfinItemId, r]));
+  // Keyed by EVERY id the row answers to, or widening the query above would find
+  // the row and then fail to look it up.
+  const libMap = new Map<string, (typeof libRows)[number]>();
+  for (const r of libRows) {
+    if (r.jellyfinItemId) libMap.set(r.jellyfinItemId, r);
+    for (const id of r.jellyfinItemIds) libMap.set(id, r);
+  }
 
   // Resolve TMDB ids per session (TV episodes hit DB via resolveShowTmdbId).
   const resolved = await Promise.all(

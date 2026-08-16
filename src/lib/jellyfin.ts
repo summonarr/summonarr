@@ -529,6 +529,15 @@ interface JellyfinEpisodeItem {
   IndexNumber?: number;
 }
 
+// The value for JellyfinLibraryItem.jellyfinItemIds: every id this title
+// occupies, the stored `itemId` first. Reads OR this against `jellyfinItemId`
+// (rows written before the column existed are `[]`), so the winner appearing in
+// both is deliberate rather than redundant — it keeps the array a complete
+// answer on its own once a full sync has rewritten the row.
+export function libraryItemIds(data: JellyfinLibraryItemData): string[] {
+  return data.itemId ? [data.itemId, ...data.duplicateItemIds] : [...data.duplicateItemIds];
+}
+
 // EVERY Jellyfin item id that resolves to a given series, not just the one whose
 // row survives into JellyfinLibraryItem.
 //
