@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr, isMovieDownloadingInRadarr, isSeriesDownloadingInSonarr, getMovieReleaseInfo, getSeriesFirstAired } from "@/lib/arr";
-import { notifyUserDownloadPending, notifyUserAwaitingRelease, assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
@@ -11,7 +11,7 @@ import { mergeDiscordIntoWebAccount } from "@/lib/discord-merge";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { tmdbAuth } from "@/lib/tmdb-auth";
-import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { scheduleDownloadCheck } from "@/lib/download-check";
 import { logAudit } from "@/lib/audit";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { checkBodySize, assertBodyBytesUnderCap } from "@/lib/body-size";
@@ -840,7 +840,7 @@ async function handleComponent(interaction: any): Promise<void> {
           confirmEmbed.color = 0x57f287;
         } else if (mayAutoApprove) {
           // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
-          // scheduleDelayed job still yields a follow-up notification.
+          // scheduleDownloadCheck job still yields a follow-up notification.
           // Serializable is load-bearing: at the default Read Committed two concurrent
           // txs both read count < limit and both commit past the quota boundary, and
           // runWithSerializableRetry's P2034 retry can never fire (parity with
@@ -896,52 +896,13 @@ async function handleComponent(interaction: any): Promise<void> {
             confirmEmbed.color = 0x57f287;
           }
 
-          scheduleDelayed(90_000, async () => {
-            try {
-              const current = await prisma.mediaRequest.findUnique({ where: { id: request.id }, select: { status: true } });
-              if (current?.status !== "APPROVED") return;
-
-              const downloading = mediaType === "MOVIE"
-                ? await isMovieDownloadingInRadarr(selected.id, routedSlug)
-                : await isSeriesDownloadingInSonarr(selected.id, routedSlug);
-              // Skip on true (downloading) AND null (queue unreadable); only a
-              // confirmed "not downloading" fires the pending notify.
-              if (downloading !== false) return;
-
-              const now = new Date();
-              let released = true;
-              let soonestReleaseDate: string | null = null;
-
-              if (mediaType === "MOVIE") {
-                const info = await getMovieReleaseInfo(selected.id);
-                if (info) {
-                  const futureDates = [info.digitalRelease, info.physicalRelease]
-                    .filter((d): d is string => !!d && new Date(d) > now);
-                  const pastDates = [info.digitalRelease, info.physicalRelease]
-                    .filter((d): d is string => !!d && new Date(d) <= now);
-                  if (pastDates.length === 0 && futureDates.length > 0) {
-                    released = false;
-                    // Chronological, not lexicographic — see the identical fix in
-                    // /api/requests/[id] and the comparator in the sync orchestrator.
-                    soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-                  }
-                }
-              } else {
-                const firstAired = await getSeriesFirstAired(selected.id, routedSlug);
-                if (firstAired && new Date(firstAired) > now) {
-                  released = false;
-                  soonestReleaseDate = firstAired;
-                }
-              }
-
-              if (!released) {
-                await notifyUserAwaitingRelease(dbUser.id, selected.title, mediaType, soonestReleaseDate);
-              } else {
-                await notifyUserDownloadPending(dbUser.id, selected.title, mediaType);
-              }
-            } catch (err) {
-              console.error("[interactions] 90s download-check failed:", err);
-            }
+          scheduleDownloadCheck({
+            requestId: request.id,
+            tmdbId: selected.id,
+            mediaType,
+            arrInstance: routedSlug,
+            requestedBy: dbUser.id,
+            title: selected.title,
           }, { name: "interactions:90s-download-check" });
         } else {
           // If another request for this title ON THE SAME INSTANCE is already APPROVED
@@ -1110,8 +1071,11 @@ async function handleComponent(interaction: any): Promise<void> {
       const adminName = adminUser.name ?? adminUser.email;
 
       if (action === "admin_approve") {
-        // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync orchestrator's
-        // 90s "not yet downloading" follow-up notifier fires for Discord-button approvals too.
+        // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync
+        // orchestrator's 90s "not yet downloading" follow-up notifier fires for
+        // Discord-button approvals too. Arming the field is only half of it — the
+        // scheduleDownloadCheck below is what runs the check PROMPTLY at ~90s; the
+        // orchestrator sweep is the backstop for when this job is dropped or fails.
         const claimed = await prisma.mediaRequest.updateMany({
           where: { id: requestId, status: "PENDING" },
           data: { status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
@@ -1170,6 +1134,17 @@ async function handleComponent(interaction: any): Promise<void> {
         if (!arrFailed && request.requestedBy !== adminUser.id) {
           notifyRequestStatusChange("APPROVED", request);
         }
+        // Queued unconditionally, exactly like the web PATCH path: on an arr failure the
+        // row rolled back to PENDING and the job's own status re-read bails, so there is
+        // no second gate to keep in sync here.
+        scheduleDownloadCheck({
+          requestId: request.id,
+          tmdbId: request.tmdbId,
+          mediaType: request.mediaType,
+          arrInstance: request.arrInstance,
+          requestedBy: request.requestedBy,
+          title: request.title,
+        }, { name: "interactions:admin-approve-90s-download-check" });
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
           title: arrFailed ? `⚠️ Approved (arr failed) — ${request.title}` : `✅ Approved — ${request.title}`,
