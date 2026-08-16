@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 
 export function NavigationProgress() {
   const pathname = usePathname();
+  // The bar starts on any pushState, but completion was keyed on pathname
+  // ALONE — so a query-only navigation (a filter change, a tab switch) never
+  // completed it. Almost every filter surface in this app pushes exactly
+  // that shape, so the bar sat pinned at ~85% across the viewport until the
+  // user happened to navigate to a different path. Track the full URL.
+  const searchParams = useSearchParams();
+  const url = `${pathname}?${searchParams.toString()}`;
   const [width, setWidth] = useState(0);
   const [visible, setVisible] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -41,8 +48,8 @@ export function NavigationProgress() {
   }, []);
 
   useEffect(() => {
-    if (pathname === prevPathname.current) return;
-    prevPathname.current = pathname;
+    if (url === prevPathname.current) return;
+    prevPathname.current = url;
 
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
@@ -59,7 +66,7 @@ export function NavigationProgress() {
       clearTimeout(completeId);
       clearTimeout(hideId);
     };
-  }, [pathname]);
+  }, [url]);
 
   if (!visible) return null;
 

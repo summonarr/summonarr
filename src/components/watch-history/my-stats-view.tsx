@@ -130,7 +130,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
           <AreaChart
             data={playsByDay}
             h={130}
-            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00`))}
+            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`))}
             valueSuffix=" plays"
           />
         </ActivityCard>

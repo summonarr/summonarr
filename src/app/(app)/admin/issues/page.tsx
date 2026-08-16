@@ -112,19 +112,26 @@ export default async function AdminIssuesPage({
     });
   }
 
-  const allTvTmdbIds = [...new Map(
-    groups
-      .filter(({ representative: i }) => i.mediaType === "TV")
-      .map(({ representative: i }) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
+  // Every media type, and sourced from allIssues rather than the FILTERED
+  // groups. Two bugs in one line: filtering to TV left plexSet/jellyfinSet empty
+  // for every movie, so Fix Match told the admin "This item is not in any synced
+  // library" — directly under the movie's own Plex/Jellyfin file path, which the
+  // same dialog fetches separately and displays. Every movie WRONG_MATCH issue
+  // was unfixable from this page, and the obvious reading is that library sync
+  // is broken. Sourcing from `groups` had the same effect for a selected issue
+  // outside the current filter. /admin/page.tsx builds the equivalent sets with
+  // no mediaType filter.
+  const allLibraryPairs = [...new Map(
+    allIssues.map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
   ).values()];
-  const [plexItems, jellyfinItems] = allTvTmdbIds.length > 0
+  const [plexItems, jellyfinItems] = allLibraryPairs.length > 0
     ? await Promise.all([
         prisma.plexLibraryItem.findMany({
-          where: { OR: allTvTmdbIds.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
+          where: { OR: allLibraryPairs.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
           select: { tmdbId: true, mediaType: true },
         }),
         prisma.jellyfinLibraryItem.findMany({
-          where: { OR: allTvTmdbIds.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
+          where: { OR: allLibraryPairs.map(({ tmdbId, mediaType }) => ({ tmdbId, mediaType })) },
           select: { tmdbId: true, mediaType: true },
         }),
       ])

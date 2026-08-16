@@ -183,10 +183,16 @@ export function ActivityRecentPlays({
   // updated. Re-seed from the incoming prop. Same pattern as browse-grid.tsx and
   // audit-log-table.tsx.
   useEffect(() => {
+    // Only re-seed while the user is still on page 1. A live SSE refresh fires
+    // router.refresh() on every finished play, and re-seeding unconditionally
+    // threw away every page loaded via "Load more" — on a busy server the list
+    // snapped back to 20 rows mid-read, repeatedly, which made the button
+    // effectively unusable. Past page 1 the newest rows arrive on the next
+    // explicit load instead.
+    if (page !== 1) return;
     setPlays(initialPlays);
-    setPage(1);
     setHasMore(initialPlays.length >= 20);
-  }, [initialPlays]);
+  }, [initialPlays, page]);
 
   const loadMore = async () => {
     setLoading(true);
@@ -237,7 +243,16 @@ export function ActivityRecentPlays({
         userSource: p.mediaServerUser?.source ?? "",
         userThumb: p.mediaServerUser?.thumbUrl ?? null,
       }));
-      setPlays((prev) => [...prev, ...items]);
+      // De-dup by id. Pagination is OFFSET-based over a newest-first list, so a
+      // play finishing between page 1 and page 2 shifts every row down one and
+      // the next page repeats the row that straddled the boundary. That gives
+      // React duplicate keys, and — independently of keys — `expandedId === p.id`
+      // matches both copies, so clicking one expands both. The two sibling
+      // load-more lists (watch-history-list, notification-list) already do this.
+      setPlays((prev) => {
+        const seen = new Set(prev.map((p) => p.id));
+        return [...prev, ...items.filter((p) => !seen.has(p.id))];
+      });
       setPage(nextPage);
       setHasMore(items.length >= 20);
     } catch (err) {

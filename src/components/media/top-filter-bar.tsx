@@ -83,6 +83,11 @@ export function TopFilterBar({
       if (v === undefined || v === "") params.delete(k);
       else params.set(k, v);
     }
+    // Any filter change invalidates the current page number — the result set
+    // it indexed into no longer exists. Without this a user on page 7 who
+    // narrows to two pages of results lands on an out-of-range slice.
+    // filter-bar.tsx does the same on its own push.
+    params.delete("page");
     router.push(`${pathname}?${params.toString()}`);
   }, [router, pathname, searchParams]);
 

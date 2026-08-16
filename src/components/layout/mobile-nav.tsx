@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
@@ -17,6 +17,7 @@ import {
   X,
   type IconComponent,
 } from "@/components/icons";
+import { useLiveEvents } from "@/hooks/use-live-events";
 import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
 import { filterNavByFeatures, getVisibleAdminItems, userNavItems } from "@/lib/nav-items";
@@ -57,6 +58,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
     role,
     filterNavByFeatures(userNavItems, featureFlags),
     session?.user?.permissions,
+    featureFlags,
   );
   const someTabActive = tabs.some((t) => t.match(pathname));
 
@@ -276,25 +278,54 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
 // render agree — no Date.now()/new Date() at render (guardrail 16).
 function NotificationsLink() {
   const [unread, setUnread] = useState(0);
+  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Re-read on the same signals the desktop bell uses. Fetching once on mount
+  // left the badge frozen for the whole SPA session: this component and the
+  // desktop bell are BOTH mounted at every viewport (one is hidden with CSS,
+  // not gated in React), and neither remounts on navigation — App Router
+  // layouts persist, and router.refresh() re-renders server components without
+  // re-running client effects. So reading your notifications and navigating
+  // back left the count exactly as it was at first paint, and a new
+  // notification never appeared at all until a full reload.
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(withBasePath("/api/notifications"), {
+        credentials: "include",
+      });
+      if (!res.ok) return;
+      const data = (await res.json()) as { unreadCount?: number };
+      setUnread(data.unreadCount ?? 0);
+    } catch {
+      // best-effort — a transient failure just leaves the last-known count
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(withBasePath("/api/notifications"), {
-          credentials: "include",
-        });
-        if (!res.ok) return;
-        const data = (await res.json()) as { unreadCount?: number };
-        if (!cancelled) setUnread(data.unreadCount ?? 0);
-      } catch {
-        // best-effort — a transient failure just leaves the badge hidden
-      }
-    })();
+    void load();
+    // Refresh when the tab comes back to the foreground. No poll here: the
+    // desktop bell already polls every 60s and is mounted alongside this, so a
+    // second interval would just double the request rate for one visible badge.
+    function onVisibility() {
+      if (document.visibilityState === "visible") void load();
+    }
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
     };
-  }, []);
+  }, [load]);
+
+  useLiveEvents((event) => {
+    if (
+      event.type === "request:updated" ||
+      event.type === "issue:updated" ||
+      event.type === "issuemessage:created"
+    ) {
+      if (reloadTimer.current) clearTimeout(reloadTimer.current);
+      reloadTimer.current = setTimeout(() => void load(), 400);
+    }
+  });
 
   return (
     <Link
@@ -339,7 +370,12 @@ function NotificationsLink() {
 }
 
 // Builds the bottom tab bar list; the 4th slot is role/permission-gated (admin / issues / profile).
-function buildTabs(role: string | undefined, userItems: readonly { href: string }[], sessionPerms?: string): Tab[] {
+function buildTabs(
+  role: string | undefined,
+  userItems: readonly { href: string }[],
+  sessionPerms: string | undefined,
+  featureFlags: Record<string, boolean> | undefined,
+): Tab[] {
   const has = (href: string) => userItems.some((i) => i.href === href);
 
   const browseHref = has("/movies")
@@ -380,7 +416,16 @@ function buildTabs(role: string | undefined, userItems: readonly { href: string 
   // requires MANAGE_REQUESTS — so a MANAGE_USERS-only delegate tapped Admin and
   // was redirected straight back to Discover.
   const permsStr = sessionPerms;
-  const adminItems = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role);
+  // Feature-filtered, like the user items the caller already filters. Without
+  // this the bottom bar could show a permanent tab pointing at a page whose
+  // feature is off — and those pages call requireFeature(), which renders the
+  // 404. For an issues-only delegate that tab is their primary destination.
+  // The sidebar and the More drawer both filter here; this was the one
+  // getVisibleAdminItems call site that did not.
+  const adminItems = filterNavByFeatures(
+    getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role),
+    featureFlags,
+  );
   const issuesOnly = adminItems.length === 1 && adminItems[0].href === "/admin/issues";
 
   if (adminItems.length > 0 && !issuesOnly) {

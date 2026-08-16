@@ -48,10 +48,27 @@ function AvatarImage({
   ...props
 }: React.ComponentProps<"img">) {
   const { status, setStatus } = useAvatarContext("AvatarImage")
+  const ref = React.useRef<HTMLImageElement>(null)
+
+  // React attaches the load listener during hydration and does NOT replay an
+  // event that already fired. For an <img> present in the SSR HTML whose bytes
+  // are already in the disk cache, `load` fires before that — so onLoad never
+  // runs and the status stays "idle" forever. Both this and AvatarFallback
+  // render at "idle", so the stuck state puts the image and the initials in the
+  // DOM together, each claiming size-full, and they squash each other. Reading
+  // `.complete` on mount is what the @base-ui primitive this replaced did, and
+  // it is the only way to observe a load that predates the listener.
+  React.useEffect(() => {
+    const img = ref.current
+    if (!img || !img.complete) return
+    setStatus(img.naturalWidth > 0 ? "loaded" : "error")
+  }, [setStatus])
+
   if (status === "error") return null
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
+      ref={ref}
       data-slot="avatar-image"
       alt={props.alt ?? ""}
       className={cn(

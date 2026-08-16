@@ -69,6 +69,21 @@ export function DeleteConfirm({
             {row.mediaServerUser.username}
           </span>{" "}
           will be permanently removed from history.
+          {/* Say how many rows go. A grouped row is one VIEWING that was paused
+              and resumed, so "the play record" can mean several database rows —
+              and play history cannot be restored from inside the app at all
+              (guardrail 19: the live poller is its only writer). An admin
+              deleting several sittings at once should be told so first. */}
+          {(row.segmentCount ?? 1) > 1 && (
+            <>
+              {" "}
+              This viewing was watched across{" "}
+              <span style={{ color: "var(--ds-fg)" }}>
+                {row.segmentCount} sittings
+              </span>
+              ; all of them will be deleted.
+            </>
+          )}
         </div>
         {error && (
           <div

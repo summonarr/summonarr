@@ -93,6 +93,17 @@ export function WatchHistoryList({
     filterGen.current += 1;
     setRefreshing(true);
     setError(null);
+    // Drop the cursor for the duration of the refetch. The generation counter
+    // cannot cover this on its own: it is bumped synchronously HERE, while
+    // nextCursor is state that only updates when the refetch resolves. In that
+    // window the component holds the NEW generation and the OLD cursor, so a
+    // "Load more" click captures a generation that still matches on return and
+    // sails through the guard — sending the previous query's keyset position
+    // into the new filter. Rows between the new page 1 and that stale position
+    // are never fetched, and the cursor installed afterwards sits below the
+    // gap, so the hole is permanent for the session. Clearing it also removes
+    // the button, which is the honest affordance while page 1 is reloading.
+    setNextCursor(null);
     const params = new URLSearchParams();
     if (typeFilter) params.set("mediaType", typeFilter);
     if (debouncedSearch.trim()) params.set("search", debouncedSearch.trim());

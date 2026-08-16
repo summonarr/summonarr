@@ -113,8 +113,29 @@ export function NotificationPrefs({
   // Last state the server confirmed — the toggles revert here if a save fails.
   const savedPrefsRef = useRef<AllPrefs>(prefs);
 
-  useEffect(() => () => {
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+  useEffect(() => {
+    // Alias the ref containers (not their contents) — cleanup must read whatever
+    // is pending AT UNMOUNT, so dereferencing .current inside the closure is the
+    // point.
+    const timer = saveTimerRef;
+    const pendingRef = pendingPrefsRef;
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+      const pending = pendingRef.current;
+      if (!pending) return;
+      // The toggle IS the save on this page — there is no Save button — and the
+      // switch has already flipped optimistically. Clearing the timer without
+      // flushing silently discarded any toggle made within the 400ms debounce of
+      // navigating away, so the user watched it move and it never persisted.
+      // `keepalive` lets the request outlive the unmount. Mirrors the unmount
+      // flush in settings/features-form.tsx.
+      void fetch(withBasePath("/api/profile/notifications"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pending),
+        keepalive: true,
+      }).catch(() => {});
+    };
   }, []);
 
   async function flush() {

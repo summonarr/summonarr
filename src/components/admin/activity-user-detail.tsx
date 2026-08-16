@@ -241,7 +241,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
           <AreaChart
             data={playsByDay}
             h={130}
-            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00`))}
+            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`))}
             valueSuffix=" plays"
           />
         </ActivityCard>

@@ -91,6 +91,9 @@ export function ActivityHistoryTable({
   const [platforms, setPlatforms] = useState<string[]>([]);
   const [users, setUsers] = useState<MediaServerUserOption[]>([]);
 
+  // Bumped after a delete to re-run the fetch effect. The table is the only
+  // thing that knows the DB changed — the DELETE route emits no SSE event.
+  const [reloadToken, setReloadToken] = useState(0);
   const [deleteRow, setDeleteRow] = useState<HistoryRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -209,7 +212,7 @@ export function ActivityHistoryTable({
       });
 
     return () => controller.abort();
-  }, [page, limit, buildFilterParams]);
+  }, [page, limit, buildFilterParams, reloadToken]);
 
   function toggleSort(field: SortField) {
     if (sortBy === field) {
@@ -225,14 +228,23 @@ export function ActivityHistoryTable({
     setDeleting(true);
     setDeleteError(null);
     try {
-      const res = await fetch(withBasePath(`/api/play-history/${deleteRow.id}`), {
-        method: "DELETE",
-      });
+      // In grouped mode a row IS the whole viewing — one film paused and
+      // resumed across several sittings — so the delete has to take the chain.
+      // The row's own id is only the NEWEST segment (the group's representative
+      // is picked by startedAt DESC), so deleting it alone left the rest behind.
+      const res = await fetch(
+        withBasePath(`/api/play-history/${deleteRow.id}${grouped ? "?chain=true" : ""}`),
+        { method: "DELETE" },
+      );
       if (res.ok) {
-        setRows((prev) => prev.filter((r) => r.id !== deleteRow.id));
-        setTotal((t) => Math.max(0, t - 1));
         setExpandedId(null);
         setDeleteRow(null);
+        // Refetch rather than splice the row out and decrement `total` by one.
+        // Both of those were guesses about what the server did, and both were
+        // wrong for a chain: the row vanished while its remaining segments
+        // survived, and `total` counts DISTINCT chains so it had not changed at
+        // all. Re-reading is the only thing that cannot disagree with the DB.
+        setReloadToken((t) => t + 1);
       } else {
         setDeleteError("Couldn't delete this play record. Please try again.");
       }

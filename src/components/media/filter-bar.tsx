@@ -157,7 +157,14 @@ export function FilterBar({
     const bTop = TOP_PROVIDER_IDS.has(b.provider_id);
     if (aTop && !bTop) return -1;
     if (!aTop && bTop) return 1;
-    return a.provider_name.localeCompare(b.provider_name);
+    // Pinned locale. Bare localeCompare uses the RUNTIME default — Node's on
+    // the server, the browser's on the client — and this list is rendered into
+    // SSR HTML. Czech and Slovak sort the "ch" digraph after "h" (moving the
+    // real provider "Chili"), Lithuanian and Latvian collate Y next to I, and
+    // Estonian puts Z between S and T; any of those reorders the <option> list
+    // between server and client and reports a hydration mismatch. Guardrail 16
+    // is written around the clock, but locale is the same class of bug.
+    return a.provider_name.localeCompare(b.provider_name, "en");
   });
   const activeProviderName = sortedProviders.find((p) => String(p.provider_id) === activeWatchProvider)?.provider_name;
 

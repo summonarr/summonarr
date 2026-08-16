@@ -418,7 +418,17 @@ export function Sparkline({
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
-        {hover && (
+        {/* hover.i is captured from a mousemove against the data array as it
+            was THEN. Nothing clears it when the array shrinks — the live SSE
+            refresh recomputes a rolling cutoff, so the oldest day drops out
+            while the pointer still rests on the last index, and a filter
+            change can take the series from ~60 points to ~7. The index then
+            reads past the end and `data[hover.i].toLocaleString()` throws
+            during render, which unwinds to the (app) error boundary and
+            blanks the whole activity dashboard. Dropping the tooltip for an
+            out-of-range index is honest; `?? 0` would render a value that
+            was never in the data. */}
+        {hover && hover.i < data.length && (
           <>
             <line
               x1={hover.i * step}
@@ -623,7 +633,17 @@ export function AreaChart({
           vectorEffect="non-scaling-stroke"
           strokeLinejoin="round"
         />
-        {hover && (
+        {/* hover.i is captured from a mousemove against the data array as it
+            was THEN. Nothing clears it when the array shrinks — the live SSE
+            refresh recomputes a rolling cutoff, so the oldest day drops out
+            while the pointer still rests on the last index, and a filter
+            change can take the series from ~60 points to ~7. The index then
+            reads past the end and `data[hover.i].toLocaleString()` throws
+            during render, which unwinds to the (app) error boundary and
+            blanks the whole activity dashboard. Dropping the tooltip for an
+            out-of-range index is honest; `?? 0` would render a value that
+            was never in the data. */}
+        {hover && hover.i < data.length && (
           <>
             <line
               x1={hover.i * step}
