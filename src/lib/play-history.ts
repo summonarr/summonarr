@@ -1,5 +1,4 @@
 import { prisma } from "./prisma";
-import type { VisibleServerInstances } from "./media-visibility";
 import { emitSSE } from "./sse-emitter";
 import { sanitizeForLog } from "./sanitize";
 import { normalizeEmail } from "./email-normalize";
@@ -1384,22 +1383,9 @@ const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>
 // For TV the unit is per-episode; show-level "plays" sum across episodes.
 // totalHours and episodes are computed from raw sessions so partial sittings still contribute.
 export async function getMostPopularOnServer(
-  // `visible` is REQUIRED, deliberately. This aggregate ranks titles by watch
-  // activity across every server, and without a scope it told an ungranted user
-  // which titles live on a restricted server, how often they are played and by
-  // how many people — on the same page whose availability badges hide exactly
-  // that. Making it a required argument means a new caller cannot forget it;
-  // an optional one defaulting to "everything" would reintroduce the leak
-  // silently. Callers all hold a session (see getVisibleServerInstances).
-  opts: {
-    mediaType?: "MOVIE" | "TV";
-    sort?: PopularSort;
-    page?: number;
-    limit?: number;
-    visible: VisibleServerInstances;
-  },
+  opts: { mediaType?: "MOVIE" | "TV"; sort?: PopularSort; page?: number; limit?: number } = {},
 ): Promise<PopularResult> {
-  const { mediaType, sort = "plays", visible } = opts;
+  const { mediaType, sort = "plays" } = opts;
   // Clamp page/limit at the SOURCE so every caller is bounded — the /popular server
   // page passes `page` straight through unclamped, which would let one user page
   // arbitrarily deep, forcing a fresh full-table window aggregation per distinct page
@@ -1407,12 +1393,7 @@ export async function getMostPopularOnServer(
   const page = Math.min(Math.max(1, Math.floor(opts.page ?? 1) || 1), MAX_POPULAR_PAGE);
   const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? POPULAR_PER_PAGE) || POPULAR_PER_PAGE), POPULAR_PER_PAGE);
 
-  // The visible sets are part of the key: two users with different grants must
-  // not share a ranking. Costs nothing on a deployment with nothing restricted —
-  // every user resolves the same arrays in the same order (the registry is
-  // read in stored order and only filtered), so the JSON is byte-identical and
-  // collapses to a single entry.
-  const cacheKey = JSON.stringify({ mediaType, sort, page, limit, visible });
+  const cacheKey = JSON.stringify({ mediaType, sort, page, limit });
   const cached = popularCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.data;
 
@@ -1430,33 +1411,6 @@ export async function getMostPopularOnServer(
     params.push(mediaType);
     baseConditions.push(`"mediaType"::text = $${params.length}`);
   }
-
-  // Per-service, never a flat slug list. Plex "remote" and Jellyfin "remote"
-  // are different servers (guardrail 35), so a single `serverInstance IN (…)`
-  // would hand a restricted Jellyfin instance to somebody granted only the Plex
-  // one — the exact cross-service collision the grants model was designed to
-  // avoid. Placeholder expansion rather than `= ANY($n)`: expansion is the
-  // idiom this file already uses three times, and no bound-array form is
-  // exercised anywhere in the tree.
-  //
-  // Pushed here, before baseWhere is joined, so BOTH CTEs that interpolate it
-  // inherit the predicate and every later $-index self-shifts.
-  const expand = (slugs: string[]): string =>
-    slugs
-      .map((slug) => {
-        params.push(slug);
-        return `$${params.length}`;
-      })
-      .join(", ");
-  // Always non-empty in practice — the synthesized default instance is visible
-  // to everyone — but an empty list must mean "this service contributes
-  // nothing", never an illegal `IN ()`.
-  const plexIn = visible.plex.length > 0 ? `"serverInstance" IN (${expand(visible.plex)})` : "FALSE";
-  const jellyfinIn =
-    visible.jellyfin.length > 0 ? `"serverInstance" IN (${expand(visible.jellyfin)})` : "FALSE";
-  baseConditions.push(
-    `(("source" = 'plex' AND ${plexIn}) OR ("source" = 'jellyfin' AND ${jellyfinIn}))`,
-  );
   const baseWhere = baseConditions.join(" AND ");
 
   params.push(arcGapSeconds);

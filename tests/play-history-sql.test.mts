@@ -92,13 +92,7 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (strings: TemplateStringsArr
 
 // Settings back the threshold getters (completion/arc-gap) that
 // getMostPopularOnServer folds into its params.
-shadowPrismaModel(prisma, "setting", { findMany: async () => [], findUnique: async () => null });
-shadowPrismaModel(prisma, "user", { findUnique: async () => null });
-
-// The visible-instance sets getMostPopularOnServer now requires. Distinct per
-// service on purpose: a swap or a flattened list is the failure this scoping
-// exists to prevent, and the assertion below keys off telling them apart.
-const VISIBLE = { plex: ["", "plexonly"], jellyfin: ["", "jfonly"] };
+shadowPrismaModel(prisma, "setting", { findMany: async () => [] });
 // Poster backfill on the rewatch/top-watched leaderboards — never reached with
 // zero rows, stubbed so a shape change can't silently hit a real delegate.
 shadowPrismaModel(prisma, "tmdbMediaCore", { findMany: async () => [] });
@@ -197,7 +191,7 @@ test("getMostPopularOnServer: every mediaType × sort combination keeps $-indice
       // page varies per combo so each lands on a distinct popularCache key.
       combos++;
       const queries = await capture(() =>
-        getMostPopularOnServer({ sort, mediaType, page: combos, limit: 10, visible: VISIBLE }),
+        getMostPopularOnServer({ sort, mediaType, page: combos, limit: 10 }),
       );
       auditAll(`getMostPopularOnServer(sort=${sort}, mediaType=${mediaType ?? "none"})`, queries);
     }
@@ -206,8 +200,8 @@ test("getMostPopularOnServer: every mediaType × sort combination keeps $-indice
 });
 
 test("getMostPopularOnServer: the trending window is an extra BOUND param, and it shifts limit/offset", async () => {
-  const [plain] = await capture(() => getMostPopularOnServer({ sort: "plays", page: 1, limit: 7, visible: VISIBLE }));
-  const [trending] = await capture(() => getMostPopularOnServer({ sort: "trending", page: 1, limit: 7, visible: VISIBLE }));
+  const [plain] = await capture(() => getMostPopularOnServer({ sort: "plays", page: 1, limit: 7 }));
+  const [trending] = await capture(() => getMostPopularOnServer({ sort: "trending", page: 1, limit: 7 }));
 
   assert.equal(
     trending.params.length,
@@ -233,7 +227,7 @@ test("getMostPopularOnServer: the trending window is an extra BOUND param, and i
 test("getMostPopularOnServer: page/limit clamps bind the CLAMPED values, never the caller's", async () => {
   // MAX_POPULAR_PAGE / POPULAR_PER_PAGE clamp at the source (an unclamped page
   // would defeat the cache and grow popularCache without bound).
-  const [q] = await capture(() => getMostPopularOnServer({ page: 10_000_000, limit: 10_000, visible: VISIBLE }));
+  const [q] = await capture(() => getMostPopularOnServer({ page: 10_000_000, limit: 10_000 }));
   const n = q.params.length;
   const limit = Number(q.params[n - 2]);
   const offset = Number(q.params[n - 1]);
@@ -447,30 +441,4 @@ test("no aggregate inlines a caller-supplied id — server-user and tmdb ids are
 test("the aggregate layer stays silent across every path exercised here (guardrail 7)", () => {
   assert.deepEqual(errors, [], `unexpected console.error: ${errors.join(" | ")}`);
   assert.deepEqual(warns, [], `unexpected console.warn: ${warns.join(" | ")}`);
-});
-
-// The existing auditor proves every $n is bound AND referenced, but it is
-// order-blind — it cannot tell $plex from $jellyfin. Swapping them is precisely
-// the failure the service-namespaced predicate exists to prevent: it would hand
-// a restricted Jellyfin instance to somebody granted only the Plex one. So pin
-// the association, not just the arity.
-test("popular scoping binds each service's slugs to ITS OWN source branch", async () => {
-  // A page/limit no earlier test has used: getMostPopularOnServer memoizes on
-  // the full key, so a collision returns the cached result and issues no query
-  // at all, leaving capture() empty.
-  const [q] = await capture(() => getMostPopularOnServer({ page: 3, limit: 37, visible: VISIBLE }));
-
-  const plexBranch = /"source" = 'plex' AND "serverInstance" IN \(([^)]*)\)/.exec(q.sql);
-  const jfBranch = /"source" = 'jellyfin' AND "serverInstance" IN \(([^)]*)\)/.exec(q.sql);
-  assert.ok(plexBranch, "a plex branch must exist");
-  assert.ok(jfBranch, "a jellyfin branch must exist");
-
-  const valuesAt = (list: string): unknown[] =>
-    list.split(",").map((ph) => q.params[Number(ph.trim().slice(1)) - 1]);
-
-  assert.deepEqual(valuesAt(plexBranch[1]), VISIBLE.plex, "the plex branch binds the PLEX slugs");
-  assert.deepEqual(valuesAt(jfBranch[1]), VISIBLE.jellyfin, "the jellyfin branch binds the JELLYFIN slugs");
-  // And the two are genuinely distinct, so the assertions above cannot both be
-  // satisfied by one flattened list.
-  assert.notDeepEqual(VISIBLE.plex, VISIBLE.jellyfin, "fixture must keep the services distinguishable");
 });
