@@ -392,7 +392,15 @@ export default async function LibraryDiffPage({
   const [plexItems, jellyfinItems, prefixRows, freshMovieCount, freshTvCount] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
-    prisma.setting.findMany({ where: { key: { in: ["plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix"] } } }),
+    // The four connection keys ride along on the existing query so the Re-sync
+    // button can be told which servers exist rather than POSTing to both and
+    // reading a not-configured 400 as a failure. Not derived from
+    // plexItems.length: a configured-but-empty or freshly-added server has no
+    // rows yet and would be wrongly reported as absent.
+    prisma.setting.findMany({ where: { key: { in: [
+      "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
+      "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
+    ] } } }),
     prisma.tmdbCache.count({
       where: { key: { startsWith: "movie:", endsWith: ":details" }, expiresAt: { gt: threshold } },
     }),
@@ -413,6 +421,17 @@ export default async function LibraryDiffPage({
   tvArrMapPromise.catch(() => {});
 
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
+
+  // Whether a server is CONNECTED — the same url+key gates /api/sync/plex and
+  // /api/sync/jellyfin apply themselves, so the Re-sync button can skip one that
+  // is not there rather than POSTing to it and reading the 400 as a failure.
+  // Default instance only, which is all that button syncs (it sends no slug).
+  //
+  // Deliberately NOT the `plexConfigured` further down: that one means "has
+  // library ROWS" and drives the has-anything-synced-yet empty state. A freshly
+  // connected server has none, and is exactly the case that needs the button.
+  const plexSyncConfigured = !!(prefixCfg.plexServerUrl && prefixCfg.plexAdminToken);
+  const jellyfinSyncConfigured = !!(prefixCfg.jellyfinUrl && prefixCfg.jellyfinApiKey);
 
   // Named servers' own strip prefixes (plex<Slug>MoviePathStripPrefix, …). The
   // slug list comes from the library rows rather than the instance registry:
@@ -665,7 +684,7 @@ export default async function LibraryDiffPage({
         subtitle="Media present on one server but missing from the other."
         right={
           <div className="flex items-center gap-2 flex-wrap">
-            <ResyncLibraryButton />
+            <ResyncLibraryButton plexConfigured={plexSyncConfigured} jellyfinConfigured={jellyfinSyncConfigured} />
             <SyncTVEpisodesButton />
             <WarmCacheButton uncachedCount={uncachedCount} />
           </div>
