@@ -519,6 +519,109 @@ test("negative forms share their positive group (regression: several families la
 });
 
 // ---------------------------------------------------------------------------
+// Families that had NO group at all until the full-table audit. Each is used in
+// src/, so two of them could meet through cn(base, className) and the winner
+// would fall to stylesheet order instead of last-write.
+// ---------------------------------------------------------------------------
+
+test("layout families that had no group at all now collapse", () => {
+  assert.equal(twMerge("aspect-square aspect-video"), "aspect-video");
+  assert.equal(twMerge("isolate isolation-auto"), "isolation-auto");
+  assert.equal(twMerge("auto-rows-min auto-rows-max"), "auto-rows-max");
+  assert.equal(twMerge("auto-cols-min auto-cols-fr"), "auto-cols-fr");
+  assert.equal(twMerge("overscroll-contain overscroll-none"), "overscroll-none");
+  assert.equal(twMerge("mix-blend-darken mix-blend-lighten"), "mix-blend-lighten");
+  // Axes and neighbouring properties stay independent.
+  assert.equal(twMerge("auto-rows-min auto-cols-min"), "auto-rows-min auto-cols-min");
+  assert.equal(twMerge("overscroll-x-none overscroll-y-auto"), "overscroll-x-none overscroll-y-auto");
+  assert.equal(twMerge("overscroll-contain overscroll-x-none"), "overscroll-contain overscroll-x-none");
+  // mix-blend-mode is not background-blend-mode.
+  assert.equal(twMerge("mix-blend-darken bg-blend-color"), "mix-blend-darken bg-blend-color");
+});
+
+test("typography families that had no group at all now collapse", () => {
+  assert.equal(twMerge("line-clamp-1 line-clamp-2"), "line-clamp-2");
+  assert.equal(twMerge("line-clamp-2 line-clamp-none"), "line-clamp-none");
+  assert.equal(twMerge("align-top align-middle"), "align-middle");
+  assert.equal(twMerge("antialiased subpixel-antialiased"), "subpixel-antialiased");
+  assert.equal(twMerge("accent-indigo-500 accent-indigo-600"), "accent-indigo-600");
+  // list-style-type, list-style-position and list-style-image are three
+  // properties sharing one prefix — and `list-item` is a DISPLAY, which the
+  // display group already owns.
+  assert.equal(twMerge("list-disc list-decimal"), "list-decimal");
+  assert.equal(twMerge("list-inside list-outside"), "list-outside");
+  assert.equal(twMerge("list-disc list-inside"), "list-disc list-inside");
+  assert.equal(twMerge("list-none list-image-none"), "list-none list-image-none");
+  assert.equal(twMerge("list-disc list-item"), "list-disc list-item");
+  assert.equal(twMerge("block list-item"), "list-item");
+  // accent-color is not text colour.
+  assert.equal(twMerge("accent-indigo-500 text-indigo-600"), "accent-indigo-500 text-indigo-600");
+});
+
+test("font-variant-numeric toggles are independent, not one group", () => {
+  // Each sets its own --tw-* var and they COMPOSE, so they must never merge.
+  assert.equal(twMerge("tabular-nums ordinal"), "tabular-nums ordinal");
+  assert.equal(twMerge("slashed-zero diagonal-fractions"), "slashed-zero diagonal-fractions");
+  assert.equal(twMerge("lining-nums tabular-nums"), "lining-nums tabular-nums");
+  assert.equal(twMerge("normal-nums ordinal"), "normal-nums ordinal");
+  // …but each collapses against its own sibling.
+  assert.equal(twMerge("proportional-nums tabular-nums"), "tabular-nums");
+  assert.equal(twMerge("lining-nums oldstyle-nums"), "oldstyle-nums");
+  assert.equal(twMerge("diagonal-fractions stacked-fractions"), "stacked-fractions");
+});
+
+test("outline splits into width, style, colour and offset, like border and ring", () => {
+  assert.equal(twMerge("outline outline-2"), "outline-2");
+  assert.equal(twMerge("outline-dashed outline-dotted"), "outline-dotted");
+  assert.equal(twMerge("outline-red-500 outline-blue-500"), "outline-blue-500");
+  assert.equal(twMerge("outline-offset-2 -outline-offset-4"), "-outline-offset-4");
+  assert.equal(twMerge("outline-hidden outline-none"), "outline-none");
+  // The four are independent of each other.
+  assert.equal(twMerge("outline-2 outline-red-500"), "outline-2 outline-red-500");
+  assert.equal(twMerge("outline-none outline-2"), "outline-none outline-2");
+  assert.equal(twMerge("outline-offset-2 outline-2"), "outline-offset-2 outline-2");
+  // …and none of them touch the ring family.
+  assert.equal(twMerge("outline-2 ring-2"), "outline-2 ring-2");
+});
+
+test("gradient stops split colour from position, per stop", () => {
+  assert.equal(twMerge("to-zinc-900 to-red-500"), "to-red-500");
+  assert.equal(twMerge("from-zinc-900 from-red-500"), "from-red-500");
+  assert.equal(twMerge("via-zinc-900 via-none"), "via-none");
+  assert.equal(twMerge("from-10% from-50%"), "from-50%");
+  // Each stop is its own property, and colour never collapses with position.
+  assert.equal(twMerge("from-zinc-900 to-zinc-900"), "from-zinc-900 to-zinc-900");
+  assert.equal(twMerge("to-zinc-900 to-50%"), "to-zinc-900 to-50%");
+  // The direction utility is a separate group again.
+  assert.equal(twMerge("bg-linear-to-r from-zinc-900"), "bg-linear-to-r from-zinc-900");
+});
+
+test("backdrop filters are one group per filter function, never a single backdrop group", () => {
+  assert.equal(twMerge("backdrop-blur-sm backdrop-blur-lg"), "backdrop-blur-lg");
+  assert.equal(twMerge("backdrop-grayscale backdrop-grayscale-50"), "backdrop-grayscale-50");
+  assert.equal(twMerge("backdrop-saturate-50 backdrop-saturate-150"), "backdrop-saturate-150");
+  assert.equal(twMerge("backdrop-hue-rotate-15 backdrop-hue-rotate-90"), "backdrop-hue-rotate-90");
+  // Different filter functions COMPOSE into one backdrop-filter, so folding
+  // them into a single group would delete half the effect.
+  assert.equal(twMerge("backdrop-blur-sm backdrop-opacity-50"), "backdrop-blur-sm backdrop-opacity-50");
+  assert.equal(
+    twMerge("backdrop-brightness-50 backdrop-contrast-75"),
+    "backdrop-brightness-50 backdrop-contrast-75",
+  );
+  assert.equal(twMerge("backdrop-invert backdrop-sepia"), "backdrop-invert backdrop-sepia");
+});
+
+test("transform, transform-style and transform-box are three properties", () => {
+  assert.equal(twMerge("transform-gpu transform-none"), "transform-none");
+  assert.equal(twMerge("transform-3d transform-flat"), "transform-flat");
+  assert.equal(twMerge("transform-border transform-content"), "transform-content");
+  assert.equal(twMerge("transform-gpu transform-3d"), "transform-gpu transform-3d");
+  assert.equal(twMerge("transform-gpu transform-fill"), "transform-gpu transform-fill");
+  // …and none of them touch the individual transform-function groups.
+  assert.equal(twMerge("transform-gpu translate-x-2"), "transform-gpu translate-x-2");
+});
+
+// ---------------------------------------------------------------------------
 // Pinning tests: documented divergences from the real `tailwind-merge` package.
 // These assert CURRENT behavior so a regression (or a well-meaning "fix" that
 // silently changes merge semantics for existing callsites) is caught. If you

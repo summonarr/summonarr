@@ -8,6 +8,11 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["position", /^(static|relative|absolute|fixed|sticky)$/],
   ["visibility", /^(visible|invisible|collapse)$/],
   ["overflow", /^overflow-(?:auto|hidden|clip|visible|scroll)$/],
+  ["overscroll", /^overscroll-(?!x-|y-)/],
+  ["overscroll-x", /^overscroll-x-/],
+  ["overscroll-y", /^overscroll-y-/],
+  ["isolation", /^(?:isolate|isolation-auto)$/],
+  ["mix-blend", /^mix-blend-/],
   ["overflow-x", /^overflow-x-/],
   ["overflow-y", /^overflow-y-/],
   ["z", /^-?z-/],
@@ -39,6 +44,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["bottom", /^-?bottom-/],
   ["left", /^-?left-/],
 
+  ["aspect", /^aspect-/],
   ["size", /^size-/],
   ["w", /^w-/],
   ["h", /^h-/],
@@ -104,6 +110,8 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["grid-cols", /^grid-cols-/],
   ["grid-rows", /^grid-rows-/],
+  ["auto-cols", /^auto-cols-/],
+  ["auto-rows", /^auto-rows-/],
   // grid-column, grid-column-start and grid-column-end are three properties; one
   // shared group made a start/end pair annihilate itself. Cross-group conflicts
   // are not modelled (the shorthand does not evict a preceding start/end) —
@@ -128,6 +136,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["text-size", /^text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|\[[^\]]+\])$/],
   ["text-color", /^text-/],
   ["placeholder", /^placeholder-/],
+  ["accent", /^accent-/],
 
   ["font-weight", /^font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black)$/],
   ["font-style", /^(?:italic|not-italic)$/],
@@ -138,6 +147,22 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // spelled `text-indent-*`, which is not a Tailwind class at all — so it
   // guarded nothing while the real utility had no group.
   ["indent", /^-?indent-/],
+  ["line-clamp", /^line-clamp-/],
+  ["align", /^align-/],
+  ["font-smoothing", /^(?:antialiased|subpixel-antialiased)$/],
+  // font-variant-numeric COMPOSES: each utility sets its own --tw-* var and
+  // they apply together, so one group per toggle — never a single fvn group.
+  ["fvn-normal", /^normal-nums$/],
+  ["fvn-ordinal", /^ordinal$/],
+  ["fvn-slashed-zero", /^slashed-zero$/],
+  ["fvn-figure", /^(?:lining|oldstyle)-nums$/],
+  ["fvn-spacing", /^(?:proportional|tabular)-nums$/],
+  ["fvn-fraction", /^(?:diagonal|stacked)-fractions$/],
+  // list-style-type / -position / -image share one prefix. `list-item` is a
+  // DISPLAY and is claimed by the display group at the top of this table.
+  ["list-style", /^list-(?:disc|decimal|none)$/],
+  ["list-position", /^list-(?:inside|outside)$/],
+  ["list-image", /^list-image-/],
   ["leading", /^leading-/],
   ["tracking", /^-?tracking-/],
   ["whitespace", /^whitespace-/],
@@ -162,6 +187,13 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // radial/conic need no trailing dash — both are valid bare utilities.
   ["bg-image", /^-?bg-(?:none|gradient-|linear-|radial|conic)/],
   ["bg-blend", /^bg-blend-/],
+  // Gradient stops: each of from/via/to carries a colour AND a position.
+  ["from-pos", /^from-(?:\d+%|\[)/],
+  ["from", /^from-/],
+  ["via-pos", /^via-(?:\d+%|\[)/],
+  ["via", /^via-/],
+  ["to-pos", /^to-(?:\d+%|\[)/],
+  ["to", /^to-/],
   ["bg-clip", /^bg-clip-/],
   ["bg-origin", /^bg-origin-/],
   ["bg", /^bg-/],
@@ -233,6 +265,11 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["rounded-ee", /^rounded-ee(?:-|$)/],
   ["rounded", /^rounded(?:-|$)/],
 
+  ["outline-style", /^outline-(?:solid|dashed|dotted|double|none|hidden)$/],
+  ["outline-offset", /^-?outline-offset-/],
+  ["outline-w", /^outline(?:-\d|-\[|$)/],
+  ["outline-color", /^outline-/],
+
   // ring-inset toggles the inset flag rather than setting a width, so it gets
   // its own group. Bare `ring` IS a width (1px in v4) and now says so: it used
   // to match no group and merge with ring colours only by accident, because the
@@ -255,6 +292,19 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["shadow", /^shadow(?:-|$)/],
   ["opacity", /^opacity-/],
 
+  // Backdrop filters COMPOSE into one backdrop-filter value, each through its
+  // own --tw-backdrop-* var, so a single /^backdrop-/ group would delete half
+  // the effect. One group per filter function.
+  ["backdrop-blur", /^backdrop-blur(?:-|$)/],
+  ["backdrop-brightness", /^backdrop-brightness-/],
+  ["backdrop-contrast", /^backdrop-contrast-/],
+  ["backdrop-grayscale", /^backdrop-grayscale(?:-|$)/],
+  ["backdrop-hue-rotate", /^-?backdrop-hue-rotate-/],
+  ["backdrop-invert", /^backdrop-invert(?:-|$)/],
+  ["backdrop-opacity", /^backdrop-opacity-/],
+  ["backdrop-saturate", /^backdrop-saturate-/],
+  ["backdrop-sepia", /^backdrop-sepia(?:-|$)/],
+
   ["transition-behavior", /^transition-(?:discrete|normal)$/],
   ["transition", /^transition(?:-|$)/],
   ["duration", /^duration-/],
@@ -262,6 +312,9 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["delay", /^delay-/],
   ["animate", /^animate-/],
 
+  ["transform-style", /^transform-(?:3d|flat)$/],
+  ["transform-box", /^transform-(?:border|content|fill|stroke|view)$/],
+  ["transform", /^transform(?:-|$)/],
   ["translate-x", /^-?translate-x-/],
   ["translate-y", /^-?translate-y-/],
   ["translate-z", /^-?translate-z-/],
