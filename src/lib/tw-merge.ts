@@ -4,7 +4,7 @@
 // independent class spaces.
 
 const GROUPS: Array<readonly [string, RegExp]> = [
-  ["display", /^(flex|grid|block|inline|inline-flex|inline-grid|inline-block|hidden|contents|flow-root|table|table-(?:row|cell|caption|column|row-group|column-group|header-group|footer-group))$/],
+  ["display", /^(flex|grid|block|inline|inline-flex|inline-grid|inline-block|inline-table|list-item|hidden|contents|flow-root|table|table-(?:row|cell|caption|column|row-group|column-group|header-group|footer-group))$/],
   ["position", /^(static|relative|absolute|fixed|sticky)$/],
   ["visibility", /^(visible|invisible|collapse)$/],
   ["overflow", /^overflow-(?:auto|hidden|clip|visible|scroll)$/],
@@ -23,8 +23,12 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // logical border sides are. The positional catch-all below excludes only
   // x-/y-, so without these `inset-s-0 inset-e-0` annihilated itself. The extra
   // letter keeps them distinct: `inset-s-` cannot match `inset-shadow-`.
-  ["inset-s", /^-?inset-s-/],
-  ["inset-e", /^-?inset-e-/],
+  // `start-*`/`end-*` are the same two properties as `inset-s-*`/`inset-e-*`.
+  // Their value shape is constrained (as border-w/ring-w constrain theirs)
+  // because "start" and "end" are ordinary words: a bare /^end-/ would also
+  // capture prose like `end-to-end` if it ever reached a class string.
+  ["inset-s", /^-?(?:inset-s-|start-(?:\d|\[|\(|auto$|full$|px$))/],
+  ["inset-e", /^-?(?:inset-e-|end-(?:\d|\[|\(|auto$|full$|px$))/],
   ["inset-bs", /^-?inset-bs-/],
   ["inset-be", /^-?inset-be-/],
   ["inset", /^-?inset-(?!x-|y-)/],
@@ -75,7 +79,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["flex-dir", /^flex-(?:row|row-reverse|col|col-reverse)$/],
   ["flex-wrap", /^flex-(?:wrap|wrap-reverse|nowrap)$/],
-  ["flex", /^flex-(?:1|auto|initial|none|\[)/],
+  ["flex", /^flex-(?:\d|auto|initial|none|\[)/],
   ["grow", /^grow(?:-|$)/],
   ["shrink", /^shrink(?:-|$)/],
   ["basis", /^basis-/],
@@ -104,12 +108,12 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // shared group made a start/end pair annihilate itself. Cross-group conflicts
   // are not modelled (the shorthand does not evict a preceding start/end) —
   // that leaves a redundant class, never a dropped one. See the PIN test.
-  ["col-span", /^col-span-/],
-  ["col-start", /^col-start-/],
-  ["col-end", /^col-end-/],
-  ["row-span", /^row-span-/],
-  ["row-start", /^row-start-/],
-  ["row-end", /^row-end-/],
+  ["col-span", /^col-(?:span-|auto$)/],
+  ["col-start", /^-?col-start-/],
+  ["col-end", /^-?col-end-/],
+  ["row-span", /^row-(?:span-|auto$)/],
+  ["row-start", /^-?row-start-/],
+  ["row-end", /^-?row-end-/],
 
   ["text-align", /^text-(?:left|center|right|justify|start|end)$/],
   // These set text-overflow / text-wrap / text-indent / text-shadow, not colour.
@@ -124,6 +128,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["text-shadow-color", /^text-shadow-/],
   ["text-size", /^text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|\[[^\]]+\])$/],
   ["text-color", /^text-/],
+  ["placeholder", /^placeholder-/],
 
   ["font-weight", /^font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black)$/],
   ["font-style", /^(?:italic|not-italic)$/],
@@ -143,7 +148,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["decoration-w", /^decoration-(?:\d|from-font|auto|\[)/],
   ["decoration", /^decoration-/],
   ["underline", /^(?:underline|overline|line-through|no-underline)$/],
-  ["underline-offset", /^underline-offset-/],
+  ["underline-offset", /^-?underline-offset-/],
 
   ["bg-attachment", /^bg-(?:fixed|local|scroll)$/],
   ["bg-repeat", /^bg-(?:repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/],
@@ -152,7 +157,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // Tailwind v4 renamed bg-gradient-* to bg-linear-* and added bg-radial /
   // bg-conic; unrecognised, the new spellings fell into the bg colour catch-all.
   // radial/conic need no trailing dash — both are valid bare utilities.
-  ["bg-image", /^bg-(?:none|gradient-|linear-|radial|conic)/],
+  ["bg-image", /^-?bg-(?:none|gradient-|linear-|radial|conic)/],
   ["bg-blend", /^bg-blend-/],
   ["bg-clip", /^bg-clip-/],
   ["bg-origin", /^bg-origin-/],

@@ -449,6 +449,66 @@ test("the -safe alignment variants land in their alignment group (regression: co
   assert.equal(twMerge("place-content-start place-content-center-safe"), "place-content-center-safe");
 });
 
+test("families that had no group at all now collapse (regression: each class keyed by itself)", () => {
+  // flex-<number>: the regex matched a literal `1`, so flex-10/11/12 collapsed
+  // by accident (they start with "flex-1") while flex-2…flex-9 matched nothing.
+  assert.equal(twMerge("flex-1 flex-2"), "flex-2");
+  assert.equal(twMerge("flex-2 flex-3"), "flex-3");
+  assert.equal(twMerge("flex-1 flex-12"), "flex-12");
+  assert.equal(twMerge("flex-auto flex-5"), "flex-5");
+  // …without disturbing the direction/wrap groups on the same prefix.
+  assert.equal(twMerge("flex-2 flex-col"), "flex-2 flex-col");
+  assert.equal(twMerge("flex-2 flex-wrap"), "flex-2 flex-wrap");
+  assert.equal(twMerge("flex flex-1"), "flex flex-1"); // display vs flex
+
+  // placeholder-<color> sets `color` on the placeholder pseudo-element.
+  assert.equal(twMerge("placeholder-zinc-500 placeholder-zinc-600"), "placeholder-zinc-600");
+  assert.equal(twMerge("placeholder-zinc-500 text-zinc-100"), "placeholder-zinc-500 text-zinc-100");
+
+  // col-auto/row-auto set the same shorthand as col-span/row-span.
+  assert.equal(twMerge("col-span-2 col-auto"), "col-auto");
+  assert.equal(twMerge("row-auto row-span-3"), "row-span-3");
+  assert.equal(twMerge("col-auto col-start-2"), "col-auto col-start-2");
+
+  // inline-table and list-item are displays; the group listed 19 of 21 members.
+  assert.equal(twMerge("flex inline-table"), "inline-table");
+  assert.equal(twMerge("block list-item"), "list-item");
+  assert.equal(twMerge("list-item table-row"), "table-row");
+});
+
+test("logical start-*/end-* are the same properties as inset-s-*/inset-e-* (regression: they had no group)", () => {
+  assert.equal(twMerge("inset-s-0 start-full"), "start-full");
+  assert.equal(twMerge("end-auto inset-e-4"), "inset-e-4");
+  assert.equal(twMerge("start-px start-auto"), "start-auto");
+  assert.equal(twMerge("-start-full start-px"), "start-px");
+  // inline-start and inline-end remain different properties.
+  assert.equal(twMerge("start-full end-full"), "start-full end-full");
+  // Neighbours on the positional block are unaffected.
+  assert.equal(twMerge("start-full top-0"), "start-full top-0");
+  assert.equal(twMerge("start-full inset-x-2"), "start-full inset-x-2");
+  // "start" and "end" are ordinary words, so the value shape is constrained:
+  // a bare /^end-/ would merge prose that reached a class string.
+  assert.equal(twMerge("end-credits end-to-end"), "end-credits end-to-end");
+  assert.equal(twMerge("start-case start-full"), "start-case start-full");
+  assert.equal(twMerge("end-full end-to-end"), "end-full end-to-end");
+  // Real value shapes all still land in the group.
+  assert.equal(twMerge("start-0 start-1/2"), "start-1/2");
+  assert.equal(twMerge("end-[3px] end-4"), "end-4");
+});
+
+test("negative forms share their positive group (regression: several families lacked the -? prefix)", () => {
+  assert.equal(twMerge("col-start-2 -col-start-1"), "-col-start-1");
+  assert.equal(twMerge("-col-end-1 col-end-4"), "col-end-4");
+  assert.equal(twMerge("row-start-2 -row-start-1"), "-row-start-1");
+  assert.equal(twMerge("-row-end-1 row-end-4"), "row-end-4");
+  assert.equal(twMerge("underline-offset-2 -underline-offset-1"), "-underline-offset-1");
+  assert.equal(twMerge("bg-linear-30 -bg-linear-90"), "-bg-linear-90");
+  assert.equal(twMerge("-bg-conic-30 bg-conic-60"), "bg-conic-60");
+  // A negative must still not leak into a neighbouring group.
+  assert.equal(twMerge("-col-start-1 -col-end-1"), "-col-start-1 -col-end-1");
+  assert.equal(twMerge("-bg-linear-90 bg-red-500"), "-bg-linear-90 bg-red-500");
+});
+
 // ---------------------------------------------------------------------------
 // Pinning tests: documented divergences from the real `tailwind-merge` package.
 // These assert CURRENT behavior so a regression (or a well-meaning "fix" that
