@@ -11,7 +11,12 @@ name: E2E
 
 on:
   pull_request:
-    branches: [main]
+    # BOTH integration targets. Day-to-day work lands on `build` and only
+    # `build` -> `main` is PR'd (see CLAUDE.md's release flow), so gating
+    # main-targeted PRs alone left every feature PR with zero checks — green
+    # or red was invisible on the PR page, and the only signal came from
+    # remembering to `gh workflow run` by hand.
+    branches: [main, build]
   workflow_dispatch:
 
 concurrency:
