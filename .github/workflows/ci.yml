@@ -129,6 +129,17 @@ jobs:
       - name: OpenAPI route parity
         run: npm run audit:openapi
 
+      # tw-merge group table vs the installed Tailwind: fails the build when a
+      # group spans two CSS properties (one utility silently deletes the other
+      # — the bug that made DrawerPopup render no border and AvatarBadge no
+      # background), when one property is split across groups, or when a family
+      # src/ uses has no group at all. Derived from Tailwind's own utility set,
+      # so a Tailwind upgrade that renames utilities surfaces here. Blocking —
+      # legitimate same-family groups are allowlisted with a reason in
+      # scripts/audit-tw-merge.mts.
+      - name: tw-merge group audit
+        run: npm run audit:tw-merge
+
       # License compliance: THIRD_PARTY_LICENSES.txt is generated from the
       # lockfile and shipped in the Docker image (Next standalone strips
       # node_modules notices). Blocking — a dependency change that doesn't

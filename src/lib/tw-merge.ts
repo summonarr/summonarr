@@ -369,11 +369,24 @@ function parseToken(raw: string): Parsed {
   return { full: raw, variants, base, important };
 }
 
-function groupOf(base: string): string {
+/**
+ * The group a utility belongs to, or `null` when the table models none of it.
+ *
+ * Exported for [scripts/audit-tw-merge.mts](../../scripts/audit-tw-merge.mts),
+ * which must tell "matched group X" apart from "matched nothing" — a
+ * distinction `groupOf` erases by falling back to the class string. That
+ * fallback is why a group whose NAME equals a real class reads as grouped
+ * either way; the auditor would report those as false findings without this.
+ */
+export function matchGroup(base: string): string | null {
   for (const [name, re] of GROUPS) {
     if (re.test(base)) return name;
   }
-  return base;
+  return null;
+}
+
+function groupOf(base: string): string {
+  return matchGroup(base) ?? base;
 }
 
 export function twMerge(input: string): string {
