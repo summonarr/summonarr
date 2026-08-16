@@ -11,7 +11,12 @@ name: CI
 
 on:
   pull_request:
-    branches: [main]
+    # BOTH integration targets. Day-to-day work lands on `build` and only
+    # `build` -> `main` is PR'd (see CLAUDE.md's release flow), so gating
+    # main-targeted PRs alone left every feature PR with zero checks — green
+    # or red was invisible on the PR page, and the only signal came from
+    # remembering to `gh workflow run` by hand.
+    branches: [main, build]
   schedule:
     # Monday 15:03 UTC — offset from gitleaks (15:15), trivy (15:27),
     # and codeql (15:39) so Security-tab uploads don't pile up.
@@ -128,6 +133,17 @@ jobs:
       # hand-maintained OpenAPI document from silently drifting from the routes.
       - name: OpenAPI route parity
         run: npm run audit:openapi
+
+      # tw-merge group table vs the installed Tailwind: fails the build when a
+      # group spans two CSS properties (one utility silently deletes the other
+      # — the bug that made DrawerPopup render no border and AvatarBadge no
+      # background), when one property is split across groups, or when a family
+      # src/ uses has no group at all. Derived from Tailwind's own utility set,
+      # so a Tailwind upgrade that renames utilities surfaces here. Blocking —
+      # legitimate same-family groups are allowlisted with a reason in
+      # scripts/audit-tw-merge.mts.
+      - name: tw-merge group audit
+        run: npm run audit:tw-merge
 
       # License compliance: THIRD_PARTY_LICENSES.txt is generated from the
       # lockfile and shipped in the Docker image (Next standalone strips
