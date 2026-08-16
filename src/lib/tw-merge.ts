@@ -116,14 +116,13 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["row-end", /^-?row-end-/],
 
   ["text-align", /^text-(?:left|center|right|justify|start|end)$/],
-  // These set text-overflow / text-wrap / text-indent / text-shadow, not colour.
+  // These set text-overflow / text-wrap / text-shadow, not colour.
   // Without their own groups they fall into the `text-color` catch-all below and
   // one silently deletes the other (`text-ellipsis text-zinc-400` → colour only).
   // text-overflow and text-wrap stay SEPARATE groups: they are different CSS
   // properties, so merging them would invent a new collision.
   ["text-overflow", /^text-(?:ellipsis|clip)$/],
   ["text-wrap", /^text-(?:wrap|nowrap|balance|pretty)$/],
-  ["text-indent", /^-?text-indent-/],
   ["text-shadow-size", /^text-shadow-(?:2xs|xs|sm|md|lg|xl|none)$/],
   ["text-shadow-color", /^text-shadow-/],
   ["text-size", /^text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|\[[^\]]+\])$/],
@@ -135,6 +134,10 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["font-stretch", /^font-stretch-/],
   ["font", /^font-/],
 
+  // The text-indent property's utility is `indent-*`. This group used to be
+  // spelled `text-indent-*`, which is not a Tailwind class at all — so it
+  // guarded nothing while the real utility had no group.
+  ["indent", /^-?indent-/],
   ["leading", /^leading-/],
   ["tracking", /^-?tracking-/],
   ["whitespace", /^whitespace-/],

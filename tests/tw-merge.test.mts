@@ -104,9 +104,18 @@ test("text-overflow and text-wrap are their own groups, not text colors", () => 
   assert.equal(twMerge("whitespace-nowrap text-nowrap"), "whitespace-nowrap text-nowrap");
 });
 
-test("text-indent and text-shadow are not text colors", () => {
-  assert.equal(twMerge("text-indent-4 text-zinc-400"), "text-indent-4 text-zinc-400");
-  assert.equal(twMerge("text-indent-2 text-indent-8"), "text-indent-8");
+test("indent-* is the real text-indent utility (regression: the group guarded text-indent-*, which is not a Tailwind class)", () => {
+  // Tailwind spells the text-indent property `indent-4`, never `text-indent-4`.
+  // The old group therefore matched nothing that can exist, while the real
+  // utility had no group and two of them never collapsed.
+  assert.equal(twMerge("indent-2 indent-8"), "indent-8");
+  assert.equal(twMerge("indent-4 -indent-2"), "-indent-2");
+  // It is not on the text- prefix, so it never touched the colour catch-all.
+  assert.equal(twMerge("indent-4 text-zinc-400"), "indent-4 text-zinc-400");
+  assert.equal(twMerge("indent-4 text-sm"), "indent-4 text-sm");
+});
+
+test("text-shadow is not a text color", () => {
   // text-shadow carries the same size-vs-color overload border already models.
   assert.equal(twMerge("text-shadow-sm text-red-500"), "text-shadow-sm text-red-500");
   assert.equal(twMerge("text-shadow-sm text-shadow-red-500"), "text-shadow-sm text-shadow-red-500");
