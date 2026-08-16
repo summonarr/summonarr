@@ -12,6 +12,7 @@ import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
 import { putDiscordCommands, recordDiscordSchemaHash } from "@/lib/discord-register";
 import { FEATURE_KEYS, invalidateFeatureFlagCache } from "@/lib/features";
+import { invalidateApnsRelayCache } from "@/lib/push";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 
@@ -697,6 +698,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // Feature flags are memoized (features.ts); drop the memo so a toggle in this
   // write is visible on the very next check instead of after the TTL.
   invalidateFeatureFlagCache();
+  // Same for the APNs relay config, which push.ts memoizes for 30s. The admin
+  // flow is "save the relay key, then press Send test notification", so a stale
+  // read lands on exactly the interaction used to verify the change.
+  invalidateApnsRelayCache();
 
   const writeTs = Date.now();
   for (const [key] of entries) {
@@ -847,6 +852,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     for (const [key] of entries) lastKeyWriteAt.delete(key);
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
+    invalidateApnsRelayCache();
     // Same for the Discord public key and the session-duration TTLs: both memos were
     // dropped BEFORE the connectivity tests ran, so anything that repopulated them
     // during the test window (a Discord interaction, a sign-in) cached the value this

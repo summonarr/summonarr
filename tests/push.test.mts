@@ -142,6 +142,7 @@ const {
   notifyUsersRequestsApprovedPush,
   notifyUsersRequestsDeclinedPush,
   buildVapidContact,
+  invalidateApnsRelayCache,
 } = await import("../src/lib/push.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -359,6 +360,7 @@ const ADMIN: UserMeta = { role: "ADMIN", permissions: 0n, notifyOnIssue: false }
 beforeEach(() => {
   settings.clear();
   invalidateFeatureFlagCache(); // the 10s flag cache must not leak across tests
+  invalidateApnsRelayCache(); // ditto the 30s relay-config cache
   warns.length = 0;
   errors.length = 0;
   fetchUrls.length = 0;
@@ -924,7 +926,12 @@ test("sendAppUpdateNoticeToAllIos: every iOS device across users, {sent, failed}
 
   const counts = await sendAppUpdateNoticeToAllIos();
 
-  assert.deepEqual(subQueries[0]?.where, { platform: "ios" });
+  // The deactivatedAt filter is the point, not incidental: a disabled account
+  // keeps its PushSubscription rows (guardrail 33), so without it a removed user
+  // is told to update an app they can no longer sign into. Every sibling fan-out
+  // in push.ts carries the same clause; this broadcast was the one that did not,
+  // and this assertion previously pinned its absence.
+  assert.deepEqual(subQueries[0]?.where, { platform: "ios", user: { deactivatedAt: null } });
   assert.equal(relayCalls.length, 3);
   assert.deepEqual(counts, { sent: 1, failed: 2 }); // unregistered + 500 both count as failed
   assert.deepEqual(subDeletes, [{ where: { endpoint: goneRow.endpoint } }]); // and the dead token is pruned

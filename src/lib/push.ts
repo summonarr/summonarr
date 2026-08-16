@@ -162,7 +162,47 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
 // `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
 const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 
+// The relay config is two Setting rows that change only when an admin edits
+// them, but sendApns read them PER DEVICE — so a fan-out cost one findMany per
+// iOS row, not per user: a 50-title availability batch against 3-device users
+// issued 150 identical queries against the small Prisma pool. Memoized on the
+// same shape as omdb.ts's getApiKey (30s TTL + in-flight coalescing), which
+// exists for exactly this reason.
+//
+// The memo holds the DECRYPTED relay key in process memory for the TTL. That is
+// not a new class of exposure — omdb.ts already memoizes an API key on the same
+// basis — but it is worth stating rather than leaving implicit.
+const APNS_RELAY_TTL_MS = 30_000;
+let apnsRelayCache: { value: { url: string; key: string }; at: number } | null = null;
+let apnsRelayInflight: Promise<{ url: string; key: string }> | null = null;
+
+/**
+ * Drops the memo. Called by /api/settings after a relay write — without it the
+ * admin flow is "save the relay key, press Send test notification", and that
+ * test would run against a config up to 30s stale, which is precisely the
+ * interaction an operator uses to check the change landed.
+ */
+export function invalidateApnsRelayCache(): void {
+  apnsRelayCache = null;
+  apnsRelayInflight = null;
+}
+
 async function getApnsRelayConfig(): Promise<{ url: string; key: string }> {
+  const now = Date.now();
+  if (apnsRelayCache && now - apnsRelayCache.at < APNS_RELAY_TTL_MS) return apnsRelayCache.value;
+  if (apnsRelayInflight) return apnsRelayInflight;
+  apnsRelayInflight = readApnsRelayConfig()
+    .then((value) => {
+      apnsRelayCache = { value, at: Date.now() };
+      return value;
+    })
+    .finally(() => {
+      apnsRelayInflight = null;
+    });
+  return apnsRelayInflight;
+}
+
+async function readApnsRelayConfig(): Promise<{ url: string; key: string }> {
   const rows = await prisma.setting.findMany({
     where: { key: { in: ["apnsRelayUrl", "apnsRelayKey"] } },
   });
@@ -298,7 +338,15 @@ export async function sendApnsTestToUser(
 // Returns per-fan-out counts for the admin UI.
 export async function sendAppUpdateNoticeToAllIos(): Promise<{ sent: number; failed: number }> {
   const subs = await prisma.pushSubscription.findMany({
-    where: { platform: "ios" },
+    // A disabled account keeps its PushSubscription rows (guardrail 33 — the
+    // deactivate write set is exactly two fields), so without this a removed
+    // user gets a push telling them to update an app they can no longer sign
+    // into. This was the only fan-out in the file missing the filter; the four
+    // siblings all carry it. Guardrail 33's two chokepoints cannot cover this
+    // one — both are keyed on a request, and a broadcast has neither a request
+    // nor a requester — so the filter belongs on the query, exactly as it does
+    // in getAdminSubscriptions.
+    where: { platform: "ios", user: { deactivatedAt: null } },
   });
   const payload: PushPayload = {
     title: "Update Summonarr",
