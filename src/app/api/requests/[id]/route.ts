@@ -4,15 +4,13 @@ import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
 import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
-import { notifyUserDownloadPending, notifyUserAwaitingRelease } from "@/lib/discord-notify";
-import { isMovieDownloadingInRadarr, isSeriesDownloadingInSonarr, getMovieReleaseInfo, getSeriesFirstAired } from "@/lib/arr";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { scheduleDelayed } from "@/lib/delayed-jobs";
+import { scheduleDownloadCheck } from "@/lib/download-check";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 
@@ -323,66 +321,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
     }
 
-    scheduleDelayed(90_000, async () => {
-      try {
-        const current = await prisma.mediaRequest.findUnique({ where: { id }, select: { status: true } });
-        if (current?.status !== "APPROVED") return;
-
-        const downloading = updated.mediaType === "MOVIE"
-          ? await isMovieDownloadingInRadarr(updated.tmdbId, variant)
-          : await isSeriesDownloadingInSonarr(updated.tmdbId, variant);
-        // Skip on true (downloading) and null (queue unreadable) — only a confirmed
-        // "not downloading" fires the pending notify. Returning leaves pendingNotifyAt
-        // set so the orchestrator backstop retries.
-        if (downloading !== false) return;
-
-        const now = new Date();
-        let released = true;
-        let soonestReleaseDate: string | null = null;
-
-        if (updated.mediaType === "MOVIE") {
-          const info = await getMovieReleaseInfo(updated.tmdbId);
-          if (info) {
-            const futureDates = [info.digitalRelease, info.physicalRelease]
-              .filter((d): d is string => !!d && new Date(d) > now);
-            const pastDates = [info.digitalRelease, info.physicalRelease]
-              .filter((d): d is string => !!d && new Date(d) <= now);
-
-            if (pastDates.length === 0 && futureDates.length > 0) {
-              released = false;
-              // Sort CHRONOLOGICALLY, not lexicographically. A bare .sort() is
-              // string-ordering: it agrees with date order only while every value
-              // is the same ISO-8601 shape in the same zone. Radarr returning one
-              // date with an offset (…T02:00:00+02:00) and one in Z would pick the
-              // later release as "soonest" and tell the user the wrong date.
-              // Matches the comparator the sync orchestrator uses on this exact data.
-              soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-            }
-          }
-        } else {
-          const firstAired = await getSeriesFirstAired(updated.tmdbId, variant);
-          if (firstAired && new Date(firstAired) > now) {
-            released = false;
-            soonestReleaseDate = firstAired;
-          }
-        }
-
-        const requester = await prisma.user.findUnique({ where: { id: updated.requestedBy }, select: { deactivatedAt: true } });
-        await prisma.mediaRequest.update({ where: { id }, data: { pendingNotifyAt: null } });
-        // Guardrail 33: a disabled account keeps a live Discord link. CONSUME the backstop
-        // rather than defer it (pendingNotifyAt cleared above, DM dropped) so re-enabling
-        // an account doesn't replay a stale "download pending" backlog — same reasoning as
-        // the orchestrator's disabledRequesters short-circuit in /api/sync.
-        if (requester?.deactivatedAt) return;
-
-        if (!released) {
-          await notifyUserAwaitingRelease(updated.requestedBy, updated.title, updated.mediaType, soonestReleaseDate);
-        } else {
-          await notifyUserDownloadPending(updated.requestedBy, updated.title, updated.mediaType);
-        }
-      } catch (err) {
-        console.error("[download-check] 90s status check failed:", err);
-      }
+    scheduleDownloadCheck({
+      requestId: id,
+      tmdbId: updated.tmdbId,
+      mediaType: updated.mediaType,
+      arrInstance: variant,
+      requestedBy: updated.requestedBy,
+      title: updated.title,
     }, { name: "requests:90s-download-check" });
 
     // `updated` was read before the arr push; after a rollback it is stale
