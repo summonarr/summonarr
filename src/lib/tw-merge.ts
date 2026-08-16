@@ -69,6 +69,11 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["basis", /^basis-/],
   ["order", /^-?order-/],
 
+  // justify-content / justify-items / justify-self are three properties, and
+  // the more specific two must precede the catch-all — exactly the split the
+  // place-content/place-items/place-self trio below already models.
+  ["justify-items", /^justify-items-/],
+  ["justify-self", /^justify-self-/],
   ["justify", /^justify-/],
   ["items", /^items-/],
   // align-content values only. Everything else under /^content-/ sets the CSS

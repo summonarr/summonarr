@@ -209,6 +209,34 @@ test("col-span/col-start/col-end are three CSS properties, not one group (regres
   assert.equal(twMerge("col-start-1 row-start-1"), "col-start-1 row-start-1");
 });
 
+test("justify-content, justify-items and justify-self are three properties, not one group (regression: one /^justify-/ group)", () => {
+  // The parallel place-content/place-items/place-self trio was already split;
+  // justify-* was not, so a component's justify-self was deleted by any
+  // justify-content a caller passed in, and vice versa.
+  assert.equal(twMerge("justify-center justify-self-end"), "justify-center justify-self-end");
+  assert.equal(twMerge("justify-self-end justify-center"), "justify-self-end justify-center");
+  assert.equal(twMerge("justify-between justify-items-center"), "justify-between justify-items-center");
+  assert.equal(twMerge("justify-items-center justify-self-start"), "justify-items-center justify-self-start");
+  assert.equal(
+    twMerge("justify-start justify-items-end justify-self-auto"),
+    "justify-start justify-items-end justify-self-auto",
+  );
+  // Each still collapses within itself.
+  assert.equal(twMerge("justify-start justify-center"), "justify-center");
+  assert.equal(twMerge("justify-items-start justify-items-center"), "justify-items-center");
+  assert.equal(twMerge("justify-self-start justify-self-center"), "justify-self-center");
+  // v4's -safe alignments land in the same three groups, not a fourth.
+  assert.equal(twMerge("justify-center justify-end-safe"), "justify-end-safe");
+  assert.equal(twMerge("justify-self-center justify-self-end-safe"), "justify-self-end-safe");
+  assert.equal(twMerge("justify-end-safe justify-self-end-safe"), "justify-end-safe justify-self-end-safe");
+  // The align-* shorthands sit on their own prefixes and stay unaffected.
+  assert.equal(twMerge("justify-self-end self-start"), "justify-self-end self-start");
+  assert.equal(twMerge("justify-items-center items-center"), "justify-items-center items-center");
+  // place-* already modelled this split; it must not regress.
+  assert.equal(twMerge("place-content-center place-self-end"), "place-content-center place-self-end");
+  assert.equal(twMerge("place-items-center place-self-end"), "place-items-center place-self-end");
+});
+
 test("align-content and the CSS `content` property are separate groups (regression: one /^content-/ group)", () => {
   // `content-none` and `content-[…]` set the CSS `content` property (pseudo-
   // element text); `content-center` and friends set align-content. One group
