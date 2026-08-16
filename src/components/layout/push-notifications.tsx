@@ -84,7 +84,16 @@ export function PushNotifications() {
     setError(null);
     try {
       const res = await fetch(withBasePath("/api/push/vapid-key"));
-      if (!res.ok) throw new Error("Could not fetch VAPID key");
+      if (!res.ok) {
+        // Surface the server's reason rather than a generic one. The 503 here
+        // means an incomplete VAPID keypair in Settings — an operator problem
+        // the user can report, not a transient fetch failure they should retry.
+        const reason = await res
+          .json()
+          .then((b: { error?: string }) => b?.error)
+          .catch(() => undefined);
+        throw new Error(reason || "Could not fetch VAPID key");
+      }
       const { publicKey } = await res.json() as { publicKey: string };
 
       // `navigator.serviceWorker.ready` never rejects — it simply never settles

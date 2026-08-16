@@ -147,15 +147,21 @@ async function buildExclusionSet(userId: string, linkedServerUserIds: string[], 
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : prisma.playHistory.findMany({
+      : // groupBy, not findMany + distinct. Prisma applies `distinct` CLIENT-side
+        // — verified by capturing the emitted SQL, which is byte-identical with
+        // and without it — so every watch row crossed the wire and was deduped
+        // in Node. Only the distinct pairs are ever used, and a heavy viewer has
+        // thousands of rows collapsing to a few hundred titles. groupBy compiles
+        // to a real GROUP BY, so Postgres does the dedup. The result shape is
+        // the same {tmdbId, mediaType}, so the consumers below are unchanged.
+        prisma.playHistory.groupBy({
+          by: ["tmdbId", "mediaType"],
           where: {
             mediaServerUserId: { in: linkedServerUserIds },
             watched: true,
             tmdbId: { not: null },
             mediaType: { not: null },
           },
-          select: { tmdbId: true, mediaType: true },
-          distinct: ["tmdbId", "mediaType"],
         }),
   ]);
 
@@ -359,15 +365,21 @@ export async function getUserRecommendations(userId: string): Promise<TmdbMedia[
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : prisma.playHistory.findMany({
+      : // groupBy, not findMany + distinct. Prisma applies `distinct` CLIENT-side
+        // — verified by capturing the emitted SQL, which is byte-identical with
+        // and without it — so every watch row crossed the wire and was deduped
+        // in Node. Only the distinct pairs are ever used, and a heavy viewer has
+        // thousands of rows collapsing to a few hundred titles. groupBy compiles
+        // to a real GROUP BY, so Postgres does the dedup. The result shape is
+        // the same {tmdbId, mediaType}, so the consumers below are unchanged.
+        prisma.playHistory.groupBy({
+          by: ["tmdbId", "mediaType"],
           where: {
             mediaServerUserId: { in: linkedServerUserIds },
             watched: true,
             tmdbId: { not: null },
             mediaType: { not: null },
           },
-          select: { tmdbId: true, mediaType: true },
-          distinct: ["tmdbId", "mediaType"],
         }),
   ]);
 

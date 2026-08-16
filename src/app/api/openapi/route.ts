@@ -936,7 +936,10 @@ const spec = {
         // requirement. Declaring it public made generated clients omit the
         // credential and fail push registration with an unexplained 401.
         summary: "Get the public VAPID key for push subscription",
-        responses: { "200": { description: "VAPID public key", content: { "application/json": { schema: { type: "object", properties: { publicKey: { type: "string" } } } } } } },
+        responses: {
+          "200": { description: "VAPID public key", content: { "application/json": { schema: { type: "object", properties: { publicKey: { type: "string" } } } } } },
+          "503": { description: "Web push is not configured — the stored VAPID keypair is incomplete. A client must treat this as 'push unavailable', not a transient failure." },
+        },
       },
     },
     "/push/subscribe": {
