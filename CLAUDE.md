@@ -593,8 +593,23 @@ Guardrails above are *what the code should look like*. These are *how to approac
 3. **Concrete commands or code** — no abstractions where a shell command will do.
 4. **One point per block** — don't bundle unrelated examples.
 5. **Bullets over paragraphs.**
+6. **Attach to a topic; don't join the queue at the tail** — see numbering below.
 
 Use ❌/✅ examples only when the antipattern is subtle. Do not add "warning signs" sections to obvious rules.
+
+#### Numbering — a guardrail id is a permanent address
+
+**NEVER renumber an existing guardrail.** ~710 comments across `src/`, `tests/` and `scripts/` cite rules by number (`guardrail 23`, `guardrail 6b`), and merged commit messages cite them too and can never be edited. Renumbering silently repoints every one of those at the wrong rule, and nothing would catch it. A retired rule leaves its number burned — never shift the ones below it to close the gap.
+
+**Default to a letter suffix on the nearest related guardrail** (`13a` directly after `13`), not the next number at the bottom of the list. This is the collision fix, not a style preference:
+
+- Everyone who appends at the tail claims the same next number, so two branches in flight both take it. That happened twice in one afternoon (36 and 37 were each claimed by two branches), and it costs a manual renumber every time.
+- Git only warns when the inserts land close enough to conflict textually. Resolve a conflict by "keeping both", or land two rules git auto-merges, and the file ships two rules wearing one number — from then on every citation of it is ambiguous.
+- Suffixing puts each new rule next to its topic, so concurrent branches edit *different regions* of the file and stop meeting at all. Two branches suffixing the SAME parent still conflict — correctly, because they wrote overlapping rules about one topic and someone should reconcile them.
+
+Take the next sequential number only for a genuinely new top-level topic with no parent to attach to. Expect to lose the race for it; **on any collision renumber YOUR rule, never the one already on the integration branch** — its number may already be cited in code that landed with it.
+
+`tests/guardrail-ids.test.mts` enforces this: ids unique, every in-file `guardrail N` citation resolves, and a suffixed rule sits directly after its parent. It does NOT require the numbers to be gapless or sorted — the citations are what matter, not tidiness.
 
 **ALWAYS apply a new rule to the current work immediately after writing it.** A rule born from a mistake means the codebase likely contains other instances of the same mistake. Writing the rule does not fix them.
 
