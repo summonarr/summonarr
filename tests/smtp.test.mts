@@ -649,3 +649,55 @@ test("NUL bytes in From/To are stripped alongside CR/LF", async () => {
   assert.equal(header(headers, "To"), "user@dest.example");
   assert.equal(r.writes.includes("RCPT TO:<user@dest.example>\r\n"), true);
 });
+
+// ── bare reply codes (RFC 5321 §4.2) ────────────────────────────────────────
+//
+// `Reply-code [ SP textstring ] CRLF` makes BOTH the space and the text
+// optional, and the prose is a normative MUST on the client side: any text,
+// "including no text at all … MUST be acceptable", with an explicit
+// compatibility note that clients "SHOULD be prepared to process the code alone
+// (with or without a trailing space character)".
+//
+// The reply-completeness scan required the space, so a bare code never looked
+// like a terminated reply and every command died on the 30s read timeout. These
+// run instantly when the parser is right and take 30s to go red when it is not,
+// which is the same signal — a regression cannot pass quickly.
+//
+// The `220 ` variant (code + space, no text) already worked and is pinned here
+// too, because §4.2 says the space is part of the text: it must keep working.
+test("a bare reply code with no trailing space is a complete reply — greeting", async () => {
+  const r = await runSendMail({ greeting: "220\r\n" });
+  assert.equal(r.error, undefined, "a bare 220 banner must not stall the read");
+  assert.equal(r.writes[0], `EHLO ${EXPECTED_EHLO}\r\n`);
+});
+
+test("a bare reply code with no trailing space is a complete reply — mid-session", async () => {
+  const r = await runSendMail({ overrides: { MAIL: "250\r\n" } });
+  assert.equal(r.error, undefined, "a bare 250 to MAIL FROM must not stall the read");
+  assert.ok(
+    r.writes.includes("RCPT TO:<user@dest.example>\r\n"),
+    `the session must proceed past MAIL FROM — got: ${JSON.stringify(r.writes)}`,
+  );
+});
+
+// QUIT is the nastiest variant and needs a TIMING assertion, not an error one:
+// sendMail reads the QUIT reply inside a swallow-everything try/catch, so a
+// bare 221 never surfaces as a failure. The mail is delivered and the call
+// reports success — it just costs a silent extra 30s read timeout every time.
+// Across a settleLimit(…, 3) fan-out to 30 admins that is seconds vs ~5 minutes.
+test("a bare 221 on QUIT does not silently cost a 30s read timeout", async () => {
+  const started = process.hrtime.bigint();
+  const r = await runSendMail({ overrides: { QUIT: "221\r\n" } });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.equal(r.error, undefined);
+  assert.ok(
+    elapsedMs < 5_000,
+    `sending took ${Math.round(elapsedMs)}ms — a bare 221 is being read as an incomplete reply, ` +
+      `so every send stalls until READ_TIMEOUT_MS and the cost is invisible to the caller`,
+  );
+});
+
+test("code plus a trailing space but no text stays acceptable", async () => {
+  const r = await runSendMail({ greeting: "220 \r\n" });
+  assert.equal(r.error, undefined);
+});

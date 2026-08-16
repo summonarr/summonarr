@@ -311,7 +311,17 @@ class SmtpConnection {
       if (eol === -1) return -1;
       const line = this.buffer.slice(from, eol);
       // A final line is `\d{3} …` (space after the code); continuation is `\d{3}-…`.
-      if (/^\d{3} /.test(line)) return eol + 2;
+      //
+      // The bare `\d{3}` form (no space, no text) must be accepted too. RFC 5321
+      // §4.2 writes the text as optional — `Reply-code [ SP textstring ] CRLF` —
+      // and states outright that clients "SHOULD be prepared to process the code
+      // alone (with or without a trailing space character)". Senders SHOULD NOT
+      // emit it, but the spec carries a compatibility clause precisely because
+      // some do. Requiring the space made the reply never look complete, so
+      // every command died on the 30s read timeout — and a bare 221 on QUIT was
+      // worse than a failure: sendMail swallows that read, so the mail was
+      // delivered and reported success while silently costing 30s per send.
+      if (/^\d{3}(?: |$)/.test(line)) return eol + 2;
       from = eol + 2;
     }
   }
@@ -355,11 +365,31 @@ class SmtpConnection {
     this.detachListeners();
     const plain = this.socket;
     const tlsSocket = await new Promise<tls.TLSSocket>((resolve, reject) => {
+      // This handshake needs its OWN deadline, and that asymmetry is the whole
+      // bug: implicit TLS on 465 runs inside connectSocket and is covered by
+      // the connect deadline, while STARTTLS on 587 upgrades here — after that
+      // deadline was disarmed, and before any readReply timer exists. Every
+      // ACTIVE failure (RST, FIN, non-TLS garbage) does reject via `error`, so
+      // the uncovered case is a peer that goes SILENT: a hung middlebox or a
+      // stateful firewall. That awaited nothing forever, so sendMail's
+      // `finally { conn.close() }` never ran and the socket, fd and the closure
+      // holding the SMTP password all leaked. Worse, the callers fan out
+      // through settleLimit(…, 3) worker pools, so three such hangs wedge the
+      // entire email queue permanently, and the hourly sync adds three more.
+      //
+      // Armed on the TLSSocket, not `plain`: destroying it tears down the
+      // parent too, and parent-socket errors surface here (onError is attached
+      // to `s`), so the detachListeners() window above stays covered.
       const s = tls.connect({ socket: plain, servername: host }, () => {
+        clearDeadline();
         s.off("error", onError);
         resolve(s);
       });
-      const onError = (err: Error) => reject(err);
+      const onError = (err: Error) => {
+        clearDeadline();
+        reject(err);
+      };
+      const clearDeadline = armConnectDeadline(s, reject, "STARTTLS handshake");
       s.once("error", onError);
     });
     this.socket = tlsSocket;
@@ -439,7 +469,11 @@ function buildAuthPlainToken(user: string, pass: string): string {
 
 // Arms the CONNECT deadline and returns the disarm fn. Mirrors readReply's
 // timer shape: destroy the socket so the fd is released, then reject.
-function armConnectDeadline(socket: net.Socket, reject: (err: Error) => void): () => void {
+function armConnectDeadline(
+  socket: net.Socket,
+  reject: (err: Error) => void,
+  what = "connect",
+): () => void {
   let timer: NodeJS.Timeout | null = setTimeout(() => {
     timer = null;
     try {
@@ -447,7 +481,7 @@ function armConnectDeadline(socket: net.Socket, reject: (err: Error) => void): (
     } catch {
       // socket may already be destroyed
     }
-    reject(new SmtpError(`SMTP connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+    reject(new SmtpError(`SMTP ${what} timed out after ${CONNECT_TIMEOUT_MS}ms`));
   }, CONNECT_TIMEOUT_MS);
   return () => {
     if (timer) {
