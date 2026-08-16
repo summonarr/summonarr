@@ -626,6 +626,15 @@ function ArrFilterButton({
   );
 }
 
+// Cards actually painted per column. Each row is 14 DOM nodes and an <img>,
+// so an unbounded column is measured at ~12MB of HTML and 70k elements for a
+// 5,000-row diff. The cap is applied to the ALREADY-FILTERED array, never to
+// the source: search and the arr/request filters still see every row, so
+// narrowing the search reaches anything the cap hides. A genuine two-server
+// diff is normally in the hundreds — this is a backstop for the transient
+// spike while a newly added second server is still on its first sync.
+const RENDER_CAP = 500;
+
 function DiffColumn({
   label,
   tint,
@@ -683,6 +692,16 @@ function DiffColumn({
         </span>
       </div>
 
+      {items.length > RENDER_CAP && (
+        <p
+          role="status"
+          className="ds-mono"
+          style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 8 }}
+        >
+          Showing the first {RENDER_CAP.toLocaleString("en-US")} of{" "}
+          {items.length.toLocaleString("en-US")} — narrow the search to see the rest.
+        </p>
+      )}
       {items.length === 0 ? (
         <div
           style={{
@@ -698,7 +717,7 @@ function DiffColumn({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {items.map((item) => (
+          {items.slice(0, RENDER_CAP).map((item) => (
             <MediaCard
               // serverInstance is part of the key: the same title present on two
               // configured servers is two rows here, and without it React sees a

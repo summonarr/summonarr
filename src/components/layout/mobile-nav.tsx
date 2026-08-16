@@ -18,6 +18,7 @@ import {
   type IconComponent,
 } from "@/components/icons";
 import { useLiveEvents } from "@/hooks/use-live-events";
+import { getClientBadgeVisibility } from "@/lib/badge-visibility";
 import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
 import { filterNavByFeatures, getVisibleAdminItems, userNavItems } from "@/lib/nav-items";
@@ -38,14 +39,12 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
-  const provider = session?.user?.provider;
-  const showPlex =
-    role === "ADMIN" || role === "ISSUE_ADMIN" || provider === "plex";
-  const showJellyfin =
-    role === "ADMIN" ||
-    role === "ISSUE_ADMIN" ||
-    provider === "jellyfin" ||
-    provider === "jellyfin-quickconnect";
+  // One shared predicate with the Header and the ~14 server surfaces. The
+  // hand-rolled copy that lived here read the role STRING only (so a delegate
+  // holding the ADMIN or MANAGE_ISSUES bit on role USER was missed) and keyed on
+  // `provider` rather than `mediaServer` (so a credentials or OIDC account with
+  // an admin-assigned media server got badges on browse cards and none here).
+  const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);

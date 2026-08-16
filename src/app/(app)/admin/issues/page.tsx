@@ -24,6 +24,12 @@ const SCOPE_LABELS: Record<string, string> = {
 };
 
 const VALID_FILTERS = ["ALL", "OPEN", "IN_PROGRESS", "RESOLVED"] as const;
+
+// Row budget for the list. Applied per-status (see the query below), so it is
+// only reachable on a single tab holding this many issues rather than across
+// the whole table. When it IS hit the UI says so rather than silently showing
+// a short list under a full count.
+const ISSUE_LIST_CAP = 500;
 type FilterValue = (typeof VALID_FILTERS)[number];
 
 // Collapses duplicate reports (same tmdbId+mediaType+type+scope+season+episode)
@@ -75,14 +81,20 @@ export default async function AdminIssuesPage({
     : "OPEN";
 
   const [allIssues, statusCounts, radarrInstances, sonarrInstances] = await Promise.all([
+    // Filtered in SQL, not in JS. Fetching 500 rows across ALL statuses and
+    // then filtering in memory meant that past 500 issues the tab counts (which
+    // come from an uncapped groupBy) described rows the list could not contain —
+    // a tab reading "620" over a list missing the older ones. Applying the
+    // status here spends the whole budget on the tab actually being viewed.
     prisma.issue.findMany({
+      where: filter === "ALL" ? undefined : { status: filter },
       include: {
         user: { select: { name: true, email: true } },
         claimedUser: { select: { name: true, email: true } },
         _count: { select: { messages: true } },
       },
       orderBy: { createdAt: "desc" },
-      take: 500,
+      take: ISSUE_LIST_CAP,
     }),
     prisma.issue.groupBy({ by: ["status"], _count: { status: true } }),
     getSyncableArrInstances("radarr"),
@@ -97,7 +109,7 @@ export default async function AdminIssuesPage({
   const countFor = (status: string) =>
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
 
-  const filtered = filter === "ALL" ? allIssues : allIssues.filter((i) => i.status === filter);
+  const filtered = allIssues;
   const groups = groupIssues(filtered);
 
   let selectedIssue = selectedId ? allIssues.find((i) => i.id === selectedId) ?? null : null;
@@ -143,7 +155,10 @@ export default async function AdminIssuesPage({
     { label: "Open", value: "OPEN", count: countFor("OPEN") },
     { label: "In Progress", value: "IN_PROGRESS", count: countFor("IN_PROGRESS") },
     { label: "Resolved", value: "RESOLVED", count: countFor("RESOLVED") },
-    { label: "All", value: "ALL", count: allIssues.length },
+    // Sum of the uncapped groupBy, not allIssues.length — the array is capped,
+    // so the old expression made "All" disagree with its own three tabs at
+    // exactly 501 issues.
+    { label: "All", value: "ALL", count: statusCounts.reduce((n, c) => n + c._count.status, 0) },
   ];
 
   function issueHref(id: string): string {
@@ -209,6 +224,16 @@ export default async function AdminIssuesPage({
           );
         })}
       </div>
+
+      {allIssues.length >= ISSUE_LIST_CAP && (
+        <p
+          role="status"
+          className="ds-mono"
+          style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 10 }}
+        >
+          Showing the {ISSUE_LIST_CAP} most recent — older issues in this tab are not listed.
+        </p>
+      )}
 
       {groups.length === 0 ? (
         <div
