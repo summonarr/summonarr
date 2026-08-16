@@ -18,9 +18,13 @@
 //      revoked AuthSession row rejects a still-valid JWT — the guardrail-29
 //      "never JWT-only" principle at the proxy layer);
 //   5. bearer-FIRST resolution (guardrail 6b: an invalid bearer never falls
-//      back to a valid cookie; when both are valid the bearer identity wins)
-//      and the sliding-refresh Set-Cookie that rides cookie responses but is
-//      NEVER appended for bearer clients;
+//      back to a valid cookie; when both are valid the bearer identity wins),
+//      the sliding-refresh Set-Cookie that rides cookie responses but is
+//      NEVER appended for bearer clients, and the server-internal rewrite that
+//      hands the re-signed token to the DOWNSTREAM verifier on the forwarded
+//      request — cookie header for browsers, Authorization for bearer — so the
+//      second verify rides the dbCheckedAt fast path instead of repeating the
+//      whole DB-checked slow path;
 //   6. the UA-fingerprint cookie binding (mismatch → cleared-cookie login
 //      redirect) and its bearer/machine-session skips;
 //   7. the /api/admin/* defense-in-depth backstop (403 only for principals
@@ -78,10 +82,14 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 
 // Dynamic imports so the env/global stubs above genuinely precede the
 // module-graph load (static imports would hoist — the trakt.test pattern).
-const { NextRequest } = await import("next/server");
+const { NextRequest, NextResponse } = await import("next/server");
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+// The DOWNSTREAM verifier — the second of the two session checks every /api/*
+// request pays. Imported so the forwarded-credential tests can measure the
+// whole two-pass cost, not just the proxy's half.
+const { withAuth } = await import("../src/lib/api-auth.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 const { API_VERSION, MIN_CLIENT } = await import("../src/lib/api-version.ts");
@@ -261,6 +269,25 @@ function assertPassedThrough(res: Response, msg?: string): void {
 async function bodyOf(res: Response): Promise<unknown> {
   return res.json();
 }
+
+// Rebuild the request the APP sees. NextResponse.next({ request: { headers } })
+// encodes every forwarded header as `x-middleware-request-<key>` plus an
+// `x-middleware-override-headers` index (node_modules/next/dist/esm/server/web/
+// spec-extension/response.js), which is how a proxy header rewrite reaches the
+// route handler. Reconstructing it here lets a test run the downstream verifier
+// against the same credential the handler would receive.
+function forwardedRequest(res: Response, path: string, method = "GET"): Req {
+  const headers = new Headers();
+  for (const key of (res.headers.get("x-middleware-override-headers") ?? "")
+    .split(",")
+    .filter(Boolean)) {
+    const value = res.headers.get(`x-middleware-request-${key}`);
+    if (value !== null) headers.set(key, value);
+  }
+  return new NextRequest(`${SELF}${path}`, { method, headers });
+}
+
+const okHandler = async (): Promise<Response> => NextResponse.json({ ok: true });
 
 function setCookies(res: Response): string[] {
   return res.headers.getSetCookie();
@@ -630,6 +657,125 @@ test("a valid bearer session passes with NO Set-Cookie — native clients ride t
     null,
     "a bearer client can't read Set-Cookie — the slid token must be withheld (guardrail 6b)",
   );
+});
+
+test("the refreshed JWT is forwarded to the app on the Authorization header — server-internal only, still no Set-Cookie", async () => {
+  // The cookie transport has always been rewritten on the forwarded request
+  // (so the downstream verifier sees the token THIS pass just re-signed);
+  // bearer was not, which is what made a native request pay the full
+  // DB-checked verify twice. The rewrite is on the request the ROUTE sees —
+  // the client is handed nothing, so guardrail 6b's "no sliding refresh for
+  // bearer clients" is intact: it keeps presenting its original token to
+  // expiry.
+  const { userId, sessionId, token } = await mintSession();
+  const res = await proxy(req("/api/requests", { headers: asBearer(token) }));
+  assertPassedThrough(res);
+
+  const forwarded = res.headers.get("x-middleware-request-authorization");
+  assert.ok(forwarded, "a bearer request must forward an Authorization header to the app");
+  assert.ok(
+    forwarded.startsWith("Bearer "),
+    "the forwarded credential must stay a well-formed Bearer header",
+  );
+  const rewritten = forwarded.slice("Bearer ".length);
+  assert.notEqual(rewritten, token, "the forwarded token must be the re-signed one");
+
+  const claims = await verifySessionJwt(rewritten);
+  assert.ok(claims, "the forwarded token must be a genuine signed session JWT");
+  assert.equal(claims.id, userId, "same principal — this is a re-sign, not a new identity");
+  assert.equal(claims.sessionId, sessionId);
+  const dbCheckedAt = (claims as { dbCheckedAt?: number }).dbCheckedAt;
+  assert.ok(
+    typeof dbCheckedAt === "number",
+    "the whole point: the forwarded token carries the dbCheckedAt this pass stamped",
+  );
+  assert.ok(
+    Math.abs(dbCheckedAt - Math.floor(Date.now() / 1000)) <= 2,
+    "dbCheckedAt must be 'now', not a stale value carried over",
+  );
+
+  assert.equal(
+    res.headers.get("set-cookie"),
+    null,
+    "the rewrite must never become a client-visible token handoff (guardrail 6b)",
+  );
+  // Nothing else about the request may be disturbed by the rewrite — the CSP
+  // nonce the app reads off the same forwarded headers still propagates.
+  assert.ok(
+    res.headers.get("x-middleware-request-x-nonce"),
+    "the nonce header must survive the authorization rewrite",
+  );
+});
+
+test("forwarding the refreshed bearer token HALVES the per-request session DB cost — the downstream verify takes the fast path", async () => {
+  // An /api/* request is session-verified twice: proxy(), then
+  // authenticateRequest inside the route wrapper. Both read the credential off
+  // the forwarded request, so whichever token is on it decides whether the
+  // second pass repeats the whole DB-checked slow path.
+  const { token } = await mintSession();
+
+  dbReads = 0;
+  const res = await proxy(req("/api/requests", { headers: asBearer(token) }));
+  assertPassedThrough(res);
+  const proxyReads = dbReads;
+  assert.ok(proxyReads > 0, "the proxy pass must be the DB-checked one");
+
+  dbReads = 0;
+  const downstream = await withAuth(okHandler)(
+    forwardedRequest(res, "/api/requests"),
+    undefined,
+  );
+  assert.equal(downstream.status, 200);
+  assert.equal(
+    dbReads,
+    0,
+    "the forwarded token's dbCheckedAt must carry the second verify onto the fast path",
+  );
+
+  // The control that makes the pin mean something: the token the CLIENT sent
+  // carries no dbCheckedAt (it is stamped only by a re-sign, and a bearer
+  // client is never handed one), so without the rewrite the route re-runs the
+  // full slow path — the doubled cost this forwarding removes.
+  dbReads = 0;
+  const unforwarded = await withAuth(okHandler)(
+    req("/api/requests", { headers: asBearer(token) }),
+    undefined,
+  );
+  assert.equal(unforwarded.status, 200);
+  assert.equal(
+    dbReads,
+    proxyReads,
+    "the client's own token can never take the fast path — that is the cost being halved",
+  );
+});
+
+test("the cookie transport keeps its own rewrite: the forwarded cookie carries the refreshed token, and its downstream verify is free too", async () => {
+  // The bearer branch must not have displaced the cookie branch — both
+  // transports hand the downstream verifier the re-signed token, each on the
+  // header that transport actually uses.
+  const { userId, token } = await mintSession();
+  const res = await proxy(req("/api/requests", { headers: asCookie(token) }));
+  assertPassedThrough(res);
+
+  const forwardedCookie = res.headers.get("x-middleware-request-cookie");
+  assert.ok(forwardedCookie, "a cookie request must forward a Cookie header to the app");
+  assert.ok(forwardedCookie.startsWith(`${COOKIE}=`));
+  const rewritten = forwardedCookie.slice(COOKIE.length + 1).split(";")[0];
+  assert.notEqual(rewritten, token);
+  assert.equal((await verifySessionJwt(rewritten))?.id, userId);
+  assert.equal(
+    res.headers.get("x-middleware-request-authorization"),
+    null,
+    "a cookie request must not grow an Authorization header",
+  );
+
+  dbReads = 0;
+  const downstream = await withAuth(okHandler)(
+    forwardedRequest(res, "/api/requests"),
+    undefined,
+  );
+  assert.equal(downstream.status, 200);
+  assert.equal(dbReads, 0, "the refreshed cookie must ride the fast path downstream");
 });
 
 test("the slide happens on public paths too: /login with a live cookie still refreshes", async () => {
