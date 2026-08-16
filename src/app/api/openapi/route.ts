@@ -837,6 +837,28 @@ const spec = {
         },
       },
     },
+    "/play-history/mine/wrapped": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN \"Wrapped\" year-in-review — the REST mirror of the /my-stats/wrapped page, projected for native clients. Scoped server-side to the media-server users linked to the session account; no parameter can select another user.",
+        parameters: [
+          {
+            name: "year",
+            in: "query",
+            schema: { type: "integer" },
+            description:
+              "Calendar year (UTC). Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
+          },
+        ],
+        responses: {
+          "200": {
+            description:
+              "{ linked, years, year, data }. data carries totals, movie/TV splits, topTitles, biggestDay, busiestMonth, primeDow/primeHour, longestSitting, completion and top platform/device; posters ship as raw TMDB posterPath. linked=false when the account has no linked media-server user yet; year/data are null when it has no watched plays in any year",
+          },
+        },
+      },
+    },
     "/play-history/sessions": {
       get: {
         tags: ["Sessions"],
@@ -2368,6 +2390,23 @@ const spec = {
           { name: "is4k", in: "query", schema: { type: "boolean" }, description: "Legacy shorthand for instance=4k" },
         ],
         responses: { "200": { description: "{ qualityProfiles: [...] }" } },
+      },
+    },
+    "/requests/instances": {
+      get: {
+        tags: ["Requests"],
+        summary:
+          "NAMED Radarr/Sonarr instances the caller may request this title on, with its per-instance request/availability state — the data behind the detail page's \"Request on <instance>\" actions. Excludes the default ('') and '4k' instances, which are the plain and 4K request actions.",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
+        responses: {
+          "200": {
+            description:
+              "{ instances: [{ slug, name, requested, available }] }. Filtered to instances this caller may target, so an ungranted or unknown slug is simply absent; empty when none are configured, none are grantable, or the title is blacklisted",
+          },
+        },
       },
     },
     "/requests/users": {

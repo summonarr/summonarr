@@ -73,6 +73,35 @@ function getOidcConfig(): Promise<client.Configuration> {
   return configPromise;
 }
 
+// Marker prefixed onto the OIDC `state` for a NATIVE (app) flow.
+//
+// Why it lives in `state` and not the cookie: /start is called by the app's own
+// URLSession, but the IdP redirect lands in the app's web-auth view — a
+// different cookie jar entirely — so the callback sees NO flow cookie on a
+// native sign-in. `state` is the one value guaranteed to round-trip, so it is
+// what tells the callback to hand the code back to the app instead of
+// exchanging it and minting a web session.
+//
+// This is ROUTING information, not a secret and not an authorization. The native
+// flow's security is PKCE: the codeVerifier lives only inside the signed
+// flowState token held by the app, so an authorization code lifted out of the
+// custom-scheme redirect cannot be redeemed without it.
+const NATIVE_STATE_PREFIX = "nat.";
+
+export function isNativeOidcState(state: string | null | undefined): state is string {
+  return typeof state === "string" && state.startsWith(NATIVE_STATE_PREFIX);
+}
+
+// Custom-scheme target the callback bounces a native flow back to. The app
+// intercepts it with ASWebAuthenticationSession (which matches on the scheme
+// itself, so this never needs registering as a URL type in the app).
+//
+// A hardcoded constant on purpose: the callback redirects here while holding an
+// authorization code, so accepting a client-supplied target would turn this
+// route into an open redirect that leaks the code to whoever asked.
+export const NATIVE_OIDC_CALLBACK_SCHEME = "summonarr";
+export const NATIVE_OIDC_CALLBACK_URL = `${NATIVE_OIDC_CALLBACK_SCHEME}://oidc-callback`;
+
 interface OidcFlowState {
   state: string;
   nonce: string;
@@ -133,11 +162,16 @@ export interface OidcAuthorizationStart {
 export async function buildOidcAuthorization(
   redirectUri: string,
   returnTo?: string,
+  opts?: { native?: boolean },
 ): Promise<OidcAuthorizationStart> {
   const config = await getOidcConfig();
   const codeVerifier = client.randomPKCECodeVerifier();
   const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
-  const state = client.randomState();
+  // The marker only PREFIXES the random state — it never replaces entropy, so a
+  // native state is exactly as unguessable as a web one.
+  const state = opts?.native
+    ? `${NATIVE_STATE_PREFIX}${client.randomState()}`
+    : client.randomState();
   const nonce = client.randomNonce();
   const url = client.buildAuthorizationUrl(config, {
     redirect_uri: redirectUri,
@@ -165,6 +199,23 @@ export interface OidcClaims {
   accessToken: string | null;
   refreshToken: string | null;
   expiresAt: number | null;
+}
+
+// Native-flow variant. The app posts back the bare (code, state) it caught on
+// the custom-scheme redirect, so there is no real request URL to hand
+// openid-client — synthesize one from the redirectUri SIGNED INTO the flow
+// state. Using the signed copy (never a client-supplied value) is what keeps
+// the token request's redirect_uri pinned to the one the authorization was
+// issued against.
+export async function exchangeNativeOidcCode(
+  code: string,
+  state: string,
+  flowState: OidcFlowState,
+): Promise<OidcClaims> {
+  const url = new URL(flowState.redirectUri);
+  url.searchParams.set("code", code);
+  url.searchParams.set("state", state);
+  return exchangeOidcCode(url, flowState);
 }
 
 export async function exchangeOidcCode(

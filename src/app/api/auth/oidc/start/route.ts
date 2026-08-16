@@ -2,12 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 import {
   buildOidcAuthorization,
   isOidcConfigured,
+  NATIVE_OIDC_CALLBACK_SCHEME,
   OIDC_STATE_COOKIE,
   OIDC_STATE_COOKIE_PATH,
   signOidcStateCookie,
 } from "@/lib/oidc";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
+import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 function getRedirectUri(base: string): string {
   return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
@@ -43,15 +45,33 @@ export async function GET(req: NextRequest) {
 
   const redirectUri = getRedirectUri(authUrl);
   const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
+  // Native clients cannot use the redirect+cookie handshake: this call is made
+  // by the app's own HTTP client, while the IdP redirect lands in a separate
+  // web-auth view with its own cookie jar. They get the authorize URL and the
+  // signed flow state as JSON and drive the rest themselves, exactly like
+  // /api/auth/plex/start hands back its flowState.
+  const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
   let auth;
   try {
-    auth = await buildOidcAuthorization(redirectUri, returnTo);
+    auth = await buildOidcAuthorization(redirectUri, returnTo, { native: isNative });
   } catch (err) {
     console.error("[oidc/start] discovery or URL build failed:", err);
     return NextResponse.json({ error: "OIDC sign-in is unavailable" }, { status: 503 });
   }
 
   const cookieValue = await signOidcStateCookie(auth.state);
+
+  if (isNative) {
+    // No Set-Cookie: the cookie would be dead weight here (wrong jar) and the
+    // flow state is already in the body. The app submits it back to
+    // /api/auth/sign-in/oidc together with the code it catches.
+    return NextResponse.json({
+      authorizeUrl: auth.url.toString(),
+      flowState: cookieValue,
+      callbackScheme: NATIVE_OIDC_CALLBACK_SCHEME,
+    });
+  }
+
   const res = NextResponse.redirect(auth.url.toString());
   const secure = isSecureCookieContext();
   const attrs = [
