@@ -218,6 +218,31 @@ const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string
 // round-trip), so the count of requester-shaped reads is itself a pin.
 const userFindManyCalls: Array<{ where?: Record<string, unknown>; select?: Record<string, unknown> }> = [];
 type CasCall = { mode: "markAvailable" | "requireAvailable" | "plain"; ids: string[]; winners: string[] };
+// Seedable ARR-available rows.
+//
+// These two delegates used to return a hardcoded [], which made
+// availableMovieSet/availableTvSet permanently empty — so nowAvailableApproved
+// was always empty and the ENTIRE ARR-available block of the orchestrator was
+// unreachable from this suite. Verified by replacing that code with a `throw`:
+// the suite still passed 47/47, i.e. no test ever executed it.
+//
+// `fromCall` exists because the route reads these tables twice: once at run
+// start and once after the repush. A row visible only from call 2 is the only
+// way to reach the SECOND pass's filter.
+type ArrAvailRow = {
+  model: "radarrAvailableItem" | "sonarrAvailableItem";
+  tmdbId: number; arrInstance: string; fromCall?: number;
+};
+const arrAvailableRows: ArrAvailRow[] = [];
+const arrAvailableReadCounts = { radarrAvailableItem: 0, sonarrAvailableItem: 0 };
+function arrAvailableRead(model: ArrAvailRow["model"], ids: number[] | undefined) {
+  const n = ++arrAvailableReadCounts[model];
+  return arrAvailableRows
+    .filter((r) => r.model === model && n >= (r.fromCall ?? 1) && (!ids || ids.includes(r.tmdbId)))
+    // arrInstance is required, not cosmetic: the lookup key is vkey(tmdbId, arrInstance).
+    .map((r) => ({ tmdbId: r.tmdbId, arrInstance: r.arrInstance }));
+}
+
 const casCalls: CasCall[] = [];
 
 type Op = { model: string; method: string; args: unknown };
@@ -351,9 +376,15 @@ const fakePrisma = {
     },
   },
   pushSubscription: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
-  radarrAvailableItem: { findMany: async () => [] },
+  radarrAvailableItem: {
+    findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
+      arrAvailableRead("radarrAvailableItem", args?.where?.tmdbId?.in),
+  },
   radarrWantedItem: { findMany: async () => [] },
-  sonarrAvailableItem: { findMany: async () => [] },
+  sonarrAvailableItem: {
+    findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
+      arrAvailableRead("sonarrAvailableItem", args?.where?.tmdbId?.in),
+  },
   sonarrWantedItem: { findMany: async () => [] },
   plexLibraryItem: {
     // The dedupe prior-mapping lookup. Wheres are recorded so the instance-scoping
@@ -570,6 +601,9 @@ beforeEach(() => {
   plexLibraryItemFindManyWheres.length = 0;
   orphanSweepDeletes.length = 0;
   casCalls.length = 0;
+  arrAvailableRows.length = 0;
+  arrAvailableReadCounts.radarrAvailableItem = 0;
+  arrAvailableReadCounts.sonarrAvailableItem = 0;
   pgLockCalls.length = 0;
   requests.clear();
   usersById.clear();
@@ -2141,4 +2175,38 @@ test("source-pinning: the gated request never reaches the notification CAS at al
   );
   // Still re-evaluable on a later run: not notified, and the flag is untouched.
   assert.equal(requests.get("r-gated")!.notifiedAvailable, false);
+});
+
+test("source-pinning: the ARR-available pass EXCLUDES a pinned user outright, leaving them APPROVED", async () => {
+  configureBothServers();
+  // Both libraries empty, so the ARR cache is the ONLY thing that can move a
+  // row. This isolates the ARR pass from the library marking pass, which has
+  // different semantics (it flips the status and withholds only the notify).
+  respond = bothServersRespond([], []);
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 777, arrInstance: "" });
+
+  pinUser("u-pinned", "plex");
+  seedRequest({ id: "r-pinned", tmdbId: 777, mediaType: "MOVIE", requestedBy: "u-pinned", status: "APPROVED" });
+  seedRequest({ id: "r-unpinned", tmdbId: 777, mediaType: "MOVIE", requestedBy: "u-unpinned", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // Non-vacuity, and the reason this pin exists: before the fake ARR-available
+  // tables became seedable they returned a hardcoded [], so this whole branch
+  // of the route was unreachable — replacing it with a `throw` did not fail a
+  // single test. The control proves the branch actually ran.
+  assert.equal(requests.get("r-unpinned")!.status, "AVAILABLE", "the ARR pass did not run at all");
+  assert.equal(requests.get("r-unpinned")!.notifiedAvailable, true);
+
+  // ARR-available means "downloaded in Radarr/Sonarr", which is NOT the same as
+  // "scanned into the user's chosen library yet". A pinned user is therefore
+  // left APPROVED — not marked, not notified — so the library pass can flip and
+  // notify them once the title actually appears on the server they watch.
+  // Marking here would be a premature "now available" for a library they
+  // cannot see. Note this differs from the library pass, which DOES flip.
+  assert.equal(requests.get("r-pinned")!.status, "APPROVED", "a pinned user must not be flipped by the ARR pass");
+  assert.equal(requests.get("r-pinned")!.notifiedAvailable, false);
+  assert.ok(!notifiedUserIds().includes("u-pinned"), "pinned user was notified off an unreached library");
 });
