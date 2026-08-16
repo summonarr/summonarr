@@ -11,7 +11,7 @@ Self-hosted media request aggregator. Users browse TMDB (trending / popular / di
 - **Prisma 7.8** + **PostgreSQL 17**, schema-first. No `prisma/migrations/` directory — changes are applied via `prisma db push`.
 - **Custom session auth** — a `jose`-signed (HS256) session JWT, not NextAuth (the project migrated off it; there is no `next-auth` dependency and no `auth.config.ts`). Session lifecycle lives in [src/lib/session-jwt.ts](src/lib/session-jwt.ts) (sign/verify), [src/lib/session-refresh.ts](src/lib/session-refresh.ts) (`verifyAndRefreshSession`: DB revocation, `sessionsRevokedAt`/`passwordChangedAt` cutoffs, role rotation, sliding window), [src/lib/session-cookie.ts](src/lib/session-cookie.ts), and [src/lib/auth.ts](src/lib/auth.ts) (`auth()` — JWT-only read). A custom `AuthSession` table backs per-device tracking + revocation. Providers: local credentials, Plex OAuth, Jellyfin (standard + QuickConnect), OIDC (`openid-client`).
 - **Tailwind v4** — **no `tailwind.config.js`**. Theme lives inline in [src/app/globals.css](src/app/globals.css) under `@theme inline` with oklch variables and `.dark` class-based dark mode.
-- **UI**: [src/components/ui/](src/components/ui/) — `@base-ui/react` (Radix-style) primitives scaffolded via the `shadcn` CLI, composed with the in-repo `@/lib/cva` and `@/lib/tw-merge` reimplementations (the `class-variance-authority` and `tailwind-merge` npm packages are **not** installed — these are hand-written equivalents; the merger's group table is CI-audited against the installed Tailwind, see guardrail 37).
+- **UI**: [src/components/ui/](src/components/ui/) — `@base-ui/react` (Radix-style) primitives scaffolded via the `shadcn` CLI, composed with the in-repo `@/lib/cva` and `@/lib/tw-merge` reimplementations (the `class-variance-authority` and `tailwind-merge` npm packages are **not** installed — these are hand-written equivalents; the merger's group table is CI-audited against the installed Tailwind, see guardrail 39).
 - **Client state**: plain `useState` + URL `searchParams`. No Zustand, Jotai, Redux, or TanStack Query.
 - **Data fetching**: REST API routes + `fetch` on the client, or server components calling Prisma directly. No tRPC. No server actions.
 - **Package manager**: npm (see `package-lock.json`). No `packageManager` field, no `.nvmrc`.
@@ -534,28 +534,6 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **Red means a CONFIGURED server failed.** Nothing configured is neutral, not an error. A partial failure still refreshes — the rows that did sync are what the click was for.
     - **Never sum `plexMarked` and `jellyfinMarked`.** One marking pass, one `stillPending` snapshot, so a title on both servers is counted once by each. Report per source.
     - **One POST to `/api/sync` already syncs Jellyfin.** Its Jellyfin arm is a strict superset of a bodiless `/api/sync/jellyfin` call (full unwindowed replace over every instance, vs insert-only inside a 2-hour window on the default alone). Don't add a second call; it re-runs the whole marking pass and races the orchestrator's own delete-and-replace.
-37. **A new `tw-merge` group goes BEFORE the catch-all it narrows, and `npm run audit:tw-merge` must stay green.**
-
-    Why:
-    - [tw-merge.ts](src/lib/tw-merge.ts) decides which utilities conflict from a hand-maintained table of prefix regexes, and `groupOf` returns the FIRST match. A group placed after the catch-all it was meant to narrow is unreachable, and a catch-all that swallows a *different* CSS property silently deletes one of the two classes.
-    - The failure is invisible: both classes are real, the merged string still looks plausible, and nothing type-checks or lints differently. It has shipped visibly twice — `ui/drawer.tsx`'s DrawerPopup lost `border-t` to the border-colour catch-all, and `ui/avatar.tsx`'s AvatarBadge lost `bg-primary` to `bg-blend-color`. One full audit against Tailwind 4.3.3's 23,286 utilities found 20 more of the same shape.
-    - The table is also v3-shaped wherever nobody has looked: Tailwind renames (`bg-left-top` → `bg-top-left`) and additions (3D `rotate-x/y/z`, `transition-behavior`, `-safe` alignments) do not announce themselves.
-
-    Rules:
-    - **Order is load-bearing** — specific before catch-all. `["bg-blend", /^bg-blend-/]` must precede `["bg", /^bg-/]`.
-    - **Constrain the value shape when the prefix is an ordinary word.** `border-w`/`ring-w`/`inset-s` all require `-\d`, `-[` or a known keyword. A bare `/^end-/` merged the prose `end-credits` with `end-to-end`.
-    - **Utilities that COMPOSE get one group EACH, never a shared one.** Each backdrop filter and each font-variant-numeric toggle contributes its own `--tw-*` var to one shared value, so a single `backdrop`/`fvn` group deletes half the effect — the same over-merge bug from the other direction.
-    - **A group whose NAME can equal a real class is a trap.** Unknown classes fall back to keying by their own string, so bare `ring` merged with ring colours only because the catch-all group happened to be *called* `ring`. Renaming it would have silently broken that; `matchGroup` (null when nothing matched) is what the auditor uses to tell the two apart.
-    - **Legitimate same-family collapses are allowlisted with a reason** in [scripts/audit-tw-merge.mts](scripts/audit-tw-merge.mts) — a reset (`ease-initial`) or one shorthand spelled two ways (`bg-linear-*` vs `bg-conic`). Adding an entry is a claim that the utilities cannot meaningfully apply together; read the emitted CSS first.
-    - The auditor derives everything from Tailwind's own design system, so it needs no maintenance on upgrade — it re-derives and reports. If Tailwind drops `__unstable__loadDesignSystem` it fails loudly rather than auditing an empty set.
-
-    ```bash
-    npm run audit:tw-merge            # blocking in CI
-    npm run audit:tw-merge -- --list  # show the allowlisted findings and why
-    ```
-
-    **Run it bare, never piped** — a pipe reports the last command's exit code, the same trap as `generate-licenses.mts --check`.
-
 37. **NEVER build a Jellyfin series→tmdbId map from `JellyfinLibraryItemData.itemId` alone — use `buildSeriesItemIdIndex`.** This is the SAME-server, multi-*library* twin of guardrail 35 (which is about multi-*server*); the two are independent.
 
     Why:
@@ -581,6 +559,28 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - `tests/proxy.test.mts` pins BOTH directions (development grants it; `production`/`test`/unset never do). A one-sided pin would be satisfied by a hardcoded constant — keep both.
     - Next's CSP guide documents this exact carve-out and states neither React nor Next uses `eval()` in production. `style-src` needs no dev branch here: it is already `'unsafe-inline'` in every environment.
     - [SECURITY.md](SECURITY.md) describes the **shipped** posture. It stays accurate only while this branch is dev-only — if that ever changes, that file changes with it.
+
+39. **A new `tw-merge` group goes BEFORE the catch-all it narrows, and `npm run audit:tw-merge` must stay green.**
+
+    Why:
+    - [tw-merge.ts](src/lib/tw-merge.ts) decides which utilities conflict from a hand-maintained table of prefix regexes, and `groupOf` returns the FIRST match. A group placed after the catch-all it was meant to narrow is unreachable, and a catch-all that swallows a *different* CSS property silently deletes one of the two classes.
+    - The failure is invisible: both classes are real, the merged string still looks plausible, and nothing type-checks or lints differently. It has shipped visibly twice — `ui/drawer.tsx`'s DrawerPopup lost `border-t` to the border-colour catch-all, and `ui/avatar.tsx`'s AvatarBadge lost `bg-primary` to `bg-blend-color`. One full audit against Tailwind 4.3.3's 23,286 utilities found 20 more of the same shape.
+    - The table is also v3-shaped wherever nobody has looked: Tailwind renames (`bg-left-top` → `bg-top-left`) and additions (3D `rotate-x/y/z`, `transition-behavior`, `-safe` alignments) do not announce themselves.
+
+    Rules:
+    - **Order is load-bearing** — specific before catch-all. `["bg-blend", /^bg-blend-/]` must precede `["bg", /^bg-/]`.
+    - **Constrain the value shape when the prefix is an ordinary word.** `border-w`/`ring-w`/`inset-s` all require `-\d`, `-[` or a known keyword. A bare `/^end-/` merged the prose `end-credits` with `end-to-end`.
+    - **Utilities that COMPOSE get one group EACH, never a shared one.** Each backdrop filter and each font-variant-numeric toggle contributes its own `--tw-*` var to one shared value, so a single `backdrop`/`fvn` group deletes half the effect — the same over-merge bug from the other direction.
+    - **A group whose NAME can equal a real class is a trap.** Unknown classes fall back to keying by their own string, so bare `ring` merged with ring colours only because the catch-all group happened to be *called* `ring`. Renaming it would have silently broken that; `matchGroup` (null when nothing matched) is what the auditor uses to tell the two apart.
+    - **Legitimate same-family collapses are allowlisted with a reason** in [scripts/audit-tw-merge.mts](scripts/audit-tw-merge.mts) — a reset (`ease-initial`) or one shorthand spelled two ways (`bg-linear-*` vs `bg-conic`). Adding an entry is a claim that the utilities cannot meaningfully apply together; read the emitted CSS first.
+    - The auditor derives everything from Tailwind's own design system, so it needs no maintenance on upgrade — it re-derives and reports. If Tailwind drops `__unstable__loadDesignSystem` it fails loudly rather than auditing an empty set.
+
+    ```bash
+    npm run audit:tw-merge            # blocking in CI
+    npm run audit:tw-merge -- --list  # show the allowlisted findings and why
+    ```
+
+    **Run it bare, never piped** — a pipe reports the last command's exit code, the same trap as `generate-licenses.mts --check`.
 
 ## Working principles
 
