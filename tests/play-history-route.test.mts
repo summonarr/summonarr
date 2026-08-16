@@ -338,7 +338,9 @@ const fakePrisma = {
     findFirst: async (args: unknown) => { rec("plexLibraryItem", "findFirst", args); return null; },
   },
   jellyfinLibraryItem: {
-    findMany: async (args: unknown) => { rec("jellyfinLibraryItem", "findMany", args); return []; },
+    // Returns whatever jfLibRows holds — the poller's tmdbId fallback for a
+    // session whose payload carries no ProviderIds.Tmdb reads through here.
+    findMany: async (args: unknown) => { rec("jellyfinLibraryItem", "findMany", args); return jfLibRows; },
     findFirst: async (args: unknown) => { rec("jellyfinLibraryItem", "findFirst", args); return null; },
   },
   tmdbMediaCore: {
@@ -410,6 +412,9 @@ let plexSnapshot: Array<Record<string, unknown>> = [];
 let plexRemoteSnapshot: Array<Record<string, unknown>> = [];
 let jfSnapshot: Array<Record<string, unknown>> = [];
 let jfRemoteSnapshot: Array<Record<string, unknown>> = [];
+// JellyfinLibraryItem rows the poller's tmdbId fallback sees. Default [] keeps
+// every pre-existing test's "no library row" behaviour.
+let jfLibRows: Array<Record<string, unknown>> = [];
 let plexSessionsStatus = 200;
 let plexRemoteSessionsStatus = 200;
 let jfSessionsStatus = 200;
@@ -640,6 +645,7 @@ beforeEach(() => {
   plexSnapshot = [];
   plexRemoteSnapshot = [];
   jfSnapshot = [];
+  jfLibRows = [];
   plexSessionsStatus = 200;
   plexRemoteSessionsStatus = 200;
   jfSessionsStatus = 200;
@@ -1046,6 +1052,52 @@ test("a brand-new jellyfin session is created from the /Sessions snapshot", asyn
   assert.equal(created[0].sessionKey, "jf-new");
   assert.equal(created[0].tmdbId, 551, "the ProviderIds.Tmdb resolves the movie id");
   assert.equal(created[0].progressMs, 30_000n, "positionTicks (100ns) convert to ms");
+});
+
+// guardrail 37. A title in two Jellyfin libraries (Anime vs TV, HD vs 4K, a
+// double-import) has one item id per copy, but JellyfinLibraryItem allows one
+// row — so only one id could be stored and a watch of the OTHER copy resolved to
+// no tmdbId at all. The watch then landed unattributed: no poster, no title
+// link, and nothing tying it to the requested media. jellyfinItemIds closes it.
+test("a jellyfin watch of a duplicated title's OTHER copy still resolves its tmdbId", async () => {
+  jfLibRows = [{
+    // The stored id is copy A; the session below is playing copy B.
+    jellyfinItemId: "jf-copy-a",
+    jellyfinItemIds: ["jf-copy-a", "jf-copy-b"],
+    tmdbId: 603,
+    mediaType: "MOVIE",
+  }];
+  jfSnapshot = [{
+    Id: "jf-dup", PlaySessionId: "jf-dup",
+    UserId: "jf-acct-dup", UserName: "bob", Client: "Jellyfin Web", DeviceName: "Firefox",
+    PlayState: { IsPaused: false, PositionTicks: 300_000_000, PlayMethod: "DirectPlay" },
+    NowPlayingItem: {
+      Id: "jf-copy-b", // the copy that did NOT win the row
+      Name: "JF Movie", Type: "Movie", ProductionYear: 2021, RunTimeTicks: 72_000_000_000,
+      // No ProviderIds at all, so the tmdbId can only come from the library lookup.
+    },
+  }];
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).jellyfin, { started: 1, updated: 0, ended: 0 });
+  await settle();
+
+  const created = activeCreatesFor("jellyfin:jf-dup");
+  assert.equal(created.length, 1);
+  assert.equal(
+    created[0].tmdbId,
+    603,
+    "the losing copy's item id must still resolve — keying the lookup map on jellyfinItemId alone drops this watch to tmdbId null",
+  );
+
+  const lookup = dbCalls
+    .filter((c) => c.model === "jellyfinLibraryItem" && c.op === "findMany")
+    .at(-1)?.args as { where?: { OR?: unknown[] }; select?: Record<string, boolean> } | undefined;
+  assert.ok(
+    lookup?.where?.OR?.length === 2,
+    "the prefetch ORs jellyfinItemId against jellyfinItemIds — rows predating the column carry [] and would otherwise stop matching",
+  );
+  assert.equal(lookup?.select?.jellyfinItemIds, true, "the array has to be selected or the map can't be keyed by it");
 });
 
 test("multi-server: two Jellyfin instances reporting the SAME raw playSessionId in one tick create TWO distinct ActiveSession rows, not a collision", async () => {

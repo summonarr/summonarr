@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
-import { getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
+import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -103,16 +103,17 @@ async function syncJellyfin(request: NextRequest) {
     );
   }
 
-  const seriesItemIdToTmdbId = new Map<string, number>();
-  for (const [tmdbId, data] of tvIds) {
-    if (data.itemId) seriesItemIdToTmdbId.set(data.itemId, tmdbId);
-  }
+  // Keyed on EVERY item id per series, not just the stored one — a show in two
+  // libraries files its episodes under two SeriesIds and the unlisted one's
+  // episodes would be dropped on the floor.
+  const seriesItemIdToTmdbId = buildSeriesItemIdIndex(tvIds);
 
   // Fire-and-forget: episode cache is best-effort and must not block the main library write.
   // On recentOnly, scope deletes to the series we're about to repopulate so unrelated cached
   // episodes survive (the recentOnly tv filter is a 2h window, not the whole library).
   const episodeRecentOnly = recentOnly;
-  const tmdbIdsBeingReplaced = Array.from(seriesItemIdToTmdbId.values());
+  // Deduped: a duplicated series contributes one entry per item id.
+  const tmdbIdsBeingReplaced = Array.from(new Set(seriesItemIdToTmdbId.values()));
   // Decided BEFORE the fetch, like the Plex twin: bailing out inside the .then()
   // still page-walked every Episode in the library first, then threw the whole
   // result away on any multi-server install.
@@ -172,8 +173,8 @@ async function syncJellyfin(request: NextRequest) {
   // scoped to `instance`, so omitting it made a named-instance resync delete that
   // server's rows and re-insert the whole library under the schema default "",
   // moving it onto the DEFAULT server and un-restricting a `restricted` one.
-  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
-  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+  const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
+  const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, jellyfinItemId: d.itemId, jellyfinItemIds: libraryItemIds(d), title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), communityRating: d.communityRating, addedAt: d.addedAt }));
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.

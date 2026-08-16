@@ -352,13 +352,17 @@ const JF_ITEM_FULL = {
   DateCreated: "2026-07-01T00:00:00.000Z", ProviderIds: { Tmdb: "550" },
 };
 const JF_ITEM_MIN = { Id: "jf-551", Name: "Second", ProviderIds: { Tmdb: "551" } };
+// jellyfinItemIds carries EVERY id the title occupies, the stored one included
+// (guardrail 37) — a single-copy item is therefore a one-element array, not [].
 const JF_ROW_550 = {
   tmdbId: 550, serverInstance: "", mediaType: "MOVIE", filePath: "/media/movies/fc.mkv", jellyfinItemId: "jf-550",
+  jellyfinItemIds: ["jf-550"],
   title: "Fight bClub/b", year: "1999", overview: "Rules apply.", contentRating: "R",
   communityRating: 8.8, addedAt: new Date("2026-07-01T00:00:00.000Z"),
 };
 const JF_ROW_551 = {
   tmdbId: 551, serverInstance: "", mediaType: "MOVIE", filePath: null, jellyfinItemId: "jf-551",
+  jellyfinItemIds: ["jf-551"],
   title: "Second", year: null, overview: null, contentRating: null,
   communityRating: null, addedAt: null,
 };
@@ -819,6 +823,32 @@ test("jellyfin recentOnly rides a ~2h MinDateLastSaved window (RECENT_WINDOW_MS)
     creates.map((c) => c.args),
     [{ data: [JF_ROW_551], skipDuplicates: true }],
     "recentOnly must insert only the NEW tmdbId, with skipDuplicates on",
+  );
+});
+
+// guardrail 37. The same title in two libraries on one server collapses to one
+// row — @@id([tmdbId, mediaType, serverInstance]) allows no more — but the
+// losing copy's item id must still be PERSISTED, or the poller can't attribute a
+// watch of it and the episodes filed under it drop out of TVEpisodeCache.
+test("guardrail 37: a title in two Jellyfin libraries writes ONE row carrying BOTH item ids", async () => {
+  configureJellyfin();
+  respond = jellyfinMovieResponder([
+    // Newest first on purpose — arrival order must not decide the winner.
+    { Id: "jf-dup-new", Name: "Dup", ProviderIds: { Tmdb: "552" }, DateCreated: "2026-08-01T00:00:00.000Z" },
+    { Id: "jf-dup-old", Name: "Dup", ProviderIds: { Tmdb: "552" }, DateCreated: "2026-01-01T00:00:00.000Z" },
+  ]);
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const rows = opsFor("jellyfinLibraryItem", "createMany")
+    .flatMap((c) => (c.args as { data: Array<Record<string, unknown>> }).data);
+  assert.equal(rows.length, 1, "one row per (tmdbId, mediaType, serverInstance) — the collapse itself is correct");
+  assert.equal(rows[0].jellyfinItemId, "jf-dup-new", "the newest copy is the canonical stored id");
+  assert.deepEqual(
+    rows[0].jellyfinItemIds,
+    ["jf-dup-new", "jf-dup-old"],
+    "both ids persist, stored id first — dropping the loser is what made its watches unattributable",
   );
 });
 

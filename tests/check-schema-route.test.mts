@@ -113,7 +113,7 @@ const TRUSTED_ORIGIN = "http://localhost:3000";
 const EXPECTED: Record<string, string[]> = {
   User: ["id", "name", "email", "passwordHash", "role", "permissions", "mediaServer", "discordId", "autoApprove", "quotaExempt"],
   PlexLibraryItem: ["tmdbId", "mediaType", "filePath", "plexRatingKey", "title", "year", "overview"],
-  JellyfinLibraryItem: ["tmdbId", "mediaType", "filePath", "jellyfinItemId", "title", "year", "overview"],
+  JellyfinLibraryItem: ["tmdbId", "mediaType", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview"],
   TVEpisodeCache: ["source", "tmdbId", "seasonNumber", "episodeNumber"],
   PlayHistory: ["id", "source", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched"],
   MediaRequest: ["id", "tmdbId", "mediaType", "title", "posterPath", "status", "requestedBy"],

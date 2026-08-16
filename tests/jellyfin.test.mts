@@ -30,7 +30,14 @@
 //   - MinDateLastSaved is appended ONLY when a date is passed — the recentOnly
 //     window the sync orchestrator rides on;
 //   - ProviderIds parsing: Tmdb with lowercase tmdb fallback, non-numeric
-//     skipped, absent skipped, duplicate tmdb ids last-write-wins into the Map;
+//     skipped, absent skipped;
+//   - one tmdb id in SEVERAL libraries (Anime vs TV, HD vs 4K, a double-import)
+//     still collapses to one row — the schema keys JellyfinLibraryItem
+//     @@id([tmdbId, mediaType, serverInstance]) with a single jellyfinItemId —
+//     but WHICH copy survives is now a deterministic rule (newest DateCreated,
+//     item-id tiebreak) instead of whichever concurrently-fetched library page
+//     happened to land last, and the losing copies' ids are kept in
+//     duplicateItemIds so nothing downstream has to guess;
 //   - paging: TotalRecordCount drives parallel page fan-out (StartIndex 0,
 //     5000, 10000, …); library-scoped queries add ParentId per library;
 //   - fetchPage retry: a 5xx retries (with the [jellyfin] retry warn), a
@@ -41,6 +48,11 @@
 //     response body excerpt on failure.
 //
 //   Episodes (getJellyfinTVEpisodes, getJellyfinEpisodesForShow):
+//   - buildSeriesItemIdIndex maps EVERY item id of a duplicated series to its
+//     tmdbId. processEpisodes skips an unrecognised SeriesId, so a map built
+//     from the surviving row's id alone dropped the other copy's whole episode
+//     set out of TVEpisodeCache — which then reads as "those seasons aren't in
+//     the library";
 //   - series→episode mapping via SeriesId→tmdbId; unknown series, season 0
 //     (specials), non-integer/negative indices all skipped; duplicates deduped;
 //   - an empty series map short-circuits to [] with ZERO fetches;
@@ -120,6 +132,7 @@ const {
   getJellyfinMediaFolders,
   refreshJellyfinLibrary,
   getJellyfinTmdbIds,
+  buildSeriesItemIdIndex,
   getJellyfinTVEpisodes,
   getJellyfinEpisodesForShow,
   getJellyfinSessions,
@@ -389,6 +402,7 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
     contentRating: "R",
     communityRating: 8.8,
     addedAt: new Date("2024-05-01T12:00:00.000Z"),
+    duplicateItemIds: [], // the single-copy case: no other library holds it
   });
 
   // TV maps to the Series item type on the same query shape.
@@ -397,22 +411,19 @@ test("library query pins the exact /Items wire shape (Fields list, BoxSet exclus
   assert.ok(sent[1].url.includes("IncludeItemTypes=Series"), "TV must query Series");
 });
 
-test("ProviderIds parsing: lowercase tmdb fallback, non-numeric skipped, absent skipped, duplicate ids last-write-wins, missing fields null", async () => {
+test("ProviderIds parsing: lowercase tmdb fallback, non-numeric skipped, absent skipped, missing fields null", async () => {
   const B = nextBase();
   respond = () => okJson({
     Items: [
       { Id: "a", ProviderIds: { tmdb: "603" } },              // lowercase fallback
       { Id: "b", ProviderIds: { Tmdb: "abc" } },              // non-numeric → skipped
       { Id: "c", Name: "No Providers" },                      // no ProviderIds → skipped
-      { Id: "d", ProviderIds: { Tmdb: "77" }, Name: "First" },
-      { Id: "e", ProviderIds: { Tmdb: "77" }, Name: "Second" }, // same id → overwrites
     ],
-    TotalRecordCount: 5,
+    TotalRecordCount: 3,
   });
 
   const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
-  assert.deepEqual([...items.keys()].sort((x, y) => x - y), [77, 603]);
-  assert.equal(items.get(77)!.title, "Second", "a duplicate tmdb id must last-write-win into the map");
+  assert.deepEqual([...items.keys()], [603]);
   // The minimal lowercase-fallback item: every optional field degrades to null.
   assert.deepEqual(items.get(603), {
     filePath: null,
@@ -423,7 +434,71 @@ test("ProviderIds parsing: lowercase tmdb fallback, non-numeric skipped, absent 
     contentRating: null,
     communityRating: null,
     addedAt: null,
+    duplicateItemIds: [],
   });
+});
+
+// This test previously pinned the BUG: `duplicate tmdb ids last-write-wins into
+// the Map`. One tmdb id in two libraries overwrote the first copy wholesale, and
+// because the library-scoped walk fetches folders CONCURRENTLY the survivor —
+// and with it the row's itemId, filePath, addedAt and ratings — could flip
+// between syncs. The collapse to one row stays (the schema has nowhere to put a
+// second itemId); the coin-flip does not.
+test("a tmdb id in several libraries resolves to the most recently added copy, whatever order the libraries land in", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      // NEWEST FIRST on purpose: last-write-wins would answer "Oldest" here.
+      { Id: "d", ProviderIds: { Tmdb: "77" }, Name: "Newest", Path: "/tv/newest.mkv", DateCreated: "2024-03-01T00:00:00.000Z" },
+      { Id: "e", ProviderIds: { Tmdb: "77" }, Name: "Middle", DateCreated: "2024-02-01T00:00:00.000Z" },
+      { Id: "f", ProviderIds: { Tmdb: "77" }, Name: "Oldest", DateCreated: "2024-01-01T00:00:00.000Z" },
+    ],
+    TotalRecordCount: 3,
+  });
+
+  const items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(items.size, 1, "still one row per tmdb id — the schema can hold no more");
+  assert.equal(items.get(77)!.title, "Newest", "newest DateCreated wins, not whichever page landed last");
+  assert.equal(items.get(77)!.itemId, "d");
+  assert.equal(items.get(77)!.filePath, "/tv/newest.mkv", "the winner's whole row travels together");
+  assert.deepEqual(
+    items.get(77)!.duplicateItemIds,
+    ["e", "f"],
+    "the losing copies stay addressable — their episodes are filed under these SeriesIds",
+  );
+  assert.ok(
+    warns.some((w) => w.includes("[jellyfin] 1 TMDB id(s) matched more than one Movie")),
+    "a collapsed duplicate is reported once per walk, so the dropped file path is diagnosable",
+  );
+});
+
+test("duplicate copies with equal or absent DateCreated fall back to an item-id tiebreak, never arrival order", async () => {
+  const B = nextBase();
+  // A dated copy outranks an undated one even when the undated one arrives
+  // first AND sorts higher on id — DateCreated is the primary key of the rule.
+  respond = () => okJson({
+    Items: [
+      { Id: "z", ProviderIds: { Tmdb: "77" }, Name: "Undated" },
+      { Id: "a", ProviderIds: { Tmdb: "77" }, Name: "Dated", DateCreated: "2024-01-01T00:00:00.000Z" },
+    ],
+    TotalRecordCount: 2,
+  });
+  let items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(items.get(77)!.title, "Dated", "an undated copy never displaces a dated one");
+  assert.deepEqual(items.get(77)!.duplicateItemIds, ["z"]);
+
+  // All-undated (or exactly-tied) copies: the greater item id wins. Jellyfin ids
+  // are stable GUIDs, so this is reproducible across syncs — unlike page order.
+  respond = () => okJson({
+    Items: [
+      { Id: "z", ProviderIds: { Tmdb: "77" }, Name: "Zed" },
+      { Id: "a", ProviderIds: { Tmdb: "77" }, Name: "Ay" },
+    ],
+    TotalRecordCount: 2,
+  });
+  items = await getJellyfinTmdbIds(B, "k", "MOVIE");
+  assert.equal(items.get(77)!.title, "Zed");
+  assert.deepEqual(items.get(77)!.duplicateItemIds, ["a"]);
 });
 
 test("recentOnly: minDateLastSaved rides the query as MinDateLastSaved, and is absent otherwise", async () => {
@@ -600,6 +675,71 @@ test("episodes without a provided map discover the Series set first, then map ep
   const episodes = await getJellyfinTVEpisodes(B, "k");
   assert.ok(sent[0].url.includes("IncludeItemTypes=Series"), "series discovery runs first");
   assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2 }]);
+});
+
+// The regression this whole change exists for. A show in two libraries has two
+// Jellyfin item ids, and each of its episodes carries whichever SeriesId it was
+// filed under. Only one id survives into JellyfinLibraryItem.jellyfinItemId, and
+// processEpisodes `continue`s on a SeriesId it doesn't recognise — so a series
+// map built from the surviving id alone dropped the OTHER copy's entire episode
+// set out of TVEpisodeCache, silently, with the badge just reading "not in the
+// library". Which copy lost was a coin flip, so the missing seasons could move
+// between syncs.
+test("a series in two libraries maps BOTH item ids, so the losing copy's episodes survive", async () => {
+  const B = nextBase();
+  respond = (url) => {
+    if (url.includes("IncludeItemTypes=Series")) {
+      return okJson({
+        Items: [
+          // Same show, filed in an Anime library and a TV library. "ser-tv" is
+          // newer, so it wins the row and "ser-anime" is the losing copy.
+          { Id: "ser-anime", ProviderIds: { Tmdb: "1399" }, Name: "Show", DateCreated: "2024-01-01T00:00:00.000Z" },
+          { Id: "ser-tv",    ProviderIds: { Tmdb: "1399" }, Name: "Show", DateCreated: "2024-06-01T00:00:00.000Z" },
+        ],
+        TotalRecordCount: 2,
+      });
+    }
+    if (url.includes("IncludeItemTypes=Episode")) {
+      return okJson({
+        Items: [
+          { SeriesId: "ser-tv",    ParentIndexNumber: 1, IndexNumber: 1 },
+          { SeriesId: "ser-anime", ParentIndexNumber: 2, IndexNumber: 4 }, // the whole of S2 used to vanish here
+          { SeriesId: "ser-anime", ParentIndexNumber: 1, IndexNumber: 1 }, // same episode via the other copy → deduped
+          { SeriesId: "ser-other", ParentIndexNumber: 9, IndexNumber: 9 }, // genuinely unknown series → still skipped
+        ],
+        TotalRecordCount: 4,
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const episodes = await getJellyfinTVEpisodes(B, "k");
+  assert.deepEqual(
+    episodes.sort((a, b) => a.seasonNumber - b.seasonNumber),
+    [
+      { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 },
+      { tmdbId: 1399, seasonNumber: 2, episodeNumber: 4 },
+    ],
+    "both copies' episodes land on the one tmdb id, deduped, with unknown series still dropped",
+  );
+});
+
+test("buildSeriesItemIdIndex keys every copy of a series, not just the stored row", () => {
+  const index = buildSeriesItemIdIndex(new Map([
+    [1399, { filePath: null, itemId: "ser-tv", title: null, year: null, overview: null,
+             contentRating: null, communityRating: null, addedAt: null, duplicateItemIds: ["ser-anime", "ser-4k"] }],
+    [66732, { filePath: null, itemId: "ser-solo", title: null, year: null, overview: null,
+              contentRating: null, communityRating: null, addedAt: null, duplicateItemIds: [] }],
+    // A series with no Id can't anchor episodes and must not create a "" key.
+    [9, { filePath: null, itemId: null, title: null, year: null, overview: null,
+          contentRating: null, communityRating: null, addedAt: null, duplicateItemIds: [] }],
+  ]));
+  assert.deepEqual([...index.entries()].sort(), [
+    ["ser-4k", 1399],
+    ["ser-anime", 1399],
+    ["ser-solo", 66732],
+    ["ser-tv", 1399],
+  ]);
 });
 
 test("sequential episode paging advances StartIndex by items served and stops on a short page", async () => {
