@@ -1196,6 +1196,21 @@ function configureJellyfinRestrictedRemote(): void {
 function seedUser(id: string, grants: unknown): void {
   usersById.set(id, { ...defaultUser(id), mediaServerGrants: grants });
 }
+// Pin a requester to one media server (the User.mediaServer preference).
+//
+// A per-test override rather than a changed default, deliberately. Every
+// fixture user is mediaServer:null, which is what left the whole preference
+// unexercised — but null is load-bearing for two existing pins: flipping the
+// default to "jellyfin" breaks the guardrail-14 CAS pin (a shared row routed
+// through the mark-only path is already AVAILABLE by the time the second
+// source claims it, so the win happens in requireAvailable mode) and the
+// grants read-count pin (a non-null preference leaves rows AVAILABLE with
+// notifiedAvailable:false, so the trailing notify block issues a SECOND
+// requester read). Changing the default would also quietly assert
+// plex-preferred semantics across the whole file.
+function pinUser(id: string, mediaServer: string | null): void {
+  usersById.set(id, { ...defaultUser(id), mediaServer });
+}
 const GRANT_PLEX_REMOTE = { plex: { remote: { view: true } } };
 const GRANT_JF_REMOTE = { jellyfin: { remote: { view: true } } };
 function notifiedUserIds(): string[] {
@@ -2038,4 +2053,92 @@ test("a configured media server never appears in skippedSources, and *arr uses s
       "from what was actually there to sync, not from the enabled flag",
   );
   assert.equal(b.failedSources, undefined, "and nothing failed");
+});
+
+// ── User.mediaServer source-pinning ─────────────────────────────────────────
+//
+// A user who signed in through Plex should not be told a title is ready
+// because it landed on the Jellyfin server they cannot watch. The orchestrator
+// enforces that in four places, and NONE of them was exercised: every fixture
+// user is mediaServer:null, so the whole preference could be deleted from the
+// route and this suite stayed green. Verified by mutation before these were
+// written — deleting any single filter, or all four at once, passed 47/47.
+//
+// The exact semantics matter and are easy to get backwards. On the LIBRARY
+// marking pass a wrong-source hit still flips the row to AVAILABLE (the status
+// is a fact about the server, not about the viewer) — what is withheld is the
+// NOTIFICATION. A pin asserting "not marked AVAILABLE" here would fail against
+// correct code. Only the ARR paths exclude the request outright.
+
+test("source-pinning: a wrong-source library hit marks AVAILABLE but does NOT notify", async () => {
+  configureBothServers();
+  // 100 is Plex-only, 200 is Jellyfin-only.
+  respond = bothServersRespond([100], [200]);
+
+  // Wrong source: a Plex-pinned user whose title landed only on Jellyfin.
+  pinUser("u-plex-pinned", "plex");
+  seedRequest({ id: "r-wrong", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-plex-pinned", status: "PENDING" });
+  // Right source: a Jellyfin-pinned user on the same Jellyfin-only title.
+  pinUser("u-jf-pinned", "jellyfin");
+  seedRequest({ id: "r-right", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-jf-pinned", status: "PENDING" });
+  // Unpinned: no preference, so any source is acceptable.
+  seedRequest({ id: "r-open", tmdbId: 100, mediaType: "MOVIE", requestedBy: "u-open", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  // Non-vacuity: every assertion below is about what did NOT happen to the
+  // pinned user, so a run that never executed would satisfy them all.
+  assert.equal(res.status, 200, "the sync run must actually authorize and execute");
+  await settle();
+
+  // The status flip is NOT gated — the title really is on a server.
+  assert.equal(requests.get("r-wrong")!.status, "AVAILABLE", "a wrong-source hit still flips the status");
+  // The notification is.
+  assert.equal(
+    requests.get("r-wrong")!.notifiedAvailable, false,
+    "a Plex-pinned user must NOT be notified by a Jellyfin-only hit",
+  );
+  assert.equal(requests.get("r-right")!.notifiedAvailable, true, "the matching-source user IS notified");
+  assert.equal(requests.get("r-open")!.notifiedAvailable, true, "an unpinned user is notified by any source");
+
+  const notified = notifiedUserIds();
+  assert.ok(!notified.includes("u-plex-pinned"), `wrong-source user was notified: ${JSON.stringify(notified)}`);
+  assert.ok(notified.includes("u-jf-pinned"), "matching-source user missing from the notify fan-out");
+});
+
+test("source-pinning: the gated request never reaches the notification CAS at all", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], [200]);
+
+  pinUser("u-plex-only", "plex");
+  seedRequest({ id: "r-gated", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-plex-only", status: "PENDING" });
+  // A control on the SAME title from an unpinned user. Without it `toNotify` is
+  // empty, the CAS is never called, and "the gated id never reached the CAS"
+  // would hold for the trivial reason that nothing did.
+  seedRequest({ id: "r-control", tmdbId: 200, mediaType: "MOVIE", requestedBy: "u-unpinned", status: "PENDING" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200, "the sync run must actually authorize and execute");
+  await settle();
+
+  // Non-vacuity: the CAS must have RUN this pass, just without the gated id.
+  // Without this a 401'd run — or any run that reached no candidates — would
+  // satisfy the negative assertion below for entirely the wrong reason.
+  const claimedAll = casCalls.flatMap((c) => c.ids);
+  assert.ok(
+    claimedAll.includes("r-control"),
+    "the control request never reached the CAS, so the negative below proves nothing",
+  );
+
+  // Guardrail 35's pre-CAS rule: the filter runs on the candidate array BEFORE
+  // any id reaches claimAvailableNotificationWinners, so the CAS stays the sole
+  // writer of notifiedAvailable and simply never sees the gated id. It must NOT
+  // be filtered after the UPDATE ... RETURNING, which would BURN the claim and
+  // mean the user could never be notified even after the situation changes.
+  const claimed = casCalls.flatMap((c) => c.ids);
+  assert.ok(
+    !claimed.includes("r-gated"),
+    `the gated request reached the CAS and had its claim burned: ${JSON.stringify(claimed)}`,
+  );
+  // Still re-evaluable on a later run: not notified, and the flag is untouched.
+  assert.equal(requests.get("r-gated")!.notifiedAvailable, false);
 });
