@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 import { resolvePosterMap } from "@/lib/poster-cache";
 import {
   getPlayStatsForServerUsers,
@@ -76,17 +77,6 @@ export interface MyWatchHistoryPage {
   // All-time RAW totals for the caller (every play, unaffected by filters and
   // consolidation), for the summary line.
   stats: { plays: number; playSeconds: number };
-}
-
-const MAX_SEARCH_LEN = 100;
-
-// Escape LIKE/ILIKE wildcard metacharacters (`%`, `_`, and the escape char `\`
-// itself) so user-supplied search text is matched LITERALLY rather than as a
-// pattern — paired with `ESCAPE '\'` on every ILIKE below. Without this, a
-// wildcard-laden search string forces an unindexable pattern scan (a
-// search-box DoS). Same discipline as /api/play-history's grouped path.
-function escapeIlike(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 // Raw row shape returned by the grouped page query: the representative
@@ -191,8 +181,11 @@ export async function getMyWatchHistory(
     binds.push(opts.mediaType);
     filterSql += ` AND h."mediaType" = CAST($${binds.length} AS "MediaType")`;
   }
-  const search = (opts.search?.trim() ?? "").slice(0, MAX_SEARCH_LEN);
+  const search = (opts.search?.trim() ?? "").slice(0, SEARCH_TERM_MAX_LEN);
   if (search) {
+    // Escaped bind + `ESCAPE '\'` on every ILIKE below — see escapeIlike in
+    // src/lib/sanitize.ts for why the pair is mandatory (the escape alone
+    // matches nothing; the clause alone leaves a wildcard-scan DoS open).
     binds.push(`%${escapeIlike(search)}%`);
     const bind = binds.length;
     filterSql += ` AND (h."title" ILIKE $${bind} ESCAPE '\\' OR h."episodeTitle" ILIKE $${bind} ESCAPE '\\')`;

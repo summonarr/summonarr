@@ -11,15 +11,42 @@ export function sanitizeText(input: string): string {
     .trim();
 }
 
-// The Prisma `contains` filter emits an ILIKE with NO ESCAPE clause, so any
-// %/_ in the search term stay wildcards and a wildcard-laden string forces an
-// unindexable pattern scan (a search-box DoS). Strip the metacharacters (and
-// the escape char) and bound the length, leaving a literal substring match for
-// normal text. Also safe to use before binding a search term into a raw ILIKE
-// query — the wildcard concern is the same regardless of how the SQL is built.
-const CONTAINS_SEARCH_MAX_LEN = 100;
+// Two ways to make user-supplied search text safe for a LIKE/ILIKE match. Pick
+// by HOW the query is built, not by taste:
+//
+//   raw SQL you control → escapeIlike, paired with `ESCAPE '\'` on EVERY ILIKE
+//                         clause the escaped bind feeds.
+//   Prisma `contains`   → sanitizeContainsSearch.
+//
+// The shared hazard is the same either way: `%` and `_` are LIKE wildcards, and
+// a wildcard-laden term expands into an unindexable pattern scan, so any search
+// box becomes an expensive query on demand (a wildcard-scan DoS). Neither
+// helper is an injection defence — search terms ride BOUND parameters on both
+// paths; only whitelisted identifiers ever reach SQL text.
+//
+// Length is bounded separately: `sanitizeContainsSearch` slices, `escapeIlike`
+// does not (escaping can lengthen the string, so the cap belongs on the term
+// BEFORE it, where the limit means what it says). Raw callers slice to
+// SEARCH_TERM_MAX_LEN themselves.
+export const SEARCH_TERM_MAX_LEN = 100;
+
+// Escape the LIKE/ILIKE metacharacters (`%`, `_`) and the escape character
+// itself so the term matches LITERALLY. This ONLY works when the ILIKE clause
+// consuming the bind carries an explicit `ESCAPE '\'` — that clause is what
+// tells Postgres the backslashes we inserted are escapes rather than data.
+// Without it the term is matched with the backslashes still in it and a search
+// for `john_doe` silently matches nothing.
+export function escapeIlike(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+// The Prisma `contains` filter emits an ILIKE with NO ESCAPE clause and gives
+// callers no way to add one, so escaping is not available on that path — the
+// metacharacters have to be dropped instead. That is lossy (a search for
+// `john_doe` degrades to `johndoe`, which over-matches), which is exactly why
+// the raw-SQL paths are worth the extra `ESCAPE '\'` ceremony.
 export function sanitizeContainsSearch(input: string): string {
-  return input.replace(/[%_\\]/g, "").slice(0, CONTAINS_SEARCH_MAX_LEN);
+  return input.replace(/[%_\\]/g, "").slice(0, SEARCH_TERM_MAX_LEN);
 }
 
 export function sanitizeOptional(input: string | undefined | null): string | null {

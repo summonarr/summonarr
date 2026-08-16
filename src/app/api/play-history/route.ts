@@ -5,22 +5,9 @@ import { prisma } from "@/lib/prisma";
 import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { composeWhere, parsePlayHistoryFilters } from "@/lib/play-history-filters";
 
 export const dynamic = "force-dynamic";
-
-// Escape LIKE/ILIKE wildcard metacharacters (`%`, `_`, and the escape char `\`
-// itself) so user-supplied search text is matched LITERALLY rather than as a
-// pattern. Without this, a query containing many `%`/`_` wildcards expands into an
-// unindexable full-table scan with pathological pattern matching — letting a search
-// box trigger an expensive query (a wildcard-scan denial-of-service). Each escaped
-// value must be paired with `ESCAPE '\'` on its ILIKE clause so Postgres treats the
-// backslash we inserted as the escape character and matches the metacharacters as
-// literal text.
-function escapeIlike(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-}
-
 
 export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, session) => {
   // The grouped path runs two heavy window-function/aggregate raw queries over
@@ -95,101 +82,6 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   return groupedQuery(params, page, limit, skip, safeSortBy, sortDir);
 });
 
-// Shape of a filter expression for raw-SQL composition. Each entry adds an
-// "AND <sql>" fragment with its binds appended to the parameter list.
-type SqlFragment = { sql: string; binds: unknown[] };
-
-// Translate the query-string filters into a flat list of SQL fragments. Same
-// semantics as the original Prisma `where` object, but emitted as `$N`-bound
-// fragments so they can be composed into a window-function query.
-function parseFilters(params: URLSearchParams): SqlFragment[] {
-  const fragments: SqlFragment[] = [];
-
-  const source = params.get("source");
-  if (source === "plex" || source === "jellyfin") {
-    fragments.push({ sql: `h."source" = ?`, binds: [source] });
-  }
-
-  const tmdbIdRaw = params.get("tmdbId");
-  if (tmdbIdRaw) {
-    const tmdbId = parseInt(tmdbIdRaw, 10);
-    if (!isNaN(tmdbId)) {
-      fragments.push({ sql: `h."tmdbId" = ?`, binds: [tmdbId] });
-    }
-  }
-
-  const mediaType = params.get("mediaType");
-  if (mediaType === "MOVIE" || mediaType === "TV") {
-    fragments.push({ sql: `h."mediaType" = CAST(? AS "MediaType")`, binds: [mediaType] });
-  }
-
-  const watched = params.get("watched");
-  if (watched === "true") fragments.push({ sql: `h."watched" = TRUE`, binds: [] });
-  else if (watched === "false") fragments.push({ sql: `h."watched" = FALSE`, binds: [] });
-
-  const userId = params.get("userId");
-  if (userId) fragments.push({ sql: `h."mediaServerUserId" = ?`, binds: [userId] });
-
-  const playMethod = params.get("playMethod");
-  if (playMethod && ["DirectPlay", "DirectStream", "Transcode"].includes(playMethod)) {
-    fragments.push({ sql: `h."playMethod" = ?`, binds: [playMethod] });
-  }
-
-  const platform = params.get("platform");
-  if (platform) fragments.push({ sql: `h."platform" = ?`, binds: [platform] });
-
-  const startDate = params.get("startDate");
-  if (startDate) fragments.push({ sql: `h."startedAt" >= ?`, binds: [new Date(startDate)] });
-  const endDate = params.get("endDate");
-  if (endDate) fragments.push({ sql: `h."startedAt" <= ?`, binds: [new Date(endDate)] });
-
-  const search = params.get("search")?.trim();
-  if (search) {
-    // Username search needs the MediaServerUser table, which is a JOIN in the
-    // grouped path; keep this filter self-contained by emitting an EXISTS subquery
-    // test instead, so it composes cleanly with the other fragments.
-    // Escape `%`/`_`/`\` in the search term so it matches literally, and append
-    // `ESCAPE '\'` to every ILIKE clause so Postgres honors those escapes. This is
-    // what prevents a wildcard-laden search string from forcing an expensive,
-    // unindexable scan across title / ipAddress / username (a search-box DoS).
-    const like = `%${escapeIlike(search)}%`;
-    fragments.push({
-      sql: `(h."title" ILIKE ? ESCAPE '\\' OR h."ipAddress" ILIKE ? ESCAPE '\\' OR EXISTS (
-              SELECT 1 FROM "MediaServerUser" msu2
-              WHERE msu2.id = h."mediaServerUserId" AND msu2."username" ILIKE ? ESCAPE '\\'
-            ))`,
-      binds: [like, like, like],
-    });
-  }
-
-  return fragments;
-}
-
-// Renumber `?` placeholders in a SQL string to `$1, $2, ...` starting at
-// `startIndex`. Postgres needs positional binds, not the `?` placeholder.
-function renumber(sql: string, startIndex: number): { sql: string; nextIndex: number } {
-  let i = startIndex;
-  const out = sql.replace(/\?/g, () => `$${i++}`);
-  return { sql: out, nextIndex: i };
-}
-
-function composeWhere(fragments: SqlFragment[]): { whereSql: string; binds: unknown[]; nextBindIndex: number } {
-  const binds: unknown[] = [];
-  const parts: string[] = [];
-  let next = 1;
-  for (const f of fragments) {
-    const { sql, nextIndex } = renumber(f.sql, next);
-    parts.push(sql);
-    binds.push(...f.binds);
-    next = nextIndex;
-  }
-  return {
-    whereSql: parts.length > 0 ? `AND ${parts.join(" AND ")}` : "",
-    binds,
-    nextBindIndex: next,
-  };
-}
-
 async function ungroupedQuery(
   params: URLSearchParams,
   page: number,
@@ -198,83 +90,82 @@ async function ungroupedQuery(
   sortBy: string,
   sortDir: "asc" | "desc",
 ) {
-  const where: Record<string, unknown> = {};
-  const source = params.get("source");
-  if (source === "plex" || source === "jellyfin") where.source = source;
+  // Raw SQL rather than a Prisma `where`, for the SAME reason as the grouped
+  // path below: `search`. Prisma's `contains` emits an ILIKE with no ESCAPE
+  // clause, so the only way to keep a `%`/`_` in the term from acting as a
+  // wildcard there is to strip it — and a stripped term matches NOTHING for a
+  // username or title that legitimately contains one (`john_doe` searched as
+  // `johndoe`). Sharing parsePlayHistoryFilters with the grouped path and the
+  // export also means one definition of what each filter param means, for the
+  // three endpoints the admin table drives off one URLSearchParams.
+  //
+  // Same injection discipline as groupedQuery: filters are bound `$N`
+  // parameters, and the ORDER BY column comes from the caller's safeSortBy
+  // whitelist — no user data reaches SQL identifiers or structure.
+  const fragments = parsePlayHistoryFilters(params);
+  const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
 
-  const tmdbIdRaw = params.get("tmdbId");
-  if (tmdbIdRaw) {
-    const tmdbId = parseInt(tmdbIdRaw, 10);
-    if (!isNaN(tmdbId)) where.tmdbId = tmdbId;
-  }
-
-  const mediaType = params.get("mediaType");
-  if (mediaType === "MOVIE" || mediaType === "TV") where.mediaType = mediaType;
-
-  const watched = params.get("watched");
-  if (watched === "true") where.watched = true;
-  else if (watched === "false") where.watched = false;
-
-  const userId = params.get("userId");
-  if (userId) where.mediaServerUserId = userId;
-
-  const playMethod = params.get("playMethod");
-  if (playMethod && ["DirectPlay", "DirectStream", "Transcode"].includes(playMethod)) {
-    where.playMethod = playMethod;
-  }
-
-  const platform = params.get("platform");
-  if (platform) where.platform = platform;
-
-  const startDate = params.get("startDate");
-  const endDate = params.get("endDate");
-  if (startDate || endDate) {
-    where.startedAt = {
-      ...(startDate ? { gte: new Date(startDate) } : {}),
-      ...(endDate ? { lte: new Date(endDate) } : {}),
-    };
-  }
-
-  const search = sanitizeContainsSearch(params.get("search")?.trim() ?? "");
-  if (search) {
-    where.OR = [
-      { title: { contains: search, mode: "insensitive" } },
-      { ipAddress: { contains: search, mode: "insensitive" } },
-      { mediaServerUser: { username: { contains: search, mode: "insensitive" } } },
-    ];
-  }
-
-  // Append `id` as a stable secondary sort so OFFSET pagination can't duplicate
-  // or skip rows when the primary column is non-unique (title/platform/source/
+  const dir = sortDir.toUpperCase();
+  // `id` is a stable secondary sort so OFFSET pagination can't duplicate or
+  // skip rows when the primary column is non-unique (title/platform/source/
   // duration/playDuration all repeat) and data shifts between page fetches.
-  // Mirrors the export path's [{startedAt},{id}] tiebreaker.
-  const orderBy: Record<string, string>[] = [{ [sortBy]: sortDir }, { id: sortDir }];
+  // Mirrors the export path's (startedAt, id) tiebreaker.
+  //
+  // Deliberately NO `NULLS LAST` here, unlike the grouped query: Prisma emitted
+  // plain `ORDER BY <col> <dir>` for this path, so adding the clause would
+  // reshuffle nullable-column sorts (platform) for anyone with the grouping
+  // toggle off. The two modes have always differed here; this keeps it that way
+  // rather than smuggling an ordering change into a search fix.
+  const dataSql = `
+    SELECT h.*,
+      msu."username" AS msu_username,
+      msu."source" AS msu_source,
+      msu."thumbUrl" AS msu_thumb_url,
+      u."id" AS msu_user_id,
+      u."name" AS msu_user_name
+    FROM "PlayHistory" h
+    LEFT JOIN "MediaServerUser" msu ON msu.id = h."mediaServerUserId"
+    LEFT JOIN "User" u ON u.id = msu."userId"
+    WHERE 1=1 ${whereSql}
+    ORDER BY h."${sortBy}" ${dir}, h."id" ${dir}
+    LIMIT $${nextBindIndex} OFFSET $${nextBindIndex + 1}
+  `;
 
-  const [items, total] = await Promise.all([
-    prisma.playHistory.findMany({
-      where,
-      orderBy,
-      skip,
-      take: limit,
-      include: {
-        mediaServerUser: {
-          select: { username: true, source: true, thumbUrl: true, user: { select: { name: true } } },
-        },
-      },
-    }),
-    prisma.playHistory.count({ where }),
+  const countSql = `
+    SELECT COUNT(*)::int AS total
+    FROM "PlayHistory" h
+    WHERE 1=1 ${whereSql}
+  `;
+
+  const [rows, totalRows] = await Promise.all([
+    prisma.$queryRawUnsafe<RawUngroupedRow[]>(dataSql, ...binds, limit, skip),
+    prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...binds),
   ]);
+
+  const total = totalRows[0]?.total ?? 0;
 
   // Live TmdbMediaCore/TmdbCache paths. `posterUrl` (the web field) stays
   // live-only as it always was; `posterPath` — the row's finalize-time snapshot,
   // null for anything uncached at record time — falls back to the snapshot but
   // now prefers the live path, which is what native clients read.
-  const livePaths = await resolvePosterPathMap(items);
-  const itemsWithPosters = items.map((it) => {
+  const livePaths = await resolvePosterPathMap(rows);
+  const itemsWithPosters = rows.map((row) => {
+    // Split the joined aliases back out so the response carries the same nested
+    // `mediaServerUser` object Prisma's `include` produced — the relation is a
+    // required FK, so it is always present. `user` keys off the joined id, not
+    // the name: a linked account with a null `name` is `{ name: null }`, which
+    // is what the relation returned, and NOT an absent link.
+    const { msu_username, msu_source, msu_thumb_url, msu_user_id, msu_user_name, ...it } = row;
     const live =
       it.tmdbId != null ? livePaths[posterPathKey(it.tmdbId, it.mediaType)] ?? null : null;
     return {
       ...it,
+      mediaServerUser: {
+        username: msu_username,
+        source: msu_source,
+        thumbUrl: msu_thumb_url,
+        user: msu_user_id != null ? { name: msu_user_name } : null,
+      },
       posterPath: live ?? it.posterPath,
       posterUrl: posterUrl(live, "w342"),
       // In ungrouped mode every row is its own chain of one — surface segmentCount
@@ -310,7 +201,7 @@ async function groupedQuery(
   // safeSortBy whitelist only. No user data is interpolated into SQL identifiers
   // or structure. This is the complex dynamic-stats area; changes must preserve
   // the whitelist + parameterization discipline to avoid injection.
-  const fragments = parseFilters(params);
+  const fragments = parsePlayHistoryFilters(params);
   const { whereSql, binds, nextBindIndex } = composeWhere(fragments);
 
   // chain_id = COALESCE("referenceId", id) groups a continued-watch chain
@@ -440,12 +331,13 @@ async function groupedQuery(
   });
 }
 
-// Shape of the raw row returned by groupedQuery's $queryRawUnsafe. Mirrors
-// PlayHistory's columns (already camelCase via SELECT b.*) plus the window
-// function aliases (snake_case) and the joined MediaServerUser fields.
-interface RawGroupedRow {
+// PlayHistory's own columns as they arrive from a `SELECT h.*` / `SELECT b.*`
+// (already camelCase — Prisma's column names are the field names). Shared by
+// both raw paths; each extends it with its own aliases.
+interface RawPlayHistoryRow {
   id: string;
   source: string;
+  serverInstance: string;
   startedAt: Date;
   stoppedAt: Date | null;
   duration: number;
@@ -487,7 +379,11 @@ interface RawGroupedRow {
   creditsEndMs: number | null;
   referenceId: string | null;
   createdAt: Date;
-  // Window aliases
+}
+
+// groupedQuery's row: the representative segment plus the window-function
+// aliases (snake_case) and the joined MediaServerUser fields.
+interface RawGroupedRow extends RawPlayHistoryRow {
   chain_id: string;
   rn: number;
   segment_count: number;
@@ -497,9 +393,21 @@ interface RawGroupedRow {
   last_stopped_at: Date | null;
   chain_watched: boolean;
   chain_completed: boolean;
-  // Joined columns
   msu_username: string | null;
   msu_source: string | null;
   msu_thumb_url: string | null;
+}
+
+// ungroupedQuery's row: the segment itself plus the MediaServerUser join that
+// stands in for Prisma's `include` (and the User join behind its `user`
+// sub-select). The relation is a required FK, so the msu_* columns are only
+// nullable in the type, never in practice; msu_user_* genuinely can be null
+// (MediaServerUser.userId is optional).
+interface RawUngroupedRow extends RawPlayHistoryRow {
+  msu_username: string;
+  msu_source: string;
+  msu_thumb_url: string | null;
+  msu_user_id: string | null;
+  msu_user_name: string | null;
 }
 

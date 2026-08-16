@@ -7,7 +7,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { sanitizeText, sanitizeOptional, sanitizeForLog, sanitizeContainsSearch } from "../src/lib/sanitize.ts";
+import {
+  sanitizeText,
+  sanitizeOptional,
+  sanitizeForLog,
+  sanitizeContainsSearch,
+  escapeIlike,
+  SEARCH_TERM_MAX_LEN,
+} from "../src/lib/sanitize.ts";
 
 const RTL_OVERRIDE = String.fromCharCode(0x202e); // U+202E, a bidi override
 
@@ -160,8 +167,37 @@ test("sanitizeContainsSearch strips LIKE wildcard metacharacters and the escape 
 
 test("sanitizeContainsSearch bounds the length at 100 chars", () => {
   const long = "a".repeat(150);
-  assert.equal(sanitizeContainsSearch(long).length, 100);
-  assert.equal(sanitizeContainsSearch(long), "a".repeat(100));
+  assert.equal(sanitizeContainsSearch(long).length, SEARCH_TERM_MAX_LEN);
+  assert.equal(sanitizeContainsSearch(long), "a".repeat(SEARCH_TERM_MAX_LEN));
+});
+
+// The raw-SQL counterpart: PRESERVES the term instead of degrading it, at the
+// cost of requiring `ESCAPE '\'` on the ILIKE clause that consumes the bind.
+// Behaviour against a real Postgres is pinned in tests/play-history-search.test.mts
+// (all three admin play-history paths) and tests/watch-history-mine-route.test.mts.
+test("escapeIlike neutralises LIKE metacharacters without deleting them", () => {
+  assert.equal(escapeIlike("john_doe"), "john\\_doe");
+  assert.equal(escapeIlike("50% off"), "50\\% off");
+  assert.equal(escapeIlike("normal title"), "normal title");
+});
+
+test("escapeIlike escapes the escape character FIRST, so a literal backslash can't forge an escape", () => {
+  // A user-typed `\` must become `\\` (one literal backslash) — and it has to
+  // be doubled BEFORE `%`/`_` are escaped, or the backslash the helper inserts
+  // for `_` would itself get doubled and the `_` would go back to being a
+  // wildcard. `\_` in, `\\\_` out: a literal backslash then a literal underscore.
+  assert.equal(escapeIlike("a\\b"), "a\\\\b");
+  assert.equal(escapeIlike("\\_"), "\\\\\\_");
+  assert.equal(escapeIlike("100\\%"), "100\\\\\\%");
+});
+
+test("escapeIlike does not truncate — callers bound the term before escaping", () => {
+  // Escaping can only lengthen a string, so a cap applied afterwards could
+  // slice a pattern in half and leave it ending on a lone escape character,
+  // which Postgres rejects outright ("LIKE pattern must not end with escape
+  // character"). SEARCH_TERM_MAX_LEN is applied to the raw term instead.
+  const long = "_".repeat(150);
+  assert.equal(escapeIlike(long).length, 300);
 });
 
 test("sanitizeOptional runtime-guards non-strings instead of throwing", () => {
