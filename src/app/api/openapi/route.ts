@@ -140,12 +140,18 @@ const spec = {
     "/health": {
       get: {
         tags: ["Health"],
-        summary: "Liveness probe",
+        summary: "Readiness probe (public)",
+        description:
+          "Not a bare liveness reply — it pings Postgres with SELECT 1 and returns 503 when the database is unreachable, so an orchestrator restarts a live Node process fronting a dead DB. This is the Docker/compose HEALTHCHECK target.",
         security: [],
         responses: {
           "200": {
-            description: "Service is up",
-            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } },
+            description: "Service and database are up",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, db: { type: "string", enum: ["up"] } } } } },
+          },
+          "503": {
+            description: "Database unreachable — the container should be considered unhealthy",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, db: { type: "string", enum: ["down"] } } } } },
           },
         },
       },
@@ -403,12 +409,17 @@ const spec = {
       },
       delete: {
         tags: ["Requests"],
-        summary: "Delete a request (ADMIN)",
+        summary: "Delete a request (MANAGE_REQUESTS), or self-cancel your own PENDING request",
+        description:
+          "Two callers share this handler. A user holding MANAGE_REQUESTS may delete any request in any status, which is audited as REQUEST_DELETE. The request's OWNER may delete it only while still PENDING, and that is deliberately not audited — cancelling your own pending request is routine. Anyone else gets 403. A missing row 404s before the authorization branch runs.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
           "200": { description: "Deleted", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
-          "403": { description: "Forbidden" },
+          "401": { description: "Unauthenticated" },
+          "403": { description: "Forbidden — caller lacks MANAGE_REQUESTS and is not the owner of a still-PENDING request" },
           "404": { description: "Not found" },
+          "409": { description: "Self-cancel only — the request left PENDING between the read and the delete" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
         },
       },
     },
@@ -548,6 +559,40 @@ const spec = {
       },
     },
     "/issues/{id}/releases": {
+      post: {
+        tags: ["Issues"],
+        summary: "Grab a specific release for the issue's media (ADMIN / ISSUE_ADMIN)",
+        description:
+          "CAS-claims the issue to IN_PROGRESS before the grab, then records an instance-scoped IssueGrab row. Routes to Radarr for a MOVIE issue and Sonarr for a TV one.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["guid", "indexerId"],
+                properties: {
+                  guid: { type: "string", minLength: 1, maxLength: 500, description: "Release GUID from the GET on this path" },
+                  indexerId: { type: "integer", minimum: 1 },
+                  instance: { type: "string", description: "Arr instance slug; defaults to the default instance" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Grab accepted", content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" } } } } } },
+          "400": { description: "Missing or malformed guid / indexerId, or an invalid instance slug" },
+          "403": { description: "Forbidden — ADMIN or ISSUE_ADMIN only" },
+          "404": { description: "Issue not found" },
+          "409": { description: "Issue is already RESOLVED, or lost the claim race" },
+          "413": { description: "Request body over the 64 KB cap" },
+          "422": { description: "Named instance not configured, TVDB resolution failed, or the issue scope is invalid" },
+          "502": { description: "Radarr/Sonarr rejected the grab" },
+          "503": { description: "Maintenance mode" },
+        },
+      },
       get: {
         tags: ["Issues"],
         summary: "Get Sonarr/Radarr releases for issue media (ADMIN / ISSUE_ADMIN)",
@@ -561,13 +606,21 @@ const spec = {
         tags: ["Votes"],
         summary: "List deletion vote items",
         parameters: [
-          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "mine", in: "query", schema: { type: "boolean" }, description: "Only items the caller has voted on" },
-          { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter" },
+          { name: "page", in: "query", schema: { type: "integer", default: 1, minimum: 1, maximum: 10000 } },
+          {
+            name: "mine", in: "query", schema: { type: "string", enum: ["1"] },
+            description:
+              "Set to the literal string 1 to show only items the caller has voted on. Any other value — INCLUDING the OpenAPI-canonical `true` — is ignored and returns the unfiltered list.",
+          },
+          {
+            name: "sort", in: "query", schema: { type: "string", enum: ["votes", "recent"], default: "votes" },
+            description: "`votes` orders by vote count desc, `recent` by most-recent vote desc; both tie-break on tmdbId asc. An unrecognized value falls back to `votes`.",
+          },
+          { name: "q", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on title" },
         ],
         responses: {
           "200": {
-            description: "Paginated vote items",
+            description: "Paginated vote items — pageSize is fixed at 40 and is not a parameter",
             content: {
               "application/json": {
                 schema: {
@@ -592,19 +645,48 @@ const spec = {
                 type: "object",
                 required: ["tmdbId", "mediaType", "_token"],
                 properties: {
-                  tmdbId: { type: "integer" },
+                  tmdbId: { type: "integer", minimum: 1 },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   reason: { type: "string", maxLength: 200 },
-                  _token: { type: "string" },
+                  _token: { type: "string", description: "Request token bound to tmdbId + mediaType + the calling user" },
                 },
               },
             },
           },
         },
-        responses: { "200": { description: "Vote recorded" } },
+        responses: {
+          "201": { description: "Vote recorded — the body is the created DeletionVote row, not an empty ack" },
+          "400": { description: "Malformed JSON, or an invalid tmdbId / mediaType / reason" },
+          "403": { description: "Deletion voting disabled, an invalid _token, or the caller has previously requested this title" },
+          "409": { description: "Already voted — unique violation on (tmdbId, mediaType, userId)" },
+          "413": { description: "Request body over the 16 KB cap" },
+          "422": { description: "TMDB could not verify the title, or it is in no library visible to this voter" },
+          "429": { description: "Rate limited (rateLimitRequests setting, default 20/min per user)" },
+          "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
       },
     },
     "/votes/{tmdbId}": {
+      patch: {
+        tags: ["Votes"],
+        summary: "Dismiss all deletion votes for a title (ADMIN)",
+        description:
+          "Deletes every DeletionVote for the title and clears the one-shot deletionVoteNotified setting key in one transaction, so the threshold notification can re-arm. Note the sibling DELETE on this path is withAuth (retract your own vote), not ADMIN.",
+        parameters: [
+          { name: "tmdbId", in: "path", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
+        responses: {
+          "200": {
+            description: "Votes dismissed",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, dismissed: { type: "integer" } } } } },
+          },
+          "400": { description: "Invalid tmdbId or mediaType" },
+          "403": { description: "Forbidden — ADMIN only" },
+          "429": { description: "Rate limited (10/min per admin)" },
+          "503": { description: "Maintenance mode" },
+        },
+      },
       delete: {
         tags: ["Votes"],
         summary: "Retract own vote",
@@ -691,7 +773,11 @@ const spec = {
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
           { name: "limit", in: "query", schema: { type: "integer" } },
-          { name: "distinct", in: "query", schema: { type: "boolean" } },
+          {
+            name: "distinct", in: "query", schema: { type: "string", enum: ["platforms", "users"] },
+            description:
+              "A MODE SWITCH, not a boolean. `platforms` returns a bare string[] of non-null platforms; `users` returns a bare array of { id, username, source } over every MediaServerUser (departed ones included, per guardrail 28). Both ignore every other parameter. Any other value — including `true` — falls through to the paginated list.",
+          },
           { name: "ungrouped", in: "query", schema: { type: "boolean" } },
           { name: "sortBy", in: "query", schema: { type: "string" } },
           { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
@@ -776,11 +862,39 @@ const spec = {
       },
     },
     "/play-history/{id}": {
+      get: {
+        tags: ["Play History"],
+        summary: "Fetch one play-history record (ADMIN)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "The PlayHistory row, with its media-server user embedded",
+            content: {
+              "application/json": {
+                schema: { type: "object", description: "Full PlayHistory row plus mediaServerUser { id, username, source, thumbUrl }" },
+              },
+            },
+          },
+          "400": { description: "Invalid id" },
+          "403": { description: "Forbidden — ADMIN only" },
+          "404": { description: "Not found" },
+        },
+      },
       delete: {
         tags: ["Play History"],
-        summary: "Delete a play history record (ADMIN)",
-        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        responses: { "200": { description: "Deleted" } },
+        summary: "Delete a play history record, or its whole resume chain (ADMIN)",
+        description:
+          "Play history is unrecoverable — the live poller is its only writer, so a deleted watch cannot be rebuilt. `chain=true` deletes every segment of the resume chain the record belongs to, which is what the grouped admin table shows as one play.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "chain", in: "query", schema: { type: "string", enum: ["true"] }, description: "Delete every segment of this record's resume chain, not just the one segment" },
+        ],
+        responses: {
+          "204": { description: "Deleted — no content" },
+          "400": { description: "Invalid id" },
+          "403": { description: "Forbidden — ADMIN only" },
+          "404": { description: "Not found" },
+        },
       },
     },
 
@@ -901,6 +1015,41 @@ const spec = {
       },
     },
     "/profile/notifications": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's notification preferences",
+        responses: {
+          "200": {
+            description: "Preference flags",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    notifyOnApproved: { type: "boolean" },
+                    notifyOnAvailable: { type: "boolean" },
+                    notifyOnDeclined: { type: "boolean" },
+                    emailOnApproved: { type: "boolean" },
+                    emailOnAvailable: { type: "boolean" },
+                    emailOnDeclined: { type: "boolean" },
+                    pushOnApproved: { type: "boolean" },
+                    pushOnAvailable: { type: "boolean" },
+                    pushOnDeclined: { type: "boolean" },
+                    notifyOnIssue: { type: "boolean" },
+                    notificationEmail: { type: "string", nullable: true },
+                    emailEnabled: {
+                      type: "boolean",
+                      description:
+                        "True only when the email feature, the notification-email switch AND a configured transport all line up. Clients hide the email section when false, since the channel can never send.",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "User row not found" },
+        },
+      },
       patch: {
         tags: ["Profile"],
         summary: "Update notification preferences",
@@ -919,12 +1068,20 @@ const spec = {
                   pushOnApproved: { type: "boolean" },
                   pushOnAvailable: { type: "boolean" },
                   pushOnDeclined: { type: "boolean" },
+                  notifyOnIssue: { type: "boolean" },
+                  notificationEmail: {
+                    type: "string", nullable: true,
+                    description: "Jellyfin-provider accounts only — any other provider gets 403. Null clears it.",
+                  },
                 },
               },
             },
           },
         },
-        responses: { "200": { description: "Preferences updated" } },
+        responses: {
+          "200": { description: "Preferences updated" },
+          "403": { description: "notificationEmail was sent by a non-Jellyfin account" },
+        },
       },
     },
 
@@ -1064,21 +1221,42 @@ const spec = {
       },
     },
     "/auth/jellyfin/quickconnect": {
+      get: {
+        tags: ["Auth"],
+        summary: "Poll a QuickConnect secret for approval (public)",
+        description:
+          "Public — native clients poll this before any session exists. `wait=1` upgrades to a server-side long poll (25s budget, 2s ticks) instead of a single upstream check.",
+        security: [],
+        parameters: [
+          { name: "secret", in: "query", required: true, schema: { type: "string" } },
+          { name: "wait", in: "query", schema: { type: "string", enum: ["1"] }, description: "Set to 1 to long-poll instead of returning immediately" },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Media-instance slug; defaults to the default instance" },
+        ],
+        responses: {
+          "200": { description: "Poll result", content: { "application/json": { schema: { type: "object", properties: { authenticated: { type: "boolean" } } } } } },
+          "400": { description: "Missing secret or invalid instance slug" },
+          "410": { description: "QuickConnect session expired or no longer known upstream" },
+          "429": { description: "Rate limited — 60/min per IP, 30/min per secret" },
+          "499": { description: "Client aborted during a long poll (non-standard)" },
+          "502": { description: "QuickConnect disabled upstream, or the poll failed" },
+          "503": { description: "Jellyfin not configured, or long-poll capacity reached (3/IP, 50 global)" },
+        },
+      },
       post: {
         tags: ["Auth"],
-        summary: "Initiate or poll Jellyfin QuickConnect login",
+        summary: "Initiate a Jellyfin QuickConnect login (public)",
+        description:
+          "Takes NO request body — the instance is selected via the query string. The instance is pinned into a signed flow cookie here and read back from that verified cookie on redemption, never from a client-supplied field. Poll for approval with GET on this path.",
         security: [],
-        requestBody: {
-          content: {
-            "application/json": {
-              schema: {
-                type: "object",
-                properties: { code: { type: "string", description: "QuickConnect code from poll response" } },
-              },
-            },
-          },
+        parameters: [
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Media-instance slug; defaults to the default instance" },
+        ],
+        responses: {
+          "200": { description: "QuickConnect initiation state (code, secret) plus any flow state" },
+          "400": { description: "Invalid instance slug" },
+          "502": { description: "QuickConnect is disabled or unavailable upstream" },
+          "503": { description: "Jellyfin not configured" },
         },
-        responses: { "200": { description: "QuickConnect state or token" } },
       },
     },
     "/auth/me": {
@@ -1492,15 +1670,66 @@ const spec = {
     },
 
     "/admin/audit-log": {
+      delete: {
+        tags: ["Admin – Audit Log"],
+        summary: "Scrub PII from audit rows past the retention cutoff (ADMIN)",
+        description:
+          "Manual equivalent of the scrub-audit-pii cron. Nulls ipAddress/userAgent and redacts userName on every row older than auditPiiRetentionDays (default 90); additionally nulls details on AUTH_LOGIN, AUTH_LOGIN_FAILED and AUTH_LOGOUT rows. Takes no body and no parameters.",
+        responses: {
+          "200": {
+            description: "Scrub counts",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    scrubbed: { type: "integer" },
+                    detailsScrubbed: { type: "integer" },
+                    cutoff: { type: "string", format: "date-time" },
+                    retentionDays: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Forbidden — ADMIN only" },
+        },
+      },
       get: {
         tags: ["Admin – Audit Log"],
-        summary: "Paginated audit log (ADMIN)",
+        summary: "Audit log, keyset-paginated (ADMIN)",
+        description:
+          "Cursor (keyset) pagination — there is no page or offset parameter. Pass the previous response's nextCursor back as `cursor`; that row itself is skipped. Ordered createdAt DESC, id DESC.",
         parameters: [
-          { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "action", in: "query", schema: { type: "string" } },
-          { name: "userId", in: "query", schema: { type: "string" } },
+          { name: "pageSize", in: "query", schema: { type: "integer", default: 50, minimum: 1, maximum: 50 } },
+          { name: "cursor", in: "query", schema: { type: "string" }, description: "AuditLog id from the previous response's nextCursor; exclusive" },
+          { name: "action", in: "query", schema: { type: "string" }, description: "Exact AuditAction value. Takes precedence over `group`; an unrecognized value is ignored." },
+          { name: "group", in: "query", schema: { type: "string", enum: ["auth", "admin", "system"] }, description: "Coarse action bucket, ignored when a valid `action` is given" },
+          { name: "dateFrom", in: "query", schema: { type: "string", format: "date" }, description: "createdAt >= this date; unparseable values are ignored" },
+          { name: "dateTo", in: "query", schema: { type: "string", format: "date" }, description: "Inclusive end date (compared as < dateTo + 1 day); unparseable values are ignored" },
+          { name: "user", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on userName — the display name, NOT the user id" },
+          { name: "target", in: "query", schema: { type: "string" }, description: "Case-insensitive substring match on target" },
+          { name: "hideCron", in: "query", schema: { type: "string", enum: ["1"] }, description: "Hide the `system` principal. Rows with a NULL userId (e.g. the machine-session mint) are deliberately kept." },
         ],
-        responses: { "200": { description: "Audit log entries" } },
+        responses: {
+          "200": {
+            description: "Audit log page",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    logs: { type: "array", items: { type: "object" }, description: "Full AuditLog rows" },
+                    nextCursor: { type: "string", nullable: true },
+                    hasMore: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Forbidden — ADMIN only" },
+          "429": { description: "Rate limited (60/min per admin)" },
+        },
       },
     },
     "/admin/audit-log/export": {
@@ -2049,8 +2278,29 @@ const spec = {
     "/config/public": {
       get: {
         tags: ["Config"],
-        summary: "Public client configuration (branding, enabled sign-in providers, feature flags)",
-        responses: { "200": { description: "Public config object" } },
+        summary: "User-readable client configuration (AUTHENTICATED)",
+        description:
+          "Despite the path name this requires a session — it is not in isPublicPath and is wrapped in withAuth. \"Public\" here means the non-sensitive slice of admin config a signed-in client may read, not unauthenticated. It carries NO sign-in provider information; for pre-auth capability negotiation use /config/compat.",
+        responses: {
+          "200": {
+            description: "User-readable config slice",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    recommendedIosBuild: { type: "integer", description: "Soft-upgrade hint. OMITTED unless set to a valid integer >= 1 — clients key off the field's presence." },
+                    siteTitle: { type: "string", nullable: true },
+                    motd: { type: "object", properties: { enabled: { type: "boolean" }, title: { type: "string", nullable: true }, body: { type: "string", nullable: true } } },
+                    donate: { type: "object", description: "Each value passes through safeExternalHref; non-http(s) values collapse to null." },
+                    features: { type: "object", additionalProperties: { type: "boolean" }, description: "The feature.* flag map" },
+                  },
+                },
+              },
+            },
+          },
+          "401": { description: "Unauthenticated" },
+        },
       },
     },
     "/play-history/calendar": {
