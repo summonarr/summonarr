@@ -548,6 +548,18 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **Which copy becomes the stored row is `prefersCandidate` — newest `addedAt`, item-id tiebreak — NOT arrival order.** The library-scoped walk fetches folders concurrently, so plain last-write-wins let the winner (and with it the row's `itemId`, `filePath`, `addedAt` and ratings) flip between syncs. Order-independence is the whole point; don't "simplify" it back to a bare `items.set()`. The rule is also what the unscoped single-query path already did by construction (`SortBy=DateCreated` ascending + last write), so single-library servers see no change.
     - **fix-match remaps EVERY copy, serially.** All copies of a title are mismatched on the server, so remapping one left the others reporting the old tmdbId and the next library sync could elect an unfixed copy — the admin's correction silently reverted. Only a total failure aborts; a partial one still records the copies that moved and returns a `warning` naming the shortfall. Keep it serial — parallel `FullRefresh` calls are how these start timing out.
 
+38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
+
+    Why:
+    - React's development build calls `eval()` to reconstruct server-side error stacks in the browser, and Turbopack's HMR runtime evaluates modules the same way. Without the carve-out every `next dev` page logged *"eval() is not supported in this environment"* and those debugging features were dark — a permanent console error that trains people to ignore the dev console, which is the only place dev-only hydration **warnings** ever surface (guardrail 16a).
+    - Widening it is a real vulnerability, not a lint nit: `'unsafe-eval'` makes any string reaching `eval()`/`new Function()` executable, which is most of what the per-request nonce + `'strict-dynamic'` policy exists to prevent. Production is the response an attacker can reach.
+
+    Rules:
+    - The condition lives inline in [src/proxy.ts](src/proxy.ts)'s `cspValue`. `next build` sets `NODE_ENV=production`, so Turbopack constant-folds the branch away — the string is **absent from the production bundle**, not merely false at runtime. Verify that way (`grep unsafe-eval` the built `.next/server/chunks/*.js`), not by reading the source.
+    - `tests/proxy.test.mts` pins BOTH directions (development grants it; `production`/`test`/unset never do). A one-sided pin would be satisfied by a hardcoded constant — keep both.
+    - Next's CSP guide documents this exact carve-out and states neither React nor Next uses `eval()` in production. `style-src` needs no dev branch here: it is already `'unsafe-inline'` in every environment.
+    - [SECURITY.md](SECURITY.md) describes the **shipped** posture. It stays accurate only while this branch is dev-only — if that ever changes, that file changes with it.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

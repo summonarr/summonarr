@@ -971,6 +971,46 @@ test("the CSP nonce is stamped on the response AND propagated to the request the
   assert.notEqual(nonce2, nonce, "the nonce must be fresh per request, never static");
 });
 
+test("'unsafe-eval' is granted ONLY under NODE_ENV=development", async () => {
+  // React's dev build evals to reconstruct server-side error stacks, so
+  // `next dev` needs the carve-out (Next's CSP guide documents it). Production
+  // must NEVER get it: 'unsafe-eval' makes any string reaching eval()/new
+  // Function() executable, which is most of what nonce + 'strict-dynamic'
+  // buys. proxy() reads NODE_ENV per request, so both directions are pinnable
+  // in-process. Both assertions matter — dropping either turns this into a
+  // one-sided pin that a hardcoded constant would satisfy.
+  const env = process.env as Record<string, string | undefined>;
+  const original = env.NODE_ENV;
+  const cspFor = async (value: string | undefined) => {
+    if (value === undefined) delete env.NODE_ENV;
+    else env.NODE_ENV = value;
+    const res = await proxy(req("/login"));
+    assertPassedThrough(res);
+    return res.headers.get("content-security-policy") ?? "";
+  };
+  try {
+    assert.match(
+      await cspFor("development"),
+      /script-src 'self' 'nonce-[^']+' 'strict-dynamic' 'unsafe-eval'/,
+      "next dev must carry 'unsafe-eval', appended after 'strict-dynamic'",
+    );
+    for (const value of ["production", "test", undefined]) {
+      const csp = await cspFor(value);
+      assert.ok(
+        !csp.includes("unsafe-eval"),
+        `NODE_ENV=${String(value)} must never grant 'unsafe-eval' (got: ${csp})`,
+      );
+      assert.ok(
+        /script-src 'self' 'nonce-[^']+' 'strict-dynamic'/.test(csp),
+        "the nonce + strict-dynamic policy stays intact outside development",
+      );
+    }
+  } finally {
+    if (original === undefined) delete env.NODE_ENV;
+    else env.NODE_ENV = original;
+  }
+});
+
 // ── BASE_PATH interplay ─────────────────────────────────────────────────────
 
 test("BASE_PATH prefixes both the login redirect and the admin-denial redirect", async () => {

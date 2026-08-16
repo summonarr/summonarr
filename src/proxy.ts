@@ -311,9 +311,23 @@ export async function proxy(request: NextRequest) {
 
   // Nonce is propagated via x-nonce request header; server components read it to stamp inline scripts
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
+  // `next dev` ONLY. React's development build calls eval() to reconstruct
+  // server-side error stacks in the browser, and Turbopack's HMR runtime
+  // evaluates modules the same way; without this every dev page logs "eval()
+  // is not supported in this environment" and those debugging features go
+  // dark. Next's CSP guide documents this exact carve-out and states neither
+  // React nor Next uses eval() in production.
+  //
+  // NEVER widen this past `=== "development"`. 'unsafe-eval' turns any string
+  // that reaches eval()/new Function() into executable script, which is most
+  // of what the nonce + 'strict-dynamic' policy exists to prevent — and a
+  // production response is the one an attacker can reach. `next build` sets
+  // NODE_ENV=production, so this reads false for every shipped deployment;
+  // tests/proxy.test.mts pins both directions.
+  const isDev = process.env.NODE_ENV === "development";
   const cspValue = [
     "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
     `style-src 'self' 'unsafe-inline'`,
     "img-src 'self' data: https://image.tmdb.org https://plex.tv https://assets.plex.tv https://secure.gravatar.com https://i0.wp.com",
     "font-src 'self'",

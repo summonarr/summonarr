@@ -54,7 +54,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **CSRF:** Mutating API requests (`POST`/`PUT`/`PATCH`/`DELETE`) must carry an `Origin` or `Referer` header that matches `AUTH_URL` (plus any `AUTH_TRUSTED_ORIGIN` entries). Webhook, sync, cron, and Discord-interactions routes use their own machine auth and bypass the origin check by design.
 
-**XSS / clickjacking:** Strict CSP with per-request nonce and `strict-dynamic`, `frame-ancestors 'none'`, `object-src 'none'`, and a tight `img-src`/`connect-src` allowlist.
+**XSS / clickjacking:** Strict CSP with per-request nonce and `strict-dynamic`, `frame-ancestors 'none'`, `object-src 'none'`, and a tight `img-src`/`connect-src` allowlist. `'unsafe-eval'` is granted only under `NODE_ENV=development`, where React's dev build needs it to reconstruct server-side error stacks; the production build compiles that branch out entirely.
 
 **SSRF:** All outbound HTTP goes through one of three helpers in `src/lib/safe-fetch.ts`:
 
