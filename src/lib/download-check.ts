@@ -9,6 +9,7 @@ import {
 } from "./arr";
 import { notifyUserAwaitingRelease, notifyUserDownloadPending } from "./discord-notify";
 import { scheduleDelayed } from "./delayed-jobs";
+import { mapLimit } from "./concurrency";
 
 // The "did the approval actually start downloading?" follow-up.
 //
@@ -26,6 +27,10 @@ import { scheduleDelayed } from "./delayed-jobs";
 // Adding a third copy for the admin button would have widened that drift, so the
 // union of the two behaviors lives here once.
 export const DOWNLOAD_CHECK_DELAY_MS = 90_000;
+
+// Matches the delayed-job pool's own default worker count, so ONE batched job
+// spends the same upstream budget the per-row scheduling it replaces would have.
+const DOWNLOAD_CHECK_CONCURRENCY = 4;
 
 export interface DownloadCheckTarget {
   requestId: string;
@@ -113,17 +118,36 @@ export async function runDownloadCheck(target: DownloadCheckTarget): Promise<voi
 }
 
 /**
- * Queue `runDownloadCheck` to run in ~90s via the bounded delayed-job pool.
- * Best-effort: returns false when the pending-timer cap dropped the job, and a
- * dropped or failed job still self-heals on the orchestrator's backstop sweep.
- * `opts.name` stays per-callsite so a drop names the path that queued it.
+ * Queue `runDownloadCheck` for every target as ONE ~90s job in the bounded
+ * delayed-job pool.
+ *
+ * One job, not one per row: the bulk (50) and batch (100) approve paths would
+ * otherwise fill the pool's whole 100-slot run queue from a single admin click,
+ * and the next path to schedule would have its jobs dropped at fire time. The
+ * targets are swept with a bounded fan-out instead, and each self-catches so one
+ * bad row can neither abort the sweep nor reject into the pool.
+ *
+ * Best-effort throughout: returns false for an empty list or when the pending
+ * cap dropped the job, and anything dropped or failed still self-heals on the
+ * orchestrator's backstop sweep. `opts.name` stays per-callsite so a drop names
+ * the path that queued it.
  */
-export function scheduleDownloadCheck(target: DownloadCheckTarget, opts: { name: string }): boolean {
+export function scheduleDownloadChecks(targets: readonly DownloadCheckTarget[], opts: { name: string }): boolean {
+  if (targets.length === 0) return false;
   return scheduleDelayed(DOWNLOAD_CHECK_DELAY_MS, async () => {
-    try {
-      await runDownloadCheck(target);
-    } catch (err) {
-      console.error("[download-check] 90s status check failed:", err);
-    }
+    // mapLimit (not settleLimit) is correct because every task self-catches —
+    // guardrail 31's stated rule. Nothing here can reject.
+    await mapLimit(targets, DOWNLOAD_CHECK_CONCURRENCY, async (target) => {
+      try {
+        await runDownloadCheck(target);
+      } catch (err) {
+        console.error("[download-check] 90s status check failed:", err);
+      }
+    });
   }, opts);
+}
+
+/** Single-target convenience wrapper over {@link scheduleDownloadChecks}. */
+export function scheduleDownloadCheck(target: DownloadCheckTarget, opts: { name: string }): boolean {
+  return scheduleDownloadChecks([target], opts);
 }

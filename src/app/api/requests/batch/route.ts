@@ -9,6 +9,7 @@ import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { buildNotificationData } from "@/lib/notification-data";
 import { emitSSE } from "@/lib/sse-emitter";
+import { scheduleDownloadChecks } from "@/lib/download-check";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -219,6 +220,25 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         data: { status: "PENDING", pendingNotifyAt: null },
       }).catch((err) => console.error("[requests/batch] rollback to PENDING failed:", err));
     }
+
+    // Run the pendingNotifyAt check PROMPTLY at ~90s for every row that actually
+    // landed in ARR, instead of leaving it to the orchestrator's next sweep. One
+    // batched job, not one per row — a 100-id batch would otherwise fill the whole
+    // delayed-job run queue. Rolled-back rows are excluded: they had
+    // pendingNotifyAt cleared above, so there is nothing left to check.
+    scheduleDownloadChecks(
+      approved
+        .filter((r) => !failedIds.has(r.id))
+        .map((r) => ({
+          requestId: r.id,
+          tmdbId: r.tmdbId,
+          mediaType: r.mediaType,
+          arrInstance: r.arrInstance,
+          requestedBy: r.requestedBy,
+          title: r.title,
+        })),
+      { name: "requests/batch:90s-download-check" },
+    );
 
     // Notify only the ones that actually made it into ARR — otherwise users get
     // a misleading "Approved!" ping for a request that's actually back to PENDING.

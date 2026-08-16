@@ -7,6 +7,7 @@ import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { exceedsCap } from "@/lib/content-rating";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
+import { scheduleDownloadChecks, type DownloadCheckTarget } from "@/lib/download-check";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { resolveMediaMeta } from "@/lib/request-meta";
@@ -594,6 +595,10 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
   // Phase 3 — push auto-approved rows to *arr (bounded, post-commit), rolling back
   // to PENDING on push failure like the single route. Every created row emits request:new.
   const rowByKey = new Map(createdRows.map((r) => [keyOf(r.tmdbId, r.mediaType), r]));
+  // Rows that armed pendingNotifyAt AND landed in *arr — collected here rather than
+  // derived from `outcomes`, which cannot distinguish an auto-approved row that was
+  // pushed from a mirrored one that deliberately skipped both the push and the flag.
+  const downloadChecks: DownloadCheckTarget[] = [];
   const outcomes = await mapLimit(prepared, ARR_CONCURRENCY, async (p): Promise<CreateOutcome> => {
     const row = rowByKey.get(keyOf(p.tmdbId, p.mediaType));
     if (!row) return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "error" };
@@ -645,8 +650,21 @@ export const POST = withPermission(Permission.REQUEST)(async (req, _ctx, session
         );
     }
 
+    downloadChecks.push({
+      requestId: row.id,
+      tmdbId: p.tmdbId,
+      mediaType: p.mediaType,
+      arrInstance: p.arrInstance,
+      requestedBy: targetUserId,
+      title: p.title,
+    });
     return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
   });
+
+  // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
+  // orchestrator's next sweep. One batched job, not one per row — a 50-item bulk
+  // request would otherwise take half the delayed-job run queue on its own.
+  scheduleDownloadChecks(downloadChecks, { name: "requests/bulk:90s-download-check" });
 
   const results = [...skipped, ...metaFailed, ...ratingBlocked, ...outcomes];
   const createdCount = outcomes.filter((o) => o.result === "created" || o.result === "auto-approved").length;

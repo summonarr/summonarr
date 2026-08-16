@@ -31,7 +31,7 @@
 // in-memory (tests/_helpers.mts), globalThis.fetch is scripted, and dns.lookup is
 // stubbed so safe-fetch's SSRF resolver never issues a real lookup. Dynamic imports
 // keep the stubs ahead of the module graph (the discord-notify.test pattern).
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 import { readdirSync, readFileSync } from "node:fs";
@@ -89,7 +89,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
-const { DOWNLOAD_CHECK_DELAY_MS, runDownloadCheck, scheduleDownloadCheck } =
+const { DOWNLOAD_CHECK_DELAY_MS, runDownloadCheck, scheduleDownloadCheck, scheduleDownloadChecks } =
   await import("../src/lib/download-check.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -109,13 +109,23 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 let requestRow: { status: string } | null = null;
+// Per-id overrides for the multi-target sweep tests; unset ids fall back to requestRow.
+const requestRowById = new Map<string, { status: string } | null>();
+let throwForRequestId: string | null = null;
 const requestUpdates: Array<Record<string, unknown>> = [];
+const requestUpdateIds: string[] = [];
 shadowPrismaModel(prisma, "mediaRequest", {
-  findUnique: async () => requestRow,
-  update: async (args: { data: Record<string, unknown> }) => {
+  findUnique: async (args: { where: { id: string } }) => {
+    if (throwForRequestId !== null && args.where.id === throwForRequestId) {
+      throw new Error("simulated transient DB failure");
+    }
+    return requestRowById.has(args.where.id) ? requestRowById.get(args.where.id)! : requestRow;
+  },
+  update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     order.push("clear");
     requestUpdates.push(args.data);
-    return { id: "req-1", ...args.data };
+    requestUpdateIds.push(args.where.id);
+    return { id: args.where.id, ...args.data };
   },
 });
 
@@ -179,6 +189,9 @@ beforeEach(() => {
   errors.length = 0;
   order.length = 0;
   requestUpdates.length = 0;
+  requestUpdateIds.length = 0;
+  requestRowById.clear();
+  throwForRequestId = null;
   requestRow = { status: "APPROVED" };
   requesterDeactivatedAt = null;
   requesterDiscordId = DID;
@@ -354,9 +367,108 @@ test("scheduleDownloadCheck queues at the 90s mark and reports acceptance", () =
   assert.equal(scheduleDownloadCheck(target(), { name: "unit-test:download-check" }), true);
 });
 
+// Fake timers so the queued job actually RUNS — otherwise everything below is a
+// 90-second wait. Only setTimeout is faked; the job's own awaits resolve on real
+// microtasks, which is what the setImmediate drain below pumps.
+async function fireScheduledJobs(): Promise<void> {
+  mock.timers.tick(DOWNLOAD_CHECK_DELAY_MS);
+  for (let i = 0; i < 200; i++) await new Promise((r) => setImmediate(r));
+}
+
+test("an empty target list schedules nothing at all — no wasted timer slot", async () => {
+  setSettings(DISCORD_CFG);
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    assert.equal(scheduleDownloadChecks([], { name: "unit-test:empty" }), false);
+    await fireScheduledJobs();
+  } finally {
+    mock.timers.reset();
+  }
+  assert.deepEqual(requestUpdates, []);
+  assert.equal(sent.length, 0);
+});
+
+test("one batched job sweeps EVERY target (the bulk/batch approve shape)", async () => {
+  setSettings(DISCORD_CFG);
+  const targets = [
+    target({ requestId: "req-a", tmdbId: 1, title: "Alpha" }),
+    target({ requestId: "req-b", tmdbId: 2, title: "Bravo" }),
+    target({ requestId: "req-c", tmdbId: 3, title: "Charlie" }),
+  ];
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    assert.equal(scheduleDownloadChecks(targets, { name: "unit-test:sweep" }), true,
+      "the whole batch must cost ONE pending timer, not one per row");
+    await fireScheduledJobs();
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.deepEqual([...requestUpdateIds].sort(), ["req-a", "req-b", "req-c"]);
+  const titles = discordPosts()
+    .map((p) => (p.body?.embeds as Array<{ title: string }>)[0].title)
+    .sort();
+  assert.equal(titles.length, 3);
+  for (const name of ["Alpha", "Bravo", "Charlie"]) {
+    assert.ok(titles.some((t) => t.includes(name)), `${name} was skipped by the sweep`);
+  }
+});
+
+test("a throwing target is isolated: the rest of the sweep still completes", async () => {
+  setSettings(DISCORD_CFG);
+  throwForRequestId = "req-b";
+  const targets = [
+    target({ requestId: "req-a", tmdbId: 1, title: "Alpha" }),
+    target({ requestId: "req-b", tmdbId: 2, title: "Bravo" }),
+    target({ requestId: "req-c", tmdbId: 3, title: "Charlie" }),
+  ];
+
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    scheduleDownloadChecks(targets, { name: "unit-test:isolation" });
+    await fireScheduledJobs();
+  } finally {
+    mock.timers.reset();
+  }
+
+  // Without the per-target catch, mapLimit's bounded Promise.all rejects on the
+  // first failure and Alpha/Charlie silently lose their follow-up.
+  assert.deepEqual([...requestUpdateIds].sort(), ["req-a", "req-c"]);
+  assert.equal(discordPosts().length, 2);
+  assert.ok(
+    errors.some((e) => e.includes("[download-check]") && e.includes("simulated transient DB failure")),
+    "a failed target must be logged under the [download-check] scope, not swallowed silently",
+  );
+});
+
+test("the single-target wrapper runs the check through the same batched path", async () => {
+  setSettings(DISCORD_CFG);
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    scheduleDownloadCheck(target({ requestId: "req-solo", title: "Solo" }), { name: "unit-test:solo" });
+    await fireScheduledJobs();
+  } finally {
+    mock.timers.reset();
+  }
+  assert.deepEqual(requestUpdateIds, ["req-solo"]);
+  assert.equal(discordPosts().length, 1);
+});
+
 // ── drift pins ──────────────────────────────────────────────────────────────
 
 const src = (rel: string) => readFileSync(join(REPO, rel), "utf8");
+
+/** Every .ts/.tsx under src/, repo-relative, excluding the Prisma output (guardrail 12). */
+function walkSrc(dir = "src", out: string[] = []): string[] {
+  for (const entry of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+    const rel = `${dir}/${entry.name}`;
+    if (rel.includes("/generated/")) continue;
+    if (entry.isDirectory()) walkSrc(rel, out);
+    else if (rel.endsWith(".ts") || rel.endsWith(".tsx")) out.push(rel);
+  }
+  return out;
+}
 
 test("the Discord admin-approve button schedules the check, not just the pendingNotifyAt flag", () => {
   const text = src("src/app/api/interactions/route.ts");
@@ -374,6 +486,34 @@ test("the Discord admin-approve button schedules the check, not just the pending
   );
 });
 
+test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
+  // Derived, not a hardcoded list: a new approval path that copies the familiar
+  // `pendingNotifyAt: now + 90_000` line and stops there is exactly the bug this
+  // suite exists for, and it would sail past a fixed roster. Arming the flag only
+  // buys the orchestrator's periodic sweep — the schedule is what makes it prompt.
+  const arming = walkSrc()
+    .filter((f) => f.startsWith("src/app/api/"))
+    .filter((f) => {
+      const text = src(f);
+      return text.includes("pendingNotifyAt") && /\+ 90_000/.test(text);
+    });
+
+  // Guards the pin itself: if the arming literal is ever reformatted, the regex
+  // matches nothing and the assertion below passes vacuously.
+  assert.deepEqual(arming.sort(), [
+    "src/app/api/interactions/route.ts",
+    "src/app/api/requests/[id]/route.ts",
+    "src/app/api/requests/batch/route.ts",
+    "src/app/api/requests/bulk/route.ts",
+    "src/app/api/requests/route.ts",
+  ], "an approval path was added or removed — confirm it schedules, then update this roster");
+
+  const armedButUnscheduled = arming.filter((f) => !/scheduleDownloadChecks?\(/.test(src(f)));
+  assert.deepEqual(armedButUnscheduled, [],
+    "these routes stamp pendingNotifyAt but never queue the job that consumes it, so the " +
+    "requester's 'download pending' ping waits for the next sync tick instead of ~90s");
+});
+
 test("no third copy of the check body: only download-check.ts and the orchestrator backstop notify", () => {
   const text = src("src/lib/download-check.ts");
   assert.match(text, /scheduleDelayed\(DOWNLOAD_CHECK_DELAY_MS/);
@@ -382,16 +522,7 @@ test("no third copy of the check body: only download-check.ts and the orchestrat
   // The two legitimate importers. /api/sync/route.ts is the periodic backstop that
   // sweeps elapsed pendingNotifyAt rows; anything else means the body was re-inlined.
   const ALLOWED = new Set(["src/lib/download-check.ts", "src/app/api/sync/route.ts"]);
-  const walk = (dir: string, out: string[] = []): string[] => {
-    for (const entry of readdirSync(join(REPO, dir), { withFileTypes: true })) {
-      const rel = `${dir}/${entry.name}`;
-      if (rel.includes("/generated/")) continue; // Prisma output (guardrail 12)
-      if (entry.isDirectory()) walk(rel, out);
-      else if (rel.endsWith(".ts") || rel.endsWith(".tsx")) out.push(rel);
-    }
-    return out;
-  };
-  const offenders = walk("src")
+  const offenders = walkSrc()
     .filter((f) => f !== "src/lib/discord-notify.ts" && /notifyUserDownloadPending|notifyUserAwaitingRelease/.test(src(f)))
     .filter((f) => !ALLOWED.has(f));
   assert.deepEqual(offenders, [],
