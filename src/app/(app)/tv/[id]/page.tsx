@@ -25,9 +25,8 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
-import { canRequest, canRequestInstance, hasPermission, parseInstanceGrants, Permission } from "@/lib/permissions";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
-import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
+import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { isFeatureEnabled } from "@/lib/features";
 
@@ -81,7 +80,6 @@ export default async function TVDetailPage({
     request4kAllRow,
     sonarr4kAvailable,
     sonarr4kWanted,
-    sonarrInstances,
     votesEnabled,
     issuesEnabled,
     plexEnabled,
@@ -133,7 +131,6 @@ export default async function TVDetailPage({
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
     prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    getSyncableArrInstances("sonarr"),
     isFeatureEnabled("feature.page.votes"),
     isFeatureEnabled("feature.page.issues"),
     isFeatureEnabled("feature.integration.plex"),
@@ -181,39 +178,20 @@ export default async function TVDetailPage({
   const arr4kPending = show4k && !!sonarr4kWanted;
 
   // Named instances (non-default, non-4K): render an explicit "Request on X"
-  // button for each configured one the viewer may target. Grants require a DB
-  // read (they're not in the session JWT), so only pay it when one exists.
-  const namedDefs = sonarrInstances.filter(
-    (i) => i.slug !== "" && i.slug !== FOURK_ARR_INSTANCE,
-  );
-
+  // button for each configured one the viewer may target. Shared with the movie
+  // page and GET /api/requests/instances so the three can't drift — see
+  // resolveNamedInstanceTargets.
   const [suggestions, namedTargets] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true, show4k }),
-    (async (): Promise<{ slug: string; name: string; requested: boolean; available: boolean }[]> => {
-      if (!session || namedDefs.length === 0 || blacklisted) return [];
-      const viewer = await prisma.user.findUnique({
-        where: { id: session.user.id },
-        select: { instanceGrants: true },
-      });
-      const grants = parseInstanceGrants(viewer?.instanceGrants);
-      const eligible = namedDefs.filter((inst) =>
-        canRequestInstance(session.user.permissions, inst, grants, "TV"),
-      );
-      return Promise.all(
-        eligible.map(async (inst) => {
-          const [namedRequest, namedAvailable] = await Promise.all([
-            prisma.mediaRequest.findFirst({
-              where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
-              select: { id: true },
-            }),
-            prisma.sonarrAvailableItem.findUnique({
-              where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
-            }),
-          ]);
-          return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
-        }),
-      );
-    })(),
+    session
+      ? resolveNamedInstanceTargets({
+          tmdbId: media.id,
+          mediaType: "TV",
+          userId: session.user.id,
+          permissions: session.user.permissions,
+          blacklisted,
+        })
+      : Promise.resolve([]),
   ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 

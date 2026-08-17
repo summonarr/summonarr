@@ -822,7 +822,13 @@ model PlayHistory {
   videoCodec    String?    @db.VarChar(64)
   audioCodec    String?    @db.VarChar(64)
   resolution    String?    @db.VarChar(32)
-  bitrate       Int? // kbps
+  // WHATEVER THE UPSTREAM REPORTED, VERBATIM — the unit is a property of
+  // `source`, NOT of this column: plex is kbps, jellyfin is bps. There is no
+  // write-time normalization. Read it through lib/bitrate.ts
+  // (BITRATE_KBPS_SQL / bitrateToKbps), never by magnitude — the two ranges
+  // overlap, and this comment previously read a flat "kbps", which is the
+  // premise both shipped reconciliation bugs were built on. See guardrail 19a.
+  bitrate       Int?
   videoDecision String?    @db.VarChar(32)
   audioDecision String?    @db.VarChar(32)
   container     String?    @db.VarChar(32)
@@ -939,6 +945,8 @@ model ActiveSession {
   videoCodec    String?  @db.VarChar(64)
   audioCodec    String?  @db.VarChar(64)
   resolution    String?  @db.VarChar(32)
+  // Source-dependent unit, exactly like PlayHistory.bitrate — see the comment
+  // there and lib/bitrate.ts. plex = kbps, jellyfin = bps.
   bitrate       Int?
   videoDecision String?  @db.VarChar(32)
   audioDecision String?  @db.VarChar(32)
