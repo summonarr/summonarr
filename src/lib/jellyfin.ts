@@ -702,11 +702,17 @@ interface JellyfinSessionRaw {
     ProviderIds?: Record<string, string>;
     Container?: string;
     MediaStreams?: Array<{ Type?: string; Codec?: string; BitRate?: number; Width?: number; Height?: number }>;
+    // Container-level totals (every track plus overhead), one entry per version.
+    // Jellyfin does not always populate this on /Sessions — sourceBitrateBps
+    // falls back to summing MediaStreams when it is absent.
+    MediaSources?: Array<{ Id?: string; Bitrate?: number }>;
   };
   PlayState?: {
     PositionTicks?: number;
     IsPaused?: boolean;
     PlayMethod?: string;
+    // Which MediaSources entry is playing, for multi-version items.
+    MediaSourceId?: string;
   };
   TranscodingInfo?: {
     VideoCodec?: string;
@@ -717,6 +723,43 @@ interface JellyfinSessionRaw {
     IsAudioDirect?: boolean;
     TranscodeReasons?: string[];
   };
+}
+
+// Total SOURCE bitrate (bps) of the media source actually playing.
+//
+// Only reached when there is no TranscodingInfo — i.e. DirectPlay, where the
+// file is pushed as-is, so the source total IS the delivered bitrate and this
+// feeds the activity Bandwidth stat directly.
+//
+// The previous fallback was `videoStream.BitRate`, the VIDEO track alone, which
+// silently dropped the audio from every direct-played Jellyfin session: 128 kbps
+// for stereo AAC, and up to ~4.5 Mbps for a TrueHD/DTS-HD MA track, where the
+// undercount is larger than many whole streams.
+//
+// MediaSources[].Bitrate is the container total and is exactly what direct play
+// transfers, so it wins when present. Jellyfin does not always populate
+// MediaSources on /Sessions, hence the stream sum: video + the selected audio
+// track, the pair the player is decoding. A file carrying several audio tracks
+// direct-plays all of them, so that sum is a FLOOR — still far closer than video
+// alone, and it can never over-report.
+function sourceBitrateBps(
+  np: NonNullable<JellyfinSessionRaw["NowPlayingItem"]>,
+  ps: JellyfinSessionRaw["PlayState"],
+): number | undefined {
+  const sources = np.MediaSources;
+  if (sources?.length) {
+    const playing =
+      (ps?.MediaSourceId ? sources.find((m) => m.Id === ps.MediaSourceId) : undefined) ??
+      sources[0];
+    if (typeof playing?.Bitrate === "number" && playing.Bitrate > 0) return playing.Bitrate;
+  }
+
+  const streams = np.MediaStreams;
+  if (!streams?.length) return undefined;
+  const video = streams.find((s) => s.Type === "Video")?.BitRate ?? 0;
+  const audio = streams.find((s) => s.Type === "Audio")?.BitRate ?? 0;
+  const total = video + audio;
+  return total > 0 ? total : undefined;
 }
 
 // Server-side /Sessions filter for the 5s poller. Jellyfin's idle reaper
@@ -786,7 +829,11 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
           ? (videoStream.Height >= 2160 ? "4K" : videoStream.Height >= 1080 ? "1080p" : videoStream.Height >= 720 ? "720p" : `${videoStream.Height}p`)
           : undefined,
         container: ti?.Container ?? np.Container,
-        bitrate: ti?.Bitrate ?? videoStream?.BitRate,
+        // Transcoding ⇒ TranscodingInfo.Bitrate is the OUTPUT bitrate, which is
+        // what actually leaves the server. No TranscodingInfo ⇒ DirectPlay, where
+        // the source total is the delivered bitrate. Both are "bytes on the
+        // wire", so the Bandwidth stat means one thing across play methods.
+        bitrate: ti?.Bitrate ?? sourceBitrateBps(np, ps),
         transcodeReason:
           playMethod === "Transcode"
             ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? "Container not supported"

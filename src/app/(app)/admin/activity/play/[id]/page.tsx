@@ -6,6 +6,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
+import { bitrateToKbps } from "@/lib/bitrate";
 import {
   ArrowLeft, Film, Tv2, User, Monitor, Zap,
   Clock, CheckCircle2, Circle,
@@ -26,9 +27,11 @@ function formatDuration(seconds: number | null): string {
   return `${s}s`;
 }
 
-function formatBitrate(raw: number | null): string {
-  if (!raw || raw <= 0) return "—";
-  const kbps = raw > 100000 ? raw / 1000 : raw;
+// `source` is required: Plex reports kbps, Jellyfin bps, and the row is the
+// only thing that can tell them apart (lib/bitrate.ts).
+function formatBitrate(raw: number | null, source: string | null): string {
+  const kbps = bitrateToKbps(raw, source);
+  if (kbps <= 0) return "—";
   if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
   return `${Math.round(kbps)} kbps`;
 }
@@ -241,7 +244,7 @@ export default async function PlayDetailPage({
               )}
             </div>
             <LabeledValue label="Container" value={play.container?.toUpperCase() ?? "—"} />
-            <LabeledValue label="Bitrate" value={formatBitrate(play.bitrate)} />
+            <LabeledValue label="Bitrate" value={formatBitrate(play.bitrate, play.source)} />
           </div>
         </Card>
 

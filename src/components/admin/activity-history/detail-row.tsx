@@ -50,7 +50,7 @@ export function DetailRow({
       play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
     ],
     ["Container", play.container ?? "—"],
-    ["Bitrate", fmtBitrate(play.bitrate)],
+    ["Bitrate", fmtBitrate(play.bitrate, play.source)],
     ["Video codec", play.videoCodec ?? "—"],
     ["Audio codec", play.audioCodec ?? "—"],
     ["Video decision", play.videoDecision ?? "—"],

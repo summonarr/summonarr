@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useLiveEvents, type ActiveSessionLive } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
 import { parseActiveSessionId } from "@/lib/media-instances";
+import { bitrateToKbps } from "@/lib/bitrate";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
 import {
@@ -343,12 +344,6 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
   );
 }
 
-// Plex reports bitrate in kbps; Jellyfin in bps — normalize to kbps.
-function toBitrateKbps(raw: number | null): number {
-  if (!raw || raw <= 0) return 0;
-  return raw > 100000 ? raw / 1000 : raw;
-}
-
 // Stable, pleasant per-title poster wash so the radial accent is consistent
 // across renders without depending on TMDB colors.
 function accentFor(seed: string): string {
@@ -371,7 +366,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   // instance, and SourceTag renders nothing extra in that case.
   const serverInstance = parseActiveSessionId(s.id).serverInstance;
   const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
-  const bitrateMbps = toBitrateKbps(s.bitrate) / 1000;
+  const bitrateMbps = bitrateToKbps(s.bitrate, s.source) / 1000;
   const paused = s.state === "paused";
 
   const userNode = s.serverUsername ? (
@@ -678,7 +673,7 @@ export function ActivityNowPlaying({
   const plexCount = sessions.filter((s) => s.source === "plex").length;
   const jellyfinCount = sessions.length - plexCount;
   const totalMbps =
-    sessions.reduce((sum, s) => sum + toBitrateKbps(s.bitrate), 0) / 1000;
+    sessions.reduce((sum, s) => sum + bitrateToKbps(s.bitrate, s.source), 0) / 1000;
 
   const sub =
     sessions.length === 0

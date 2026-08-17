@@ -332,6 +332,25 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The `getJellyfinSessions` lib helper feeds the live poller — don't confuse it with the removed `getJellyfinPlaybackReporting`/`getJellyfinUserPlayHistory`/`getJellyfinItemRuntimes` backfill helpers (also deleted).
     - "The poller" is now a loop over every configured Jellyfin server (guardrail 35) and `PlayHistory.serverInstance` records which one a watch came from — so "sole writer" means the poller *as a whole*, not one connection. Don't assume a single Jellyfin anywhere on this path.
 
+19a. **NEVER reconcile a `bitrate` column by MAGNITUDE. Normalize on `source` via [bitrate.ts](src/lib/bitrate.ts).**
+
+    Why:
+    - `PlayHistory.bitrate` / `ActiveSession.bitrate` store what the upstream sent, verbatim — there is no write-time normalization. The unit is a property of the row's `source`: **Plex is kbps** (`Media.bitrate`; a 20 Mbps file reads `20000`), **Jellyfin is bps** (`TranscodingInfo.Bitrate` / `MediaStream.BitRate`; the same file reads `20000000`).
+    - The two ranges genuinely OVERLAP, so a `bitrate > N` threshold is wrong at one end no matter which N you pick — and **both** wrong answers have already shipped:
+      - `> 100_000` erased Plex UHD: a 128 Mbps remux (`128000` kbps) is above the cutoff, so it was divided by 1000 and read as 0.128 Mbps — the heaviest sessions vanished from the panel meant to surface them.
+      - `> 1_000_000` inflated Jellyfin 1000×: anything under 1 Mbps (music, and Jellyfin's stock sub-1-Mbps mobile transcode rungs) stayed unscaled and was read as kbps. A 2-hour 720 kbps phone stream reported **648 GB** against a true 0.65 GB.
+    - "It's rare, and it contributes little bandwidth" is NOT a valid reason to accept a gap — that reasoning shipped the second bug. The error *multiplies* the row's contribution by 1000, so the **lightest** sessions become the heaviest line items. One phone stream can outweigh a real month.
+
+    Rules:
+    - One definition: `BITRATE_KBPS_SQL` (raw-SQL sites) and `bitrateToKbps(raw, source)` (TS/client). Never a private copy — the copies drift. The fix that raised the SQL threshold updated all nine SQL sites and missed **four** UI helpers, which sat on the old cutoff for releases while the SQL and the UI on the same page disagreed about the same session.
+    - `source` is a **required** parameter on every formatter, never optional — an optional one silently defaults Jellyfin rows to the Plex reading and renders them 1000× high.
+    - An unrecognized `source` is read as kbps. Guessing wrong that way under-reports; guessing wrong the other way multiplies by 1000.
+    - `tests/bitrate.test.mts` pins both failure directions plus a repo-wide structural scan for the magnitude antipattern (it caught two undiscovered copies the moment it was written). Adding a media server means editing `BPS_SOURCES`, not a call site.
+
+    **Bandwidth stats use `DELIVERED_KBPS_SQL`, not the raw column** — they answer "how many bytes left the server", and three of the four (server × play-method) cases already measure that: Plex DirectPlay and Jellyfin DirectPlay push the source as-is, and a Jellyfin transcode reports its true output via `TranscodingInfo.Bitrate`. The fourth, a **Plex transcode**, cannot be read at all — `TranscodeSession` carries width/height/codec/container/size/speed and **no bitrate field**. So `Session.bandwidth` (the Streaming Brain's *reserved* estimate, explicitly "not the used bandwidth" per Tautulli) is used for that case alone, wrapped in `LEAST(bandwidth, bitrate)`. The clamp is the load-bearing part: delivered can never exceed the source when transcoding, so a garbage reading (10500 Mbps has been seen in the wild) degrades to *exactly* the un-clamped number — the expression can never be worse than measuring at source, only closer. Never drop the clamp, never extend the estimate to DirectPlay (there source *is* delivered, exactly), and keep both `> 0` guards — Postgres `LEAST` ignores NULLs, so `LEAST(bandwidth, NULL)` returns `bandwidth` and would count a row the raw column calls unknown.
+
+    **Jellyfin DirectPlay bitrate is the SOURCE TOTAL, via `sourceBitrateBps`** ([jellyfin.ts](src/lib/jellyfin.ts)) — `MediaSources[].Bitrate` (the container total, selected by `PlayState.MediaSourceId`), falling back to video + audio stream sum. The old fallback was `videoStream.BitRate`, the video track alone, which dropped the audio from every direct-played session — 128 kbps for stereo AAC, up to ~4.5 Mbps for TrueHD/DTS-HD MA. Do not "simplify" back to a single stream; the sum is already a floor for multi-audio-track files and can only under-report.
+
 20. **The Plex stall anchor (`progressUpdatedAt`) must track playhead MOVEMENT, not strict forward advance — in BOTH writers (SSE and the 5s poller).**
 
     Why:
