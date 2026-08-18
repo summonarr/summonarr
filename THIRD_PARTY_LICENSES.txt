@@ -6122,7 +6122,7 @@ THIS SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-deepmerge-ts@7.1.5
+deepmerge-ts@8.0.1
 License: BSD-3-Clause
 
 BSD 3-Clause License
