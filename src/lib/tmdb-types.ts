@@ -95,9 +95,17 @@ export interface TmdbMedia {
     tmdbId: number;
     title: string;
     mediaType: MediaType;
-    source: "WATCH_HISTORY" | "WATCHLIST";
+    // TRENDING never appears here: fallback rows carry no reason title, so the
+    // read path's all-four-non-null gate keeps this object absent for them —
+    // they surface through fromTrendingFallback below instead.
+    source: "WATCH_HISTORY" | "WATCHLIST" | "REQUEST" | "TRENDING";
     seedCount: number;
   };
+
+  // Set on cold-start fallback rows only (reasonSource TRENDING): the title is
+  // here because it is popular right now, not because the engine matched it to
+  // the viewer's taste. The UI labels it honestly and withholds match chips.
+  fromTrendingFallback?: boolean;
 
   // How strongly the For You engine rates this pick, as a band rather than a
   // raw score — the score is a sum of seed weights whose magnitude depends on

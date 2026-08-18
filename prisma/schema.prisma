@@ -1164,12 +1164,19 @@ model UserRecommendation {
   @@index([userId, rank])
 }
 
-// Which of the two seed pools a recommendation's reason came from. Drives the
-// wording only ("Because you watched X" vs "X is on your watchlist") — the
-// weighting difference between the pools lives in recommendations.ts.
+// Which pool a recommendation's reason came from. Drives the wording only
+// ("Because you watched X" / "On your watchlist: X" / "Because you requested
+// X") — the weighting differences between pools live in recommendations.ts.
+// TRENDING is the odd one out: it marks a COLD-START FALLBACK row (a shelf
+// filled from the prewarmed trending/popular caches when a user has no seeds),
+// which carries NO reason title — its reasonTmdbId/reasonTitle/reasonMediaType
+// stay NULL so the read path's all-four-non-null gate never fabricates a
+// "Because you watched…" line for it, and match-tier chips skip it entirely.
 enum RecommendationSeed {
   WATCH_HISTORY
   WATCHLIST
+  REQUEST
+  TRENDING
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event

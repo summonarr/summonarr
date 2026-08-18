@@ -79,16 +79,34 @@ export default async function ForYouPage({
   if (summary.watchlistSeeds > 0) {
     seedParts.push(`${summary.watchlistSeeds} on your watchlist`);
   }
+  if (summary.requestSeeds > 0) {
+    seedParts.push(`${summary.requestSeeds} you requested`);
+  }
+  const seedList =
+    seedParts.length > 1
+      ? `${seedParts.slice(0, -1).join(", ")} and ${seedParts[seedParts.length - 1]}`
+      : seedParts[0];
+  // An all-fallback shelf (cold start) says so instead of implying these came
+  // from a taste profile that does not exist yet.
+  const allFallback = enriched.length > 0 && enriched.every((m) => m.fromTrendingFallback);
   const subtitle =
     enriched.length === 0
-      ? "Picked from your watch history and watchlist"
-      : [
-          `${filtered.length} of ${enriched.length} picks`,
-          seedParts.length > 0 ? `built from ${seedParts.join(" and ")}` : null,
-          summary.computedAt ? `updated ${formatRelativeTime(summary.computedAt)}` : null,
-        ]
-          .filter(Boolean)
-          .join(" · ");
+      ? "Picked from what you watch, list and request"
+      : allFallback
+        ? [
+            `${filtered.length} popular picks while your taste profile builds`,
+            "watch, list or request a few titles to make these personal",
+            summary.computedAt ? `updated ${formatRelativeTime(summary.computedAt)}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : [
+            `${filtered.length} of ${enriched.length} picks`,
+            seedParts.length > 0 ? `built from ${seedList}` : null,
+            summary.computedAt ? `updated ${formatRelativeTime(summary.computedAt)}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
 
   return (
     <div className="ds-page-enter">
@@ -230,6 +248,15 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
 function RecommendationReason({ media }: { media: TmdbMedia }) {
   const why = media.recommendedBecause;
   if (!why) {
+    // A cold-start fallback pick says what it is. Deliberately NOT a match
+    // chip and NOT a "Because you…" line — it was picked for everyone.
+    if (media.fromTrendingFallback) {
+      return (
+        <p className="ds-mono m-0" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}>
+          Popular right now
+        </p>
+      );
+    }
     return media.matchTier ? (
       <div className="flex">
         <MatchTierChip tier={media.matchTier} />
@@ -237,7 +264,12 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
     ) : null;
   }
 
-  const lead = why.source === "WATCHLIST" ? "On your watchlist:" : "Because you watched";
+  const lead =
+    why.source === "WATCHLIST"
+      ? "On your watchlist:"
+      : why.source === "REQUEST"
+        ? "Because you requested"
+        : "Because you watched";
   // seedCount counts every seed that surfaced this title, the named one
   // included — so the "+N more" is the corroborating remainder.
   const others = why.seedCount - 1;

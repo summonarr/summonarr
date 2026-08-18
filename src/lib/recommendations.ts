@@ -2,7 +2,7 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import type { MediaType, RecommendationSeed } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { getMovieSuggestions, getTVSuggestions, SUGGESTIONS_CACHE_MAX } from "@/lib/tmdb";
+import { getMovieSuggestions, getTVSuggestions, getTrending, getPopularMovies, getPopularTV, SUGGESTIONS_CACHE_MAX } from "@/lib/tmdb";
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
 import { settleLimit } from "@/lib/concurrency";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
@@ -25,6 +25,15 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 // warm cycle issues far fewer requests than the cold worst case of 2 per seed.
 const MAX_WATCH_HISTORY_SEEDS = 100;
 const MAX_WATCHLIST_SEEDS = 24;
+// A request is the strongest single-title signal a user can emit — they filled
+// in a form asking for it — and for local/OIDC accounts with no linked media-
+// server identity it is often the ONLY signal: their history reads resolve to
+// zero server users, so before this pool existed those users' shelves were
+// built from nothing at all. Every status seeds (even DECLINED — the admin
+// vetoed the fulfilment, not the taste); the overfetch absorbs the per-
+// arrInstance duplicate rows the unique key permits, collapsed newest-wins.
+const MAX_REQUEST_SEEDS = 24;
+const REQUEST_SEED_OVERFETCH = 3;
 const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 // STORE the whole rated shortlist; SERVE the historical 200. The two used to be
 // one number, which silently threw away paid-for work: ranks 200-299 were
@@ -122,6 +131,20 @@ const LANGUAGE_FLOOR = 0.35;
 // and that tail-of-/similar junk used to outrank known-mediocre titles the
 // prior had pulled down.
 const RATING_SHORTLIST = 300;
+// ── Cold-start fallback ────────────────────────────────────────────────────
+// A user with no seeds — no linked watch history, empty watchlist, no requests
+// — used to get a conclusive empty: a blank page with an empty-state blurb,
+// for up to 12h between crons, exactly when the app most needs to make a first
+// impression. Their shelf now fills from the prewarmed trending/popular caches
+// (warm-list-cache keeps them hot, so the marginal cost is ~zero), run through
+// the same quality prior so it is at least a GOOD generic shelf.
+//
+// The honesty engineering is the load-bearing part: fallback rows are labeled
+// "popular right now", never given a fabricated reason line, and never wear a
+// match-tier chip — a "Top match" on a title picked for everyone would erode
+// the chip's meaning everywhere. Thin shelves top up to this target the same
+// way, with fallback rows ranked strictly BELOW every real pick.
+const FALLBACK_SHELF_TARGET = 100;
 const QUALITY_WEIGHT = 0.5;
 const QUALITY_NEUTRAL = 0.65;
 const OBSCURITY_DAMP = 0.9;
@@ -208,6 +231,10 @@ function matchTierFor(index: number, total: number): "top" | "strong" | undefine
 // higher per-seed weight but fewer slots, so history still dominates volume.
 const WATCHLIST_SEED_WEIGHT = 1.5;
 const WATCH_HISTORY_SEED_WEIGHT = 1.0;
+// Same weight as the watchlist: both are unambiguous single-person acts. The
+// two never double-count — a title in several pools seeds exactly once (see
+// the dedup in selectSeeds).
+const REQUEST_SEED_WEIGHT = 1.5;
 
 export interface RecommendationCandidate {
   tmdbId: number;
@@ -223,10 +250,16 @@ export interface RecommendationCandidate {
   // The single strongest seed that surfaced this candidate, and how many seeds
   // surfaced it in total. `score` says HOW MUCH the engine likes a title;
   // these say WHY, which is what the /for-you page shows the user.
-  reasonTmdbId: number;
-  reasonTitle: string;
-  reasonMediaType: MediaType;
-  reasonSource: RecommendationSeed;
+  //
+  // Nullable because a cold-start FALLBACK row has no seed to name: it carries
+  // reasonSource TRENDING with the other three null (and seedCount 0), which
+  // keeps the read path's all-four-non-null gate closed — the one honesty rule
+  // the fallback feature hangs on is that it may never fabricate a "Because
+  // you watched…". Real candidates always fill all four.
+  reasonTmdbId: number | null;
+  reasonTitle: string | null;
+  reasonMediaType: MediaType | null;
+  reasonSource: RecommendationSeed | null;
   seedCount: number;
 }
 
@@ -349,7 +382,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take,
     });
 
-  const [windowedRows, watchlistRows] = await Promise.all([
+  const [windowedRows, watchlistRows, requestRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
       : groupHistory(true, MAX_WATCH_HISTORY_SEEDS),
@@ -359,7 +392,30 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take: MAX_WATCHLIST_SEEDS,
       select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
     }),
+    // Every own request, any status (see MAX_REQUEST_SEEDS). requestedBy is the
+    // row's attributed user, which covers on-behalf requests too — the row has
+    // no created-by column, so "requests attributed to this user" is the finest
+    // grain the schema can express.
+    prisma.mediaRequest.findMany({
+      where: { requestedBy: userId },
+      orderBy: { createdAt: "desc" },
+      take: MAX_REQUEST_SEEDS * REQUEST_SEED_OVERFETCH,
+      select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
+    }),
   ]);
+
+  // Collapse the per-arrInstance duplicates (one user may hold an HD and a 4K
+  // row for the same title): rows arrive newest-first, so first-wins is
+  // newest-wins.
+  const seenRequestKeys = new Set<string>();
+  const requestSeedRows: { tmdbId: number; mediaType: MediaType; title: string; createdAt: Date }[] = [];
+  for (const r of requestRows) {
+    const key = candidateKey(r.tmdbId, r.mediaType);
+    if (seenRequestKeys.has(key)) continue;
+    seenRequestKeys.add(key);
+    requestSeedRows.push(r);
+    if (requestSeedRows.length >= MAX_REQUEST_SEEDS) break;
+  }
 
   let historyRows = windowedRows;
   if (linkedServerUserIds.length > 0 && windowedRows.length < MAX_WATCH_HISTORY_SEEDS) {
@@ -394,14 +450,20 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // slow query change the weights partway down the list.
   const now = Date.now();
 
-  // The app's core loop is watchlist -> request -> watch, and WATCHING a title
-  // never deletes its WatchlistItem — so for every engaged user the recently
-  // watched titles sat in BOTH pools and seeded twice, ~2.5x the weight of any
-  // single-source seed (1.0 history + 1.5 watchlist). The history seed wins the
-  // dedup: once watched, the list entry is fulfilled bookkeeping, while the
-  // history seed carries the real signal (actual recency, real play count).
+  // The app's core loop is watchlist -> request -> watch, so one title can sit
+  // in all three pools at once — and it must seed exactly ONCE. Priority is
+  // history > watchlist > request: once watched, everything else is fulfilled
+  // bookkeeping and the history seed carries the real signal (actual recency,
+  // real play count); between the two explicit signals the weights are
+  // identical (1.5), so which one keeps the slot changes nothing but the
+  // reason wording, and watchlist keeps it as the earlier-established pool.
   const historyKeys = new Set(historySeeds.map((r) => candidateKey(r.tmdbId, r.mediaType)));
   const unwatchedListRows = watchlistRows.filter((r) => !historyKeys.has(candidateKey(r.tmdbId, r.mediaType)));
+  const listKeys = new Set(unwatchedListRows.map((r) => candidateKey(r.tmdbId, r.mediaType)));
+  const novelRequestRows = requestSeedRows.filter((r) => {
+    const key = candidateKey(r.tmdbId, r.mediaType);
+    return !historyKeys.has(key) && !listKeys.has(key);
+  });
 
   return [
     ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY", now),
@@ -410,6 +472,13 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       unwatchedListRows.map((r) => ({ ...r, lastAt: r.createdAt })),
       WATCHLIST_SEED_WEIGHT,
       "WATCHLIST",
+      now,
+    ),
+    // A request's recency is when it was placed.
+    ...weightSeeds(
+      novelRequestRows.map((r) => ({ ...r, lastAt: r.createdAt })),
+      REQUEST_SEED_WEIGHT,
+      "REQUEST",
       now,
     ),
   ];
@@ -535,7 +604,17 @@ async function collectAbandonedTitleKeys(linkedServerUserIds: string[], now: num
 
 async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<Set<string>> {
   const excluded = await collectKnownTitleKeys(userId, linkedServerUserIds);
-  for (const s of seeds) excluded.add(candidateKey(s.tmdbId, s.mediaType));
+  for (const s of seeds) {
+    // REQUEST seeds do NOT fold themselves into the exclusion set. Request
+    // exclusion is STATUS-BASED and lives in collectKnownTitleKeys alone
+    // (PENDING/APPROVED/permanentlyDeclined out; AVAILABLE and re-requestable
+    // DECLINED deliberately kept) — a blanket fold here would re-exclude the
+    // kept classes the moment they became seeds, silently reversing that
+    // decision. History/watchlist seeds still fold, though it is belt-and-
+    // suspenders: both pools are wholly covered by collectKnownTitleKeys.
+    if (s.source === "REQUEST") continue;
+    excluded.add(candidateKey(s.tmdbId, s.mediaType));
+  }
   return excluded;
 }
 
@@ -565,7 +644,21 @@ export interface RecommendationComputation {
 export async function computeRecommendationsForUser(userId: string): Promise<RecommendationComputation> {
   const linkedServerUserIds = await resolveLinkedMediaServerUserIds(userId);
   const seeds = await selectSeeds(userId, linkedServerUserIds);
-  if (seeds.length === 0) return { candidates: [], conclusive: true };
+  if (seeds.length === 0) {
+    // Cold start: no history, no watchlist, no requests. Serve the fallback
+    // shelf instead of the old conclusive empty. Exclusions still apply — a
+    // seedless user can still have hidden titles, deletion votes, or an admin
+    // blacklist to honour.
+    const known = await collectKnownTitleKeys(userId, linkedServerUserIds);
+    const fallback = await buildFallbackCandidates(known, new Set(), FALLBACK_SHELF_TARGET);
+    return {
+      candidates: fallback.candidates.map((c, i) => ({ ...c, rank: i })),
+      // Pool fetch failed ⇒ inconclusive: keep yesterday's shelf (probably last
+      // cycle's fallback rows) rather than wiping it over a transient outage.
+      // Pool served but everything was excluded ⇒ a real, conclusive answer.
+      conclusive: fallback.poolAvailable,
+    };
+  }
 
   const [excluded, abandoned] = await Promise.all([
     buildExclusionSet(userId, linkedServerUserIds, seeds),
@@ -724,7 +817,93 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
     .map(
       ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }),
     );
+
+  // Thin shelf (few seeds, or a viewer who has watched most of their
+  // neighborhood): top up toward the fallback target, fallback rows ranked
+  // strictly AFTER every real pick. A pool failure here just skips the top-up
+  // — the real candidates stand, and conclusive keeps its meaning from the
+  // suggestion fan-out above, never from the fallback.
+  if (ranked.length < FALLBACK_SHELF_TARGET) {
+    const taken = new Set(ranked.map((c) => candidateKey(c.tmdbId, c.mediaType)));
+    const fallback = await buildFallbackCandidates(excluded, taken, FALLBACK_SHELF_TARGET - ranked.length);
+    for (const c of fallback.candidates) ranked.push({ ...c, rank: ranked.length });
+  }
+
   return { candidates: ranked, conclusive: rawSuggestions > 0 };
+}
+
+interface FallbackPoolResult {
+  candidates: RecommendationCandidate[];
+  // False when the trending/popular reads themselves failed — the caller keeps
+  // yesterday's shelf rather than wiping it over a transient outage. True with
+  // zero candidates is a REAL answer (everything trending is excluded/taken).
+  poolAvailable: boolean;
+}
+
+// Builds up to `slots` fallback rows from the trending/popular caches, skipping
+// anything the user already knows (excludedKeys) or the shelf already holds
+// (takenKeys). Rows come back quality-ordered but with score 0 — the engine
+// has NO relevance opinion on them, and a zero score keeps that fact in the
+// data rather than inventing a comparable number.
+async function buildFallbackCandidates(
+  excludedKeys: Set<string>,
+  takenKeys: Set<string>,
+  slots: number,
+): Promise<FallbackPoolResult> {
+  if (slots <= 0) return { candidates: [], poolAvailable: true };
+
+  let pool: TmdbMedia[];
+  try {
+    const [trending, popMovies, popTV] = await Promise.all([getTrending(), getPopularMovies(), getPopularTV()]);
+    // Trending first: it is the freshest signal, and the dedupe below keeps the
+    // first copy, so a title on both lists reads as trending.
+    pool = [...trending, ...popMovies, ...popTV];
+  } catch (err) {
+    console.warn("[recommendations] fallback pool unavailable; leaving the shelf as-is:", err);
+    return { candidates: [], poolAvailable: false };
+  }
+  if (pool.length === 0) return { candidates: [], poolAvailable: false };
+
+  const seen = new Set<string>();
+  const picked: (RecommendationCandidate & { language?: string; voteCount: number })[] = [];
+  for (const item of pool) {
+    const mediaType = toDbMediaType(item.mediaType);
+    const key = candidateKey(item.id, mediaType);
+    if (seen.has(key) || excludedKeys.has(key) || takenKeys.has(key)) continue;
+    seen.add(key);
+    picked.push({
+      tmdbId: item.id,
+      mediaType,
+      title: item.title,
+      overview: item.overview || null,
+      posterPath: item.posterPath,
+      backdropPath: item.backdropPath,
+      releaseDate: item.releaseDate,
+      voteAverage: item.voteAverage,
+      // Transient ordering seed: pool position, gently decayed, so the quality
+      // prior refines the trending order instead of replacing it. Zeroed below
+      // before the rows leave this function.
+      score: 1 / (1 + picked.length / 20),
+      rank: 0,
+      reasonTmdbId: null,
+      reasonTitle: null,
+      reasonMediaType: null,
+      reasonSource: "TRENDING",
+      seedCount: 0,
+      voteCount: item.voteCount ?? 0,
+    });
+    // Overfetch 2x before the quality sort so a badly-rated title near the top
+    // of trending can actually be out-ranked instead of being locked in.
+    if (picked.length >= slots * 2) break;
+  }
+
+  await applyQualityPrior(picked);
+  picked.sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage);
+
+  return {
+    candidates: picked.slice(0, slots).map(({ voteCount: _vc, language: _l, ...c }) => ({ ...c, score: 0 })),
+    poolAvailable: true,
+  };
 }
 
 // Normalizes whatever rating sources answered for a title into a single 0..1
@@ -917,7 +1096,9 @@ function rowToTmdbMedia(row: {
     voteAverage: row.voteAverage,
     // All four reason columns are written together or not at all, so one
     // null-check covers the whole object. Rows predating the columns simply
-    // carry no reason and the UI omits the line — they heal on the next cron run.
+    // carry no reason and the UI omits the line — they heal on the next cron
+    // run. Fallback rows (reasonSource TRENDING, other three null) rely on
+    // this same gate to never grow a fabricated reason line.
     ...(row.reasonTmdbId != null && row.reasonTitle != null && row.reasonMediaType != null && row.reasonSource != null
       ? {
           recommendedBecause: {
@@ -929,6 +1110,7 @@ function rowToTmdbMedia(row: {
           },
         }
       : {}),
+    ...(row.reasonSource === "TRENDING" ? { fromTrendingFallback: true } : {}),
   };
 }
 
@@ -942,9 +1124,11 @@ export interface RecommendationSummary {
   // pool. Counted off the stored reasons rather than by re-running selectSeeds:
   // it is one small per-user query instead of three, and it answers the more
   // honest question — not "what did we feed the engine" but "what did the
-  // engine actually get something out of".
+  // engine actually get something out of". Fallback rows never count: their
+  // reasonTmdbId is null, so the groupBy's non-null predicate drops them.
   watchHistorySeeds: number;
   watchlistSeeds: number;
+  requestSeeds: number;
 }
 
 export async function getRecommendationSummary(userId: string): Promise<RecommendationSummary> {
@@ -958,12 +1142,14 @@ export async function getRecommendationSummary(userId: string): Promise<Recommen
 
   let watchHistorySeeds = 0;
   let watchlistSeeds = 0;
+  let requestSeeds = 0;
   for (const row of seedRows) {
     if (row.reasonSource === "WATCHLIST") watchlistSeeds++;
     else if (row.reasonSource === "WATCH_HISTORY") watchHistorySeeds++;
+    else if (row.reasonSource === "REQUEST") requestSeeds++;
   }
 
-  return { computedAt: agg._max.computedAt, watchHistorySeeds, watchlistSeeds };
+  return { computedAt: agg._max.computedAt, watchHistorySeeds, watchlistSeeds, requestSeeds };
 }
 
 // Read path — called directly by home/route.ts and page.tsx. Re-filters the
@@ -996,9 +1182,16 @@ export async function getUserRecommendations(userId: string): Promise<TmdbMedia[
   // fan-out grows by the reserve's size for no visible benefit.
   const surviving = cached.filter((row) => !currentlyKnown.has(candidateKey(row.tmdbId, row.mediaType)));
   const served = surviving.slice(0, MAX_SERVED_RECOMMENDATIONS);
+
+  // Match tiers are computed over the REAL picks only. Fallback rows are
+  // stored strictly after every real pick (rank order), so the real rows are
+  // a prefix of `served` and indexes line up — but the denominator must be the
+  // real count, or a mostly-fallback shelf would hand "Top match" chips to
+  // titles picked for everyone, eroding the chip's meaning everywhere.
+  const realCount = served.filter((row) => row.reasonSource !== "TRENDING").length;
   return served.map((row, i) => {
     const media = rowToTmdbMedia(row);
-    const tier = matchTierFor(i, served.length);
+    const tier = row.reasonSource === "TRENDING" ? undefined : matchTierFor(i, realCount);
     return tier ? { ...media, matchTier: tier } : media;
   });
 }

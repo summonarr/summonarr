@@ -43,6 +43,18 @@
 //     bounding any candidate's amplification at 4x its best contribution —
 //     both the neutralised-decay and unsorted-contributions mutations are
 //     pinned;
+//   - the user's own requests are a third seed pool (REQUEST, weight 1.5,
+//     capped 24 newest-first, per-arrInstance rows collapsed newest-wins,
+//     every status seeding) — deduped history > watchlist > request, and
+//     request seeds never self-fold into the exclusion set, so the kept
+//     AVAILABLE/DECLINED classes stay recommendable even while seeding;
+//   - a seedless user gets an HONEST fallback shelf from the trending/popular
+//     caches: reasonSource TRENDING with null reason ids (the all-four gate
+//     stays closed — fabricating them is a pinned mutation), seedCount 0,
+//     stored score 0, never a match chip, ordered by trending-position ×
+//     quality, exclusions still applied, and a pool outage reads INCONCLUSIVE
+//     so yesterday's shelf survives; thin shelves top up the same way with
+//     fallback ranked strictly below every real pick;
 //   - a settled low-completion bail (watched:false only, cumulative playtime
 //     under 35%, last touch 14+ days old) dampens THAT title by ABANDON_DAMP,
 //     with the split-watch, fresh-pause and no-runtime guards each pinned by
@@ -158,7 +170,16 @@ interface UserRecRow {
 }
 
 interface HiddenRow { userId: string; tmdbId: number; mediaType: MT; createdAt: Date }
-interface RequestRow { requestedBy: string; tmdbId: number; mediaType: MT; status: "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE"; permanentlyDeclined: boolean }
+interface RequestRow {
+  requestedBy: string;
+  tmdbId: number;
+  mediaType: MT;
+  status: "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
+  permanentlyDeclined: boolean;
+  // Seed-query columns; defaulted in the stub so exclusion-only fixtures stay terse.
+  title?: string;
+  createdAt?: Date;
+}
 interface VoteRow { userId: string; tmdbId: number; mediaType: MT }
 interface BlacklistRow { tmdbId: number; mediaType: MT }
 
@@ -393,20 +414,37 @@ shadowPrismaModel(prisma, "hiddenItem", {
       .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
 });
 shadowPrismaModel(prisma, "mediaRequest", {
-  // Mirrors the real predicate: requestedBy + (status in [...] OR permanentlyDeclined).
+  // TWO query shapes share this delegate, discriminated by the OR clause:
+  //   - collectKnownTitleKeys' exclusion read: requestedBy + (status in [...]
+  //     OR permanentlyDeclined) — status-filtered;
+  //   - selectSeeds' seed read: requestedBy alone, newest-first with a take —
+  //     every status seeds.
   findMany: async (args: {
     where: {
       requestedBy: string;
-      OR: [{ status: { in: string[] } }, { permanentlyDeclined: boolean }];
+      OR?: [{ status: { in: string[] } }, { permanentlyDeclined: boolean }];
     };
-  }) =>
-    mediaRequests
-      .filter(
-        (r) =>
-          r.requestedBy === args.where.requestedBy &&
-          (args.where.OR[0].status.in.includes(r.status) || r.permanentlyDeclined === args.where.OR[1].permanentlyDeclined),
-      )
-      .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+    orderBy?: { createdAt: "desc" };
+    take?: number;
+  }) => {
+    let rows = mediaRequests.filter((r) => r.requestedBy === args.where.requestedBy);
+    if (args.where.OR) {
+      const or = args.where.OR;
+      return rows
+        .filter((r) => or[0].status.in.includes(r.status) || r.permanentlyDeclined === or[1].permanentlyDeclined)
+        .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType }));
+    }
+    if (args.orderBy?.createdAt === "desc") {
+      rows = [...rows].sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
+    }
+    if (args.take != null) rows = rows.slice(0, args.take);
+    return rows.map((r) => ({
+      tmdbId: r.tmdbId,
+      mediaType: r.mediaType,
+      title: r.title ?? `Requested ${r.tmdbId}`,
+      createdAt: r.createdAt ?? new Date(T0),
+    }));
+  },
 });
 shadowPrismaModel(prisma, "deletionVote", {
   findMany: async (args: { where: { userId: string } }) =>
@@ -425,8 +463,17 @@ shadowPrismaModel(prisma, "blacklistItem", {
 // driven deterministically with zero network — MDBList/OMDB are only consulted
 // for keys the cache misses, and here it never misses for a seeded title.
 let ratingRows: { key: string; data: string; expiresAt: Date }[] = [];
+// Warm list rows for the cold-start fallback (trending:week / movies:popular /
+// tv:popular). Empty in most tests, so getTrending & co fetch through the
+// scripted TMDB mock (which answers unknown paths with empty pages) and the
+// fallback pool reads as UNAVAILABLE — the pre-fallback status quo.
+let listCacheRows = new Map<string, unknown>();
 shadowPrismaModel(prisma, "tmdbCache", {
-  findUnique: async () => null,
+  findUnique: async (args: { where: { key: string } }) => {
+    const seeded = listCacheRows.get(args.where.key);
+    if (seeded === undefined) return null;
+    return { key: args.where.key, data: JSON.stringify(seeded), cachedAt: new Date(T0), expiresAt: new Date(T0 + 7 * DAY_MS) };
+  },
   findMany: async (args: { where: { key: { in: string[] } } }) => {
     const wanted = new Set(args.where.key.in);
     return ratingRows.filter((r) => wanted.has(r.key));
@@ -527,6 +574,7 @@ beforeEach(() => {
   watchlistRows = [];
   userRecRows = [];
   hiddenItems = [];
+  listCacheRows = new Map();
   mediaRequests = [];
   deletionVotes = [];
   blacklistItems = [];
@@ -554,14 +602,18 @@ test("TV seeds route through getTVSuggestions and round-trip the Prisma MediaTyp
   assert.ok(fetchCalls.some((p) => p.endsWith("/tv/40/similar") || p.endsWith("/tv/40/recommendations")));
 });
 
-test("cold start: a user with no watch history or watchlist gets [] with zero TMDB calls", async () => {
+test("cold start with the fallback pool UNAVAILABLE: empty and INCONCLUSIVE — yesterday's shelf survives the outage", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // No list caches seeded and the scripted fetch answers trending/popular with
+  // empty pages — the pool reads as unavailable. Before the fallback existed
+  // this was a CONCLUSIVE empty; now conclusive=false, so a transient TMDB
+  // outage can no longer wipe a cold-start user's previous (fallback) shelf.
   const result = await computeRecommendationsForUser("u1");
   assert.deepEqual(result.candidates, []);
-  // No seeds is a LEGITIMATE empty — conclusive, so the caller clears stale rows.
-  assert.equal(result.conclusive, true);
-  assert.equal(fetchCalls.length, 0);
+  assert.equal(result.conclusive, false);
+  // No seed fan-out happened — only the fallback pool reads.
+  assert.ok(!fetchCalls.some((pth) => /\/(similar|recommendations)$/.test(pth)), "no suggestion fetches without seeds");
 });
 
 // ── seed selection ───────────────────────────────────────────────────────────
@@ -959,7 +1011,7 @@ test("getRecommendationSummary: DISTINCT seeds per pool, and the newest build ti
 test("getRecommendationSummary: a user with no cached picks reports nothing rather than throwing", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   const summary = await getRecommendationSummary("u1");
-  assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0 });
+  assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0, requestSeeds: 0 });
 });
 
 // ── exclusion widening: hidden / requests / votes / blacklist ────────────────
@@ -1159,6 +1211,205 @@ test("seed dedup: a watched title's stale watchlist entry does not double-seed",
   assert.ok(Math.abs(c.score - 1.0871661180448523 * 0.9) < 1e-9, `got ${c.score} — ~2.24 means it double-seeded`);
   assert.equal(c.seedCount, 1, "one seed, not two");
   assert.equal(c.reasonSource, "WATCH_HISTORY", "the history seed wins the dedup");
+});
+
+// ── request seeds ─────────────────────────────────────────────────────────────
+
+test("request seeds: a serverless account's requests build the shelf, worded as requests", async () => {
+  // Local/OIDC accounts with no linked media-server identity resolve to zero
+  // server users — before this pool their shelves were built from nothing.
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = []; // nothing links — the history arm short-circuits
+  mediaRequests = [
+    { requestedBy: "u1", tmdbId: 10, mediaType: "MOVIE", status: "AVAILABLE", permanentlyDeclined: false, title: "Fulfilled Want", createdAt: daysAgo(1) },
+    // Even a DECLINED request seeds: the admin vetoed the fulfilment, not the taste.
+    { requestedBy: "u1", tmdbId: 20, mediaType: "MOVIE", status: "DECLINED", permanentlyDeclined: false, title: "Vetoed Want", createdAt: daysAgo(3) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+  suggestionsFor.set("movie:20", [movieItem(222)]);
+
+  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+  assert.equal(conclusive, true);
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  assert.equal(byId.get(111)!.reasonSource, "REQUEST");
+  assert.equal(byId.get(111)!.reasonTitle, "Fulfilled Want");
+  // Weight: 1.5 (request) × recency(1d) × count(1) × pos(0) × 0.9 damp.
+  assert.ok(Math.abs(byId.get(111)!.score - 1.5 * 0.9971174404154314 * 0.9) < 1e-9, `got ${byId.get(111)!.score}`);
+  assert.ok(byId.get(111)!.score > byId.get(222)!.score, "the fresher request weighs more");
+});
+
+test("request seeds: one title in all three pools seeds ONCE — history > watchlist > request", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Everywhere" },
+  ];
+  watchlistRows = [{ userId: "u1", tmdbId: 10, mediaType: "MOVIE", createdAt: daysAgo(0), title: "Everywhere" }];
+  mediaRequests = [
+    { requestedBy: "u1", tmdbId: 10, mediaType: "MOVIE", status: "AVAILABLE", permanentlyDeclined: false, title: "Everywhere", createdAt: daysAgo(0) },
+    // And a watchlist∩request pair on a second title: watchlist keeps the slot.
+    { requestedBy: "u1", tmdbId: 30, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false, title: "Listed+Requested", createdAt: daysAgo(0) },
+  ];
+  watchlistRows.push({ userId: "u1", tmdbId: 30, mediaType: "MOVIE", createdAt: daysAgo(2), title: "Listed+Requested" });
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+  suggestionsFor.set("movie:30", [movieItem(222)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  // 111: exactly one contribution from the HISTORY seed.
+  assert.equal(byId.get(111)!.seedCount, 1);
+  assert.equal(byId.get(111)!.reasonSource, "WATCH_HISTORY");
+  assert.ok(Math.abs(byId.get(111)!.score - 0.9971174404154314 * 0.9) < 1e-9, "a triple-pool title contributes once");
+  // 222: exactly one contribution, and the WATCHLIST seed kept the slot.
+  assert.equal(byId.get(222)!.seedCount, 1);
+  assert.equal(byId.get(222)!.reasonSource, "WATCHLIST");
+});
+
+test("request seeds: per-arrInstance duplicate rows collapse to one seed, newest wins", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  // The same title requested on the default AND the 4K instance (the unique
+  // key permits one row per instance). One seed, dated by the newer row.
+  mediaRequests = [
+    { requestedBy: "u1", tmdbId: 10, mediaType: "MOVIE", status: "APPROVED", permanentlyDeclined: false, title: "Both Instances", createdAt: daysAgo(10) },
+    { requestedBy: "u1", tmdbId: 10, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false, title: "Both Instances", createdAt: daysAgo(2) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].seedCount, 1, "two instance rows are one want");
+  // Weight dated by the NEWER row (2d), not the older (10d).
+  assert.ok(Math.abs(candidates[0].score - 1.5 * (0.25 + 0.75 * 0.5 ** (2 / 180)) * 0.9) < 1e-9, `got ${candidates[0].score}`);
+});
+
+test("request seeds: the pool is capped at 24, newest first — a request-hoarder cannot monopolise the fan-out", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  // 30 distinct requested titles, strictly newer for lower ids. Only the 24
+  // newest may seed: without the cap, every request a power user has ever
+  // placed would fan out to TMDB on every cron run.
+  mediaRequests = Array.from({ length: 30 }, (_, i) => ({
+    requestedBy: "u1", tmdbId: 100 + i, mediaType: "MOVIE" as MT, status: "AVAILABLE" as const,
+    permanentlyDeclined: false, title: `Req ${i}`, createdAt: daysAgo(i + 1),
+  }));
+  for (let i = 0; i < 30; i++) suggestionsFor.set(`movie:${100 + i}`, []);
+
+  await computeRecommendationsForUser("u1");
+  const requestFetches = new Set(
+    fetchCalls.map((pth) => pth.match(/\/movie\/(1\d\d)\/(?:similar|recommendations)$/)?.[1]).filter(Boolean),
+  );
+  assert.equal(requestFetches.size, 24, "exactly the cap");
+  assert.ok(requestFetches.has("100"), "the newest request seeds");
+  assert.ok(requestFetches.has("123"), "the 24th-newest seeds");
+  assert.ok(!requestFetches.has("124"), "the 25th-newest does not");
+});
+
+test("request seeds: an AVAILABLE request seeds WITHOUT self-excluding — the kept classes stay recommendable", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  // Title 10 is an AVAILABLE request (deliberately KEPT recommendable by the
+  // exclusion policy) and now also a seed. The blanket seed-fold would have
+  // silently re-excluded it the moment it seeded — reversing that decision.
+  mediaRequests = [
+    { requestedBy: "u1", tmdbId: 10, mediaType: "MOVIE", status: "AVAILABLE", permanentlyDeclined: false, title: "Kept", createdAt: daysAgo(1) },
+    { requestedBy: "u1", tmdbId: 20, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false, title: "Open", createdAt: daysAgo(1) },
+  ];
+  // Seed 20's list contains BOTH request titles.
+  suggestionsFor.set("movie:20", [movieItem(10), movieItem(30)]);
+  suggestionsFor.set("movie:10", []);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const ids = candidates.map((c) => c.tmdbId).sort((a, b) => a - b);
+  assert.deepEqual(ids, [10, 30], "the AVAILABLE request title survives as a candidate; the PENDING one is excluded by status");
+});
+
+// ── cold-start fallback ───────────────────────────────────────────────────────
+
+function seedFallbackPool(): void {
+  const entry = (id: number, title: string, voteAverage: number, voteCount: number) => ({
+    id, mediaType: "movie", title, overview: "o", posterPath: `/p${id}.jpg`, backdropPath: null,
+    releaseDate: "2024-01-01", releaseYear: "2024", voteAverage, voteCount,
+  });
+  listCacheRows.set("trending:week", [entry(901, "Trend A", 7.2, 900), entry(902, "Trend B", 5.1, 800), entry(903, "Trend C", 8.1, 1200)]);
+  listCacheRows.set("movies:popular", [entry(904, "Pop Movie", 6.9, 700)]);
+  listCacheRows.set("tv:popular", []);
+}
+
+test("cold start with a warm pool: an honest TRENDING shelf — no reasons, no chips, score 0", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  seedFallbackPool();
+  // Exclusions still apply to a seedless user: 904 is hidden.
+  hiddenItems = [{ userId: "u1", tmdbId: 904, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+
+  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+  assert.equal(conclusive, true, "a served pool is an authoritative answer");
+  assert.deepEqual(
+    candidates.map((c) => c.tmdbId).sort((a, b) => a - b),
+    [901, 902, 903],
+    "pool minus the hidden title",
+  );
+  for (const c of candidates) {
+    assert.equal(c.reasonSource, "TRENDING");
+    assert.equal(c.reasonTmdbId, null, "no fabricated reason");
+    assert.equal(c.seedCount, 0);
+    assert.equal(c.score, 0, "the engine has no relevance opinion on a fallback row");
+  }
+  // The order BLENDS trending position with quality — the prior refines the
+  // trending order, it does not replace it. Transient score = poolPos × quality:
+  //   901: 1/(1+0/20) × (1 + 0.5×(0.72−0.65)) = 1.0000 × 1.035 = 1.0350
+  //   902: 1/(1+1/20) × (1 + 0.5×(0.51−0.65)) = 0.9524 × 0.930 = 0.8857
+  //   903: 1/(1+2/20) × (1 + 0.5×(0.81−0.65)) = 0.9091 × 1.080 = 0.9818
+  // So 902's genuinely bad rating drops it below 903 (the refinement), while
+  // 903's mild edge does NOT overturn 901's two-slot trending lead. A pure
+  // quality sort here would mean trending rank carries no signal at all.
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [901, 903, 902]);
+
+  // Read path: labeled, tierless, reasonless.
+  userRecRows = candidates.map((c, i) => ({
+    id: `f${i}`, userId: "u1", tmdbId: c.tmdbId, mediaType: c.mediaType, title: c.title,
+    overview: c.overview, posterPath: c.posterPath, backdropPath: c.backdropPath,
+    releaseDate: c.releaseDate, voteAverage: c.voteAverage, score: c.score, rank: i,
+    computedAt: daysAgo(0), reasonTmdbId: null, reasonTitle: null, reasonMediaType: null,
+    reasonSource: "TRENDING" as never, seedCount: 0,
+  }));
+  const served = await getUserRecommendations("u1");
+  assert.equal(served.length, 3);
+  for (const m of served) {
+    assert.equal((m as { fromTrendingFallback?: boolean }).fromTrendingFallback, true);
+    assert.equal(m.matchTier, undefined, "a title picked for everyone never wears a match chip");
+    assert.equal(m.recommendedBecause, undefined, "the all-four gate stays closed");
+  }
+});
+
+test("thin shelf: fallback tops up BELOW every real pick, and tiers count only the real prefix", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111), movieItem(222)]);
+  seedFallbackPool();
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  // 2 real + 4 fallback (whole pool fits inside the target).
+  assert.equal(candidates.length, 6);
+  assert.deepEqual(candidates.slice(0, 2).map((c) => c.reasonSource), ["WATCH_HISTORY", "WATCH_HISTORY"], "real picks first");
+  assert.ok(candidates.slice(2).every((c) => c.reasonSource === "TRENDING"), "fallback strictly after");
+  assert.deepEqual(candidates.map((c) => c.rank), [0, 1, 2, 3, 4, 5], "ranks are continuous across the boundary");
+
+  // Read path: tiers over the 2 real rows only — ceil(2×0.1)=1 top — and never
+  // on a TRENDING row even though the shelf is mostly fallback.
+  userRecRows = candidates.map((c, i) => ({
+    id: `m${i}`, userId: "u1", tmdbId: c.tmdbId, mediaType: c.mediaType, title: c.title,
+    overview: c.overview, posterPath: c.posterPath, backdropPath: c.backdropPath,
+    releaseDate: c.releaseDate, voteAverage: c.voteAverage, score: c.score, rank: i,
+    computedAt: daysAgo(0), reasonTmdbId: c.reasonTmdbId, reasonTitle: c.reasonTitle,
+    reasonMediaType: c.reasonMediaType, reasonSource: c.reasonSource as never, seedCount: c.seedCount,
+  }));
+  const served = await getUserRecommendations("u1");
+  assert.deepEqual(
+    served.map((m) => m.matchTier),
+    ["top", undefined, undefined, undefined, undefined, undefined],
+    "one real top-band pick; the fallback majority earns nothing",
+  );
 });
 
 // ── corroboration cap ─────────────────────────────────────────────────────────
