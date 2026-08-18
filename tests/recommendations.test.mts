@@ -16,6 +16,17 @@
 //     long-ago 40-episode binge outranks something watched two days ago;
 //   - the match-strength band is assigned by RANK over the viewer's surviving
 //     set (top 10% / top 33%), independently of whether a row carries a reason;
+//   - seed SELECTION is recency-first (the last 100 titles played), so a heavy
+//     series can no longer occupy the slots on play count alone. The stub's
+//     groupBy honours args.orderBy for exactly this reason — hardcoding a sort
+//     there made the real query's ordering untestable;
+//   - candidate languages that barely feature in the weighted pool are
+//     de-emphasised toward a floor (never filtered), a substantial second
+//     language is untouched, and an unknown language is left alone;
+//   - a multi-source ratings prior re-weights the shortlist, with an UNRATED
+//     title strictly neutral and a ratings outage degrading to relevance-only
+//     rather than failing the run. Ratings are served from a seeded cache, so
+//     no test reaches MDBList or OMDB;
 //   - the exclusion set is wider than the chosen seeds — an unseeded
 //     watchlist/watched title is still excluded from suggestions;
 //   - warmRecommendationsCache does one $transaction PER eligible user (never
@@ -164,6 +175,7 @@ shadowPrismaModel(prisma, "playHistory", {
   groupBy: async (args: {
     where: { mediaServerUserId: { in: string[] }; startedAt?: { gte: Date } };
     take: number;
+    orderBy?: ({ _count?: { tmdbId: "desc" } } | { _max?: { startedAt: "desc" } })[];
   }) => {
     const ids = new Set(args.where.mediaServerUserId.in);
     const cutoff = args.where.startedAt?.gte.getTime();
@@ -193,8 +205,22 @@ shadowPrismaModel(prisma, "playHistory", {
         groups.set(key, { tmdbId: r.tmdbId as number, mediaType: r.mediaType as MT, count: 1, max: r.startedAt.getTime(), title });
       }
     }
+    // HONOUR args.orderBy rather than assuming one. This stub used to hardcode
+    // count-first, which silently made the selection ORDER untestable: a change
+    // to the real query's orderBy could not move a single assertion here.
+    const comparators = (args.orderBy ?? [{ _count: { tmdbId: "desc" as const } }]).map((clause) =>
+      "_count" in clause && clause._count
+        ? (a: { count: number }, b: { count: number }) => b.count - a.count
+        : (a: { max: number }, b: { max: number }) => b.max - a.max,
+    );
     return [...groups.values()]
-      .sort((a, b) => b.count - a.count || b.max - a.max)
+      .sort((a, b) => {
+        for (const cmp of comparators) {
+          const d = cmp(a, b);
+          if (d !== 0) return d;
+        }
+        return 0;
+      })
       .slice(0, args.take)
       .map((g) => ({
         tmdbId: g.tmdbId,
@@ -293,13 +319,46 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Pro
   return fn(prisma);
 });
 
-// ── tmdbCache (always miss, swallow writes — cache correctness is tmdb.ts's
-// own concern, not this file's) ─────────────────────────────────────────────
+// ── prisma.setting ──────────────────────────────────────────────────────────
+// No MDBList/OMDB key configured. Both clients short-circuit on a null key
+// (`if (!apiKey) return`), so the quality prior runs on CACHED ratings alone and
+// this suite can never reach the network — while still exercising the real
+// attachRatingsUnified path rather than a stub of it.
+shadowPrismaModel(prisma, "setting", {
+  findUnique: async () => null,
+  findMany: async () => [],
+});
+
+// ── tmdbCache ───────────────────────────────────────────────────────────────
+// findUnique always misses (suggestion-cache correctness is tmdb.ts's concern,
+// not this file's) and writes are swallowed. findMany DOES serve, because it is
+// what readCachedRatings reads: seeding `ratingRows` lets the quality prior be
+// driven deterministically with zero network — MDBList/OMDB are only consulted
+// for keys the cache misses, and here it never misses for a seeded title.
+let ratingRows: { key: string; data: string; expiresAt: Date }[] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
   findUnique: async () => null,
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    const wanted = new Set(args.where.key.in);
+    return ratingRows.filter((r) => wanted.has(r.key));
+  },
   upsert: async () => ({}),
   deleteMany: async () => ({ count: 0 }),
 });
+
+// Writes an MDBList-shaped ratings row for a title, fresh (never stale) so
+// attachRatingsUnified serves it without attempting a revalidation fetch.
+function seedRatings(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  ratings: Record<string, unknown>,
+): void {
+  ratingRows.push({
+    key: `mdblist:tmdb:${mediaType}:${tmdbId}`,
+    data: JSON.stringify(ratings),
+    expiresAt: new Date(T0 + 7 * DAY_MS),
+  });
+}
 
 // ── scripted TMDB fetch ──────────────────────────────────────────────────────
 // Keyed by "movie:<id>" / "tv:<id>"; the same result set answers BOTH /similar
@@ -317,6 +376,11 @@ interface RawFixture {
   release_date?: string;
   first_air_date?: string;
   vote_average?: number;
+  vote_count?: number;
+  // Present on TMDB's real list payloads, which is why the language profile
+  // costs no extra request — normalizeMovie/normalizeTV carry it straight
+  // through onto the suggestion items.
+  original_language?: string;
 }
 function movieItem(id: number): RawFixture {
   return {
@@ -374,6 +438,7 @@ beforeEach(() => {
   watchlistRows = [];
   userRecRows = [];
   suggestionsFor.clear();
+  ratingRows = [];
   fetchCalls.length = 0;
   tmdbOutage = false;
   transactionCalls = 0;
@@ -792,6 +857,192 @@ test("getRecommendationSummary: a user with no cached picks reports nothing rath
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   const summary = await getRecommendationSummary("u1");
   assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0 });
+});
+
+// ── seed selection is recency-first ──────────────────────────────────────────
+
+test("seed SELECTION is the last 100 titles played — a heavy old binge no longer takes a slot", async () => {
+  // The selection key used to be play count, and PlayHistory writes one row per
+  // EPISODE, so a long series could occupy the top slots forever while recent
+  // films never seeded at all. The cap has to BITE for this to be observable,
+  // so there are more distinct titles here than there are slots.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // Exactly MAX_WATCH_HISTORY_SEEDS recent titles, one play each.
+    ...Array.from({ length: 100 }, (_, i) => ({
+      mediaServerUserId: "msu1", tmdbId: 1000 + i, mediaType: "MOVIE" as MT,
+      watched: true, startedAt: daysAgo(i + 1), title: `Recent ${i}`,
+    })),
+    // A series with 50 plays, INSIDE the 180-day window but older than all 100
+    // titles above. The window must not be what excludes it — otherwise this
+    // test passes under either ordering and proves nothing (it did: the first
+    // version put this at 200 days and was satisfied by the window alone).
+    // Under count-first it was seed #1 by a wide margin and pushed the oldest
+    // recent title out; under recency-first it is #101 and never seeds.
+    ...Array.from({ length: 50 }, (_, i) => ({
+      mediaServerUserId: "msu1", tmdbId: 5000, mediaType: "TV" as MT,
+      watched: true, startedAt: daysAgo(150 + i), title: "Heavy Binge",
+    })),
+  ];
+  for (let i = 0; i < 100; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(9000 + i)]);
+  suggestionsFor.set("tv:5000", [tvItem(9999)]);
+
+  await computeRecommendationsForUser("u1");
+
+  assert.ok(fetchCalls.some((p) => p.includes("/movie/1000/")), "the most recent title seeds");
+  assert.ok(fetchCalls.some((p) => p.includes("/movie/1099/")), "the 100th-most-recent title seeds");
+  assert.ok(
+    !fetchCalls.some((p) => p.includes("/tv/5000/")),
+    "the 50-play binge is #101 by recency and must NOT seed, despite dwarfing every other title on play count",
+  );
+});
+
+// ── language consistency ─────────────────────────────────────────────────────
+
+test("language: a one-off foreign title is de-emphasised, but a substantial second language is kept", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // 13 equally-recent seeds, each contributing EXACTLY ONE suggestion at
+  // position 0. That is what makes this test about language and nothing else:
+  // seed weights are identical and positional decay is constant, so any score
+  // difference can only come from the language factor. (An earlier version let
+  // the foreign titles sit at position 1, and passed with the factor disabled —
+  // positional decay alone explained the gap.)
+  playHistoryRows = Array.from({ length: 13 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 10 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(1), title: `Seed ${i}`,
+  }));
+  // 10 English, 2 Japanese (a real second taste, 2/13 = 15.4% — just over
+  // LANGUAGE_FULL_SHARE), 1 Korean (1/13 = 7.7% — a one-off, well under it).
+  for (let i = 0; i < 10; i++) suggestionsFor.set(`movie:${10 + i}`, [{ ...movieItem(500 + i), original_language: "en" }]);
+  suggestionsFor.set("movie:20", [{ ...movieItem(600), original_language: "ja" }]);
+  suggestionsFor.set("movie:21", [{ ...movieItem(601), original_language: "ja" }]);
+  suggestionsFor.set("movie:22", [{ ...movieItem(700), original_language: "ko" }]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  const en = byId.get(500)!;
+  const ja = byId.get(600)!;
+  const ko = byId.get(700)!;
+
+  // ja clears the full-share threshold, so it is NOT discounted at all.
+  assert.ok(Math.abs(ja.score - en.score) < 1e-9, "a substantial second language is untouched");
+
+  // ko is under the threshold: factor = 0.35 + 0.65 × (1/13) / 0.15 = 0.6833…
+  assert.ok(ko.score < ja.score, "the one-off language is de-emphasised");
+  assert.ok(
+    Math.abs(ko.score / en.score - (0.35 + 0.65 * (1 / 13) / 0.15)) < 1e-9,
+    `expected the documented factor, got ratio ${ko.score / en.score}`,
+  );
+
+  // De-emphasis is a MULTIPLIER, not a filter: the Korean title still appears.
+  assert.ok(ko.score > 0, "a de-emphasised language is still present, not removed");
+});
+
+test("language: with only one language present, nothing is penalised", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [{ ...movieItem(555), original_language: "en" }]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  // Share is 1.0, so languageFactor is exactly 1 and the score is the raw
+  // contribution — a monolingual viewer must not be silently scaled down.
+  // 1.0 (type) × recency(1d) × count(1) × position(0)
+  //   = 0.25 + 0.75 × 0.5^(1/180) = 0.9971174404154314
+  assert.ok(Math.abs(candidates[0].score - 0.9971174404154314) < 1e-12, `score was ${candidates[0].score}`);
+});
+
+test("language: a title with no language recorded is left alone", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = Array.from({ length: 6 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 10 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(1), title: `Seed ${i}`,
+  }));
+  for (let i = 0; i < 5; i++) suggestionsFor.set(`movie:${10 + i}`, [{ ...movieItem(500 + i), original_language: "en" }]);
+  // No original_language on this one — missing metadata is not evidence of
+  // anything, so it must not be treated as a rare language and demoted.
+  suggestionsFor.set("movie:15", [movieItem(900)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const unknown = candidates.find((c) => c.tmdbId === 900)!;
+  const english = candidates.find((c) => c.tmdbId === 500)!;
+  assert.ok(Math.abs(unknown.score - english.score) < 1e-9, "an unknown language scores exactly as the dominant one");
+});
+
+// ── quality prior ────────────────────────────────────────────────────────────
+
+test("quality: better-rated candidates outrank equally-relevant worse-rated ones", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  // Same seed, adjacent positions — so relevance is near-identical and the
+  // acclaimed title starts marginally BEHIND on position alone. Only the
+  // ratings can reorder them, which is the point of the test.
+  suggestionsFor.set("movie:10", [
+    { ...movieItem(111), original_language: "en" }, // panned, but listed first
+    { ...movieItem(222), original_language: "en" }, // acclaimed, listed second
+  ]);
+  seedRatings(111, "movie", { imdbRating: "3.1", rottenTomatoes: "18", metacritic: "24" });
+  seedRatings(222, "movie", { imdbRating: "8.6", rottenTomatoes: "94", metacritic: "88" });
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(
+    candidates.map((c) => c.tmdbId),
+    [222, 111],
+    "the acclaimed title overtakes despite starting lower on relevance",
+  );
+});
+
+test("quality: an unrated title is neutral — never penalised against a rated one", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [
+    { ...movieItem(111), original_language: "en" }, // rated BADLY, listed first
+    { ...movieItem(222), original_language: "en" }, // no ratings at all, second
+  ]);
+  seedRatings(111, "movie", { imdbRating: "2.0", rottenTomatoes: "9", metacritic: "12" });
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  // Ratings coverage is partial by design (OMDB is quota-bound), so "unrated"
+  // must never be read as "bad" — otherwise the shelf silently becomes
+  // whatever the rating providers happened to cover.
+  assert.deepEqual(
+    candidates.map((c) => c.tmdbId),
+    [222, 111],
+    "the unrated title keeps its full relevance score and passes the panned one",
+  );
+});
+
+test("quality: a ratings outage degrades to relevance-only instead of failing the run", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111), movieItem(222)]);
+
+  // The ratings read itself throws — a DB blip, a provider client fault.
+  const original = prisma.tmdbCache.findMany;
+  (prisma.tmdbCache as { findMany: unknown }).findMany = async () => {
+    throw new Error("ratings backend unavailable");
+  };
+  try {
+    const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+    assert.equal(conclusive, true, "a ratings failure must not be read as a TMDB outage");
+    assert.deepEqual(candidates.map((c) => c.tmdbId), [111, 222], "relevance order stands");
+  } finally {
+    (prisma.tmdbCache as { findMany: unknown }).findMany = original;
+  }
 });
 
 // ── exclusion wider than the chosen seeds ────────────────────────────────────

@@ -5,6 +5,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getMovieSuggestions, getTVSuggestions, SUGGESTIONS_CACHE_MAX } from "@/lib/tmdb";
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
 import { settleLimit } from "@/lib/concurrency";
+import { attachRatingsUnified } from "@/lib/omdb-availability";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 
 // "For You" recommendation engine. Seeds are drawn from a user's own watched
@@ -13,12 +14,15 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 // by the warm-recommendations cron. getUserRecommendations is the only
 // live-request-path read — it never calls TMDB.
 
-// 3x the original 20/8. Deeper history is the point: at 20 slots the engine only
-// ever saw a sliver of a real library, so most of what someone had watched could
-// never influence anything. The cost is bounded by the shared 7-day TMDB
+// "The last 100 titles you played". Note TITLES, not PlayHistory rows: one row is
+// one EPISODE, so 100 rows can be a single series — the groupBy below collapses
+// to distinct titles first, which is the unit a seed actually is.
+//
+// Deeper history is the point: at the original 20 slots the engine only ever saw
+// a sliver of a real library. The cost is bounded by the shared 7-day TMDB
 // suggestion cache (tmdb.ts) — seeds repeat across runs and across users, so a
 // warm cycle issues far fewer requests than the cold worst case of 2 per seed.
-const MAX_WATCH_HISTORY_SEEDS = 60;
+const MAX_WATCH_HISTORY_SEEDS = 100;
 const MAX_WATCHLIST_SEEDS = 24;
 const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 // Sized for the dedicated /for-you page (a full grid), not just the 20-item
@@ -73,6 +77,52 @@ const SEED_COUNT_WEIGHT = 0.3;
 // where it matters, with a long tail that still lets broad corroboration promote
 // a title many seeds agree on.
 const SUGGESTION_POSITION_K = 10;
+
+// ── Language consistency ───────────────────────────────────────────────────
+// Someone who watches English-language films should not have a shelf sprinkled
+// with one-off Korean or Spanish titles just because a single seed pointed
+// there. TMDB's /similar in particular crosses languages freely.
+//
+// The profile is built from the suggestion pool itself, weighted by
+// contribution — NOT from the seeds, which have no language to read: seeds come
+// from a PlayHistory groupBy and that table stores no language column, so
+// getting one per seed would cost a TMDB details fetch each (100 per user per
+// run). The pool is a sound proxy precisely because it is generated FROM the
+// seeds: 95 English-ish seeds produce overwhelmingly English suggestions, and a
+// lone foreign-language seed contributes a correspondingly small share.
+//
+// A language reaching LANGUAGE_FULL_SHARE of the weighted pool is treated as
+// fully part of the viewer's taste (so a genuine anime-plus-Hollywood diet
+// keeps both), and anything below that scales down toward a floor rather than
+// being cut — this is a de-emphasis, not a filter, and a title corroborated by
+// many seeds can still outrank on merit.
+const LANGUAGE_FULL_SHARE = 0.15;
+const LANGUAGE_FLOOR = 0.35;
+
+// ── Quality prior ──────────────────────────────────────────────────────────
+// Relevance ("this resembles what you watch") is not the same as worth
+// watching. After relevance ranking, the top slice is re-weighted by what the
+// rating sources say — IMDb/RT/Metacritic/Trakt via MDBList, with OMDB filling
+// gaps, plus TMDB's own score which every candidate already carries.
+//
+// Deliberately MILD, and deliberately centred: NEUTRAL is roughly the mean
+// rating of a mainstream title, so the multiplier only pulls a candidate away
+// from its relevance rank when the sources genuinely disagree with the crowd.
+// An UNRATED title scores exactly 1.0 — absence of data must never read as
+// "bad", or the shelf would quietly become "whatever OMDB happened to cover".
+const RATING_SHORTLIST = 300;
+const QUALITY_WEIGHT = 0.5;
+const QUALITY_NEUTRAL = 0.65;
+// TMDB's score is the only one every candidate carries, so it would otherwise
+// dominate the mean — but on a thinly-voted title it is noise (a 10.0 from four
+// people), and the suggestion tail is full of exactly those. Below this many
+// votes TMDB abstains and the title is judged on whatever else answered.
+const MIN_TMDB_VOTES_FOR_QUALITY = 50;
+
+// Share of the weighted pool a language holds → its multiplier.
+function languageFactor(share: number): number {
+  return LANGUAGE_FLOOR + (1 - LANGUAGE_FLOOR) * Math.min(1, share / LANGUAGE_FULL_SHARE);
+}
 
 // The bands behind the "Top match" / "Strong match" chip, as fractions of the
 // viewer's own ranked set.
@@ -198,10 +248,17 @@ function weightSeeds(
 }
 
 async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
-  // History seeds track CURRENT taste, so the grouping is windowed to the last
-  // 180 days. Unwindowed, "most rows" is "most episodes ever": one PlayHistory
-  // row lands per episode watched, so a years-old 200-episode binge permanently
-  // owns the top seed slots while movies (one row each) never seed at all.
+  // History seeds track CURRENT taste. With the recency-first ordering above,
+  // the windowed query and the all-time top-up together yield exactly "the most
+  // recently played MAX_WATCH_HISTORY_SEEDS titles": the window returns the
+  // newest of them, and the top-up extends backwards past 180 days only when a
+  // quiet viewer has not filled the slots.
+  //
+  // (The window predates the ordering change, when it was load-bearing against
+  // a different failure: count-first selection let a years-old 200-episode
+  // binge own every slot while films — one row each — never seeded at all.
+  // Ordering by recency addresses that at the source; the window now just
+  // bounds the common query.)
   //
   // Windowed rows come FIRST, then the remaining slots TOP UP from all-time
   // history. A busy user with only 2-3 recent watches used to seed from just
@@ -224,6 +281,12 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
         ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
       },
       _count: { tmdbId: true },
+      // NOTE the orderBy below is RECENCY-first. It used to be count-first,
+      // which did not select "what you have been watching" but "what you have
+      // the most rows for" — and because PlayHistory writes one row per
+      // episode, that meant long series crowded out every film regardless of
+      // when either was watched. Play count still matters, but as a weight
+      // (countFactor) rather than as the selection key.
       // title rides along in the aggregate so naming the seed ("Because you
       // watched X") costs no second query. PlayHistory.title is the show/movie
       // title — episodeTitle is a separate column — so it is already the right
@@ -231,7 +294,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       // group; every row in a (tmdbId, mediaType) group is the same title
       // except for upstream renames, where the newest spelling is fine.
       _max: { startedAt: true, title: true },
-      orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
+      orderBy: [{ _max: { startedAt: "desc" } }, { _count: { tmdbId: "desc" } }],
       take,
     });
 
@@ -370,9 +433,13 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   // the outage case. Filtering first would collapse the two back together.
   let rawSuggestions = 0;
 
-  // reasonWeight is bookkeeping for picking the strongest seed; it is dropped
-  // before the candidates are returned (there is no column for it).
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number }>();
+  // reasonWeight and language are bookkeeping — the first picks the strongest
+  // seed, the second feeds the language profile. Both are dropped before the
+  // candidates are returned; neither has a column.
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string }>();
+  // Weighted language tally, accumulated in the same pass that scores.
+  const languageWeight = new Map<string, number>();
+  let totalLanguageWeight = 0;
   seeds.forEach((seed, i) => {
     const result = suggestionResults[i];
     if (result.status !== "fulfilled") return;
@@ -388,6 +455,16 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
       const key = candidateKey(item.id, mediaType);
       if (excluded.has(key)) continue;
       const contribution = seed.weight * positionFactor(position);
+
+      // Tallied AFTER the exclusion check above, deliberately: excluded titles
+      // are ones the viewer has already watched or listed, so counting them
+      // would shape the profile around a back catalogue that can never appear
+      // in the output anyway. The profile describes the CANDIDATE pool.
+      if (item.originalLanguage) {
+        languageWeight.set(item.originalLanguage, (languageWeight.get(item.originalLanguage) ?? 0) + contribution);
+        totalLanguageWeight += contribution;
+      }
+
       const existing = scored.get(key);
       if (existing) {
         existing.score += contribution;
@@ -424,18 +501,117 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
         reasonSource: seed.source,
         reasonWeight: contribution,
         seedCount: 1,
+        language: item.originalLanguage ?? undefined,
       });
     }
   });
 
-  const ranked = [...scored.values()]
-    // Scores now come from a continuous product of factors, so exact ties are
-    // rare — but when they happen, break by community rating rather than by
-    // Map insertion order, which is an artefact of seed iteration.
+  // ── Language de-emphasis ────────────────────────────────────────────────
+  // Applied after the accumulation pass because the profile is only known once
+  // every contribution has been counted. A candidate with no language recorded
+  // is left alone (factor 1.0) — missing metadata is not evidence.
+  if (totalLanguageWeight > 0) {
+    for (const candidate of scored.values()) {
+      if (!candidate.language) continue;
+      const share = (languageWeight.get(candidate.language) ?? 0) / totalLanguageWeight;
+      candidate.score *= languageFactor(share);
+    }
+  }
+
+  const byRelevance = [...scored.values()]
+    // Scores come from a continuous product of factors, so exact ties are rare
+    // — but when they happen, break by community rating rather than by Map
+    // insertion order, which is an artefact of seed iteration.
+    .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage);
+
+  // ── Quality prior ───────────────────────────────────────────────────────
+  // Only the shortlist is rated: rating every candidate would mean thousands of
+  // lookups per user, and anything below the shortlist was never going to be
+  // stored anyway. Relevance gates, quality refines.
+  const shortlist = byRelevance.slice(0, RATING_SHORTLIST);
+  await applyQualityPrior(shortlist);
+
+  const ranked = shortlist
     .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
-    .map(({ reasonWeight: _reasonWeight, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
+    .map(({ reasonWeight: _reasonWeight, language: _language, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
   return { candidates: ranked, conclusive: rawSuggestions > 0 };
+}
+
+// Normalizes whatever rating sources answered for a title into a single 0..1
+// figure. Every source is optional and independent — the mean is taken over
+// those PRESENT, so a title carrying only IMDb is judged on IMDb rather than
+// being dragged toward zero by the absent ones.
+//
+// TMDB's own vote is included but only when the title has enough votes to mean
+// anything; a 10.0 from four people is noise, and it is exactly the kind of
+// obscure title the suggestion tail is full of.
+export function qualityScoreOf(media: TmdbMedia): number | null {
+  const parts: number[] = [];
+
+  const imdb = parseFloat(media.imdbRating ?? "");
+  if (Number.isFinite(imdb)) parts.push(Math.min(1, imdb / 10));
+
+  // "84%" and "84" both appear depending on source.
+  const rt = parseFloat((media.rottenTomatoes ?? "").replace("%", ""));
+  if (Number.isFinite(rt)) parts.push(Math.min(1, rt / 100));
+
+  const mc = parseFloat((media.metacritic ?? "").replace(/\/100$/, ""));
+  if (Number.isFinite(mc)) parts.push(Math.min(1, mc / 100));
+
+  const trakt = parseFloat((media.traktRating ?? "").replace("%", ""));
+  if (Number.isFinite(trakt)) parts.push(Math.min(1, trakt / 100));
+
+  if (media.voteAverage > 0 && (media.voteCount ?? 0) >= MIN_TMDB_VOTES_FOR_QUALITY) {
+    parts.push(Math.min(1, media.voteAverage / 10));
+  }
+
+  if (parts.length === 0) return null;
+  return parts.reduce((a, b) => a + b, 0) / parts.length;
+}
+
+// Multiplies each shortlisted candidate's score by how well the rating sources
+// think of it. Mutates in place; never throws — a ratings outage must degrade
+// to "no quality opinion", not fail the whole recommendation run.
+async function applyQualityPrior(shortlist: (RecommendationCandidate & { language?: string })[]): Promise<void> {
+  if (shortlist.length === 0) return;
+
+  let rated: TmdbMedia[];
+  try {
+    // blocking:true keeps the work inline. The non-blocking path defers to
+    // Next's after(), which belongs to a request lifecycle — this runs in a
+    // cron fan-out over many users, where a detached background fetch per user
+    // has nothing sensible to attach to. attachRatingsUnified handles its own
+    // quota lockouts and caps the OMDB fallback internally.
+    rated = await attachRatingsUnified(
+      shortlist.map((c) => ({
+        id: c.tmdbId,
+        mediaType: toTmdbMediaType(c.mediaType),
+        title: c.title,
+        overview: c.overview ?? "",
+        posterPath: c.posterPath,
+        backdropPath: c.backdropPath,
+        releaseDate: c.releaseDate,
+        releaseYear: c.releaseDate?.slice(0, 4) ?? null,
+        voteAverage: c.voteAverage,
+      })),
+      { blocking: true },
+    );
+  } catch (err) {
+    console.warn("[recommendations] ratings lookup failed; ranking on relevance alone:", err);
+    return;
+  }
+
+  const byKey = new Map(rated.map((m) => [`${m.id}:${toDbMediaType(m.mediaType)}`, m]));
+  for (const candidate of shortlist) {
+    const media = byKey.get(candidateKey(candidate.tmdbId, candidate.mediaType));
+    if (!media) continue;
+    const q = qualityScoreOf(media);
+    // null = nothing answered. Leave the score untouched rather than applying a
+    // penalty — see the note on QUALITY_NEUTRAL.
+    if (q === null) continue;
+    candidate.score *= 1 + QUALITY_WEIGHT * (q - QUALITY_NEUTRAL);
+  }
 }
 
 // Who the cron bothers computing for. authSessions.lastSeenAt (not a fresh
