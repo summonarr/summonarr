@@ -217,9 +217,11 @@ const spec = {
         summary: "Full personalized For You set with availability enrichment",
         parameters: [
           { name: "filter", in: "query", schema: { type: "string", enum: ["available", "missing"] }, description: "Restrict to titles on (or not on) the user's media servers" },
+          { name: "type", in: "query", schema: { type: "string", enum: ["movie", "tv"] }, description: "Restrict to one media type" },
+          { name: "sort", in: "query", schema: { type: "string", enum: ["match", "newest", "rating"], default: "match" }, description: "Ordering; \"match\" keeps the engine's own ranking" },
         ],
         responses: {
-          "200": { description: "Ranked recommendation items ({ items, total })" },
+          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed" },
           "404": { description: "feature.page.forYou is disabled" },
         },
       },

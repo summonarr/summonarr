@@ -33,8 +33,10 @@
 //    overwritten; US certification is extracted and kept; official-YouTube
 //    trailer selection; credits sliced to 12 under `:credits`; suggestions
 //    (recommendations-then-similar so the cap starves the weaker /similar
-//    source, self/no-poster dropped) under `:suggestions:v2` — the standalone
-//    getMovieSuggestions two-fetch path pins the same order and key;
+//    source, self/no-poster dropped) under `:suggestions:v3` — the standalone
+//    getMovieSuggestions two-fetch path pins the same order and key, and both
+//    writers must agree on the STORED width (SUGGESTIONS_CACHE_MAX) too, since
+//    the For You engine reads the wide list the rails only slice 18 items from;
 //    a fresh cached row is served with zero fetches and zero
 //    rewrites; object-form keyword rows are migrated and re-persisted; a TV row
 //    without `seasons` is busted (tmdbCache.delete) and re-fetched with the
@@ -587,7 +589,7 @@ test("movie details cold: append_to_response wire, certification kept, official 
   // Exactly three cache writes: details + credits + suggestions, movie-prefixed.
   assert.deepEqual(
     cacheUpserts.map((u) => u.key).sort(),
-    ["movie:603:credits", "movie:603:details", "movie:603:suggestions:v2"],
+    ["movie:603:credits", "movie:603:details", "movie:603:suggestions:v3"],
   );
   const details = upsertFor("movie:603:details");
   assert.ok(details);
@@ -600,17 +602,20 @@ test("movie details cold: append_to_response wire, certification kept, official 
   const credits = JSON.parse(upsertFor("movie:603:credits")!.data) as unknown[];
   assert.equal(credits.length, 12); // sliced from 13
   assert.deepEqual(credits[0], { id: 900, name: "Actor 0", character: "Role 0", profilePath: "/a0.jpg" });
-  const suggestions = JSON.parse(upsertFor("movie:603:suggestions:v2")!.data) as { id: number }[];
+  const suggestions = JSON.parse(upsertFor("movie:603:suggestions:v3")!.data) as { id: number }[];
   // Recommendations first (604 deduped into its rec-side slot, then 606), the
   // similar-only survivor (607) last; self/posterless dropped.
   assert.deepEqual(suggestions.map((s) => s.id), [604, 606, 607]);
 });
 
-test("getMovieSuggestions: /recommendations outranks /similar and the result caches under :suggestions:v2", async () => {
+test("getMovieSuggestions: /recommendations outranks /similar and the result caches under :suggestions:v3", async () => {
   // The standalone two-fetch path (detail rails + the For You engine) must
-  // starve /similar, not /recommendations, when the 18-item cap bites — and
-  // must never resurrect a stale similar-first row via the old (v1) key.
+  // starve /similar, not /recommendations, when the cap bites — and must never
+  // resurrect a stale narrow row via a retired key. Both v1 (similar-first) and
+  // v2 (18-item) are seeded: serving either would silently cap the For You pool
+  // back at the old width for the rest of the 7-day DETAILS TTL.
   seedCache("movie:9:suggestions", [{ id: 999, mediaType: "movie", title: "Stale v1" }]);
+  seedCache("movie:9:suggestions:v2", [{ id: 998, mediaType: "movie", title: "Stale v2" }]);
   respond = (url) => {
     if (url.pathname === "/3/movie/9/similar")
       return jsonResponse(pageOf([rawMovie(21, "Sim Only"), rawMovie(20, "Shared")]));
@@ -622,9 +627,35 @@ test("getMovieSuggestions: /recommendations outranks /similar and the result cac
   const result = await getMovieSuggestions(9);
 
   assert.deepEqual(result.map((m) => m.id), [20, 22, 21]); // recs first, similar backfills after dedup
-  assert.equal(fetchCalls.length, 2, "the seeded v1 row must not serve as a cache hit");
-  assert.ok(upsertFor("movie:9:suggestions:v2"), "result cached under the v2 key");
+  assert.equal(fetchCalls.length, 2, "the seeded v1/v2 rows must not serve as a cache hit");
+  assert.ok(upsertFor("movie:9:suggestions:v3"), "result cached under the v3 key");
   assert.equal(upsertFor("movie:9:suggestions"), undefined, "nothing writes the retired v1 key");
+  assert.equal(upsertFor("movie:9:suggestions:v2"), undefined, "nothing writes the retired v2 key");
+});
+
+test("getMovieSuggestions: the cache holds the WIDE list; the limit only slices the caller's copy", async () => {
+  // The rails and the For You engine share one cache row and one pair of
+  // requests, differing only in how much of it they take. A regression that
+  // trimmed to the rail size BEFORE setCache would silently cap the
+  // recommendation pool at 18 per seed while every test above still passed.
+  const many = Array.from({ length: 30 }, (_, i) => rawMovie(100 + i, `Rec ${i}`));
+  respond = (url) => {
+    if (url.pathname === "/3/movie/11/similar") return jsonResponse(pageOf([rawMovie(500, "Sim")]));
+    if (url.pathname === "/3/movie/11/recommendations") return jsonResponse(pageOf(many));
+    throw new Error(`unexpected fetch ${url.pathname}`);
+  };
+
+  const railed = await getMovieSuggestions(11);
+  assert.equal(railed.length, 18, "default limit is the historical rail size");
+
+  const stored = JSON.parse(upsertFor("movie:11:suggestions:v3")!.data) as { id: number }[];
+  assert.equal(stored.length, 31, "all 30 recs + the similar survivor are cached, not just the rail's 18");
+
+  // Same row, wider slice — and no extra fetches, which is the whole point.
+  const callsAfterFirst = fetchCalls.length;
+  const wide = await getMovieSuggestions(11, 40);
+  assert.equal(wide.length, 31);
+  assert.equal(fetchCalls.length, callsAfterFirst, "the wide read is served from the same cache row");
 });
 
 test("movie details self-heal: a poisoned raw row (no mediaType) is a MISS and is overwritten normalized", async () => {

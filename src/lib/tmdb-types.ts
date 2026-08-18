@@ -85,6 +85,19 @@ export interface TmdbMedia {
   inProduction?: boolean | null;
   tvType?: string | null;
   nextEpisodeAirDate?: string | null;
+
+  // Why the For You engine picked this title: the strongest seed (something the
+  // viewer watched or watchlisted) that surfaced it, and how many seeds agreed.
+  // Set ONLY on the recommendation read path (getUserRecommendations); every
+  // other discovery surface leaves it undefined, which is how the UI knows not
+  // to render a "Because you watched…" line outside /for-you.
+  recommendedBecause?: {
+    tmdbId: number;
+    title: string;
+    mediaType: MediaType;
+    source: "WATCH_HISTORY" | "WATCHLIST";
+    seedCount: number;
+  };
 }
 
 export interface TmdbSeason {

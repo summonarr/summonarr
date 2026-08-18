@@ -16,7 +16,11 @@
 //     deactivated/purged/dormant accounts;
 //   - getUserRecommendations re-filters the cache against CURRENT
 //     watchlist/watched state at read time (drift since the last cron run),
-//     and skips those queries entirely when the cache is empty.
+//     and skips those queries entirely when the cache is empty;
+//   - each candidate records WHY it was picked — the strongest seed that
+//     surfaced it (not the first one encountered) plus the corroborating seed
+//     count — and getRecommendationSummary reports the distinct seed count per
+//     pool, so a row predating those columns degrades to no reason at all.
 //
 // No DB or network: every Prisma model recommendations.ts touches (directly,
 // or transitively via resolveLinkedMediaServerUserIds / getMovieSuggestions /
@@ -47,9 +51,8 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations } = await import(
-  "../src/lib/recommendations.ts"
-);
+const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary } =
+  await import("../src/lib/recommendations.ts");
 
 // ── in-memory tables ─────────────────────────────────────────────────────────
 type MT = "MOVIE" | "TV";
@@ -76,12 +79,16 @@ interface PlayHistoryRow {
   mediaType: MT | null;
   watched: boolean;
   startedAt: Date;
+  // PlayHistory.title is NOT NULL in the schema; optional here only so the
+  // fixtures that predate the reason columns stay readable. Defaulted below.
+  title?: string;
 }
 interface WatchlistRow {
   userId: string;
   tmdbId: number;
   mediaType: MT;
   createdAt: Date;
+  title?: string;
 }
 interface UserRecRow {
   id: string;
@@ -97,6 +104,14 @@ interface UserRecRow {
   score: number;
   rank: number;
   computedAt: Date;
+  // Optional so the pre-existing cache fixtures below stay terse; the stub
+  // defaults them to null, which is exactly what a row written before the
+  // reason columns existed carries.
+  reasonTmdbId?: number | null;
+  reasonTitle?: string | null;
+  reasonMediaType?: MT | null;
+  reasonSource?: "WATCH_HISTORY" | "WATCHLIST" | null;
+  seedCount?: number;
 }
 
 let users: UserRow[] = [];
@@ -153,21 +168,33 @@ shadowPrismaModel(prisma, "playHistory", {
         p.mediaType != null &&
         (cutoff === undefined || p.startedAt.getTime() >= cutoff),
     );
-    const groups = new Map<string, { tmdbId: number; mediaType: MT; count: number; max: number }>();
+    // _max.title rides along with _max.startedAt exactly as the real aggregate
+    // does — the engine names a seed off it, so a stub that omitted it would
+    // silently exercise the "TMDB #<id>" fallback instead of the real path.
+    const groups = new Map<string, { tmdbId: number; mediaType: MT; count: number; max: number; title: string }>();
     for (const r of eligible) {
       const key = `${r.tmdbId}:${r.mediaType}`;
+      const title = r.title ?? `Watched ${r.tmdbId}`;
       const g = groups.get(key);
       if (g) {
         g.count++;
-        if (r.startedAt.getTime() > g.max) g.max = r.startedAt.getTime();
+        if (r.startedAt.getTime() > g.max) {
+          g.max = r.startedAt.getTime();
+          g.title = title;
+        }
       } else {
-        groups.set(key, { tmdbId: r.tmdbId as number, mediaType: r.mediaType as MT, count: 1, max: r.startedAt.getTime() });
+        groups.set(key, { tmdbId: r.tmdbId as number, mediaType: r.mediaType as MT, count: 1, max: r.startedAt.getTime(), title });
       }
     }
     return [...groups.values()]
       .sort((a, b) => b.count - a.count || b.max - a.max)
       .slice(0, args.take)
-      .map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType, _count: { tmdbId: g.count }, _max: { startedAt: new Date(g.max) } }));
+      .map((g) => ({
+        tmdbId: g.tmdbId,
+        mediaType: g.mediaType,
+        _count: { tmdbId: g.count },
+        _max: { startedAt: new Date(g.max), title: g.title },
+      }));
   },
   findMany: async (args: { where: { mediaServerUserId: { in: string[] } } }) => {
     const ids = new Set(args.where.mediaServerUserId.in);
@@ -191,7 +218,7 @@ shadowPrismaModel(prisma, "watchlistItem", {
     let rows = watchlistRows.filter((w) => w.userId === args.where.userId);
     if (args.orderBy?.createdAt === "desc") rows = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     if (args.take != null) rows = rows.slice(0, args.take);
-    return rows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType }));
+    return rows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title ?? `Listed ${r.tmdbId}` }));
   },
 });
 
@@ -200,7 +227,39 @@ shadowPrismaModel(prisma, "userRecommendation", {
   findMany: async (args: { where: { userId: string }; orderBy?: { rank: "asc" } }) => {
     let rows = userRecRows.filter((r) => r.userId === args.where.userId);
     if (args.orderBy?.rank === "asc") rows = [...rows].sort((a, b) => a.rank - b.rank);
-    return rows.map((r) => ({ ...r }));
+    return rows.map((r) => ({
+      ...r,
+      reasonTmdbId: r.reasonTmdbId ?? null,
+      reasonTitle: r.reasonTitle ?? null,
+      reasonMediaType: r.reasonMediaType ?? null,
+      reasonSource: r.reasonSource ?? null,
+      seedCount: r.seedCount ?? 1,
+    }));
+  },
+  // getRecommendationSummary: newest build time for the user…
+  aggregate: async (args: { where: { userId: string } }) => {
+    const rows = userRecRows.filter((r) => r.userId === args.where.userId);
+    const max = rows.reduce<Date | null>(
+      (acc, r) => (acc === null || r.computedAt.getTime() > acc.getTime() ? r.computedAt : acc),
+      null,
+    );
+    return { _max: { computedAt: max } };
+  },
+  // …and the DISTINCT (source, seed) pairs behind the visible picks. Real
+  // groupBy returns one row per distinct combination, which is the whole point
+  // of the query — one seed that produced 40 picks must count once.
+  groupBy: async (args: { where: { userId: string } }) => {
+    const seen = new Set<string>();
+    const out: { reasonSource: string | null; reasonTmdbId: number | null }[] = [];
+    for (const r of userRecRows) {
+      if (r.userId !== args.where.userId) continue;
+      if (r.reasonSource == null || r.reasonTmdbId == null) continue;
+      const key = `${r.reasonSource}:${r.reasonTmdbId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ reasonSource: r.reasonSource, reasonTmdbId: r.reasonTmdbId });
+    }
+    return out;
   },
   deleteMany: async (args: { where: { userId: string } }) => {
     const before = userRecRows.length;
@@ -459,6 +518,133 @@ test("scoring: seed ranking (count desc, recency desc), recency-weighted contrib
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [999, 888]); // ranked by score desc
   assert.equal(byId.get(999)?.rank, 0);
   assert.equal(byId.get(888)?.rank, 1);
+});
+
+// ── the stored "why" ─────────────────────────────────────────────────────────
+
+test("reason: a candidate names the STRONGEST seed that surfaced it, not the first one seen", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+
+  // Seeds are concatenated history-then-watchlist, so the history seed is
+  // encountered FIRST while the watchlist seed (1.5x) is the heavier one. A
+  // first-wins implementation would name "The Weak One" here — the failure this
+  // test exists to catch, since the resulting page still looks plausible.
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(5), title: "The Weak One" },
+  ];
+  watchlistRows = [{ userId: "u1", tmdbId: 30, mediaType: "MOVIE", createdAt: daysAgo(0), title: "The Strong One" }];
+
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  suggestionsFor.set("movie:30", [movieItem(999)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.equal(candidates.length, 1);
+  const c = candidates[0];
+  assert.equal(c.score, 2.5); // 1.0 (history) + 1.5 (watchlist)
+  assert.equal(c.reasonTitle, "The Strong One");
+  assert.equal(c.reasonTmdbId, 30);
+  assert.equal(c.reasonSource, "WATCHLIST");
+  assert.equal(c.reasonMediaType, "MOVIE");
+  assert.equal(c.seedCount, 2, "both seeds corroborated it");
+});
+
+test("reason: a WEAKER later seed does not steal the reason, and seedCount still counts it", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+
+  // Reverse of the case above: the heaviest seed comes first (history seed 10 at
+  // full weight 1.0), and the later seeds are strictly lighter — the taper puts
+  // seed 20 at 0.5, and the sole watchlist seed at 1.5 is EXCLUDED from this
+  // fixture so nothing can outweigh the incumbent.
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Top Seed" },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(2), title: "Top Seed" },
+    { mediaServerUserId: "msu1", tmdbId: 20, mediaType: "MOVIE", watched: true, startedAt: daysAgo(3), title: "Lesser Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  suggestionsFor.set("movie:20", [movieItem(999)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.equal(candidates[0].reasonTitle, "Top Seed");
+  assert.equal(candidates[0].reasonSource, "WATCH_HISTORY");
+  assert.equal(candidates[0].seedCount, 2);
+});
+
+test("reason: a TV seed's reason keeps its own mediaType, independent of the recommended title's", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 40, mediaType: "TV", watched: true, startedAt: daysAgo(1), title: "Some Show" },
+  ];
+  suggestionsFor.set("tv:40", [tvItem(900)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.equal(candidates[0].mediaType, "TV");
+  assert.equal(candidates[0].reasonMediaType, "TV");
+  assert.equal(candidates[0].reasonTitle, "Some Show");
+});
+
+test("getUserRecommendations surfaces the reason, and omits it entirely for a pre-column row", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  userRecRows = [
+    {
+      id: "r1", userId: "u1", tmdbId: 501, mediaType: "MOVIE", title: "With Reason",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: "2021-05-05",
+      voteAverage: 7, score: 2, rank: 0, computedAt: daysAgo(0),
+      reasonTmdbId: 10, reasonTitle: "Because Of This", reasonMediaType: "MOVIE",
+      reasonSource: "WATCH_HISTORY", seedCount: 3,
+    },
+    // Written before the columns existed: every reason field null. It must come
+    // back WITHOUT a recommendedBecause key rather than with a half-built one.
+    {
+      id: "r2", userId: "u1", tmdbId: 502, mediaType: "MOVIE", title: "No Reason",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: "2019-01-01",
+      voteAverage: 6, score: 1, rank: 1, computedAt: daysAgo(0),
+    },
+  ];
+
+  const out = await getUserRecommendations("u1");
+  assert.deepEqual(out.map((m) => m.id), [501, 502]);
+  assert.deepEqual(out[0].recommendedBecause, {
+    tmdbId: 10,
+    title: "Because Of This",
+    mediaType: "movie", // DB enum → TmdbMedia's lowercase union
+    source: "WATCH_HISTORY",
+    seedCount: 3,
+  });
+  assert.equal(out[1].recommendedBecause, undefined);
+});
+
+test("getRecommendationSummary: DISTINCT seeds per pool, and the newest build time", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  const base = {
+    userId: "u1", mediaType: "MOVIE" as MT, title: "t", overview: null,
+    posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 0, seedCount: 1,
+  };
+  userRecRows = [
+    // Two picks from ONE watched seed — it must count once, not twice.
+    { ...base, id: "a", tmdbId: 1, score: 3, rank: 0, computedAt: daysAgo(2), reasonTmdbId: 10, reasonTitle: "A", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
+    { ...base, id: "b", tmdbId: 2, score: 2, rank: 1, computedAt: daysAgo(2), reasonTmdbId: 10, reasonTitle: "A", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
+    { ...base, id: "c", tmdbId: 3, score: 2, rank: 2, computedAt: daysAgo(2), reasonTmdbId: 11, reasonTitle: "B", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
+    { ...base, id: "d", tmdbId: 4, score: 1, rank: 3, computedAt: daysAgo(1), reasonTmdbId: 30, reasonTitle: "C", reasonMediaType: "MOVIE", reasonSource: "WATCHLIST" },
+    // A reasonless row contributes to neither count.
+    { ...base, id: "e", tmdbId: 5, score: 1, rank: 4, computedAt: daysAgo(3) },
+    // Another user's rows must not leak in.
+    { ...base, userId: "u2", id: "f", tmdbId: 6, score: 9, rank: 0, computedAt: daysAgo(0), reasonTmdbId: 99, reasonTitle: "X", reasonMediaType: "MOVIE", reasonSource: "WATCHLIST" },
+  ];
+
+  const summary = await getRecommendationSummary("u1");
+  assert.equal(summary.watchHistorySeeds, 2); // seeds 10 and 11 — NOT 3 rows
+  assert.equal(summary.watchlistSeeds, 1);
+  assert.equal(summary.computedAt?.getTime(), daysAgo(1).getTime());
+});
+
+test("getRecommendationSummary: a user with no cached picks reports nothing rather than throwing", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  const summary = await getRecommendationSummary("u1");
+  assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0 });
 });
 
 // ── exclusion wider than the chosen seeds ────────────────────────────────────

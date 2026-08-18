@@ -1,8 +1,8 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import type { MediaType } from "@/generated/prisma";
+import type { MediaType, RecommendationSeed } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { getMovieSuggestions, getTVSuggestions } from "@/lib/tmdb";
+import { getMovieSuggestions, getTVSuggestions, SUGGESTIONS_CACHE_MAX } from "@/lib/tmdb";
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
 import { settleLimit } from "@/lib/concurrency";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
@@ -17,9 +17,13 @@ const MAX_WATCH_HISTORY_SEEDS = 20;
 const MAX_WATCHLIST_SEEDS = 8;
 const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 // Sized for the dedicated /for-you page (a full grid), not just the 20-item
-// home rail. Costs no extra TMDB calls: the 15-seed fan-out already produces
-// a 100-250 candidate pool — this only keeps more of what was computed.
-const MAX_STORED_RECOMMENDATIONS_PER_USER = 100;
+// home rail. Costs no extra TMDB calls: the 28-seed fan-out already produces a
+// large candidate pool — this only keeps more of what was computed. Raised
+// 100 -> 200 alongside SUGGESTIONS_CACHE_MAX (tmdb.ts), which widened each
+// seed's contribution from 18 to 40 titles WITHOUT another request: /similar
+// and /recommendations each return 20 and both were already being fetched, so
+// the extra depth came out of what used to be discarded.
+const MAX_STORED_RECOMMENDATIONS_PER_USER = 200;
 const SEED_CONCURRENCY = 5;
 const USER_CONCURRENCY = 5;
 const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -42,12 +46,25 @@ export interface RecommendationCandidate {
   voteAverage: number;
   score: number;
   rank: number;
+  // The single strongest seed that surfaced this candidate, and how many seeds
+  // surfaced it in total. `score` says HOW MUCH the engine likes a title;
+  // these say WHY, which is what the /for-you page shows the user.
+  reasonTmdbId: number;
+  reasonTitle: string;
+  reasonMediaType: MediaType;
+  reasonSource: RecommendationSeed;
+  seedCount: number;
 }
 
 interface Seed {
   tmdbId: number;
   mediaType: MediaType;
   weight: number;
+  // Carried purely so a candidate can name its reason. The title is denormalized
+  // off the seed row (PlayHistory.title / WatchlistItem.title) rather than looked
+  // up later — a title watched years ago may have no TMDB cache row left.
+  title: string;
+  source: RecommendationSeed;
 }
 
 function candidateKey(tmdbId: number, mediaType: MediaType): string {
@@ -64,11 +81,17 @@ function toTmdbMediaType(m: MediaType): "movie" | "tv" {
 
 // Linearly interpolates 1.0 (index 0, most recent/most-watched) down to 0.5
 // (the oldest seed in its own list) rather than an arbitrary calendar half-life.
-function weightSeeds(rows: { tmdbId: number; mediaType: MediaType }[], typeWeight: number): Seed[] {
+function weightSeeds(
+  rows: { tmdbId: number; mediaType: MediaType; title: string }[],
+  typeWeight: number,
+  source: RecommendationSeed,
+): Seed[] {
   const n = rows.length;
   return rows.map((r, i) => ({
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
+    title: r.title,
+    source,
     weight: typeWeight * (n <= 1 ? 1 : 1 - 0.5 * (i / (n - 1))),
   }));
 }
@@ -100,7 +123,13 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
         ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
       },
       _count: { tmdbId: true },
-      _max: { startedAt: true },
+      // title rides along in the aggregate so naming the seed ("Because you
+      // watched X") costs no second query. PlayHistory.title is the show/movie
+      // title — episodeTitle is a separate column — so it is already the right
+      // label for a TV seed. _max picks one arbitrary row's title within the
+      // group; every row in a (tmdbId, mediaType) group is the same title
+      // except for upstream renames, where the newest spelling is fine.
+      _max: { startedAt: true, title: true },
       orderBy: [{ _count: { tmdbId: "desc" } }, { _max: { startedAt: "desc" } }],
       take,
     });
@@ -113,7 +142,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       where: { userId },
       orderBy: { createdAt: "desc" },
       take: MAX_WATCHLIST_SEEDS,
-      select: { tmdbId: true, mediaType: true },
+      select: { tmdbId: true, mediaType: true, title: true },
     }),
   ]);
 
@@ -134,9 +163,18 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // column types even though the where clause already excludes nulls.
   const historySeeds = historyRows
     .filter((r) => r.tmdbId != null && r.mediaType != null)
-    .map((r) => ({ tmdbId: r.tmdbId as number, mediaType: r.mediaType as MediaType }));
+    .map((r) => ({
+      tmdbId: r.tmdbId as number,
+      mediaType: r.mediaType as MediaType,
+      // PlayHistory.title is NOT NULL, but _max over an empty group is typed
+      // nullable; fall back to the id so a reason is never a blank string.
+      title: r._max.title ?? `TMDB #${r.tmdbId}`,
+    }));
 
-  return [...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT), ...weightSeeds(watchlistRows, WATCHLIST_SEED_WEIGHT)];
+  return [
+    ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY"),
+    ...weightSeeds(watchlistRows, WATCHLIST_SEED_WEIGHT, "WATCHLIST"),
+  ];
 }
 
 // Wider than "the chosen seeds" on purpose: an already-known title elsewhere on
@@ -204,8 +242,13 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
 
   const excluded = await buildExclusionSet(userId, linkedServerUserIds, seeds);
 
+  // SUGGESTIONS_CACHE_MAX (not the 18-item rail default) — the tail of each
+  // seed's list is exactly what lets the ranked set reach 200. Same cache row
+  // and same request count as the rail; only the slice differs.
   const suggestionResults = await settleLimit(seeds, SEED_CONCURRENCY, (seed) =>
-    seed.mediaType === "MOVIE" ? getMovieSuggestions(seed.tmdbId) : getTVSuggestions(seed.tmdbId),
+    seed.mediaType === "MOVIE"
+      ? getMovieSuggestions(seed.tmdbId, SUGGESTIONS_CACHE_MAX)
+      : getTVSuggestions(seed.tmdbId, SUGGESTIONS_CACHE_MAX),
   );
 
   // Counted BEFORE exclusion: a user who has already watched every suggestion is a
@@ -213,7 +256,9 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   // the outage case. Filtering first would collapse the two back together.
   let rawSuggestions = 0;
 
-  const scored = new Map<string, RecommendationCandidate>();
+  // reasonWeight is bookkeeping for picking the strongest seed; it is dropped
+  // before the candidates are returned (there is no column for it).
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number }>();
   seeds.forEach((seed, i) => {
     const result = suggestionResults[i];
     if (result.status !== "fulfilled") return;
@@ -225,6 +270,19 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
       const existing = scored.get(key);
       if (existing) {
         existing.score += seed.weight;
+        existing.seedCount++;
+        // Keep the STRONGEST seed as the reason, not the first one encountered.
+        // Seeds arrive in weight order within each pool but the two pools are
+        // concatenated (history then watchlist), so a later watchlist seed can
+        // outweigh an earlier history one — first-wins would name the weaker
+        // title. Ties keep the incumbent, which is the earlier/more-recent seed.
+        if (seed.weight > existing.reasonWeight) {
+          existing.reasonWeight = seed.weight;
+          existing.reasonTmdbId = seed.tmdbId;
+          existing.reasonTitle = seed.title;
+          existing.reasonMediaType = seed.mediaType;
+          existing.reasonSource = seed.source;
+        }
         continue;
       }
       scored.set(key, {
@@ -238,14 +296,20 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
         voteAverage: item.voteAverage,
         score: seed.weight,
         rank: 0,
+        reasonTmdbId: seed.tmdbId,
+        reasonTitle: seed.title,
+        reasonMediaType: seed.mediaType,
+        reasonSource: seed.source,
+        reasonWeight: seed.weight,
+        seedCount: 1,
       });
     }
   });
 
-  const ranked = [...scored.values()].sort((a, b) => b.score - a.score).slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER);
-  ranked.forEach((c, i) => {
-    c.rank = i;
-  });
+  const ranked = [...scored.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
+    .map(({ reasonWeight: _reasonWeight, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
   return { candidates: ranked, conclusive: rawSuggestions > 0 };
 }
 
@@ -334,6 +398,11 @@ function rowToTmdbMedia(row: {
   backdropPath: string | null;
   releaseDate: string | null;
   voteAverage: number;
+  reasonTmdbId: number | null;
+  reasonTitle: string | null;
+  reasonMediaType: MediaType | null;
+  reasonSource: RecommendationSeed | null;
+  seedCount: number;
 }): TmdbMedia {
   return {
     id: row.tmdbId,
@@ -345,7 +414,55 @@ function rowToTmdbMedia(row: {
     releaseDate: row.releaseDate,
     releaseYear: row.releaseDate?.slice(0, 4) ?? null,
     voteAverage: row.voteAverage,
+    // All four reason columns are written together or not at all, so one
+    // null-check covers the whole object. Rows predating the columns simply
+    // carry no reason and the UI omits the line — they heal on the next cron run.
+    ...(row.reasonTmdbId != null && row.reasonTitle != null && row.reasonMediaType != null && row.reasonSource != null
+      ? {
+          recommendedBecause: {
+            tmdbId: row.reasonTmdbId,
+            title: row.reasonTitle,
+            mediaType: toTmdbMediaType(row.reasonMediaType),
+            source: row.reasonSource,
+            seedCount: row.seedCount,
+          },
+        }
+      : {}),
   };
+}
+
+export interface RecommendationSummary {
+  // When THIS user's set was last rebuilt. Read per-user rather than from the
+  // global `cron:lastRun:recommendations` Setting because the cron deliberately
+  // skips users (inconclusive TMDB run, or dormant and out of the active
+  // cohort) — the global timestamp would claim a refresh they never got.
+  computedAt: Date | null;
+  // How many DISTINCT seed titles actually produced a visible pick, split by
+  // pool. Counted off the stored reasons rather than by re-running selectSeeds:
+  // it is one small per-user query instead of three, and it answers the more
+  // honest question — not "what did we feed the engine" but "what did the
+  // engine actually get something out of".
+  watchHistorySeeds: number;
+  watchlistSeeds: number;
+}
+
+export async function getRecommendationSummary(userId: string): Promise<RecommendationSummary> {
+  const [agg, seedRows] = await Promise.all([
+    prisma.userRecommendation.aggregate({ where: { userId }, _max: { computedAt: true } }),
+    prisma.userRecommendation.groupBy({
+      by: ["reasonSource", "reasonTmdbId"],
+      where: { userId, reasonSource: { not: null }, reasonTmdbId: { not: null } },
+    }),
+  ]);
+
+  let watchHistorySeeds = 0;
+  let watchlistSeeds = 0;
+  for (const row of seedRows) {
+    if (row.reasonSource === "WATCHLIST") watchlistSeeds++;
+    else if (row.reasonSource === "WATCH_HISTORY") watchHistorySeeds++;
+  }
+
+  return { computedAt: agg._max.computedAt, watchHistorySeeds, watchlistSeeds };
 }
 
 // Read path — called directly by home/route.ts and page.tsx. Re-filters the

@@ -1140,11 +1140,36 @@ model UserRecommendation {
   score Float
   rank  Int
 
+  // WHY this title was picked — the single highest-weighted seed (a title the
+  // user watched or watchlisted) that surfaced it, plus how many seeds
+  // corroborated it in total. The compute has always known this at the moment
+  // it does `score += seed.weight`; only the summed number used to survive, so
+  // the page could rank picks but never explain one.
+  //
+  // Denormalized (title alongside id, like the row's own title/posterPath)
+  // because the seed may be a title the user watched years ago that has no
+  // TmdbCache row left to join against. Nullable for rows written before this
+  // existed — the whole table is rebuilt every cron cycle, so they heal within
+  // one run, but the read path must tolerate a null until then.
+  reasonTmdbId    Int?
+  reasonTitle     String?    @db.VarChar(500)
+  reasonMediaType MediaType?
+  reasonSource    RecommendationSeed?
+  seedCount       Int        @default(1)
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tmdbId, mediaType])
   @@index([userId, rank])
+}
+
+// Which of the two seed pools a recommendation's reason came from. Drives the
+// wording only ("Because you watched X" vs "X is on your watchlist") — the
+// weighting difference between the pools lives in recommendations.ts.
+enum RecommendationSeed {
+  WATCH_HISTORY
+  WATCHLIST
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event
