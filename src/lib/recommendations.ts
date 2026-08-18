@@ -6,6 +6,7 @@ import { getMovieSuggestions, getTVSuggestions, SUGGESTIONS_CACHE_MAX } from "@/
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
 import { settleLimit } from "@/lib/concurrency";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
+import { getBlacklistSet } from "@/lib/blacklist";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 
 // "For You" recommendation engine. Seeds are drawn from a user's own watched
@@ -25,14 +26,20 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 const MAX_WATCH_HISTORY_SEEDS = 100;
 const MAX_WATCHLIST_SEEDS = 24;
 const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
-// Sized for the dedicated /for-you page (a full grid), not just the 20-item
-// home rail. Costs no extra TMDB calls: the 28-seed fan-out already produces a
-// large candidate pool — this only keeps more of what was computed. Raised
-// 100 -> 200 alongside SUGGESTIONS_CACHE_MAX (tmdb.ts), which widened each
-// seed's contribution from 18 to 40 titles WITHOUT another request: /similar
-// and /recommendations each return 20 and both were already being fetched, so
-// the extra depth came out of what used to be discarded.
-const MAX_STORED_RECOMMENDATIONS_PER_USER = 200;
+// STORE the whole rated shortlist; SERVE the historical 200. The two used to be
+// one number, which silently threw away paid-for work: ranks 200-299 were
+// scored AND run through the ratings prior every cron, then discarded. Storing
+// them costs one hundred small rows per user and buys instant backfill — when
+// the read-time drift filter drops a row (watched, hidden, requested since the
+// last cron), the next-ranked reserve row takes its place at the SAME render
+// instead of the shelf shrinking for up to 12h.
+//
+// Keep MAX_STORED equal to RATING_SHORTLIST (declared below): larger would
+// store unrated tails the quality prior never saw; smaller re-creates the
+// discard. The serve cap is what every read surface sees — page size and the
+// enrichment fan-out are tuned to it, so raise it deliberately or not at all.
+const MAX_STORED_RECOMMENDATIONS_PER_USER = 300;
+const MAX_SERVED_RECOMMENDATIONS = 200;
 const SEED_CONCURRENCY = 5;
 const USER_CONCURRENCY = 5;
 const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -108,11 +115,16 @@ const LANGUAGE_FLOOR = 0.35;
 // Deliberately MILD, and deliberately centred: NEUTRAL is roughly the mean
 // rating of a mainstream title, so the multiplier only pulls a candidate away
 // from its relevance rank when the sources genuinely disagree with the crowd.
-// An UNRATED title scores exactly 1.0 — absence of data must never read as
-// "bad", or the shelf would quietly become "whatever OMDB happened to cover".
+// An UNRATED title with a real audience scores exactly 1.0 — absence of
+// PROVIDER data must never read as "bad", or the shelf would quietly become
+// "whatever OMDB happened to cover". The one carve-out is OBSCURITY_DAMP:
+// unrated AND under the TMDB vote bar means nobody anywhere has weighed in,
+// and that tail-of-/similar junk used to outrank known-mediocre titles the
+// prior had pulled down.
 const RATING_SHORTLIST = 300;
 const QUALITY_WEIGHT = 0.5;
 const QUALITY_NEUTRAL = 0.65;
+const OBSCURITY_DAMP = 0.9;
 // TMDB's score is the only one every candidate carries, so it would otherwise
 // dominate the mean — but on a thinly-voted title it is noise (a 10.0 from four
 // people), and the suggestion tail is full of exactly those. Below this many
@@ -342,11 +354,21 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // One `now` for the whole selection: reading the clock per seed would let a
   // slow query change the weights partway down the list.
   const now = Date.now();
+
+  // The app's core loop is watchlist -> request -> watch, and WATCHING a title
+  // never deletes its WatchlistItem — so for every engaged user the recently
+  // watched titles sat in BOTH pools and seeded twice, ~2.5x the weight of any
+  // single-source seed (1.0 history + 1.5 watchlist). The history seed wins the
+  // dedup: once watched, the list entry is fulfilled bookkeeping, while the
+  // history seed carries the real signal (actual recency, real play count).
+  const historyKeys = new Set(historySeeds.map((r) => candidateKey(r.tmdbId, r.mediaType)));
+  const unwatchedListRows = watchlistRows.filter((r) => !historyKeys.has(candidateKey(r.tmdbId, r.mediaType)));
+
   return [
     ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY", now),
     // A watchlist entry has no play count; its recency is when it was added.
     ...weightSeeds(
-      watchlistRows.map((r) => ({ ...r, lastAt: r.createdAt })),
+      unwatchedListRows.map((r) => ({ ...r, lastAt: r.createdAt })),
       WATCHLIST_SEED_WEIGHT,
       "WATCHLIST",
       now,
@@ -357,8 +379,36 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
 // Wider than "the chosen seeds" on purpose: an already-known title elsewhere on
 // a long watchlist (past the top-5 seeded) or an old watch (past the top-10
 // seeded) must not leak back in as a "new" recommendation.
-async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<Set<string>> {
-  const [watchlistRows, watchedRows] = await Promise.all([
+// Mirrors getUserHiddenSet's bound (hidden.ts): HiddenItem accumulates without
+// limit, and this runs inside the cron fan-out AND on every /for-you render.
+const MAX_EXCLUSION_HIDDEN = 10_000;
+
+// Every title the user already KNOWS about, as candidateKeys. One reader shared
+// by the compute-time exclusion AND the read-time drift filter, so the two can
+// never disagree about what "already known" means — a title excluded at compute
+// but not at read (or vice versa) either wastes a stored slot or resurfaces
+// something the user acted on. Covers:
+//   - the full watchlist and all watched history (the original set);
+//   - HiddenItem — "not interested" clicks. These were only removed at render
+//     time by attachAllAvailability, so every hide permanently killed one of
+//     the stored slots and matchTier was assigned to cards nobody ever saw.
+//     Read DIRECTLY rather than via getUserHiddenSet: that helper lowercases
+//     its keys to match attach-all's TMDB casing, while candidateKey uses the
+//     Prisma enum casing — reusing it would silently never match anything;
+//   - the user's own OPEN requests (PENDING/APPROVED) — recommending a title
+//     whose request button 409s is a dead card. AVAILABLE stays recommendable
+//     on purpose (the "On your server" filter is a feature), and a plain
+//     DECLINED stays too (it is re-requestable);
+//   - permanentlyDeclined requests — the request POST 403s those forever;
+//   - the user's own DeletionVotes — "Because you watched X" on a title the
+//     user voted to DELETE is the most jarring card the shelf can produce;
+//   - the admin blacklist (global, 30s-cached in blacklist.ts) — visible but
+//     unrequestable everywhere else, so a slot spent on it is wasted. Note the
+//     deliberate divergence from attachAllAvailability, which KEEPS blacklisted
+//     titles visible in general discovery: a browse grid states facts about the
+//     catalog, a recommendation is advice to act.
+async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string[]): Promise<Set<string>> {
+  const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet] = await Promise.all([
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
@@ -378,14 +428,40 @@ async function buildExclusionSet(userId: string, linkedServerUserIds: string[], 
             mediaType: { not: null },
           },
         }),
+    prisma.hiddenItem.findMany({
+      where: { userId },
+      select: { tmdbId: true, mediaType: true },
+      orderBy: { createdAt: "desc" },
+      take: MAX_EXCLUSION_HIDDEN,
+    }),
+    prisma.mediaRequest.findMany({
+      // Across every arrInstance: a request on ANY instance makes the title known.
+      where: {
+        requestedBy: userId,
+        OR: [{ status: { in: ["PENDING", "APPROVED"] } }, { permanentlyDeclined: true }],
+      },
+      select: { tmdbId: true, mediaType: true },
+    }),
+    prisma.deletionVote.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
+    getBlacklistSet(),
   ]);
 
-  const excluded = new Set<string>();
-  for (const s of seeds) excluded.add(candidateKey(s.tmdbId, s.mediaType));
-  for (const r of watchlistRows) excluded.add(candidateKey(r.tmdbId, r.mediaType));
+  // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
+  // candidateKey, so the cached set can be adopted wholesale.
+  const known = new Set<string>(blacklistSet);
+  for (const r of watchlistRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   for (const r of watchedRows) {
-    if (r.tmdbId != null && r.mediaType != null) excluded.add(candidateKey(r.tmdbId, r.mediaType));
+    if (r.tmdbId != null && r.mediaType != null) known.add(candidateKey(r.tmdbId, r.mediaType));
   }
+  for (const r of hiddenRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  for (const r of requestRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  for (const r of voteRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  return known;
+}
+
+async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<Set<string>> {
+  const excluded = await collectKnownTitleKeys(userId, linkedServerUserIds);
+  for (const s of seeds) excluded.add(candidateKey(s.tmdbId, s.mediaType));
   return excluded;
 }
 
@@ -433,10 +509,14 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   // the outage case. Filtering first would collapse the two back together.
   let rawSuggestions = 0;
 
-  // reasonWeight and language are bookkeeping — the first picks the strongest
-  // seed, the second feeds the language profile. Both are dropped before the
-  // candidates are returned; neither has a column.
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string }>();
+  // reasonWeight, language and voteCount are bookkeeping — the first picks the
+  // strongest seed, the second feeds the language profile, the third lets the
+  // quality prior's TMDB term see the vote count it gates on. All are dropped
+  // before the candidates are returned; none has a column. voteCount earned its
+  // place by being ABSENT: applyQualityPrior used to rebuild TmdbMedia without
+  // it, so the (voteCount >= 50) gate read 0 for every candidate and TMDB's own
+  // score silently never participated in the prior at all.
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number }>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
   let totalLanguageWeight = 0;
@@ -502,6 +582,7 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
         reasonWeight: contribution,
         seedCount: 1,
         language: item.originalLanguage ?? undefined,
+        voteCount: item.voteCount ?? 0,
       });
     }
   });
@@ -534,7 +615,7 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   const ranked = shortlist
     .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
-    .map(({ reasonWeight: _reasonWeight, language: _language, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
+    .map(({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
   return { candidates: ranked, conclusive: rawSuggestions > 0 };
 }
 
@@ -573,7 +654,7 @@ export function qualityScoreOf(media: TmdbMedia): number | null {
 // Multiplies each shortlisted candidate's score by how well the rating sources
 // think of it. Mutates in place; never throws — a ratings outage must degrade
 // to "no quality opinion", not fail the whole recommendation run.
-async function applyQualityPrior(shortlist: (RecommendationCandidate & { language?: string })[]): Promise<void> {
+async function applyQualityPrior(shortlist: (RecommendationCandidate & { language?: string; voteCount: number })[]): Promise<void> {
   if (shortlist.length === 0) return;
 
   let rated: TmdbMedia[];
@@ -594,6 +675,7 @@ async function applyQualityPrior(shortlist: (RecommendationCandidate & { languag
         releaseDate: c.releaseDate,
         releaseYear: c.releaseDate?.slice(0, 4) ?? null,
         voteAverage: c.voteAverage,
+        voteCount: c.voteCount,
       })),
       { blocking: true },
     );
@@ -607,9 +689,19 @@ async function applyQualityPrior(shortlist: (RecommendationCandidate & { languag
     const media = byKey.get(candidateKey(candidate.tmdbId, candidate.mediaType));
     if (!media) continue;
     const q = qualityScoreOf(media);
-    // null = nothing answered. Leave the score untouched rather than applying a
-    // penalty — see the note on QUALITY_NEUTRAL.
-    if (q === null) continue;
+    if (q === null) {
+      // Nothing answered. For a title with a real audience that stays neutral —
+      // "unrated" usually means the providers just don't cover it. But q===null
+      // on a title ALMOST NOBODY HAS RATED ANYWHERE (under the same 50-vote bar
+      // the TMDB term uses) is the suggestion tail's obscure junk, and it used
+      // to keep its full relevance score while properly-rated 6.0 titles were
+      // pulled DOWN — mediocre-but-known lost to unknown. The damp is bounded:
+      // 0.9 is exactly the multiplier a title RATED 4.5/10 receives, so obscure
+      // can never fall below known-bad, and it sits after the outage catch so a
+      // ratings failure never becomes a penalty.
+      if (candidate.voteCount < MIN_TMDB_VOTES_FOR_QUALITY) candidate.score *= OBSCURITY_DAMP;
+      continue;
+    }
     candidate.score *= 1 + QUALITY_WEIGHT * (q - QUALITY_NEUTRAL);
   }
 }
@@ -779,41 +871,26 @@ export async function getUserRecommendations(userId: string): Promise<TmdbMedia[
   if (cached.length === 0) return [];
 
   const linkedServerUserIds = await resolveLinkedMediaServerUserIds(userId);
-  const [watchlistRows, watchedRows] = await Promise.all([
-    prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
-    linkedServerUserIds.length === 0
-      ? Promise.resolve([])
-      : // groupBy, not findMany + distinct. Prisma applies `distinct` CLIENT-side
-        // — verified by capturing the emitted SQL, which is byte-identical with
-        // and without it — so every watch row crossed the wire and was deduped
-        // in Node. Only the distinct pairs are ever used, and a heavy viewer has
-        // thousands of rows collapsing to a few hundred titles. groupBy compiles
-        // to a real GROUP BY, so Postgres does the dedup. The result shape is
-        // the same {tmdbId, mediaType}, so the consumers below are unchanged.
-        prisma.playHistory.groupBy({
-          by: ["tmdbId", "mediaType"],
-          where: {
-            mediaServerUserId: { in: linkedServerUserIds },
-            watched: true,
-            tmdbId: { not: null },
-            mediaType: { not: null },
-          },
-        }),
-  ]);
+  // The SAME reader the compute-time exclusion uses (collectKnownTitleKeys), so
+  // anything the user has acted on since the last cron — watched, watchlisted,
+  // hidden, requested, voted to delete, or admin-blacklisted — vacates its slot
+  // at the next render instead of squatting until the next 12h cycle.
+  const currentlyKnown = await collectKnownTitleKeys(userId, linkedServerUserIds);
 
-  const currentlyKnown = new Set<string>();
-  for (const r of watchlistRows) currentlyKnown.add(candidateKey(r.tmdbId, r.mediaType));
-  for (const r of watchedRows) {
-    if (r.tmdbId != null && r.mediaType != null) currentlyKnown.add(candidateKey(r.tmdbId, r.mediaType));
-  }
-
-  // Tier is assigned over the SURVIVING set, so a shelf whose top pick has since
+  // Tier is assigned over the SERVED set, so a shelf whose top pick has since
   // been watched promotes the next title into the top band rather than leaving
   // a gap where a chip used to be.
+  //
+  // Serve at most MAX_SERVED_RECOMMENDATIONS of the survivors: the store holds
+  // a deeper rated reserve (MAX_STORED_RECOMMENDATIONS_PER_USER) precisely so
+  // drift-excluded rows BACKFILL from ranks below the serve line instantly —
+  // but the slice must stay, or every render's availability/ratings enrichment
+  // fan-out grows by the reserve's size for no visible benefit.
   const surviving = cached.filter((row) => !currentlyKnown.has(candidateKey(row.tmdbId, row.mediaType)));
-  return surviving.map((row, i) => {
+  const served = surviving.slice(0, MAX_SERVED_RECOMMENDATIONS);
+  return served.map((row, i) => {
     const media = rowToTmdbMedia(row);
-    const tier = matchTierFor(i, surviving.length);
+    const tier = matchTierFor(i, served.length);
     return tier ? { ...media, matchTier: tier } : media;
   });
 }

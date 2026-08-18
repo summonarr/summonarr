@@ -23,10 +23,22 @@
 //   - candidate languages that barely feature in the weighted pool are
 //     de-emphasised toward a floor (never filtered), a substantial second
 //     language is untouched, and an unknown language is left alone;
-//   - a multi-source ratings prior re-weights the shortlist, with an UNRATED
-//     title strictly neutral and a ratings outage degrading to relevance-only
-//     rather than failing the run. Ratings are served from a seeded cache, so
-//     no test reaches MDBList or OMDB;
+//   - a multi-source ratings prior re-weights the shortlist, TMDB's own score
+//     included (its voteCount gate once read a field the prior forgot to pass —
+//     the reintroduction mutation is pinned), with an UNRATED-with-audience
+//     title strictly neutral, unrated-obscure damped by exactly OBSCURITY_DAMP
+//     (never below known-bad), and a ratings outage degrading to
+//     relevance-only rather than failing the run. Ratings are served from a
+//     seeded cache, so no test reaches MDBList or OMDB;
+//   - the exclusion set and the read-time drift filter share ONE reader
+//     (collectKnownTitleKeys): hidden titles (enum-cased — the lowercase fold
+//     is a pinned mutation), open PENDING/APPROVED requests, permanentlyDeclined
+//     requests, own DeletionVotes and the admin blacklist are all out at
+//     compute AND at read, while AVAILABLE and re-requestable DECLINED stay;
+//   - the store holds the whole rated shortlist (300) while at most 200 are
+//     served, so a drift exclusion backfills from the reserve at the same
+//     render; and a title in both the watchlist and watch history seeds ONCE
+//     (history wins);
 //   - the exclusion set is wider than the chosen seeds — an unseeded
 //     watchlist/watched title is still excluded from suggestions;
 //   - warmRecommendationsCache does one $transaction PER eligible user (never
@@ -71,6 +83,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary } =
   await import("../src/lib/recommendations.ts");
+const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 
 // ── in-memory tables ─────────────────────────────────────────────────────────
 type MT = "MOVIE" | "TV";
@@ -132,12 +145,21 @@ interface UserRecRow {
   seedCount?: number;
 }
 
+interface HiddenRow { userId: string; tmdbId: number; mediaType: MT; createdAt: Date }
+interface RequestRow { requestedBy: string; tmdbId: number; mediaType: MT; status: "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE"; permanentlyDeclined: boolean }
+interface VoteRow { userId: string; tmdbId: number; mediaType: MT }
+interface BlacklistRow { tmdbId: number; mediaType: MT }
+
 let users: UserRow[] = [];
 let authSessions: AuthSessionRow[] = [];
 let mediaServerUsers: MediaServerUserRow[] = [];
 let playHistoryRows: PlayHistoryRow[] = [];
 let watchlistRows: WatchlistRow[] = [];
 let userRecRows: UserRecRow[] = [];
+let hiddenItems: HiddenRow[] = [];
+let mediaRequests: RequestRow[] = [];
+let deletionVotes: VoteRow[] = [];
+let blacklistItems: BlacklistRow[] = [];
 let transactionCalls = 0;
 let watchlistFindManyCalls = 0;
 
@@ -329,6 +351,39 @@ shadowPrismaModel(prisma, "setting", {
   findMany: async () => [],
 });
 
+// ── exclusion sources (collectKnownTitleKeys) ───────────────────────────────
+shadowPrismaModel(prisma, "hiddenItem", {
+  findMany: async (args: { where: { userId: string } }) =>
+    hiddenItems
+      .filter((r) => r.userId === args.where.userId)
+      .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+shadowPrismaModel(prisma, "mediaRequest", {
+  // Mirrors the real predicate: requestedBy + (status in [...] OR permanentlyDeclined).
+  findMany: async (args: {
+    where: {
+      requestedBy: string;
+      OR: [{ status: { in: string[] } }, { permanentlyDeclined: boolean }];
+    };
+  }) =>
+    mediaRequests
+      .filter(
+        (r) =>
+          r.requestedBy === args.where.requestedBy &&
+          (args.where.OR[0].status.in.includes(r.status) || r.permanentlyDeclined === args.where.OR[1].permanentlyDeclined),
+      )
+      .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+shadowPrismaModel(prisma, "deletionVote", {
+  findMany: async (args: { where: { userId: string } }) =>
+    deletionVotes
+      .filter((r) => r.userId === args.where.userId)
+      .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+shadowPrismaModel(prisma, "blacklistItem", {
+  findMany: async () => blacklistItems.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+
 // ── tmdbCache ───────────────────────────────────────────────────────────────
 // findUnique always misses (suggestion-cache correctness is tmdb.ts's concern,
 // not this file's) and writes are swallowed. findMany DOES serve, because it is
@@ -437,6 +492,13 @@ beforeEach(() => {
   playHistoryRows = [];
   watchlistRows = [];
   userRecRows = [];
+  hiddenItems = [];
+  mediaRequests = [];
+  deletionVotes = [];
+  blacklistItems = [];
+  // blacklist.ts caches its resolved set module-globally for 30s — without this
+  // a test's blacklist rows leak into every later test in the file.
+  invalidateBlacklistCache();
   suggestionsFor.clear();
   ratingRows = [];
   fetchCalls.length = 0;
@@ -542,14 +604,16 @@ test("windowed-first top-up: a busy user's few recent watches keep the TOP slots
   );
   // Seed dedup across the two groupings: 60 sits in BOTH the windowed and the
   // all-time result, so a missing dedup would seed it twice and double 666's
-  // score. Derivations (see the scoring block in recommendations.ts):
-  //   666 = 1.0 × recency(3d)   × count(1) × position(0) = 0.9913855…
-  //   555 = 1.0 × recency(300d) × count(3) × position(0) = 0.5558331…
+  // score. Derivations (see the scoring block in recommendations.ts) — the
+  // trailing ×0.9 is OBSCURITY_DAMP: these fixtures carry vote_count 0 and no
+  // seeded ratings, so every candidate here is unrated-obscure:
+  //   666 = 1.0 × recency(3d)   × count(1) × position(0) × 0.9 = 0.8922469…
+  //   555 = 1.0 × recency(300d) × count(3) × position(0) × 0.9 = 0.5002498…
   const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
   const near = (actual: number, expected: number, msg: string) =>
     assert.ok(Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
-  near(byId.get(666)!.score, 0.991385515264672, "one contribution — a duplicated seed would double this");
-  near(byId.get(555)!.score, 0.555833141019026, "the older, more-watched seed contributes less");
+  near(byId.get(666)!.score, 0.8922469637382048, "one contribution — a duplicated seed would double this");
+  near(byId.get(555)!.score, 0.5002498269171234, "the older, more-watched seed contributes less");
   assert.ok(byId.get(666)!.score < 1.5, "a doubled seed would land far above this");
 });
 
@@ -601,16 +665,17 @@ test("scoring: recency + compressed play-count per seed, positional decay per su
   const near = (actual: number | undefined, expected: number, msg: string) =>
     assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
 
-  // 999 is first in all three lists, so it collects each seed's full weight.
-  near(byId.get(999)?.score, 3.578551633309524, "corroboration sums every seed's contribution");
+  // 999 is first in all three lists, so it collects each seed's full weight
+  // (sum × 0.9 OBSCURITY_DAMP — unrated zero-vote fixtures).
+  near(byId.get(999)?.score, 3.2206964699785716, "corroboration sums every seed's contribution");
 
   // 888 sits SECOND in seed 20's list, so it is discounted by position(1) =
   // 1/(1 + 1/10). Without positional decay it would score seed 20's full
-  // 0.9913855 — the assertion below is what distinguishes the two.
-  near(byId.get(888)?.score, 0.901259559331520, "a later suggestion in the same list is worth less");
+  // damped weight (0.9913855 × 0.9) — the assertion below distinguishes the two.
+  near(byId.get(888)?.score, 0.811133603398368, "a later suggestion in the same list is worth less");
   assert.ok(
-    byId.get(888)!.score < 0.991385515264672,
-    "position 1 must score strictly below the seed's full weight",
+    byId.get(888)!.score < 0.9913855152646721 * 0.9,
+    "position 1 must score strictly below the seed's full (damped) weight",
   );
 
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [999, 888]); // ranked by score desc
@@ -670,8 +735,9 @@ test("reason: a candidate names the STRONGEST seed that surfaced it, not the fir
   const { candidates } = await computeRecommendationsForUser("u1");
   assert.equal(candidates.length, 1);
   const c = candidates[0];
-  // 0.9856975 (history, 5d old) + 1.5 (watchlist, added today), both at position 0.
-  assert.ok(Math.abs(c.score - 2.485697565751686) < 1e-9, `score was ${c.score}`);
+  // (0.9856975 (history, 5d old) + 1.5 (watchlist, added today)) × 0.9
+  // OBSCURITY_DAMP, both contributions at position 0.
+  assert.ok(Math.abs(c.score - 2.2371278091765174) < 1e-9, `score was ${c.score}`);
   assert.equal(c.reasonTitle, "The Strong One");
   assert.equal(c.reasonTmdbId, 30);
   assert.equal(c.reasonSource, "WATCHLIST");
@@ -859,6 +925,205 @@ test("getRecommendationSummary: a user with no cached picks reports nothing rath
   assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0 });
 });
 
+// ── exclusion widening: hidden / requests / votes / blacklist ────────────────
+
+test("exclusion: a hidden title never enters the stored set, and hiding later vacates its slot at read time", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111), movieItem(222)]);
+  // Enum-cased mediaType, exactly as the DB stores it. The compute fold must
+  // match candidateKey's enum casing — folding through getUserHiddenSet's
+  // lowercase keyspace would silently never match (the casing trap).
+  hiddenItems = [{ userId: "u1", tmdbId: 111, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [222], "the hidden title is excluded at COMPUTE");
+
+  // Read-time drift: a row stored before the hide must vacate on the next render.
+  userRecRows = [
+    { id: "a", userId: "u1", tmdbId: 111, mediaType: "MOVIE", title: "Hidden Later", overview: null, posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 5, score: 2, rank: 0, computedAt: daysAgo(0) },
+    { id: "b", userId: "u1", tmdbId: 333, mediaType: "MOVIE", title: "Still Fine", overview: null, posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 5, score: 1, rank: 1, computedAt: daysAgo(0) },
+  ];
+  const served = await getUserRecommendations("u1");
+  assert.deepEqual(served.map((m) => m.id), [333], "the hidden row is dropped at READ, tier reassigned over survivors");
+  assert.equal(served[0].matchTier, "top", "the survivor inherits the top band");
+});
+
+test("exclusion: open requests are out, AVAILABLE and re-requestable DECLINED stay in", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(1), movieItem(2), movieItem(3), movieItem(4), movieItem(5)]);
+  mediaRequests = [
+    { requestedBy: "u1", tmdbId: 1, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false },
+    { requestedBy: "u1", tmdbId: 2, mediaType: "MOVIE", status: "APPROVED", permanentlyDeclined: false },
+    // AVAILABLE deliberately stays: "On your server" filtering is a feature,
+    // and the request lifecycle already ran its course.
+    { requestedBy: "u1", tmdbId: 3, mediaType: "MOVIE", status: "AVAILABLE", permanentlyDeclined: false },
+    // Plain DECLINED stays: it is re-requestable.
+    { requestedBy: "u1", tmdbId: 4, mediaType: "MOVIE", status: "DECLINED", permanentlyDeclined: false },
+    // permanentlyDeclined goes: the request POST 403s it forever.
+    { requestedBy: "u1", tmdbId: 5, mediaType: "MOVIE", status: "DECLINED", permanentlyDeclined: true },
+  ];
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(
+    candidates.map((c) => c.tmdbId).sort((a, b) => a - b),
+    [3, 4],
+    "PENDING/APPROVED/permanentlyDeclined excluded; AVAILABLE and plain DECLINED kept",
+  );
+});
+
+test("exclusion: another user's requests and votes do NOT poison this user's shelf", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+  mediaRequests = [{ requestedBy: "someone-else", tmdbId: 111, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false }];
+  deletionVotes = [{ userId: "someone-else", tmdbId: 111, mediaType: "MOVIE" }];
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [111], "exclusions are strictly per-user (blacklist aside)");
+});
+
+test("exclusion: own DeletionVotes and the admin blacklist are out, at compute AND at read", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111), movieItem(222), movieItem(333)]);
+  deletionVotes = [{ userId: "u1", tmdbId: 111, mediaType: "MOVIE" }];
+  blacklistItems = [{ tmdbId: 222, mediaType: "MOVIE" }];
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [333]);
+
+  // Read-time: rows stored before the vote/blacklisting vacate on render.
+  userRecRows = [111, 222, 333].map((id, i) => ({
+    id: `r${id}`, userId: "u1", tmdbId: id, mediaType: "MOVIE" as MT, title: `T${id}`,
+    overview: null, posterPath: null, backdropPath: null, releaseDate: null,
+    voteAverage: 5, score: 3 - i, rank: i, computedAt: daysAgo(0),
+  }));
+  const served = await getUserRecommendations("u1");
+  assert.deepEqual(served.map((m) => m.id), [333]);
+});
+
+// ── store 300 / serve 200 ─────────────────────────────────────────────────────
+
+test("store/serve split: the rated reserve is stored, at most 200 are served, and drift backfills from the reserve", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(0) }];
+  // 6 seeds × 40 distinct suggestions = 240 candidates — above the old 200 cap,
+  // below the shortlist, so the stored count itself proves the raise.
+  playHistoryRows = Array.from({ length: 6 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 10 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(1), title: `Seed ${i}`,
+  }));
+  for (let i = 0; i < 6; i++) {
+    suggestionsFor.set(
+      `movie:${10 + i}`,
+      Array.from({ length: 40 }, (_, j) => movieItem(1000 + i * 40 + j)),
+    );
+  }
+
+  await warmRecommendationsCache();
+  const stored = userRecRows.filter((r) => r.userId === "u1");
+  assert.equal(stored.length, 240, "everything scored+rated is stored (old cap was 200)");
+
+  const served = await getUserRecommendations("u1");
+  assert.equal(served.length, 200, "the serve cap holds regardless of reserve size");
+
+  // Drift: hide a served row — the reserve backfills at the SAME render, so the
+  // count stays 200 instead of shrinking until the next cron.
+  hiddenItems = [{ userId: "u1", tmdbId: served[0].id, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+  const afterHide = await getUserRecommendations("u1");
+  assert.equal(afterHide.length, 200, "a drift exclusion backfills from the stored reserve");
+  assert.ok(!afterHide.some((m) => m.id === served[0].id), "the hidden row itself is gone");
+});
+
+// ── quality prior: the TMDB vote term is alive, and obscurity is damped ──────
+
+test("quality: TMDB's own score now participates — a well-voted 8.5 outranks a 10-vote nobody", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  // Same seed. The obscure one sits FIRST (higher relevance via position);
+  // only the TMDB vote term can flip the order — no external ratings seeded.
+  // Before the voteCount fix both were q===null and the order never flipped.
+  suggestionsFor.set("movie:10", [
+    { ...movieItem(111), vote_average: 9.9, vote_count: 10 },   // 10 voters — noise
+    { ...movieItem(222), vote_average: 8.5, vote_count: 5000 }, // real acclaim
+  ]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  // 222: q = 0.85 → ×1.10; at position 1 (0.90909…) → 1.0 × w × 0.909 × 1.10 = 1.0×w
+  // 111: q = null (10 < 50 votes) → OBSCURITY_DAMP ×0.9 at position 0 → 0.9×w
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [222, 111], "the vote term reorders; dead voteCount could not");
+  const w = 0.9971174404154314; // seed weight at 1d, count 1
+  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * 1.1) < 1e-9, `got ${byId.get(222)!.score}`);
+  assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, `got ${byId.get(111)!.score}`);
+});
+
+test("quality: unrated-obscure is damped to exactly rated-4.5's multiplier — never below known-bad", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  suggestionsFor.set("movie:10", [
+    { ...movieItem(111), vote_count: 0 },                        // unrated-obscure → ×0.9
+    { ...movieItem(222), vote_average: 7.0, vote_count: 5000 },  // unrated by providers, real audience → tmdb term
+  ]);
+  seedRatings(333, "movie", {}); // unrelated row; must not affect anything
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  const w = 0.9971174404154314;
+  assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, "obscure: damped by exactly OBSCURITY_DAMP");
+  // 222: q = 0.7 → ×(1 + 0.5×0.05) = 1.025, at position 1 → w × (1/1.1) × 1.025
+  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * 1.025) < 1e-9, "a real audience is never damped");
+});
+
+// ── watchlist ∩ history seed dedup ────────────────────────────────────────────
+
+test("seed dedup: a watched title's stale watchlist entry does not double-seed", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // The core loop: the user watchlisted title 10, then watched it twice. The
+  // WatchlistItem row survives (watching never deletes it), so before the dedup
+  // this title seeded TWICE — 1.0×recency×count(2) + 1.5×recency ≈ 2.5x any
+  // single-source seed, silently tilting every engaged user's shelf toward
+  // whatever they most recently got through their list.
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Both Pools" },
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(2), title: "Both Pools" },
+  ];
+  watchlistRows = [{ userId: "u1", tmdbId: 10, mediaType: "MOVIE", createdAt: daysAgo(0), title: "Both Pools" }];
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.equal(candidates.length, 1);
+  const c = candidates[0];
+  // Exactly ONE contribution, from the HISTORY seed (the fulfilled list entry is
+  // bookkeeping; history carries the real recency + count):
+  // 1.0 × recency(1d) × count(2) × position(0) × 0.9 damp = 0.97844950…
+  assert.ok(Math.abs(c.score - 1.0871661180448523 * 0.9) < 1e-9, `got ${c.score} — ~2.24 means it double-seeded`);
+  assert.equal(c.seedCount, 1, "one seed, not two");
+  assert.equal(c.reasonSource, "WATCH_HISTORY", "the history seed wins the dedup");
+});
+
 // ── seed selection is recency-first ──────────────────────────────────────────
 
 test("seed SELECTION is the last 100 titles played — a heavy old binge no longer takes a slot", async () => {
@@ -950,10 +1215,11 @@ test("language: with only one language present, nothing is penalised", async () 
 
   const { candidates } = await computeRecommendationsForUser("u1");
   // Share is 1.0, so languageFactor is exactly 1 and the score is the raw
-  // contribution — a monolingual viewer must not be silently scaled down.
-  // 1.0 (type) × recency(1d) × count(1) × position(0)
-  //   = 0.25 + 0.75 × 0.5^(1/180) = 0.9971174404154314
-  assert.ok(Math.abs(candidates[0].score - 0.9971174404154314) < 1e-12, `score was ${candidates[0].score}`);
+  // contribution times only OBSCURITY_DAMP (unrated, vote_count 0) — a
+  // monolingual viewer must not be silently scaled down by LANGUAGE.
+  // 1.0 (type) × recency(1d) × count(1) × position(0) × 0.9
+  //   = (0.25 + 0.75 × 0.5^(1/180)) × 0.9 = 0.8974056963738883
+  assert.ok(Math.abs(candidates[0].score - 0.8974056963738883) < 1e-12, `score was ${candidates[0].score}`);
 });
 
 test("language: a title with no language recorded is left alone", async () => {
