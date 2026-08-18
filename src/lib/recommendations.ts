@@ -74,6 +74,33 @@ const SEED_COUNT_WEIGHT = 0.3;
 // a title many seeds agree on.
 const SUGGESTION_POSITION_K = 10;
 
+// The bands behind the "Top match" / "Strong match" chip, as fractions of the
+// viewer's own ranked set.
+//
+// Banded by RANK, not by score. A raw score is a sum of seed weights, so its
+// magnitude tracks how much history someone has rather than how good the pick
+// is — two people cannot be compared, and even within one shelf the ratio to
+// the top score depends on whether that top title happened to be corroborated
+// by 30 seeds or 3. Rank position is the thing the engine actually asserts.
+//
+// The chip earns its place because SORTING HIDES THE RANKING: choose Newest or
+// Highest rated and the engine's ordering is gone from the page entirely. This
+// is what carries it through.
+const MATCH_TIER_TOP_FRACTION = 0.1;
+const MATCH_TIER_STRONG_FRACTION = 0.33;
+
+// index is the position in the viewer's full ranked set, AFTER drift filtering
+// but BEFORE any page-level type/availability filter — so narrowing to TV never
+// re-labels a title that did not move.
+function matchTierFor(index: number, total: number): "top" | "strong" | undefined {
+  if (total <= 0) return undefined;
+  // ceil, so a shelf of any size still labels its best pick rather than
+  // rounding the whole top band away.
+  if (index < Math.ceil(total * MATCH_TIER_TOP_FRACTION)) return "top";
+  if (index < Math.ceil(total * MATCH_TIER_STRONG_FRACTION)) return "strong";
+  return undefined;
+}
+
 // Watchlist is an unambiguous single-person signal (added through the Summonarr
 // UI by whoever is signed in); watch-history via resolveLinkedMediaServerUserIds
 // can represent a shared Plex/Jellyfin household profile. Watchlist gets a
@@ -604,5 +631,13 @@ export async function getUserRecommendations(userId: string): Promise<TmdbMedia[
     if (r.tmdbId != null && r.mediaType != null) currentlyKnown.add(candidateKey(r.tmdbId, r.mediaType));
   }
 
-  return cached.filter((row) => !currentlyKnown.has(candidateKey(row.tmdbId, row.mediaType))).map(rowToTmdbMedia);
+  // Tier is assigned over the SURVIVING set, so a shelf whose top pick has since
+  // been watched promotes the next title into the top band rather than leaving
+  // a gap where a chip used to be.
+  const surviving = cached.filter((row) => !currentlyKnown.has(candidateKey(row.tmdbId, row.mediaType)));
+  return surviving.map((row, i) => {
+    const media = rowToTmdbMedia(row);
+    const tier = matchTierFor(i, surviving.length);
+    return tier ? { ...media, matchTier: tier } : media;
+  });
 }

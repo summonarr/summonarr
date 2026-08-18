@@ -14,6 +14,8 @@
 //     positional decay, dropping recency, or un-compressing the play count all
 //     break at least one assertion — the last of those being the bug where a
 //     long-ago 40-episode binge outranks something watched two days ago;
+//   - the match-strength band is assigned by RANK over the viewer's surviving
+//     set (top 10% / top 33%), independently of whether a row carries a reason;
 //   - the exclusion set is wider than the chosen seeds — an unseeded
 //     watchlist/watched title is still excluded from suggestions;
 //   - warmRecommendationsCache does one $transaction PER eligible user (never
@@ -678,6 +680,88 @@ test("getUserRecommendations surfaces the reason, and omits it entirely for a pr
     seedCount: 3,
   });
   assert.equal(out[1].recommendedBecause, undefined);
+});
+
+test("matchTier: bands are assigned by RANK over the viewer's whole set, top 10% then top 33%", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  const base = {
+    userId: "u1", mediaType: "MOVIE" as MT, overview: null, posterPath: null,
+    backdropPath: null, releaseDate: null, voteAverage: 0, computedAt: new Date(T0),
+  };
+  // 20 picks: ceil(20 × 0.10) = 2 "top", then up to ceil(20 × 0.33) = 7 "strong",
+  // so ranks 0-1 are top, 2-6 strong, 7-19 unlabelled.
+  userRecRows = Array.from({ length: 20 }, (_, i) => ({
+    ...base, id: `r${i}`, tmdbId: 100 + i, title: `T${i}`, score: 20 - i, rank: i,
+  }));
+
+  const out = await getUserRecommendations("u1");
+  assert.equal(out.length, 20);
+  assert.deepEqual(out.slice(0, 2).map((m) => m.matchTier), ["top", "top"]);
+  assert.deepEqual(out.slice(2, 7).map((m) => m.matchTier), ["strong", "strong", "strong", "strong", "strong"]);
+  assert.deepEqual(
+    out.slice(7).map((m) => m.matchTier),
+    Array(13).fill(undefined),
+    "the long tail carries no chip — a label everything gets says nothing",
+  );
+});
+
+test("matchTier: a one-pick shelf still labels its best", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  userRecRows = [
+    {
+      id: "solo", userId: "u1", tmdbId: 11, mediaType: "MOVIE", title: "Only Pick",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: null,
+      voteAverage: 0, score: 9, rank: 0, computedAt: new Date(T0),
+    },
+  ];
+  // ceil(1 × 0.1) = 1, so the single pick is labelled. Flooring would round the
+  // top band away entirely and a small shelf would carry no chips at all.
+  const out = await getUserRecommendations("u1");
+  assert.deepEqual(out.map((m) => m.matchTier), ["top"]);
+});
+
+test("matchTier: bands are computed over the SURVIVING set, not the stored one", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  const base = {
+    userId: "u1", mediaType: "MOVIE" as MT, overview: null, posterPath: null,
+    backdropPath: null, releaseDate: null, voteAverage: 0, computedAt: new Date(T0),
+  };
+  // 20 stored, but the viewer has since watched the bottom 10 — so 10 survive.
+  userRecRows = Array.from({ length: 20 }, (_, i) => ({
+    ...base, id: `r${i}`, tmdbId: 100 + i, title: `T${i}`, score: 20 - i, rank: i,
+  }));
+  playHistoryRows = Array.from({ length: 10 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 110 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(1), title: `T${10 + i}`,
+  }));
+
+  const out = await getUserRecommendations("u1");
+  assert.equal(out.length, 10, "the watched half is filtered out first");
+
+  // Sized to 10 survivors: ceil(10 × 0.1) = 1 top, ceil(10 × 0.33) = 4 → ranks
+  // 1-3 strong. Sizing to the stored 20 instead would give 2 top and 7 strong,
+  // so index 1 is the discriminator — "top" there means the band was computed
+  // against rows the viewer can no longer see.
+  assert.deepEqual(
+    out.map((m) => m.matchTier),
+    ["top", "strong", "strong", "strong", undefined, undefined, undefined, undefined, undefined, undefined],
+  );
+  assert.equal(out[1].matchTier, "strong", "banding against the pre-drift set would make this 'top'");
+});
+
+test("matchTier: a pre-reason row is still banded — rank is known even when the why is not", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  userRecRows = [
+    {
+      id: "old", userId: "u1", tmdbId: 42, mediaType: "MOVIE", title: "Pre-migration",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: null,
+      voteAverage: 0, score: 5, rank: 0, computedAt: new Date(T0),
+    },
+  ];
+  const out = await getUserRecommendations("u1");
+  assert.equal(out[0].recommendedBecause, undefined);
+  assert.equal(out[0].matchTier, "top", "the two labels are independent");
 });
 
 test("getRecommendationSummary: DISTINCT seeds per pool, and the newest build time", async () => {

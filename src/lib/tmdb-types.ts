@@ -98,6 +98,14 @@ export interface TmdbMedia {
     source: "WATCH_HISTORY" | "WATCHLIST";
     seedCount: number;
   };
+
+  // How strongly the For You engine rates this pick, as a band rather than a
+  // raw score — the score is a sum of seed weights whose magnitude depends on
+  // how much history a viewer has, so it is meaningless to show and impossible
+  // to compare between people. Set alongside recommendedBecause on the
+  // recommendation read path only; absent means "not in a labelled band", which
+  // is the majority of a 200-title shelf and renders no chip.
+  matchTier?: "top" | "strong";
 }
 
 export interface TmdbSeason {

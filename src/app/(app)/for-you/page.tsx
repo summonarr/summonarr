@@ -197,12 +197,45 @@ export default async function ForYouPage({
   );
 }
 
-// The one-line "why" under a card. Absent for rows written before the reason
-// columns existed (they heal on the next cron run), so this renders nothing
-// rather than a placeholder.
+// Match-strength band, shown because SORTING HIDES THE RANKING: once the grid is
+// ordered by Newest or Highest rated, nothing on the page says which picks the
+// engine actually rates. Only the labelled bands render — most of a 200-title
+// shelf carries no chip, which is what keeps the label meaning something.
+function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) {
+  const isTop = tier === "top";
+  return (
+    <span
+      className={isTop ? "ds-chip ds-chip-accent" : "ds-chip"}
+      style={{
+        paddingLeft: 6,
+        paddingRight: 7,
+        ...(isTop
+          ? {}
+          : { background: "var(--ds-accent-soft)", color: "var(--ds-accent)", border: "1px solid var(--ds-accent-ring)" }),
+      }}
+      title={
+        isTop
+          ? "Among the highest-ranked picks the engine built for you"
+          : "Ranked well above the rest of your picks"
+      }
+    >
+      {isTop ? "Top match" : "Strong match"}
+    </span>
+  );
+}
+
+// The "why" under a card, with the strength band above it. Both are optional and
+// independent: a row written before the reason columns existed still gets a chip
+// (rank is always known), and an unbanded pick still gets its reason line.
 function RecommendationReason({ media }: { media: TmdbMedia }) {
   const why = media.recommendedBecause;
-  if (!why) return null;
+  if (!why) {
+    return media.matchTier ? (
+      <div className="flex">
+        <MatchTierChip tier={media.matchTier} />
+      </div>
+    ) : null;
+  }
 
   const lead = why.source === "WATCHLIST" ? "On your watchlist:" : "Because you watched";
   // seedCount counts every seed that surfaced this title, the named one
@@ -210,18 +243,21 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
   const others = why.seedCount - 1;
 
   return (
-    <p
-      className="ds-mono m-0 line-clamp-2"
-      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
-      title={
-        others > 0
-          ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you've seen`
-          : `${lead} ${why.title}`
-      }
-    >
-      {lead}{" "}
-      <span style={{ color: "var(--ds-fg-muted)" }}>{why.title}</span>
-      {others > 0 && <span> + {others} more</span>}
-    </p>
+    <div className="flex flex-col gap-1 items-start">
+      {media.matchTier && <MatchTierChip tier={media.matchTier} />}
+      <p
+        className="ds-mono m-0 line-clamp-2"
+        style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
+        title={
+          others > 0
+            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you've seen`
+            : `${lead} ${why.title}`
+        }
+      >
+        {lead}{" "}
+        <span style={{ color: "var(--ds-fg-muted)" }}>{why.title}</span>
+        {others > 0 && <span> + {others} more</span>}
+      </p>
+    </div>
   );
 }
