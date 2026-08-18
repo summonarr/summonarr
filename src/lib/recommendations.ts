@@ -13,8 +13,13 @@ import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 // by the warm-recommendations cron. getUserRecommendations is the only
 // live-request-path read — it never calls TMDB.
 
-const MAX_WATCH_HISTORY_SEEDS = 20;
-const MAX_WATCHLIST_SEEDS = 8;
+// 3x the original 20/8. Deeper history is the point: at 20 slots the engine only
+// ever saw a sliver of a real library, so most of what someone had watched could
+// never influence anything. The cost is bounded by the shared 7-day TMDB
+// suggestion cache (tmdb.ts) — seeds repeat across runs and across users, so a
+// warm cycle issues far fewer requests than the cold worst case of 2 per seed.
+const MAX_WATCH_HISTORY_SEEDS = 60;
+const MAX_WATCHLIST_SEEDS = 24;
 const SEED_RECENCY_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
 // Sized for the dedicated /for-you page (a full grid), not just the 20-item
 // home rail. Costs no extra TMDB calls: the 28-seed fan-out already produces a
@@ -27,6 +32,47 @@ const MAX_STORED_RECOMMENDATIONS_PER_USER = 200;
 const SEED_CONCURRENCY = 5;
 const USER_CONCURRENCY = 5;
 const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+
+// ── Scoring ────────────────────────────────────────────────────────────────
+// A candidate's score is the sum, over every seed that surfaced it, of
+//
+//     seedTypeWeight × recencyFactor(seed) × countFactor(seed) × positionFactor(item)
+//
+// Each factor answers a different question, and the previous single-factor model
+// (position in the SEED LIST, nothing else) got two of them wrong.
+
+// How fast a seed's influence fades with age, and how far it can fade. The floor
+// is what makes deep history worth seeding at all: a pure half-life sends a
+// three-year-old watch to ~0.004, so the extra slots above would buy nothing.
+// At FLOOR 0.25 / half-life 180d a seed is worth 1.0 today, 0.63 at six months,
+// 0.42 at a year, and never less than a quarter of a fresh one.
+//
+// This replaces weighting by POSITION IN THE SEED LIST, which was ordered
+// count-first — so a movie watched once last week ranked below a show binged
+// years ago, and its recommendations were weighted as though it mattered less.
+const SEED_RECENCY_HALF_LIFE_MS = 180 * 24 * 60 * 60 * 1000;
+const SEED_RECENCY_FLOOR = 0.25;
+
+// Watching something repeatedly is a real signal, but PlayHistory writes one row
+// PER EPISODE, so raw counts put a 62-episode series two orders of magnitude
+// above any film. log10 at a 0.3 coefficient compresses that to 1.0x for a movie
+// vs ~1.5x for the whole of Breaking Bad — present, but unable to outrun the 4x
+// span of recency above. Weighting by raw count is the bug this file has always
+// been designed against (see selectSeeds); this is the smallest dose that keeps
+// the signal without reopening it.
+const SEED_COUNT_WEIGHT = 0.3;
+
+// Position of a suggestion WITHIN its seed's list. TMDB returns its behavioural
+// /recommendations first and the cruder /similar after (see getMovieSuggestions),
+// so this favours the former without either endpoint being named here.
+//
+// It exists because the list is now 40 long (SUGGESTIONS_CACHE_MAX, widened from
+// 18). Scoring every entry equally meant the 40th — a weak keyword match — voted
+// as loudly as the 1st, which diluted the ranking exactly as the pool grew.
+// 1/(1 + i/10) is 1.0 at the head, 0.53 by the 10th and 0.20 at the 40th: sharp
+// where it matters, with a long tail that still lets broad corroboration promote
+// a title many seeds agree on.
+const SUGGESTION_POSITION_K = 10;
 
 // Watchlist is an unambiguous single-person signal (added through the Summonarr
 // UI by whoever is signed in); watch-history via resolveLinkedMediaServerUserIds
@@ -79,20 +125,48 @@ function toTmdbMediaType(m: MediaType): "movie" | "tv" {
   return m === "MOVIE" ? "movie" : "tv";
 }
 
-// Linearly interpolates 1.0 (index 0, most recent/most-watched) down to 0.5
-// (the oldest seed in its own list) rather than an arbitrary calendar half-life.
+// How much a seed still counts, given when it was last watched (or added to the
+// watchlist). Bounded below by SEED_RECENCY_FLOOR so old-but-real taste keeps a
+// vote. An absent timestamp is treated as maximally old rather than dropped —
+// the seed is genuine, we just can't date it.
+function recencyFactor(at: Date | null | undefined, now: number): number {
+  if (!at) return SEED_RECENCY_FLOOR;
+  // Clamp negatives: a clock skew that puts a watch in the future must not
+  // amplify a seed past a fresh one.
+  const ageMs = Math.max(0, now - at.getTime());
+  const decayed = Math.pow(0.5, ageMs / SEED_RECENCY_HALF_LIFE_MS);
+  return SEED_RECENCY_FLOOR + (1 - SEED_RECENCY_FLOOR) * decayed;
+}
+
+// Repeat-watch signal, log-compressed — see SEED_COUNT_WEIGHT.
+function countFactor(count: number): number {
+  return 1 + SEED_COUNT_WEIGHT * Math.log10(Math.max(1, count));
+}
+
+// Weight of a single suggestion by its rank within its seed's list.
+function positionFactor(index: number): number {
+  return 1 / (1 + index / SUGGESTION_POSITION_K);
+}
+
+// Seeds are weighted ABSOLUTELY (by their own age and repeat count), not by
+// their position in the selected list. Two consequences worth knowing:
+//   - a seed's weight no longer depends on how many other seeds there are, so
+//     raising MAX_WATCH_HISTORY_SEEDS cannot dilute the ones already there;
+//   - the top seed is no longer pinned to exactly 1.0 — a viewer whose most
+//     recent watch was months ago has uniformly lower weights. Scores are only
+//     ever compared WITHIN one user, so that is immaterial to the ranking.
 function weightSeeds(
-  rows: { tmdbId: number; mediaType: MediaType; title: string }[],
+  rows: { tmdbId: number; mediaType: MediaType; title: string; lastAt?: Date | null; count?: number }[],
   typeWeight: number,
   source: RecommendationSeed,
+  now: number,
 ): Seed[] {
-  const n = rows.length;
-  return rows.map((r, i) => ({
+  return rows.map((r) => ({
     tmdbId: r.tmdbId,
     mediaType: r.mediaType,
     title: r.title,
     source,
-    weight: typeWeight * (n <= 1 ? 1 : 1 - 0.5 * (i / (n - 1))),
+    weight: typeWeight * recencyFactor(r.lastAt, now) * countFactor(r.count ?? 1),
   }));
 }
 
@@ -142,7 +216,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       where: { userId },
       orderBy: { createdAt: "desc" },
       take: MAX_WATCHLIST_SEEDS,
-      select: { tmdbId: true, mediaType: true, title: true },
+      select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
     }),
   ]);
 
@@ -169,11 +243,24 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       // PlayHistory.title is NOT NULL, but _max over an empty group is typed
       // nullable; fall back to the id so a reason is never a blank string.
       title: r._max.title ?? `TMDB #${r.tmdbId}`,
+      // Both were already being fetched to ORDER the groups; they now also
+      // weight them, which is the whole point of the rework.
+      lastAt: r._max.startedAt,
+      count: r._count.tmdbId,
     }));
 
+  // One `now` for the whole selection: reading the clock per seed would let a
+  // slow query change the weights partway down the list.
+  const now = Date.now();
   return [
-    ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY"),
-    ...weightSeeds(watchlistRows, WATCHLIST_SEED_WEIGHT, "WATCHLIST"),
+    ...weightSeeds(historySeeds, WATCH_HISTORY_SEED_WEIGHT, "WATCH_HISTORY", now),
+    // A watchlist entry has no play count; its recency is when it was added.
+    ...weightSeeds(
+      watchlistRows.map((r) => ({ ...r, lastAt: r.createdAt })),
+      WATCHLIST_SEED_WEIGHT,
+      "WATCHLIST",
+      now,
+    ),
   ];
 }
 
@@ -262,22 +349,30 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   seeds.forEach((seed, i) => {
     const result = suggestionResults[i];
     if (result.status !== "fulfilled") return;
+    // position is the index within THIS seed's suggestion list, so it has to be
+    // counted over the raw list — not over the survivors of the exclusion filter
+    // below, which would silently promote every item sitting behind a title the
+    // user had already watched.
+    let position = -1;
     for (const item of result.value) {
+      position++;
       rawSuggestions++;
       const mediaType = toDbMediaType(item.mediaType);
       const key = candidateKey(item.id, mediaType);
       if (excluded.has(key)) continue;
+      const contribution = seed.weight * positionFactor(position);
       const existing = scored.get(key);
       if (existing) {
-        existing.score += seed.weight;
+        existing.score += contribution;
         existing.seedCount++;
-        // Keep the STRONGEST seed as the reason, not the first one encountered.
-        // Seeds arrive in weight order within each pool but the two pools are
-        // concatenated (history then watchlist), so a later watchlist seed can
-        // outweigh an earlier history one — first-wins would name the weaker
-        // title. Ties keep the incumbent, which is the earlier/more-recent seed.
-        if (seed.weight > existing.reasonWeight) {
-          existing.reasonWeight = seed.weight;
+        // Keep the STRONGEST contribution as the reason, not the first one
+        // encountered — seeds are no longer visited in weight order at all, so
+        // first-wins would name an essentially arbitrary title. Comparing
+        // CONTRIBUTION rather than raw seed weight is deliberate: a slightly
+        // weaker seed that ranks this title first is a better explanation than a
+        // strong seed that had it 40th. Ties keep the incumbent.
+        if (contribution > existing.reasonWeight) {
+          existing.reasonWeight = contribution;
           existing.reasonTmdbId = seed.tmdbId;
           existing.reasonTitle = seed.title;
           existing.reasonMediaType = seed.mediaType;
@@ -294,20 +389,23 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
         backdropPath: item.backdropPath,
         releaseDate: item.releaseDate,
         voteAverage: item.voteAverage,
-        score: seed.weight,
+        score: contribution,
         rank: 0,
         reasonTmdbId: seed.tmdbId,
         reasonTitle: seed.title,
         reasonMediaType: seed.mediaType,
         reasonSource: seed.source,
-        reasonWeight: seed.weight,
+        reasonWeight: contribution,
         seedCount: 1,
       });
     }
   });
 
   const ranked = [...scored.values()]
-    .sort((a, b) => b.score - a.score)
+    // Scores now come from a continuous product of factors, so exact ties are
+    // rare — but when they happen, break by community rating rather than by
+    // Map insertion order, which is an artefact of seed iteration.
+    .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
     .map(({ reasonWeight: _reasonWeight, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
   return { candidates: ranked, conclusive: rawSuggestions > 0 };

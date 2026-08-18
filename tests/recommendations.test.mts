@@ -6,9 +6,14 @@
 //   - history seeding is windowed to the last 180 days (an old binge cannot
 //     outrank recent watches), falling back to all-time ONLY when the window
 //     is empty — while the exclusion set stays all-time;
-//   - scoring = seedTypeWeight × recencyWeight, summed across every seed that
-//     surfaced a candidate (multi-seed corroboration), with watchlist seeds
-//     (1.5x) outweighing watch-history seeds (1.0x) at equal recency;
+//   - scoring = seedTypeWeight × recency(seed age) × count(plays, log-compressed)
+//     × position(rank within the seed's suggestion list), summed across every
+//     seed that surfaced a candidate (multi-seed corroboration), with watchlist
+//     seeds (1.5x) outweighing watch-history seeds (1.0x) at equal recency.
+//     Each factor is pinned by a test that fails if it is neutralised: dropping
+//     positional decay, dropping recency, or un-compressing the play count all
+//     break at least one assertion — the last of those being the bug where a
+//     long-ago 40-episode binge outranks something watched two days ago;
 //   - the exclusion set is wider than the chosen seeds — an unseeded
 //     watchlist/watched title is still excluded from suggestions;
 //   - warmRecommendationsCache does one $transaction PER eligible user (never
@@ -218,7 +223,12 @@ shadowPrismaModel(prisma, "watchlistItem", {
     let rows = watchlistRows.filter((w) => w.userId === args.where.userId);
     if (args.orderBy?.createdAt === "desc") rows = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     if (args.take != null) rows = rows.slice(0, args.take);
-    return rows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title ?? `Listed ${r.tmdbId}` }));
+    return rows.map((r) => ({
+      tmdbId: r.tmdbId,
+      mediaType: r.mediaType,
+      title: r.title ?? `Listed ${r.tmdbId}`,
+      createdAt: r.createdAt,
+    }));
   },
 });
 
@@ -454,8 +464,10 @@ test("windowed-first top-up: a busy user's few recent watches keep the TOP slots
 
   const result = await computeRecommendationsForUser("u1");
 
-  // Both seed — but the recent watch owns index 0, so its suggestion carries
-  // the higher weight. The all-time count winner must NOT reclaim the top slot.
+  // Both seed — but the recent watch is weighted on its OWN age, so it wins
+  // despite the old favorite having 3x the plays. This is the case the scoring
+  // rework is for: under the previous list-position taper the count-ordered
+  // binge took slot 0 and outranked a watch from three days ago.
   assert.deepEqual(
     result.candidates.map((c) => c.tmdbId),
     [666, 555],
@@ -463,11 +475,15 @@ test("windowed-first top-up: a busy user's few recent watches keep the TOP slots
   );
   // Seed dedup across the two groupings: 60 sits in BOTH the windowed and the
   // all-time result, so a missing dedup would seed it twice and double 666's
-  // score past the sum of both weights. Index 0 of 2 weighs 1.0, index 1
-  // weighs 0.5 (the taper) — pin the exact single-contribution scores.
+  // score. Derivations (see the scoring block in recommendations.ts):
+  //   666 = 1.0 × recency(3d)   × count(1) × position(0) = 0.9913855…
+  //   555 = 1.0 × recency(300d) × count(3) × position(0) = 0.5558331…
   const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
-  assert.equal(byId.get(666)!.score, 1.0, "one contribution at the index-0 weight — a duplicated seed would double this");
-  assert.equal(byId.get(555)!.score, 0.5, "the topped-up seed contributes at the tail weight");
+  const near = (actual: number, expected: number, msg: string) =>
+    assert.ok(Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
+  near(byId.get(666)!.score, 0.991385515264672, "one contribution — a duplicated seed would double this");
+  near(byId.get(555)!.score, 0.555833141019026, "the older, more-watched seed contributes less");
+  assert.ok(byId.get(666)!.score < 1.5, "a doubled seed would land far above this");
 });
 
 test("seed recency window: ONLY-old history falls back to all-time seeding instead of clearing the shelf", async () => {
@@ -490,13 +506,17 @@ test("seed recency window: ONLY-old history falls back to all-time seeding inste
 
 // ── scoring: ranking, recency interpolation, seed-type weight, corroboration ─
 
-test("scoring: seed ranking (count desc, recency desc), recency-weighted contributions, watchlist (1.5x) outweighing history (1.0x), and multi-seed corroboration", async () => {
+test("scoring: recency + compressed play-count per seed, positional decay per suggestion, watchlist (1.5x) over history, and multi-seed corroboration", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
 
-  // Two history seeds: tmdbId 10 watched twice (most-frequent → seed index 0,
-  // weight 1.0×1.0), tmdbId 20 watched once (seed index 1 of 2, weight
-  // 1.0×0.5). One watchlist seed: tmdbId 30 (sole entry, weight 1.5×1.0).
+  // Two history seeds: tmdbId 10 watched twice (last 1d ago), tmdbId 20 watched
+  // once (3d ago). One watchlist seed, tmdbId 30, added today. Seed weights are
+  // now ABSOLUTE — typeWeight × recency(age) × count(plays) — so they no longer
+  // depend on how many seeds there are or what order they were selected in:
+  //   seed 10 = 1.0 × recency(1d) × count(2) = 1.0871661…
+  //   seed 20 = 1.0 × recency(3d) × count(1) = 0.9913855…
+  //   seed 30 = 1.5 × recency(0d) × count(1) = 1.5
   playHistoryRows = [
     { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(5) },
     { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
@@ -511,13 +531,55 @@ test("scoring: seed ranking (count desc, recency desc), recency-weighted contrib
 
   const result = await computeRecommendationsForUser("u1");
   const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
+  const near = (actual: number | undefined, expected: number, msg: string) =>
+    assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
 
-  // 999 = 1.0 (seed10) + 0.5 (seed20) + 1.5 (seed30) = 3.0; 888 = 0.5 (seed20 only).
-  assert.equal(byId.get(999)?.score, 3.0);
-  assert.equal(byId.get(888)?.score, 0.5);
+  // 999 is first in all three lists, so it collects each seed's full weight.
+  near(byId.get(999)?.score, 3.578551633309524, "corroboration sums every seed's contribution");
+
+  // 888 sits SECOND in seed 20's list, so it is discounted by position(1) =
+  // 1/(1 + 1/10). Without positional decay it would score seed 20's full
+  // 0.9913855 — the assertion below is what distinguishes the two.
+  near(byId.get(888)?.score, 0.901259559331520, "a later suggestion in the same list is worth less");
+  assert.ok(
+    byId.get(888)!.score < 0.991385515264672,
+    "position 1 must score strictly below the seed's full weight",
+  );
+
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [999, 888]); // ranked by score desc
   assert.equal(byId.get(999)?.rank, 0);
   assert.equal(byId.get(888)?.rank, 1);
+});
+
+test("scoring: a fresh single watch outweighs an old binge — recency beats raw play count", async () => {
+  // The compression in countFactor is what makes this true. PlayHistory writes
+  // one row PER EPISODE, so an unweighted count puts a 40-episode series ~40x
+  // above any film and the shelf becomes whatever was binged longest ago.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    ...Array.from({ length: 40 }, (_, i) => ({
+      mediaServerUserId: "msu1", tmdbId: 70, mediaType: "TV" as MT, watched: true, startedAt: daysAgo(500 + i),
+    })),
+    { mediaServerUserId: "msu1", tmdbId: 80, mediaType: "MOVIE", watched: true, startedAt: daysAgo(2) },
+  ];
+  suggestionsFor.set("tv:70", [tvItem(700)]);
+  suggestionsFor.set("movie:80", [movieItem(800)]);
+
+  const result = await computeRecommendationsForUser("u1");
+  assert.deepEqual(
+    result.candidates.map((c) => c.tmdbId),
+    [800, 700],
+    "the recent movie's suggestion outranks the long-ago 40-episode binge's",
+  );
+
+  // The binge is not silenced, just outweighed — it still carries more than the
+  // floor, because count DOES contribute. Both halves matter: a countFactor of
+  // 1 would make this equal to any single old watch, and an uncompressed one
+  // would put it back on top.
+  const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
+  assert.ok(byId.get(700)!.score > 0.25, "an old binge still votes");
+  assert.ok(byId.get(700)!.score < byId.get(800)!.score, "but never above fresh taste");
 });
 
 // ── the stored "why" ─────────────────────────────────────────────────────────
@@ -541,7 +603,8 @@ test("reason: a candidate names the STRONGEST seed that surfaced it, not the fir
   const { candidates } = await computeRecommendationsForUser("u1");
   assert.equal(candidates.length, 1);
   const c = candidates[0];
-  assert.equal(c.score, 2.5); // 1.0 (history) + 1.5 (watchlist)
+  // 0.9856975 (history, 5d old) + 1.5 (watchlist, added today), both at position 0.
+  assert.ok(Math.abs(c.score - 2.485697565751686) < 1e-9, `score was ${c.score}`);
   assert.equal(c.reasonTitle, "The Strong One");
   assert.equal(c.reasonTmdbId, 30);
   assert.equal(c.reasonSource, "WATCHLIST");
