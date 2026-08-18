@@ -39,6 +39,15 @@
 //     served, so a drift exclusion backfills from the reserve at the same
 //     render; and a title in both the watchlist and watch history seeds ONCE
 //     (history wins);
+//   - corroboration is decay-summed strongest-first (CORROBORATION_DECAY),
+//     bounding any candidate's amplification at 4x its best contribution —
+//     both the neutralised-decay and unsorted-contributions mutations are
+//     pinned;
+//   - a settled low-completion bail (watched:false only, cumulative playtime
+//     under 35%, last touch 14+ days old) dampens THAT title by ABANDON_DAMP,
+//     with the split-watch, fresh-pause and no-runtime guards each pinned by
+//     mutation — and the playHistory.groupBy stub honours where.watched, so
+//     the abandoned query cannot silently read the seed query's rows;
 //   - the exclusion set is wider than the chosen seeds — an unseeded
 //     watchlist/watched title is still excluded from suggestions;
 //   - warmRecommendationsCache does one $transaction PER eligible user (never
@@ -113,6 +122,9 @@ interface PlayHistoryRow {
   // PlayHistory.title is NOT NULL in the schema; optional here only so the
   // fixtures that predate the reason columns stay readable. Defaulted below.
   title?: string;
+  // Playback metrics for the abandoned-play query (watched:false rows).
+  playDuration?: number;
+  duration?: number;
 }
 interface WatchlistRow {
   userId: string;
@@ -195,16 +207,22 @@ shadowPrismaModel(prisma, "mediaServerUser", {
 // ── prisma.playHistory (seed groupBy + exclusion/drift findMany) ──────────
 shadowPrismaModel(prisma, "playHistory", {
   groupBy: async (args: {
-    where: { mediaServerUserId: { in: string[] }; startedAt?: { gte: Date } };
+    where: { mediaServerUserId: { in: string[] }; watched: boolean; startedAt?: { gte: Date } };
     take: number;
+    _sum?: { playDuration?: true };
+    _max?: { startedAt?: true; title?: true; duration?: true };
     orderBy?: ({ _count?: { tmdbId: "desc" } } | { _max?: { startedAt: "desc" } })[];
   }) => {
     const ids = new Set(args.where.mediaServerUserId.in);
     const cutoff = args.where.startedAt?.gte.getTime();
+    // HONOUR where.watched. This stub used to hardcode `p.watched` (truthy),
+    // which silently served the watched:FALSE abandoned-play query the same
+    // rows as the seed query — the abandoned test would then dampen nothing
+    // and the guard branches would be exercised against the wrong data.
     const eligible = playHistoryRows.filter(
       (p) =>
         ids.has(p.mediaServerUserId) &&
-        p.watched &&
+        p.watched === args.where.watched &&
         p.tmdbId != null &&
         p.mediaType != null &&
         (cutoff === undefined || p.startedAt.getTime() >= cutoff),
@@ -212,19 +230,32 @@ shadowPrismaModel(prisma, "playHistory", {
     // _max.title rides along with _max.startedAt exactly as the real aggregate
     // does — the engine names a seed off it, so a stub that omitted it would
     // silently exercise the "TMDB #<id>" fallback instead of the real path.
-    const groups = new Map<string, { tmdbId: number; mediaType: MT; count: number; max: number; title: string }>();
+    const groups = new Map<
+      string,
+      { tmdbId: number; mediaType: MT; count: number; max: number; title: string; playSum: number; maxDuration: number | null }
+    >();
     for (const r of eligible) {
       const key = `${r.tmdbId}:${r.mediaType}`;
       const title = r.title ?? `Watched ${r.tmdbId}`;
       const g = groups.get(key);
       if (g) {
         g.count++;
+        g.playSum += r.playDuration ?? 0;
+        if (r.duration != null && (g.maxDuration === null || r.duration > g.maxDuration)) g.maxDuration = r.duration;
         if (r.startedAt.getTime() > g.max) {
           g.max = r.startedAt.getTime();
           g.title = title;
         }
       } else {
-        groups.set(key, { tmdbId: r.tmdbId as number, mediaType: r.mediaType as MT, count: 1, max: r.startedAt.getTime(), title });
+        groups.set(key, {
+          tmdbId: r.tmdbId as number,
+          mediaType: r.mediaType as MT,
+          count: 1,
+          max: r.startedAt.getTime(),
+          title,
+          playSum: r.playDuration ?? 0,
+          maxDuration: r.duration ?? null,
+        });
       }
     }
     // HONOUR args.orderBy rather than assuming one. This stub used to hardcode
@@ -248,7 +279,10 @@ shadowPrismaModel(prisma, "playHistory", {
         tmdbId: g.tmdbId,
         mediaType: g.mediaType,
         _count: { tmdbId: g.count },
-        _max: { startedAt: new Date(g.max), title: g.title },
+        // Real groupBy returns only the requested aggregates; serving _sum
+        // unconditionally is harmless here because the callers destructure by name.
+        _sum: { playDuration: g.playSum },
+        _max: { startedAt: new Date(g.max), title: g.title, duration: g.maxDuration },
       }));
   },
   findMany: async (args: { where: { mediaServerUserId: { in: string[] } } }) => {
@@ -665,9 +699,12 @@ test("scoring: recency + compressed play-count per seed, positional decay per su
   const near = (actual: number | undefined, expected: number, msg: string) =>
     assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
 
-  // 999 is first in all three lists, so it collects each seed's full weight
-  // (sum × 0.9 OBSCURITY_DAMP — unrated zero-vote fixtures).
-  near(byId.get(999)?.score, 3.2206964699785716, "corroboration sums every seed's contribution");
+  // 999 is first in all three lists, so it collects each seed's full weight —
+  // decay-summed strongest-first (1.5 + 0.75×1.0871661 + 0.5625×0.9913855),
+  // × 0.9 OBSCURITY_DAMP (unrated zero-vote fixtures). An unbounded sum would
+  // read 3.2206964699785716 here — the difference IS the corroboration cap.
+  near(byId.get(999)?.score, 2.585726046783016, "corroboration decay-sums every seed's contribution");
+  assert.ok(byId.get(999)!.score < 3.2206964699785716, "strictly below the unbounded sum");
 
   // 888 sits SECOND in seed 20's list, so it is discounted by position(1) =
   // 1/(1 + 1/10). Without positional decay it would score seed 20's full
@@ -735,9 +772,9 @@ test("reason: a candidate names the STRONGEST seed that surfaced it, not the fir
   const { candidates } = await computeRecommendationsForUser("u1");
   assert.equal(candidates.length, 1);
   const c = candidates[0];
-  // (0.9856975 (history, 5d old) + 1.5 (watchlist, added today)) × 0.9
+  // Decay-summed strongest-first: (1.5 + 0.75 × 0.9856975(history, 5d)) × 0.9
   // OBSCURITY_DAMP, both contributions at position 0.
-  assert.ok(Math.abs(c.score - 2.2371278091765174) < 1e-9, `score was ${c.score}`);
+  assert.ok(Math.abs(c.score - 2.015345856882388) < 1e-9, `score was ${c.score}`);
   assert.equal(c.reasonTitle, "The Strong One");
   assert.equal(c.reasonTmdbId, 30);
   assert.equal(c.reasonSource, "WATCHLIST");
@@ -1122,6 +1159,65 @@ test("seed dedup: a watched title's stale watchlist entry does not double-seed",
   assert.ok(Math.abs(c.score - 1.0871661180448523 * 0.9) < 1e-9, `got ${c.score} — ~2.24 means it double-seeded`);
   assert.equal(c.seedCount, 1, "one seed, not two");
   assert.equal(c.reasonSource, "WATCH_HISTORY", "the history seed wins the dedup");
+});
+
+// ── corroboration cap ─────────────────────────────────────────────────────────
+
+test("corroboration: amplification is decay-bounded — equal agreements can never sum unbounded", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // Four equally-fresh seeds ALL pointing at candidate 999 first; a fifth seed
+  // points only at candidate 111. Under the old unbounded sum 999 scored 4w;
+  // decay-summed it scores w×(1 + 0.75 + 0.5625 + 0.421875) = 2.734375w — the
+  // shape of the franchise-centroid fix: agreement still wins, but at a bounded
+  // premium, so it can no longer bury every strong single-seed match under a
+  // wall of small corroborations.
+  playHistoryRows = Array.from({ length: 5 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 10 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(1), title: `Seed ${i}`,
+  }));
+  for (let i = 0; i < 4; i++) suggestionsFor.set(`movie:${10 + i}`, [movieItem(999)]);
+  suggestionsFor.set("movie:14", [movieItem(111)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  const w = 0.9971174404154314; // each seed's weight at 1d, count 1
+  assert.ok(Math.abs(byId.get(999)!.score - 2.453843701022351) < 1e-9, `got ${byId.get(999)!.score}`);
+  assert.ok(byId.get(999)!.score < 4 * w * 0.9, "strictly below the unbounded sum");
+  // The bound itself: even infinite equal corroborations converge to 4x one seed.
+  assert.ok(byId.get(999)!.score < 4 * w * 0.9, "the 1/(1-0.75) = 4x ceiling holds");
+  assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, "a single contribution is untouched by the decay");
+  assert.equal(byId.get(999)!.seedCount, 4, "seedCount still reports every corroborator");
+});
+
+// ── abandoned-play dampening ──────────────────────────────────────────────────
+
+test("abandoned: a settled low-completion bail dampens THAT title 0.3x — split-watch and fresh pauses do not", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // The seed (watched, so it seeds and is excluded as a candidate).
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+    // 111: bailed at 15%, last touch 30d ago → DAMPENED.
+    { mediaServerUserId: "msu1", tmdbId: 111, mediaType: "MOVIE", watched: false, startedAt: daysAgo(30), title: "Bailed", playDuration: 1080, duration: 7200 },
+    // 222: two half-watches summing 90% — the weeknight split → NOT dampened.
+    { mediaServerUserId: "msu1", tmdbId: 222, mediaType: "MOVIE", watched: false, startedAt: daysAgo(31), title: "Split A", playDuration: 3200, duration: 7200 },
+    { mediaServerUserId: "msu1", tmdbId: 222, mediaType: "MOVIE", watched: false, startedAt: daysAgo(30), title: "Split B", playDuration: 3300, duration: 7200 },
+    // 333: bailed at 10% but only 5 days ago — inside the settle window → NOT dampened.
+    { mediaServerUserId: "msu1", tmdbId: 333, mediaType: "MOVIE", watched: false, startedAt: daysAgo(5), title: "Fresh Pause", playDuration: 720, duration: 7200 },
+    // 444: no runtime recorded → ratio unjudgeable → NOT dampened.
+    { mediaServerUserId: "msu1", tmdbId: 444, mediaType: "MOVIE", watched: false, startedAt: daysAgo(30), title: "No Runtime", playDuration: 700 },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(111), movieItem(222), movieItem(333), movieItem(444)]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  const w = 0.9971174404154314 * 0.9; // seed weight × obscurity damp, at each position
+  const pos = (i: number) => 1 / (1 + i / 10);
+  assert.ok(Math.abs(byId.get(111)!.score - w * pos(0) * 0.3) < 1e-9, "the settled bail is dampened by exactly ABANDON_DAMP");
+  assert.ok(Math.abs(byId.get(222)!.score - w * pos(1)) < 1e-9, "cumulative 90% playtime reads as in-progress, not abandoned");
+  assert.ok(Math.abs(byId.get(333)!.score - w * pos(2)) < 1e-9, "a 5-day-old pause has not settled into a verdict");
+  assert.ok(Math.abs(byId.get(444)!.score - w * pos(3)) < 1e-9, "no runtime, no judgement");
 });
 
 // ── seed selection is recency-first ──────────────────────────────────────────

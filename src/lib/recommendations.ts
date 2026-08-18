@@ -131,6 +131,45 @@ const OBSCURITY_DAMP = 0.9;
 // votes TMDB abstains and the title is judged on whatever else answered.
 const MIN_TMDB_VOTES_FOR_QUALITY = 50;
 
+// ── Corroboration cap ──────────────────────────────────────────────────────
+// A candidate's contributions no longer sum unbounded. Sorted strongest-first,
+// the i-th contribution is scaled by DECAY^i, so total amplification over the
+// single best contribution is bounded by 1/(1-DECAY) = 4x.
+//
+// This deliberately REVERSES the original "broad corroboration wins" design.
+// What that design actually selected for, at 124 seeds, was the centroid of
+// the user's taste: the titles a little similar to EVERYTHING — sequels,
+// same-franchise entries, the most generic picks — collected dozens of small
+// contributions and deterministically owned page 1, while a strong match
+// surfaced by one or two seeds could never catch up no matter how good.
+// Bounding at 4x keeps corroboration meaningful (4x is still a big lead) while
+// letting a first-place single-seed match compete with a wall of 40th-place
+// agreements. The trade: a title genuinely adored across a whole library ranks
+// somewhat lower than before — accepted, page 1 was drowning in its franchise.
+const CORROBORATION_DECAY = 0.75;
+
+// ── Abandoned-play dampening ───────────────────────────────────────────────
+// The engine only ever learned from what the user LIKED — a title they started
+// and demonstrably bailed on could come straight back as a recommendation.
+// Sampled-but-unfinished titles (watched:false rows only; anything with a
+// watched:true row is excluded upstream) are dampened, never excluded: a 15%
+// abandon might be revisited someday, it just should not spend shelf rank.
+//
+// Two guards make it safe, and both exist for the same reason — watched:false
+// is NOISY:
+//   - the ratio guard is CUMULATIVE: a movie watched in two weeknight halves
+//     has zero watched:true rows yet ~100% total playtime, so the per-row flag
+//     alone would dampen the most normal viewing pattern there is. Only under
+//     35% TOTAL playtime reads as a bail;
+//   - the settle window: a pause five days ago is a pause, not a verdict. The
+//     signal only counts once the last touch is two weeks old.
+// A row with no usable runtime is skipped — can't judge a ratio you can't
+// compute. Fires per-title only, never on a neighborhood of similar titles.
+const ABANDON_DAMP = 0.3;
+const ABANDON_MAX_CUMULATIVE_RATIO = 0.35;
+const ABANDON_SETTLE_MS = 14 * 24 * 60 * 60 * 1000;
+const ABANDON_SCAN_LIMIT = 500;
+
 // Share of the weighted pool a language holds → its multiplier.
 function languageFactor(share: number): number {
   return LANGUAGE_FLOOR + (1 - LANGUAGE_FLOOR) * Math.min(1, share / LANGUAGE_FULL_SHARE);
@@ -459,6 +498,41 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
   return known;
 }
 
+// Titles the user sampled and demonstrably bailed on — see the ABANDON_*
+// constants for the two guards (cumulative ratio, settle window). Only
+// watched:false rows can matter here: any title with a watched:true row is
+// already in the exclusion set and never becomes a candidate at all.
+async function collectAbandonedTitleKeys(linkedServerUserIds: string[], now: number): Promise<Set<string>> {
+  if (linkedServerUserIds.length === 0) return new Set();
+  const groups = await prisma.playHistory.groupBy({
+    by: ["tmdbId", "mediaType"],
+    where: {
+      mediaServerUserId: { in: linkedServerUserIds },
+      watched: false,
+      tmdbId: { not: null },
+      mediaType: { not: null },
+    },
+    _sum: { playDuration: true },
+    _max: { startedAt: true, duration: true },
+    // Newest abandons first: under the scan cap it is the recent bails that
+    // should win the slots — a title sampled years ago has aged out of mattering.
+    orderBy: [{ _max: { startedAt: "desc" } }],
+    take: ABANDON_SCAN_LIMIT,
+  });
+
+  const out = new Set<string>();
+  for (const g of groups) {
+    if (g.tmdbId == null || g.mediaType == null) continue;
+    const runtime = g._max.duration;
+    if (!runtime || runtime <= 0) continue; // no usable runtime — cannot judge a ratio
+    if ((g._sum.playDuration ?? 0) / runtime >= ABANDON_MAX_CUMULATIVE_RATIO) continue; // split-watch in progress
+    const lastTouch = g._max.startedAt?.getTime() ?? 0;
+    if (now - lastTouch < ABANDON_SETTLE_MS) continue; // still settling
+    out.add(candidateKey(g.tmdbId, g.mediaType));
+  }
+  return out;
+}
+
 async function buildExclusionSet(userId: string, linkedServerUserIds: string[], seeds: Seed[]): Promise<Set<string>> {
   const excluded = await collectKnownTitleKeys(userId, linkedServerUserIds);
   for (const s of seeds) excluded.add(candidateKey(s.tmdbId, s.mediaType));
@@ -493,7 +567,10 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   const seeds = await selectSeeds(userId, linkedServerUserIds);
   if (seeds.length === 0) return { candidates: [], conclusive: true };
 
-  const excluded = await buildExclusionSet(userId, linkedServerUserIds, seeds);
+  const [excluded, abandoned] = await Promise.all([
+    buildExclusionSet(userId, linkedServerUserIds, seeds),
+    collectAbandonedTitleKeys(linkedServerUserIds, Date.now()),
+  ]);
 
   // SUGGESTIONS_CACHE_MAX (not the 18-item rail default) — the tail of each
   // seed's list is exactly what lets the ranked set reach 200. Same cache row
@@ -509,14 +586,16 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   // the outage case. Filtering first would collapse the two back together.
   let rawSuggestions = 0;
 
-  // reasonWeight, language and voteCount are bookkeeping — the first picks the
-  // strongest seed, the second feeds the language profile, the third lets the
-  // quality prior's TMDB term see the vote count it gates on. All are dropped
-  // before the candidates are returned; none has a column. voteCount earned its
-  // place by being ABSENT: applyQualityPrior used to rebuild TmdbMedia without
-  // it, so the (voteCount >= 50) gate read 0 for every candidate and TMDB's own
-  // score silently never participated in the prior at all.
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number }>();
+  // reasonWeight, language, voteCount and contributions are bookkeeping — the
+  // first picks the strongest seed, the second feeds the language profile, the
+  // third lets the quality prior's TMDB term see the vote count it gates on,
+  // and the fourth holds each seed's contribution until the corroboration
+  // decay-sum below collapses them into the score. All are dropped before the
+  // candidates are returned; none has a column. voteCount earned its place by
+  // being ABSENT: applyQualityPrior used to rebuild TmdbMedia without it, so
+  // the (voteCount >= 50) gate read 0 for every candidate and TMDB's own score
+  // silently never participated in the prior at all.
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[] }>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
   let totalLanguageWeight = 0;
@@ -547,7 +626,7 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
 
       const existing = scored.get(key);
       if (existing) {
-        existing.score += contribution;
+        existing.contributions.push(contribution);
         existing.seedCount++;
         // Keep the STRONGEST contribution as the reason, not the first one
         // encountered — seeds are no longer visited in weight order at all, so
@@ -583,9 +662,26 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
         seedCount: 1,
         language: item.originalLanguage ?? undefined,
         voteCount: item.voteCount ?? 0,
+        contributions: [contribution],
       });
     }
   });
+
+  // ── Corroboration decay-sum ─────────────────────────────────────────────
+  // Collapse each candidate's contribution list into its score: strongest
+  // first, the i-th scaled by DECAY^i, bounding total amplification at 4x the
+  // best single contribution (see CORROBORATION_DECAY). Runs before every
+  // multiplier below — they scale the bounded score, not the raw sum.
+  for (const candidate of scored.values()) {
+    candidate.contributions.sort((a, b) => b - a);
+    let sum = 0;
+    let factor = 1;
+    for (const c of candidate.contributions) {
+      sum += c * factor;
+      factor *= CORROBORATION_DECAY;
+    }
+    candidate.score = sum;
+  }
 
   // ── Language de-emphasis ────────────────────────────────────────────────
   // Applied after the accumulation pass because the profile is only known once
@@ -596,6 +692,16 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
       if (!candidate.language) continue;
       const share = (languageWeight.get(candidate.language) ?? 0) / totalLanguageWeight;
       candidate.score *= languageFactor(share);
+    }
+  }
+
+  // ── Abandoned-play dampening ────────────────────────────────────────────
+  // A per-title multiplier, never a neighborhood effect (see ABANDON_DAMP).
+  if (abandoned.size > 0) {
+    for (const candidate of scored.values()) {
+      if (abandoned.has(candidateKey(candidate.tmdbId, candidate.mediaType))) {
+        candidate.score *= ABANDON_DAMP;
+      }
     }
   }
 
@@ -615,7 +721,9 @@ export async function computeRecommendationsForUser(userId: string): Promise<Rec
   const ranked = shortlist
     .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
-    .map(({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }));
+    .map(
+      ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }),
+    );
   return { candidates: ranked, conclusive: rawSuggestions > 0 };
 }
 
