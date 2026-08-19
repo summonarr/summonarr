@@ -33,6 +33,16 @@ export interface RecommendationView {
   sort?: RecommendationSort;
 }
 
+// What "Highest rated" ranks on: IMDb's rating when the ratings attach
+// produced one — by far the deepest vote base of the sources the app carries,
+// so its figure is the sturdiest — falling back to TMDB's own average (the
+// same 0-10 scale) for titles IMDb data hasn't covered. Exported so any other
+// surface ordering "by rating" ranks on the SAME definition.
+export function ratingSortValue(m: TmdbMedia): number {
+  const imdb = parseFloat(m.imdbRating ?? "");
+  return Number.isFinite(imdb) ? imdb : m.voteAverage;
+}
+
 // Sorts are applied to a COPY: the caller's array is the enriched set that other
 // code (counts, the untouched "match" order) may still be reading.
 export function applyRecommendationView(items: TmdbMedia[], view: RecommendationView): TmdbMedia[] {
@@ -66,7 +76,7 @@ export function applyRecommendationView(items: TmdbMedia[], view: Recommendation
       return av === bv ? 0 : av > bv ? -1 : 1;
     });
   } else if (sort === "rating") {
-    sorted.sort((a, b) => b.voteAverage - a.voteAverage);
+    sorted.sort((a, b) => ratingSortValue(b) - ratingSortValue(a));
   }
   return sorted;
 }

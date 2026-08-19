@@ -26,10 +26,15 @@
 //   - a multi-source ratings prior re-weights the shortlist, TMDB's own score
 //     included (its voteCount gate once read a field the prior forgot to pass —
 //     the reintroduction mutation is pinned), with an UNRATED-with-audience
-//     title strictly neutral, unrated-obscure damped by exactly OBSCURITY_DAMP
-//     (never below known-bad), and a ratings outage degrading to
-//     relevance-only rather than failing the run. Ratings are served from a
-//     seeded cache, so no test reaches MDBList or OMDB;
+//     title strictly neutral, unrated-obscure damped by exactly OBSCURITY_DAMP,
+//     and a ratings outage degrading to relevance-only rather than failing the
+//     run. The prior is EVIDENCE-WEIGHTED and IMDb-led: IMDb's weight grows
+//     with its vote count (comma-formatted OMDB counts included) and the
+//     multiplier's strength scales with total evidence — both the votes-ignored
+//     and confidence-dropped mutations flip a pinned ordering. Letterboxd, MAL
+//     and RT-audience now participate; mdblistScore and rogerEbert stay
+//     excluded by pin. Ratings are served from a seeded cache, so no test
+//     reaches MDBList or OMDB;
 //   - the exclusion set and the read-time drift filter share ONE reader
 //     (collectKnownTitleKeys): hidden titles (enum-cased — the lowercase fold
 //     is a pinned mutation), open PENDING/APPROVED requests, permanentlyDeclined
@@ -102,7 +107,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary } =
+const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 
@@ -1157,15 +1162,17 @@ test("quality: TMDB's own score now participates — a well-voted 8.5 outranks a
 
   const { candidates } = await computeRecommendationsForUser("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
-  // 222: q = 0.85 → ×1.10; at position 1 (0.90909…) → 1.0 × w × 0.909 × 1.10 = 1.0×w
+  // 222: TMDB term at 5000 votes → weight 0.75×5000/6000 = 0.625, so
+  //      confidence 0.625/1.625 and q = 0.85:
+  //      ×(1 + 0.9×(0.625/1.625)×0.20) = ×1.06923; at position 1 (1/1.1) → 0.9720×w
   // 111: q = null (10 < 50 votes) → OBSCURITY_DAMP ×0.9 at position 0 → 0.9×w
   assert.deepEqual(candidates.map((c) => c.tmdbId), [222, 111], "the vote term reorders; dead voteCount could not");
   const w = 0.9971174404154314; // seed weight at 1d, count 1
-  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * 1.1) < 1e-9, `got ${byId.get(222)!.score}`);
+  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * (1 + 0.9 * (0.625 / 1.625) * (0.85 - 0.65))) < 1e-9, `got ${byId.get(222)!.score}`);
   assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, `got ${byId.get(111)!.score}`);
 });
 
-test("quality: unrated-obscure is damped to exactly rated-4.5's multiplier — never below known-bad", async () => {
+test("quality: unrated-obscure is damped by exactly OBSCURITY_DAMP — a real audience never is", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
   playHistoryRows = [
@@ -1181,8 +1188,9 @@ test("quality: unrated-obscure is damped to exactly rated-4.5's multiplier — n
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   const w = 0.9971174404154314;
   assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, "obscure: damped by exactly OBSCURITY_DAMP");
-  // 222: q = 0.7 → ×(1 + 0.5×0.05) = 1.025, at position 1 → w × (1/1.1) × 1.025
-  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * 1.025) < 1e-9, "a real audience is never damped");
+  // 222: TMDB-only evidence 0.625 (5000 votes), q = 0.7 →
+  //      ×(1 + 0.9×(0.625/1.625)×0.05) = ×1.01731, at position 1 → w × (1/1.1) × 1.01731
+  assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * (1 + 0.9 * (0.625 / 1.625) * (0.7 - 0.65))) < 1e-9, "a real audience is never damped");
 });
 
 // ── watchlist ∩ history seed dedup ────────────────────────────────────────────
@@ -1353,10 +1361,12 @@ test("cold start with a warm pool: an honest TRENDING shelf — no reasons, no c
     assert.equal(c.score, 0, "the engine has no relevance opinion on a fallback row");
   }
   // The order BLENDS trending position with quality — the prior refines the
-  // trending order, it does not replace it. Transient score = poolPos × quality:
-  //   901: 1/(1+0/20) × (1 + 0.5×(0.72−0.65)) = 1.0000 × 1.035 = 1.0350
-  //   902: 1/(1+1/20) × (1 + 0.5×(0.51−0.65)) = 0.9524 × 0.930 = 0.8857
-  //   903: 1/(1+2/20) × (1 + 0.5×(0.81−0.65)) = 0.9091 × 1.080 = 0.9818
+  // trending order, it does not replace it. Transient score = poolPos × mult,
+  // where mult = 1 + 0.9 × conf × (q − 0.65) over TMDB-only evidence
+  // (weight 0.75×votes/(votes+1000), conf = weight/(weight+1)):
+  //   901 (7.2 @ 900):  1.0000 × (1 + 0.9×0.2621×0.07)  = 1.0000 × 1.0165 = 1.0165
+  //   902 (5.1 @ 800):  0.9524 × (1 − 0.9×0.2500×0.14)  = 0.9524 × 0.9685 = 0.9224
+  //   903 (8.1 @ 1200): 0.9091 × (1 + 0.9×0.2903×0.16)  = 0.9091 × 1.0418 = 0.9471
   // So 902's genuinely bad rating drops it below 903 (the refinement), while
   // 903's mild edge does NOT overturn 901's two-slot trending lead. A pure
   // quality sort here would mean trending rank carries no signal at all.
@@ -1656,6 +1666,98 @@ test("quality: a ratings outage degrades to relevance-only instead of failing th
   } finally {
     (prisma.tmdbCache as { findMany: unknown }).findMany = original;
   }
+});
+
+test("quality: IMDb vote depth decides — a million-vote 8.6 overtakes a 200-vote 9.2", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Seed" },
+  ];
+  // The thin-stellar title sits FIRST (higher relevance via position); only
+  // vote-depth weighting can flip the order. Both mutations this pin exists
+  // for restore the old behavior and fail it: ignore the vote counts (every
+  // IMDb rating at anchor weight) and 111's 9.2 wins on raw score; drop the
+  // confidence scaling (multiplier at full strength regardless of evidence)
+  // and it wins the same way. Under the pre-rework flat mean it also won —
+  // this test fails on that code, which is how it earns its keep.
+  suggestionsFor.set("movie:10", [
+    { ...movieItem(111), original_language: "en" }, // stellar on paper, 200 voters
+    { ...movieItem(222), original_language: "en" }, // a hair lower, a million voters
+  ]);
+  seedRatings(111, "movie", { imdbRating: "9.2", imdbVotes: "200" });
+  // OMDB delivers counts comma-formatted — this exercises that parse in situ.
+  seedRatings(222, "movie", { imdbRating: "8.6", imdbVotes: "1,000,000" });
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  assert.deepEqual(
+    candidates.map((c) => c.tmdbId),
+    [222, 111],
+    "the deep-voted verdict overtakes the thin one despite starting lower on relevance",
+  );
+
+  // Exact scores: IMDb is the only participating source (movieItem carries no
+  // vote_count, so the TMDB term abstains), weight 3×votes/(votes+5000),
+  // confidence ev/(ev+1), multiplier 1 + 0.9×conf×(q−0.65).
+  const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
+  const w = 0.9971174404154314; // seed weight at 1d, count 1
+  const conf = (ev: number) => ev / (ev + 1);
+  const thin = 3 * (200 / 5200);
+  const deep = 3 * (1_000_000 / 1_005_000);
+  assert.ok(
+    Math.abs(byId.get(111)!.score - w * (1 + 0.9 * conf(thin) * (0.92 - 0.65))) < 1e-9,
+    `got ${byId.get(111)!.score}`,
+  );
+  assert.ok(
+    Math.abs(byId.get(222)!.score - w * (1 / 1.1) * (1 + 0.9 * conf(deep) * (0.86 - 0.65))) < 1e-9,
+    `got ${byId.get(222)!.score}`,
+  );
+});
+
+test("qualityScoreOf: IMDb anchors by vote depth; comma counts parse; the excluded aggregates stay out", () => {
+  const base = {
+    id: 1, mediaType: "movie" as const, title: "", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: null, releaseYear: null,
+    voteAverage: 0,
+  };
+
+  // Deep-voted IMDb outweighs a contradicting thin source ~6:1 — the blend
+  // lands IMDb-side, not at the flat mean (0.6) the old prior produced.
+  const deep = 3 * (1_000_000 / 1_005_000);
+  const v = qualityScoreOf({ ...base, imdbRating: "8.0", imdbVotes: "1000000", traktRating: "40" })!;
+  assert.ok(Math.abs(v.quality - (0.8 * deep + 0.4 * 0.5) / (deep + 0.5)) < 1e-9, `got ${v.quality}`);
+  assert.ok(v.quality > 0.72, "IMDb-led: a lone Trakt 40% cannot drag an anchored 8.0 toward it");
+  assert.ok(Math.abs(v.evidence - (deep + 0.5)) < 1e-9, `got ${v.evidence}`);
+
+  // OMDB's comma-formatted count and MDBList's bare form are the same number.
+  assert.deepEqual(
+    qualityScoreOf({ ...base, imdbRating: "8.0", imdbVotes: "1,000,000" }),
+    qualityScoreOf({ ...base, imdbRating: "8.0", imdbVotes: "1000000" }),
+  );
+
+  // A rating with no usable count is trusted at the flat unknown-votes weight
+  // — never anchor strength on unproven depth, never dropped either.
+  for (const votes of [undefined, null, "N/A", "0"]) {
+    const u = qualityScoreOf({ ...base, imdbRating: "8.0", imdbVotes: votes })!;
+    assert.equal(u.evidence, 1, `votes=${String(votes)} must read as unknown`);
+    assert.equal(u.quality, 0.8);
+  }
+
+  // The three newly-admitted community sources participate on their own scales.
+  const lb = qualityScoreOf({ ...base, letterboxdRating: "4.6" })!;
+  assert.ok(Math.abs(lb.quality - 4.6 / 5) < 1e-12);
+  assert.equal(lb.evidence, 0.75);
+  const mal = qualityScoreOf({ ...base, malRating: "8.4" })!;
+  assert.ok(Math.abs(mal.quality - 0.84) < 1e-12);
+  assert.equal(mal.evidence, 0.75);
+  const aud = qualityScoreOf({ ...base, rtAudienceScore: "88%" })!;
+  assert.ok(Math.abs(aud.quality - 0.88) < 1e-12);
+  assert.equal(aud.evidence, 0.5);
+
+  // Deliberately excluded: mdblistScore aggregates the same per-source ratings
+  // already blended (admitting it double-counts them), and Ebert is a single
+  // critic on a 4-star scale. Alone they must produce NO verdict.
+  assert.equal(qualityScoreOf({ ...base, mdblistScore: "95", rogerEbertRating: "4" }), null);
 });
 
 // ── exclusion wider than the chosen seeds ────────────────────────────────────

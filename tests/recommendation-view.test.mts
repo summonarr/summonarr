@@ -5,6 +5,8 @@
 //   - "match" preserves the engine's ranking EXACTLY and never re-derives it;
 //   - "newest" is a date order with undated titles last, and ties fall back to
 //     rank (sort stability), so the two surfaces can't disagree about ordering;
+//   - "rating" ranks on ratingSortValue — IMDb's figure where present (the
+//     deepest vote base the app carries), TMDB's average otherwise;
 //   - filters compose, and every path returns a COPY — the caller still holds
 //     the enriched array it counts the unfiltered total from.
 //
@@ -17,6 +19,7 @@ import {
   parseAvailability,
   parseRecommendationSort,
   parseRecommendationType,
+  ratingSortValue,
 } from "../src/lib/recommendation-view.ts";
 import type { TmdbMedia } from "../src/lib/tmdb-types.ts";
 
@@ -88,6 +91,25 @@ test('"rating" orders by score descending with ties falling back to rank', () =>
     media({ id: 4, voteAverage: 0 }),
   ];
   assert.deepEqual(applyRecommendationView(items, { sort: "rating" }).map((m) => m.id), [2, 1, 3, 4]);
+});
+
+test('"rating" ranks on IMDb where the attach produced one, TMDB\'s average otherwise', () => {
+  const items = [
+    media({ id: 1, voteAverage: 7.0 }),                    // no IMDb → 7.0
+    media({ id: 2, voteAverage: 6.0, imdbRating: "8.8" }), // IMDb wins → 8.8
+    media({ id: 3, voteAverage: 9.1 }),                    // no IMDb → 9.1
+    media({ id: 4, voteAverage: 8.0, imdbRating: "N/A" }), // junk falls back → 8.0
+  ];
+  // Title 2 overtaking 4 and 1 is the point: its thin TMDB 6.0 sank it to last
+  // under the old bare-voteAverage sort even though IMDb's far deeper vote base
+  // calls it an 8.8. Titles IMDb data hasn't covered keep competing on TMDB's
+  // figure — the two scales are both 0-10 estimates of the same thing.
+  assert.deepEqual(applyRecommendationView(items, { sort: "rating" }).map((m) => m.id), [3, 2, 4, 1]);
+
+  // The helper itself, pinned directly so a future consumer ordering "by
+  // rating" can rely on the same definition.
+  assert.equal(ratingSortValue(media({ id: 9, voteAverage: 5.5 })), 5.5);
+  assert.equal(ratingSortValue(media({ id: 9, voteAverage: 5.5, imdbRating: "7.3" })), 7.3);
 });
 
 test("availability reads BOTH servers: on either one counts as available", () => {
